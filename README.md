@@ -14,6 +14,9 @@ This control software includes several built-in safety features designed to prev
 
 > **WARNING**: These are software-based safety measures and are not a substitute for responsible operation and a safe work environment. The user assumes all responsibility for safe operation. Always be attentive when the robot is active, ensure you have immediate access to the physical E-Stop, and operate the robot in a clear area.
 
+## Instalation
+Intructions are the same as for [commander software](https://github.com/PCrnjak/PAROL-commander-software) Follow the guide located [here](https://github.com/PCrnjak/PAROL-commander-software)
+
 ## 3. System Architecture
 The system uses a server/client model to separate robot operation from command generation.
 * **The Robot Controller (`headless_commander.py`)**: This script is the server and runs on the computer connected to the robot. Its high-frequency main loop handles a command queue that processes a sequence of object-oriented commands one at a time. A non-blocking UDP server listens for remote commands and adds them to the queue without interrupting the current operation.
