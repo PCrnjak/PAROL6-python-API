@@ -572,6 +572,16 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
     test_list.append(bytes([Gripper_data[3]]))
     # Gripper mode
     test_list.append(bytes([Gripper_data[4]]))
+    
+    # ==========================================================
+    # === FIX: Make sure calibrate is a one-shot command      ====
+    # ==========================================================
+    # If the mode was set to calibrate (1) or clear_error (2), reset it
+    # back to normal (0) for the next cycle. This prevents an endless loop.
+    if Gripper_data_out[4] == 1 or Gripper_data_out[4] == 2:
+        Gripper_data_out[4] = 0
+    # ==========================================================
+    
     # Gripper ID
     test_list.append(bytes([Gripper_data[5]]))
  
@@ -875,7 +885,7 @@ class JogCommand:
                 print("Error: 'speed_percentage' must be provided if not calculating automatically.")
                 self.is_valid = False
                 return
-            speed_steps_per_sec = int(np.interp(self.speed_percentage, [0, 200], [0, PAROL6_ROBOT.Joint_max_speed[self.joint_index] * 2]))
+            speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[self.joint_index] * 2]))
 
         self.speed_out = speed_steps_per_sec * self.direction
         self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
@@ -915,6 +925,121 @@ class JogCommand:
             Command_out.value = 123
             self.command_step += 1
             return False
+        
+class MultiJogCommand:
+    """
+    A non-blocking command to jog multiple joints simultaneously for a specific duration.
+    It performs all safety and validity checks upon initialization.
+    """
+    def __init__(self, joints, speed_percentages, duration):
+        """
+        Initializes and validates the multi-jog command.
+        """
+        self.is_valid = False
+        self.is_finished = False
+        self.command_step = 0
+
+        # --- 1. Parameter Validation ---
+        if not isinstance(joints, list) or not isinstance(speed_percentages, list):
+            print("Error: MultiJogCommand requires 'joints' and 'speed_percentages' to be lists.")
+            return
+
+        if len(joints) != len(speed_percentages):
+            print("Error: The number of joints must match the number of speed percentages.")
+            return
+
+        if not duration or duration <= 0:
+            print("Error: MultiJogCommand requires a positive 'duration'.")
+            return
+
+        # ==========================================================
+        # === NEW: Check for conflicting joint commands          ===
+        # ==========================================================
+        base_joints = set()
+        for joint in joints:
+            # Normalize the joint index to its base (0-5)
+            base_joint = joint % 6
+            # If the base joint is already in our set, it's a conflict.
+            if base_joint in base_joints:
+                print(f"  -> VALIDATION FAILED: Conflicting commands for Joint {base_joint + 1} (e.g., J1+ and J1-).")
+                self.is_valid = False
+                return
+            base_joints.add(base_joint)
+        # ==========================================================
+
+        print(f"Initializing MultiJog for joints {joints} with speeds {speed_percentages}% for {duration}s.")
+
+        # --- 2. Store parameters ---
+        self.joints = joints
+        self.speed_percentages = speed_percentages
+        self.duration = duration
+        self.command_len = int(self.duration / INTERVAL_S)
+
+        # --- This will be calculated in the prepare step ---
+        self.speeds_out = [0] * 6
+
+        self.is_valid = True
+
+    def prepare_for_execution(self, current_position_in):
+        """Pre-computes the speeds for each joint."""
+        print(f"  -> Preparing for MultiJog command...")
+
+        for i, joint in enumerate(self.joints):
+            # Determine direction and joint index (0-5 for positive, 6-11 for negative)
+            direction = 1 if 0 <= joint <= 5 else -1
+            joint_index = joint if direction == 1 else joint - 6
+            speed_percentage = self.speed_percentages[i]
+
+            # Check for joint index validity
+            if not (0 <= joint_index < 6):
+                print(f"  -> VALIDATION FAILED: Invalid joint index {joint_index}.")
+                self.is_valid = False
+                return
+
+            # Calculate speed in steps/sec
+            speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[joint_index]]))
+            self.speeds_out[joint_index] = speed_steps_per_sec * direction
+
+        print("  -> MultiJog command is ready.")
+
+
+    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
+        """This is the EXECUTION phase. It runs on every loop cycle."""
+        if self.is_finished or not self.is_valid:
+            return True
+
+        # Stop if the duration has elapsed
+        if self.command_step >= self.command_len:
+            print("Timed multi-jog finished.")
+            self.is_finished = True
+            Speed_out[:] = [0] * 6
+            Command_out.value = 255
+            return True
+        else:
+            # Continuously check for joint limits during the jog
+            for i in range(6):
+                if self.speeds_out[i] != 0:
+                    current_pos = Position_in[i]
+                    # Hitting positive limit while moving positively
+                    if self.speeds_out[i] > 0 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[i][1]:
+                         print(f"Limit reached on joint {i + 1}. Stopping jog.")
+                         self.is_finished = True
+                         Speed_out[:] = [0] * 6
+                         Command_out.value = 255
+                         return True
+                    # Hitting negative limit while moving negatively
+                    elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
+                         print(f"Limit reached on joint {i + 1}. Stopping jog.")
+                         self.is_finished = True
+                         Speed_out[:] = [0] * 6
+                         Command_out.value = 255
+                         return True
+
+            # If no limits are hit, apply the speeds
+            Speed_out[:] = self.speeds_out
+            Command_out.value = 123 # Jog command
+            self.command_step += 1
+            return False # Command is still running
         
 # This dictionary maps descriptive axis names to movement vectors, which is cleaner.
 # Format: ([x, y, z], [rx, ry, rz])
@@ -1443,8 +1568,8 @@ class MoveCartCommand:
         
 class GripperCommand:
     """
-    A non-blocking command to control the gripper.
-    For special actions like 'calibrate', it runs for two cycles to set and then reset the command state.
+    A non-blocking command to control the gripper. This command executes
+    instantaneously by setting the correct data values and then finishes.
     """
     def __init__(self, gripper_type, action=None, position=100, speed=100, current=500, output_port=1):
         """
@@ -1453,73 +1578,67 @@ class GripperCommand:
         self.is_valid = True
         self.is_finished = False
         self.gripper_type = gripper_type.lower()
-        self.execution_state = 0  # 0: Start, 1: Resetting
 
-        # --- Store all parameters for execution ---
-        self.action = action.lower() if action else None
-        self.position = position
-        self.speed = speed
-        self.current = current
-        self.pneumatic_state = 1 if action == 'open' else 0
-        self.pneumatic_port_index = 2 if output_port == 1 else 3
-
-        # --- Initial Validation ---
+        # --- Store parameters based on gripper type ---
         if self.gripper_type == 'electric':
+            self.action = action.lower() if action else None
+            self.position = position
+            self.speed = speed
+            self.current = current
+            # Validation based on the working script's limits
             if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
                 print("  -> VALIDATION FAILED: Electric gripper values out of range.")
                 self.is_valid = False
+                return
             print(f"Initializing Electric Gripper command: action={action}, pos={position}, speed={speed}")
+
         elif self.gripper_type == 'pneumatic':
             if action not in ['open', 'close']:
                 print(f"  -> VALIDATION FAILED: Pneumatic action must be 'open' or 'close', not '{action}'.")
                 self.is_valid = False
-            elif output_port not in [1, 2]:
+                return
+            if output_port not in [1, 2]:
                 print(f"  -> VALIDATION FAILED: Pneumatic output_port must be 1 or 2, not '{output_port}'.")
                 self.is_valid = False
-            else:
-                print(f"Initializing Pneumatic Gripper command: action='{action}' on port {output_port}")
+                return
+            self.state = 1 if action == 'open' else 0
+            self.port_index = 2 if output_port == 1 else 3 # Map port 1 to InOut_out[2], port 2 to InOut_out[3]
+            print(f"Initializing Pneumatic Gripper command: action='{action}' on port {output_port}")
+
         else:
             print(f"  -> VALIDATION FAILED: Unknown gripper_type '{gripper_type}'.")
             self.is_valid = False
+            return
 
     def execute_step(self, Gripper_data_out, InOut_out, **kwargs):
         """
-        Sets the appropriate output values for the gripper.
+        Sets the appropriate output values for the gripper and finishes immediately.
         """
-        if not self.is_valid or self.is_finished:
+        if not self.is_valid:
+            self.is_finished = True
             return True
 
-        # --- First Execution Cycle ---
-        if self.execution_state == 0:
-            if self.gripper_type == 'electric':
+        if self.gripper_type == 'electric':
+            # Case 1: The action is to calibrate.
+            if self.action == 'calibrate':
+                # For calibration, ONLY change the mode byte. The Pack_data function will reset it.
+                Gripper_data_out[4] = 1  # Mode 1 for calibration
+
+            # Case 2: The action is a normal move.
+            else:
+                # For a move, set the position, speed, and current data.
                 Gripper_data_out[0] = self.position
                 Gripper_data_out[1] = self.speed
                 Gripper_data_out[2] = self.current
+                # Also ensure the mode is set to normal operation.
+                Gripper_data_out[4] = 0
 
-                # For the special 'calibrate' command, set the mode and schedule a reset
-                if self.action == 'calibrate':
-                    Gripper_data_out[4] = 1  # Mode 1 for calibration
-                    self.execution_state = 1 # Advance state to 'Resetting'
-                    return False             # Tell the main loop this command is not finished yet
+        elif self.gripper_type == 'pneumatic':
+            InOut_out[self.port_index] = self.state
 
-                # For all other electric gripper actions, just set normal mode and finish
-                else:
-                    Gripper_data_out[4] = 0  # Mode 0 for normal operation
-
-            elif self.gripper_type == 'pneumatic':
-                InOut_out[self.pneumatic_port_index] = self.pneumatic_state
-            
-            # If we didn't start a calibration, the command is done now
-            self.is_finished = True
-            return True
-
-        # --- Second Execution Cycle (only for calibration) ---
-        elif self.execution_state == 1:
-            # The only purpose of this cycle is to reset the calibration mode to 0
-            Gripper_data_out[4] = 0
-            self.is_finished = True
-            # Command is now finished
-            return True
+        # This command is instantaneous, so it finishes on the first execution.
+        self.is_finished = True
+        return True
 
 class DelayCommand:
     """
@@ -1736,6 +1855,21 @@ while timer.elapsed_time < 1100000:
                 lambda p=pose_vals, d=duration, s=speed: MoveCartCommand(pose=p, duration=d, velocity_percent=s)
             )
 
+        # Protocol: MULTIJOG|joint1,joint2|speed1,speed2|duration
+        elif command_name == 'MULTIJOG' and len(parts) == 4:
+            try:
+                # Parse comma-separated strings into lists of numbers
+                joint_indices = [int(j) for j in parts[1].split(',')]
+                speeds = [float(s) for s in parts[2].split(',')]
+                duration = float(parts[3])
+                
+                print(f"Queueing MultiJog for joints {joint_indices}")
+                command_queue.append(
+                    lambda js=joint_indices, spds=speeds, d=duration: MultiJogCommand(joints=js, speed_percentages=spds, duration=d)
+                )
+            except ValueError:
+                print(f"Warning: Malformed MULTIJOG command: {message}")
+
         elif command_name == 'PNEUMATICGRIPPER' and len(parts) == 3:
             action, port = parts[1].lower(), int(parts[2])
             print(f"Queueing Pneumatic Gripper command: {action} on port {port}")
@@ -1806,18 +1940,22 @@ while timer.elapsed_time < 1100000:
                 command_creator_function = command_queue.popleft()
                 new_command_object = command_creator_function()
 
-                # If the command has a 'prepare' step, run it now with the
-                # current robot position to generate its trajectory.
-                if hasattr(new_command_object, 'prepare_for_execution'):
-                    # Pass the live robot state to the command for Just-In-Time planning
-                    new_command_object.prepare_for_execution(
-                        current_position_in=Position_in
-                    )
-
+                # First, check if the command was validated successfully during its initialization.
                 if new_command_object.is_valid:
-                    active_command = new_command_object
+                    # Only if it's valid, run the 'prepare' step (if it exists).
+                    if hasattr(new_command_object, 'prepare_for_execution'):
+                        new_command_object.prepare_for_execution(
+                            current_position_in=Position_in
+                        )
+
+                    # After preparation, the command could have become invalid. Check again.
+                    if new_command_object.is_valid:
+                        active_command = new_command_object
+                    else:
+                        print("Skipping invalid command: failed during preparation step.")
                 else:
-                    print("Skipping invalid command in queue.")
+                    # This handles commands that fail validation in their __init__ method.
+                    print("Skipping invalid command: failed during initialization.")
 
             if active_command:
                 is_done = active_command.execute_step(
