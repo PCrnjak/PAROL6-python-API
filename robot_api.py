@@ -85,6 +85,36 @@ def jog_robot_joint(
     command = f"JOG|{joint_index}|{speed_percentage}|{duration_str}|{distance_str}"
     return send_robot_command(command)
 
+def jog_multiple_joints(
+    joints: List[int], 
+    speeds: List[float], 
+    duration: float
+) -> str:
+    """
+    Jogs multiple robot joints simultaneously for a specified duration.
+
+    Args:
+        joints (List[int]): A list of joint indices. Use 0-5 for positive direction
+                            and 6-11 for negative direction (e.g., 6 is J1-).
+        speeds (List[float]): A list of corresponding speeds (1-100%).
+                              The number of speeds must match the number of joints.
+        duration (float): The duration of the jog in seconds.
+
+    Returns:
+        str: A confirmation or error message.
+    """
+    if len(joints) != len(speeds):
+        return "Error: The number of joints must match the number of speeds."
+
+    # Convert the lists to comma-separated strings for the command protocol
+    joints_str = ",".join(map(str, joints))
+    speeds_str = ",".join(map(str, speeds))
+    
+    command = f"MULTIJOG|{joints_str}|{speeds_str}|{duration}"
+    
+    return send_robot_command(command)
+
+
 def jog_cartesian(
     frame: Literal['TRF', 'WRF'],
     axis: Literal['X+', 'X-', 'Y+', 'Y-', 'Z+', 'Z-', 'RX+', 'RX-', 'RY+', 'RY-', 'RZ+', 'RZ-'],
