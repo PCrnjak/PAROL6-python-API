@@ -377,13 +377,22 @@ def get_electric_gripper_status():
                 is_moving = (status_byte & 0b00000010) != 0
                 is_calibrated = (status_byte & 0b10000000) != 0
 
+                # Correctly interpret the object detection status
+                object_detection_status = gripper_values[5]
+                if object_detection_status == 1:
+                    detection_text = "Yes (closing)"
+                elif object_detection_status == 2:
+                    detection_text = "Yes (opening)"
+                else:
+                    detection_text = "No"
+
                 # Print the formatted, human-readable status
                 print("--- Electric Gripper Status ---")
                 print(f"  Device ID:         {gripper_values[0]}")
                 print(f"  Current Position:  {gripper_values[1]}")
                 print(f"  Current Speed:     {gripper_values[2]}")
                 print(f"  Current Current:   {gripper_values[3]}")
-                print(f"  Object Detected:   {'Yes' if gripper_values[5] else 'No'}")
+                print(f"  Object Detected:   {detection_text}")
                 print(f"  Status Byte:       {bin(status_byte)}")
                 print(f"    - Calibrated:    {is_calibrated}")
                 print(f"    - Active:        {is_active}")
