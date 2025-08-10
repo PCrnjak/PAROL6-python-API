@@ -1541,7 +1541,7 @@ class GripperCommand:
         self.gripper_type = gripper_type.lower()
         self.action = action.lower() if action else 'move'
         self.state = "START"
-        self.timeout_counter = 300 # 3-second safety timeout for all waiting states
+        self.timeout_counter = 1000 # 10-second safety timeout for all waiting states
 
         # --- Configure based on Gripper Type and Action ---
         if self.gripper_type == 'electric':
