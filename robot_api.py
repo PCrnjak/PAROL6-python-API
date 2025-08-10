@@ -207,7 +207,7 @@ def control_electric_gripper(
     current: Optional[int] = 500
 ):
     """Controls the electric gripper."""
-    action_str = "None" if action == 'move' else 'calibrate'
+    action_str = "move" if action == 'move' else 'calibrate'
     command = f"ELECTRICGRIPPER|{action_str}|{position}|{speed}|{current}"
     return send_robot_command(command)
 
@@ -303,4 +303,101 @@ def get_robot_joint_angles():
             return None
         except Exception as e:
             print(f"An error occurred while getting robot angles: {e}")
+            return None
+        
+def get_robot_io():
+    """
+    Requests the robot's current digital I/O status.
+    Returns a list [IN1, IN2, OUT1, OUT2, ESTOP] or None if it fails.
+    """
+    SERVER_IP = "127.0.0.1"
+    SERVER_PORT = 5001
+    
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
+        client_socket.settimeout(2.0)
+        
+        request_message = "GET_IO"
+        client_socket.sendto(request_message.encode('utf-8'), (SERVER_IP, SERVER_PORT))
+        
+        try:
+            data, _ = client_socket.recvfrom(1024)
+            response_str = data.decode('utf-8')
+            
+            parts = response_str.split('|')
+            if parts[0] == 'IO' and len(parts) == 2:
+                # The response will be a comma-separated string of 0s and 1s
+                io_values = [int(v) for v in parts[1].split(',')]
+                
+                # Print the formatted, human-readable status
+                print("--- Robot I/O Status ---")
+                print(f"  Input 1 (IN1):   {'ON' if io_values[0] else 'OFF'}")
+                print(f"  Input 2 (IN2):   {'ON' if io_values[1] else 'OFF'}")
+                print(f"  Output 1 (OUT1): {'ON' if io_values[2] else 'OFF'}")
+                print(f"  Output 2 (OUT2): {'ON' if io_values[3] else 'OFF'}")
+                print(f"  E-Stop:          {'TRIGGERED' if io_values[4] == 0 else 'OK'}")
+                print("--------------------------")
+
+                return io_values
+            else:
+                print(f"Error: Received malformed I/O data: {response_str}")
+                return None
+
+        except socket.timeout:
+            print("Error: Timeout waiting for I/O response from robot controller.")
+            return None
+        except Exception as e:
+            print(f"An error occurred while getting I/O status: {e}")
+            return None
+
+def get_electric_gripper_status():
+    """
+    Requests the electric gripper's current status.
+    Returns a list [ID, Position, Speed, Current, StatusByte, ObjectDetected] or None.
+    """
+    SERVER_IP = "127.0.0.1"
+    SERVER_PORT = 5001
+    
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
+        client_socket.settimeout(2.0)
+        
+        request_message = "GET_GRIPPER"
+        client_socket.sendto(request_message.encode('utf-8'), (SERVER_IP, SERVER_PORT))
+        
+        try:
+            data, _ = client_socket.recvfrom(1024)
+            response_str = data.decode('utf-8')
+            
+            parts = response_str.split('|')
+            if parts[0] == 'GRIPPER' and len(parts) == 2:
+                gripper_values = [int(v) for v in parts[1].split(',')]
+
+                # Decode the status byte for printing
+                status_byte = gripper_values[4]
+                is_active = (status_byte & 0b00000001) != 0
+                is_moving = (status_byte & 0b00000010) != 0
+                is_calibrated = (status_byte & 0b10000000) != 0
+
+                # Print the formatted, human-readable status
+                print("--- Electric Gripper Status ---")
+                print(f"  Device ID:         {gripper_values[0]}")
+                print(f"  Current Position:  {gripper_values[1]}")
+                print(f"  Current Speed:     {gripper_values[2]}")
+                print(f"  Current Current:   {gripper_values[3]}")
+                print(f"  Object Detected:   {'Yes' if gripper_values[5] else 'No'}")
+                print(f"  Status Byte:       {bin(status_byte)}")
+                print(f"    - Calibrated:    {is_calibrated}")
+                print(f"    - Active:        {is_active}")
+                print(f"    - Moving:        {is_moving}")
+                print("-------------------------------")
+
+                return gripper_values
+            else:
+                print(f"Error: Received malformed gripper data: {response_str}")
+                return None
+
+        except socket.timeout:
+            print("Error: Timeout waiting for gripper response from robot controller.")
+            return None
+        except Exception as e:
+            print(f"An error occurred while getting gripper status: {e}")
             return None
