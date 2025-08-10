@@ -43,7 +43,7 @@ logging.disable(logging.DEBUG)
 
 my_os = platform.system()
 if my_os == "Windows": 
-    STARTING_PORT = 9 # COM3
+    STARTING_PORT = 6 # COM3
 str_port = ''
 
 if my_os == "Windows":
@@ -1632,6 +1632,12 @@ class GripperCommand:
                 Gripper_data_out[2] = self.current
                 # Also ensure the mode is set to normal operation.
                 Gripper_data_out[4] = 0
+                Gripper_activate_deactivate = 1
+                Gripper_action_status = 1
+                Gripper_rel_dir = 1
+                bitfield_list = [Gripper_activate_deactivate,Gripper_action_status,not InOut_in[4],Gripper_rel_dir,0,0,0,0] #InOut_in[4] is estop
+                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield_list)
+                Gripper_data_out[3] = int(fused.hex(),16)
 
         elif self.gripper_type == 'pneumatic':
             InOut_out[self.port_index] = self.state
@@ -1685,6 +1691,7 @@ class DelayCommand:
             self.is_finished = True
         
         return self.is_finished
+
 
 # Create a new, empty command queue
 command_queue = deque()
