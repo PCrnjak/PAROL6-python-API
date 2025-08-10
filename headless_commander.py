@@ -1527,83 +1527,110 @@ class MoveCartCommand:
         
 class GripperCommand:
     """
-    A non-blocking command to control the gripper. This command executes
-    instantaneously by setting the correct data values and then finishes.
+    A single, unified, non-blocking command to control all gripper functions.
+    It internally selects the correct logic (position-based waiting, timed delay,
+    or instantaneous) based on the specified action.
     """
     def __init__(self, gripper_type, action=None, position=100, speed=100, current=500, output_port=1):
         """
-        Initializes the Gripper command.
+        Initializes the Gripper command and configures its internal state machine
+        based on the requested action.
         """
         self.is_valid = True
         self.is_finished = False
         self.gripper_type = gripper_type.lower()
+        self.action = action.lower() if action else 'move'
+        self.state = "START"
+        self.timeout_counter = 300 # 3-second safety timeout for all waiting states
 
-        # --- Store parameters based on gripper type ---
+        # --- Configure based on Gripper Type and Action ---
         if self.gripper_type == 'electric':
-            self.action = action.lower() if action else None
-            self.position = position
-            self.speed = speed
-            self.current = current
-            # Validation based on the working script's limits
-            if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
-                print("  -> VALIDATION FAILED: Electric gripper values out of range.")
-                self.is_valid = False
-                return
-            print(f"Initializing Electric Gripper command: action={action}, pos={position}, speed={speed}")
+            if self.action == 'move':
+                self.target_position = position
+                self.speed = speed
+                self.current = current
+                if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
+                    self.is_valid = False
+            elif self.action == 'calibrate':
+                self.wait_counter = 200 # 2-second fixed delay for calibration
+            else:
+                self.is_valid = False # Invalid action
 
         elif self.gripper_type == 'pneumatic':
-            if action not in ['open', 'close']:
-                print(f"  -> VALIDATION FAILED: Pneumatic action must be 'open' or 'close', not '{action}'.")
+            if self.action not in ['open', 'close']:
                 self.is_valid = False
-                return
-            if output_port not in [1, 2]:
-                print(f"  -> VALIDATION FAILED: Pneumatic output_port must be 1 or 2, not '{output_port}'.")
-                self.is_valid = False
-                return
-            self.state = 1 if action == 'open' else 0
-            self.port_index = 2 if output_port == 1 else 3 # Map port 1 to InOut_out[2], port 2 to InOut_out[3]
-            print(f"Initializing Pneumatic Gripper command: action='{action}' on port {output_port}")
-
+            self.state_to_set = 1 if self.action == 'open' else 0
+            self.port_index = 2 if output_port == 1 else 3
         else:
-            print(f"  -> VALIDATION FAILED: Unknown gripper_type '{gripper_type}'.")
             self.is_valid = False
-            return
 
-    def execute_step(self, Gripper_data_out, InOut_out, **kwargs):
-        """
-        Sets the appropriate output values for the gripper and finishes immediately.
-        """
         if not self.is_valid:
+            print(f"  -> VALIDATION FAILED for GripperCommand with action: '{self.action}'")
+
+    def execute_step(self, Gripper_data_out, InOut_out, Gripper_data_in, InOut_in, **kwargs):
+        if self.is_finished or not self.is_valid:
+            return True
+
+        self.timeout_counter -= 1
+        if self.timeout_counter <= 0:
+            print(f"  -> ERROR: Gripper command timed out in state {self.state}.")
             self.is_finished = True
             return True
 
+        # --- Pneumatic Logic (Instantaneous) ---
+        if self.gripper_type == 'pneumatic':
+            InOut_out[self.port_index] = self.state_to_set
+            print("  -> Pneumatic gripper command sent.")
+            self.is_finished = True
+            return True
+
+        # --- Electric Gripper Logic ---
         if self.gripper_type == 'electric':
-            # Case 1: The action is to calibrate.
-            if self.action == 'calibrate':
-                # For calibration, ONLY change the mode byte. The Pack_data function will reset it.
-                Gripper_data_out[4] = 1  # Mode 1 for calibration
+            # On the first run, transition to the correct state for the action
+            if self.state == "START":
+                if self.action == 'calibrate':
+                    self.state = "SEND_CALIBRATE"
+                else: # 'move'
+                    self.state = "WAIT_FOR_POSITION"
+            
+            # --- Calibrate Logic (Timed Delay) ---
+            if self.state == "SEND_CALIBRATE":
+                print("  -> Sending one-shot calibrate command...")
+                Gripper_data_out[4] = 1 # Set mode to calibrate
+                self.state = "WAITING_CALIBRATION"
+                return False
 
-            # Case 2: The action is a normal move.
-            else:
-                # For a move, set the position, speed, and current data.
-                Gripper_data_out[0] = self.position
-                Gripper_data_out[1] = self.speed
-                Gripper_data_out[2] = self.current
-                # Also ensure the mode is set to normal operation.
-                Gripper_data_out[4] = 0
-                Gripper_activate_deactivate = 1
-                Gripper_action_status = 1
-                Gripper_rel_dir = 1
-                bitfield_list = [Gripper_activate_deactivate,Gripper_action_status,not InOut_in[4],Gripper_rel_dir,0,0,0,0] #InOut_in[4] is estop
-                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield_list)
-                Gripper_data_out[3] = int(fused.hex(),16)
+            if self.state == "WAITING_CALIBRATION":
+                self.wait_counter -= 1
+                if self.wait_counter <= 0:
+                    print("  -> Calibration delay finished.")
+                    Gripper_data_out[4] = 0 # Reset to operation mode
+                    self.is_finished = True
+                    return True
+                return False
 
-        elif self.gripper_type == 'pneumatic':
-            InOut_out[self.port_index] = self.state
+            # --- Move Logic (Position-Based) ---
+            if self.state == "WAIT_FOR_POSITION":
+                # Persistently send the move command
+                Gripper_data_out[0], Gripper_data_out[1], Gripper_data_out[2] = self.target_position, self.speed, self.current
+                Gripper_data_out[4] = 0 # Operation mode
+                bitfield = [1, 1, not InOut_in[4], 1, 0, 0, 0, 0]
+                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
+                Gripper_data_out[3] = int(fused.hex(), 16)
 
-        # This command is instantaneous, so it finishes on the first execution.
-        self.is_finished = True
-        return True
+                # Check for completion
+                current_position = Gripper_data_in[1]
+                if abs(current_position - self.target_position) <= 5:
+                    print(f"  -> Gripper move complete.")
+                    self.is_finished = True
+                    # Set command back to idle
+                    bitfield = [1, 0, not InOut_in[4], 1, 0, 0, 0, 0]
+                    fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
+                    Gripper_data_out[3] = int(fused.hex(), 16)
+                    return True
+                return False
+        
+        return self.is_finished
 
 class DelayCommand:
     """
