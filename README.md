@@ -199,6 +199,30 @@ This section details each command, its parameters, and provides a Python example
     if angles:
         print(f"Current Angles (deg): {angles}")
     ```
+    
+#### `get_robot_io()`
+* **Purpose**: Requests the robot's current digital I/O status.
+* **Parameters**: None.
+* **Returns**: Returns a list [IN1, IN2, OUT1, OUT2, ESTOP] or None if it fails.
+* **Python API Usage**:
+    ```python
+    from robot_api import get_robot_io
+
+    data = get_robot_io()
+    print(data)
+    ```
+
+#### `get_electric_gripper_status()`
+* **Purpose**: Requests the electric gripper's current status.
+* **Parameters**: None.
+* **Returns**: Returns a list [ID, Position, Speed, Current, StatusByte, ObjectDetected] or None.
+* **Python API Usage**:
+    ```python
+    from robot_api import get_electric_gripper_status
+
+    data = get_electric_gripper_status()
+    print(data)
+    ```
 
 ## 5. Setup & Operation
 ### Dependencies
@@ -212,24 +236,68 @@ same folder:
 ● headless_commander.py (The main server/controller) 
 ● robot_api.py (The client API for sending commands) 
 ● PAROL6_ROBOT.py (The robot's specific configuration and kinematic model) 
-As long as these three files are kept together, their parent folder can be located 
-anywhere on your computer. The original requirement to place them in the GUI/files 
-directory is no longer necessary. 
-How to Operate the System 
-1. Start Controller: In a terminal, navigate to your folder and run the main controller 
-script: 
-python headless_commander.py 
+
+> [!NOTE]
+> com_port.txt is optional and it needs to have a single element and that is your USB com port of the robot. For example COM5
+>
+
+As long as these three files are kept together, their parent folder can be located <br />
+anywhere on your computer. <br />
+How to Operate the System  <br />
+1. Start Controller: In a terminal, navigate to your folder and run the main controller <br />
+script: <br />
+```python
+python headless_commander.py
+```
 2. Send Commands: In a separate script or terminal, you can import and use the 
 functions from robot_api.py to send commands to the running controller. For 
 example: 
 
+```python
+from robot_api import move_robot_joints
+move_robot_joints([90, -90, 160, 12, 12, 180], duration=5.5)
+delay_robot(0.2)
+move_robot_joints([50, -60, 180, -12, 32, 0], duration=5.5)
+delay_robot(0.2)
+```
+
+
+Or use test_script.py <br />
+
 * **Python API Usage**:
     ```python
     # your_script.py 
-    from robot_api import move_robot_joints, home_robot, delay_robot 
+    from robot_api import move_robot_joints, home_robot, delay_robot, get_robot_joint_angles, control_pneumatic_gripper,get_robot_pose, control_electric_gripper, move_robot_pose,move_robot_cartesian,get_electric_gripper_status,get_robot_io
+    import time
     print("Homing robot...") 
-    home_robot() 
-    delay_robot(5) # Wait 5 seconds for homing to complete 
+    time.sleep(2)
+    control_electric_gripper(action = "calibrate")
+    time.sleep(2)
+    control_electric_gripper(action='move', position=100, speed=150, current = 200) 
+    time.sleep(2)
+    control_electric_gripper(action='move', position=200, speed=150, current = 200) 
+    time.sleep(2)
+    print(get_robot_joint_angles())
+    print(get_robot_pose())
     print("Moving to new position...") 
-    move_robot_joints([90, -45, 90, 0, 45, 180], speed_percentage=75) 
+    control_pneumatic_gripper("open",1)
+    time.sleep(0.3)
+    control_pneumatic_gripper("close",1)
+    time.sleep(0.3)
+    control_pneumatic_gripper("open",1)
+    time.sleep(0.3)
+    control_pneumatic_gripper("close",1)
+    time.sleep(0.3)
+    move_robot_joints([90, -90, 160, 12, 12, 180], duration=5.5)
+    time.sleep(6)
+    move_robot_joints([50, -60, 180, -12, 32, 0], duration=5.5)
+    time.sleep(6)
+    move_robot_joints([90, -90, 160, 12, 12, 180], duration=5.5)
+    time.sleep(6)
+    move_robot_pose([7, 250, 200, -100, 0, -90], duration=5.5) 
+    time.sleep(6)
+    move_robot_cartesian([7, 250, 150, -100, 0, -90], speed_percentage=50) 
+    delay_robot(0.2)
+    print(get_electric_gripper_status())
+    print(get_robot_io())
     ```
