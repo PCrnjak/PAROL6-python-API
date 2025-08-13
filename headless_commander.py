@@ -42,6 +42,7 @@ logging.disable(logging.DEBUG)
 
 
 my_os = platform.system()
+
 if my_os == "Windows":
     # Try to read the COM port from a file
     try:
@@ -1571,11 +1572,6 @@ class GripperCommand:
         if self.is_finished or not self.is_valid:
             return True
 
-        self.timeout_counter -= 1
-        if self.timeout_counter <= 0:
-            print(f"  -> ERROR: Gripper command timed out in state {self.state}.")
-            self.is_finished = True
-            return True
 
         # --- Pneumatic Logic (Instantaneous) ---
         if self.gripper_type == 'pneumatic':

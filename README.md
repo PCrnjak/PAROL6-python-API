@@ -53,7 +53,7 @@ This section details each command, its parameters, and provides a Python example
     # Move by duration (in 5.5 seconds)
     move_robot_joints([0, -90, 180, 0, 0, 180], duration=5.5)
     ```
-
+    
 #### `move_robot_pose()`
 * **Purpose**: Moves the end-effector to a Cartesian pose via a joint-based path.
 * **Parameters**:
@@ -118,6 +118,23 @@ This section details each command, its parameters, and provides a Python example
     # Jog joint 3 backwards by 15 degrees (index 2 -> negative is 2+6=8)
     jog_robot_joint(joint_index=8, speed_percentage=60, distance_deg=15)
     ```
+
+#### `jog_multiple_joints()`
+* **Purpose**: Allows you to jog multiple joints at the same time.
+* **Parameters**:
+  * `joints` (`List[int]`): A list of joint indices. Use 0-5 for positive direction and 6-11 for negative direction (e.g., 6 is J1-).
+  * `speeds` (`List[float]`): A list of corresponding speeds (1-100%). The number of speeds must match the number of joints.
+  * `duration (float)`: The duration of the jog in seconds.
+* **Python API Usage**:
+    ```python
+    from robot_api import jog_multiple_joints
+
+    # Jog joints J1, J4 and J6 at a speed of 70%, 40% and 60% respectively for a duration of 0.6 seconds
+    jog_multiple_joints([0, 3, 5], [70, 40, 60], 0.6)
+
+    # Jog joints J1, J4 and J6 in the opposite direction at a speed of 70%, 40% and 60% respectively for a duration of 1.2 seconds
+    jog_multiple_joints([(0+6), (3+6), (5+6)], [70, 40, 60], 1.2)
+    # Equivalent to jog_multiple_joints([6, 9, 11], [70, 40, 60], 1.2)
 
 #### `delay_robot()`
 * **Purpose**: Pauses the command queue execution.
