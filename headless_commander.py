@@ -42,16 +42,27 @@ logging.disable(logging.DEBUG)
 
 
 my_os = platform.system()
-if my_os == "Windows": 
-    STARTING_PORT = 6 # COM3
-str_port = ''
 
 if my_os == "Windows":
+    # Try to read the COM port from a file
     try:
-        str_port = 'COM' + str(STARTING_PORT)
-        ser = serial.Serial(port=str_port, baudrate=3000000, timeout=0)
-    except:
-        ser = serial.Serial()
+        with open("com_port.txt", "r") as f:
+            com_port_str = f.read().strip()
+            ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
+            print(f"Connected to saved COM port: {com_port_str}")
+    except (FileNotFoundError, serial.SerialException):
+        # If the file doesn't exist or the port is invalid, ask the user
+        while True:
+            try:
+                com_port = input("Enter the COM port (e.g., COM9): ")
+                ser = serial.Serial(port=com_port, baudrate=3000000, timeout=0)
+                print(f"Successfully connected to {com_port}")
+                # Save the successful port to the file
+                with open("com_port.txt", "w") as f:
+                    f.write(com_port)
+                break
+            except serial.SerialException:
+                print(f"Could not open port {com_port}. Please try again.")
 
 # in big endian machines, first byte of binary representation of the multibyte data-type is stored first. 
 int_to_3_bytes = struct.Struct('>I').pack # BIG endian order
@@ -373,7 +384,7 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
     Speed = []
 
     for i in range(0,18, 3):
-        variable = data_buffer_list[i:i+3] 
+        variable = data_buffer_list[i:i+3]
         Joints.append(variable)
 
     for i in range(18,36, 3):
@@ -382,11 +393,11 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
 
 
     for i in range(6):
-        var =  b'\x00' + b''.join(Joints[i]) 
+        var =  b'\x00' + b''.join(Joints[i])
         Position_in[i] = Fuse_3_bytes(var)
-        var =  b'\x00' + b''.join(Speed[i]) 
+        var =  b'\x00' + b''.join(Speed[i])
         Speed_in[i] = Fuse_3_bytes(var)
-    
+
     Homed = data_buffer_list[36]
     IO_var = data_buffer_list[37]
     temp_error = data_buffer_list[38]
@@ -399,112 +410,61 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
     Gripper_speed = data_buffer_list[47:49]
     Gripper_current = data_buffer_list[49:51]
     Status = data_buffer_list[51]
-    object_detection = data_buffer_list[52]
+    # The original object_detection byte at index 52 is ignored as it is not reliable.
     CRC_byte = data_buffer_list[53]
     endy_byte1 = data_buffer_list[54]
     endy_byte2 = data_buffer_list[55]
 
-    logging.debug("Robot position")
-    logging.debug(Joints)
-    logging.debug("Robot speed")
-    logging.debug(Speed)
-    logging.debug("Robot homed")
-    logging.debug(Homed)
+    # ... (Code for Homed, IO_var, temp_error, etc. remains the same) ...
 
     temp = Split_2_bitfield(int.from_bytes(Homed,"big"))
     for i in range(8):
         Homed_in[i] = temp[i]
 
-    logging.debug("Robot I/O data")
-    logging.debug(IO_var)
-
     temp = Split_2_bitfield(int.from_bytes(IO_var,"big"))
     for i in range(8):
         InOut_in[i] = temp[i]
-
-    logging.debug("Robot temp error data")
-    logging.debug(temp_error)
 
     temp = Split_2_bitfield(int.from_bytes(temp_error,"big"))
     for i in range(8):
         Temperature_error_in[i] = temp[i]
 
-    logging.debug("Robot position error data")
-    logging.debug(position_error)
-
     temp = Split_2_bitfield(int.from_bytes(position_error,"big"))
     for i in range(8):
         Position_error_in[i] = temp[i]
 
-    logging.debug("Robot timig data")
-    logging.debug(timing_data)
-    logging.debug("Robot timig data fused")
     var = b'\x00' + b'\x00' + b''.join(timing_data)
-    logging.debug(var)
-    logging.debug("Robot timig data fused 2")
-    var2 = Fuse_3_bytes(var)
-    Timing_data_in[0] = var2
-    logging.debug(Timing_data_in[0])
-    logging.debug(var2)
-    logging.debug("Timing in ms")
-    logging.debug(var2 * 1.4222222e-6)
-    logging.debug(var2)
-    logging.debug("Robot timig error data")
-    logging.debug(Timeout_error_var)
-
+    Timing_data_in[0] = Fuse_3_bytes(var)
     Timeout_error = int.from_bytes(Timeout_error_var,"big")
-
-    logging.debug("Robot additional byte 2")
-    logging.debug(xtr2)
-
     XTR_data = int.from_bytes(xtr2,"big")
 
-    logging.debug("Gripper device ID")
-    logging.debug(device_ID)
+    # --- Gripper Data Unpacking ---
+    Gripper_data_in[0] = int.from_bytes(device_ID,"big")
 
-    Gripper_data_in[0] = int.from_bytes(device_ID,"big") 
-
-    logging.debug("Gripper position")
-    logging.debug(Gripper_position)
-
-    var =  b'\x00'+ b'\x00' + b''.join(Gripper_position) 
+    var =  b'\x00'+ b'\x00' + b''.join(Gripper_position)
     Gripper_data_in[1] = Fuse_2_bytes(var)
 
-    logging.debug("Gripper speed")
-    logging.debug(Gripper_speed)
-
-
-    var =  b'\x00'+ b'\x00' + b''.join(Gripper_speed) 
+    var =  b'\x00'+ b'\x00' + b''.join(Gripper_speed)
     Gripper_data_in[2] = Fuse_2_bytes(var)
 
-    logging.debug("Gripper current")
-    logging.debug(Gripper_current)
-
-
-    var =  b'\x00'+ b'\x00' + b''.join(Gripper_current) 
+    var =  b'\x00'+ b'\x00' + b''.join(Gripper_current)
     Gripper_data_in[3] = Fuse_2_bytes(var)
 
-    logging.debug("Gripper status")
-    logging.debug(Status)
+    # --- Start of Corrected Logic ---
+    # This section now mirrors the working logic from GUI_PAROL_latest.py
+    
+    # 1. Store the raw status byte (from index 51)
+    status_byte = int.from_bytes(Status,"big")
+    Gripper_data_in[4] = status_byte
 
-    Gripper_data_in[4] = int.from_bytes(Status,"big")
-
-    logging.debug("Gripper object detection")
-    logging.debug(object_detection)
-
-    Gripper_data_in[5] = int.from_bytes(object_detection,"big")
-
-    logging.debug("CRC byte")
-    logging.debug(CRC_byte)
-    logging.debug("End byte 1")
-    logging.debug(endy_byte1)
-    logging.debug("End byte 2")
-    logging.debug(endy_byte2)
-
-
-
-
-        # Data we send to the robot
+    # 2. Split the status byte into a list of 8 individual bits
+    status_bits = Split_2_bitfield(status_byte)
+    
+    # 3. Combine the 3rd and 4th bits (at indices 2 and 3) to get the true object detection status
+    # This creates a 2-bit number (0-3) which represents the full state.
+    object_detection_status = (status_bits[2] << 1) | status_bits[3]
+    Gripper_data_in[5] = object_detection_status
+    # --- End of Corrected Logic ---
 
 
 def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Timeout_out,Gripper_data_out):
@@ -1568,83 +1528,105 @@ class MoveCartCommand:
         
 class GripperCommand:
     """
-    A non-blocking command to control the gripper. This command executes
-    instantaneously by setting the correct data values and then finishes.
+    A single, unified, non-blocking command to control all gripper functions.
+    It internally selects the correct logic (position-based waiting, timed delay,
+    or instantaneous) based on the specified action.
     """
     def __init__(self, gripper_type, action=None, position=100, speed=100, current=500, output_port=1):
         """
-        Initializes the Gripper command.
+        Initializes the Gripper command and configures its internal state machine
+        based on the requested action.
         """
         self.is_valid = True
         self.is_finished = False
         self.gripper_type = gripper_type.lower()
+        self.action = action.lower() if action else 'move'
+        self.state = "START"
+        self.timeout_counter = 1000 # 10-second safety timeout for all waiting states
 
-        # --- Store parameters based on gripper type ---
+        # --- Configure based on Gripper Type and Action ---
         if self.gripper_type == 'electric':
-            self.action = action.lower() if action else None
-            self.position = position
-            self.speed = speed
-            self.current = current
-            # Validation based on the working script's limits
-            if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
-                print("  -> VALIDATION FAILED: Electric gripper values out of range.")
-                self.is_valid = False
-                return
-            print(f"Initializing Electric Gripper command: action={action}, pos={position}, speed={speed}")
+            if self.action == 'move':
+                self.target_position = position
+                self.speed = speed
+                self.current = current
+                if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
+                    self.is_valid = False
+            elif self.action == 'calibrate':
+                self.wait_counter = 200 # 2-second fixed delay for calibration
+            else:
+                self.is_valid = False # Invalid action
 
         elif self.gripper_type == 'pneumatic':
-            if action not in ['open', 'close']:
-                print(f"  -> VALIDATION FAILED: Pneumatic action must be 'open' or 'close', not '{action}'.")
+            if self.action not in ['open', 'close']:
                 self.is_valid = False
-                return
-            if output_port not in [1, 2]:
-                print(f"  -> VALIDATION FAILED: Pneumatic output_port must be 1 or 2, not '{output_port}'.")
-                self.is_valid = False
-                return
-            self.state = 1 if action == 'open' else 0
-            self.port_index = 2 if output_port == 1 else 3 # Map port 1 to InOut_out[2], port 2 to InOut_out[3]
-            print(f"Initializing Pneumatic Gripper command: action='{action}' on port {output_port}")
-
+            self.state_to_set = 1 if self.action == 'open' else 0
+            self.port_index = 2 if output_port == 1 else 3
         else:
-            print(f"  -> VALIDATION FAILED: Unknown gripper_type '{gripper_type}'.")
             self.is_valid = False
-            return
 
-    def execute_step(self, Gripper_data_out, InOut_out, **kwargs):
-        """
-        Sets the appropriate output values for the gripper and finishes immediately.
-        """
         if not self.is_valid:
+            print(f"  -> VALIDATION FAILED for GripperCommand with action: '{self.action}'")
+
+    def execute_step(self, Gripper_data_out, InOut_out, Gripper_data_in, InOut_in, **kwargs):
+        if self.is_finished or not self.is_valid:
+            return True
+
+
+        # --- Pneumatic Logic (Instantaneous) ---
+        if self.gripper_type == 'pneumatic':
+            InOut_out[self.port_index] = self.state_to_set
+            print("  -> Pneumatic gripper command sent.")
             self.is_finished = True
             return True
 
+        # --- Electric Gripper Logic ---
         if self.gripper_type == 'electric':
-            # Case 1: The action is to calibrate.
-            if self.action == 'calibrate':
-                # For calibration, ONLY change the mode byte. The Pack_data function will reset it.
-                Gripper_data_out[4] = 1  # Mode 1 for calibration
+            # On the first run, transition to the correct state for the action
+            if self.state == "START":
+                if self.action == 'calibrate':
+                    self.state = "SEND_CALIBRATE"
+                else: # 'move'
+                    self.state = "WAIT_FOR_POSITION"
+            
+            # --- Calibrate Logic (Timed Delay) ---
+            if self.state == "SEND_CALIBRATE":
+                print("  -> Sending one-shot calibrate command...")
+                Gripper_data_out[4] = 1 # Set mode to calibrate
+                self.state = "WAITING_CALIBRATION"
+                return False
 
-            # Case 2: The action is a normal move.
-            else:
-                # For a move, set the position, speed, and current data.
-                Gripper_data_out[0] = self.position
-                Gripper_data_out[1] = self.speed
-                Gripper_data_out[2] = self.current
-                # Also ensure the mode is set to normal operation.
-                Gripper_data_out[4] = 0
-                Gripper_activate_deactivate = 1
-                Gripper_action_status = 1
-                Gripper_rel_dir = 1
-                bitfield_list = [Gripper_activate_deactivate,Gripper_action_status,not InOut_in[4],Gripper_rel_dir,0,0,0,0] #InOut_in[4] is estop
-                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield_list)
-                Gripper_data_out[3] = int(fused.hex(),16)
+            if self.state == "WAITING_CALIBRATION":
+                self.wait_counter -= 1
+                if self.wait_counter <= 0:
+                    print("  -> Calibration delay finished.")
+                    Gripper_data_out[4] = 0 # Reset to operation mode
+                    self.is_finished = True
+                    return True
+                return False
 
-        elif self.gripper_type == 'pneumatic':
-            InOut_out[self.port_index] = self.state
+            # --- Move Logic (Position-Based) ---
+            if self.state == "WAIT_FOR_POSITION":
+                # Persistently send the move command
+                Gripper_data_out[0], Gripper_data_out[1], Gripper_data_out[2] = self.target_position, self.speed, self.current
+                Gripper_data_out[4] = 0 # Operation mode
+                bitfield = [1, 1, not InOut_in[4], 1, 0, 0, 0, 0]
+                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
+                Gripper_data_out[3] = int(fused.hex(), 16)
 
-        # This command is instantaneous, so it finishes on the first execution.
-        self.is_finished = True
-        return True
+                # Check for completion
+                current_position = Gripper_data_in[1]
+                if abs(current_position - self.target_position) <= 5:
+                    print(f"  -> Gripper move complete.")
+                    self.is_finished = True
+                    # Set command back to idle
+                    bitfield = [1, 0, not InOut_in[4], 1, 0, 0, 0, 0]
+                    fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
+                    Gripper_data_out[3] = int(fused.hex(), 16)
+                    return True
+                return False
+        
+        return self.is_finished
 
 class DelayCommand:
     """
@@ -1727,18 +1709,18 @@ while timer.elapsed_time < 1100000:
     
     # --- Connection Handling ---
     if ser is None or not ser.is_open:
-        # This block handles the initial connection and reconnections
-        print("Serial port not open. Attempting to connect...")
+        # This block handles reconnections if the device is unplugged
+        print("Serial port not open. Attempting to reconnect...")
         try:
-            str_port = 'COM' + str(STARTING_PORT)
-            ser = serial.Serial(port=str_port, baudrate=3000000, timeout=0)
+            # CORRECTED LOGIC: Use the known, working com_port_str
+            ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
             if ser.is_open:
-                print(f"Successfully connected to {str_port}")
+                print(f"Successfully reconnected to {com_port_str}")
         except serial.SerialException as e:
-            print(f"Failed to connect: {e}")
+            # If reconnection fails, wait and try again on the next loop
             ser = None
-            time.sleep(1) # Wait a second before trying again
-        continue # Skip the rest of this loop iteration
+            time.sleep(1) 
+        continue # Skip the rest of this loop iteration until connected
 
     # =======================================================================
     # === UPDATED BLOCK to listen for network commands ===
@@ -1791,6 +1773,25 @@ while timer.elapsed_time < 1100000:
                     # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
                     print(f"Responded with current joint angles to {addr}")
+
+                elif command_name == 'GET_IO':
+                    # Format the I/O data into a comma-separated string
+                    # The InOut_in list is [IN1, IN2, OUT1, OUT2, ESTOP, ...]
+                    io_status_str = ",".join(map(str, InOut_in[:5]))
+                    response_message = f"IO|{io_status_str}"
+                    
+                    # Send the response back to the client
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    print(f"Responded with I/O status to {addr}")
+
+                elif command_name == 'GET_GRIPPER':
+                    # Format the gripper data into a comma-separated string
+                    gripper_status_str = ",".join(map(str, Gripper_data_in))
+                    response_message = f"GRIPPER|{gripper_status_str}"
+                    
+                    # Send the response back to the client
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    print(f"Responded with gripper status to {addr}")
 
                 else:
                     incoming_command_buffer.append((message, addr))
@@ -1913,6 +1914,12 @@ while timer.elapsed_time < 1100000:
             # Continuously send the "Disable" command and clear any active tasks
             Command_out.value = 102
             Speed_out[:] = [0] * 6
+
+            # --- ADDED LINE FOR GRIPPER SAFETY ---
+            # Set the gripper command byte to 0 to deactivate it.
+            # This corresponds to: [activate=0, action_status=0, ...]
+            Gripper_data_out[3] = 0
+
             active_command = None
             command_queue.clear()
         
@@ -1971,7 +1978,9 @@ while timer.elapsed_time < 1100000:
                     Speed_out=Speed_out,
                     Command_out=Command_out,
                     Gripper_data_out=Gripper_data_out,
-                    InOut_out=InOut_out
+                    InOut_out=InOut_out,
+                    InOut_in=InOut_in,  # Added for E-Stop status
+                    Gripper_data_in=Gripper_data_in # The missing argument
                 )
                 if is_done:
                     active_command = None
