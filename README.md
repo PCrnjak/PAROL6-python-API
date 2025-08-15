@@ -4,7 +4,6 @@
 * **Software Origin**: This control system is based on the `experimental_kinematics` branch of the `PAROL_commander_software` repository. The core communication functions were derived from the `Serial_sender_good_latest.py` file; however, the approach to motion planning has been altered from the original implementation. This system was created by editing the `Commander_minimal_version.py` file, which was used as a base.
 * **Automatic Homing on Startup**: By default, the `headless_commander.py` script will immediately command the robot to home itself upon startup. This is done for convenience but can be disabled. To prevent automatic homing, comment out or delete line 1556 (`command_queue.append(lambda: HomeCommand())`) in `headless_commander.py`.
 * **AI-Assisted Development**: This code was developed with significant AI assistance. While the core logic has been corrected and improved, it has not been exhaustively tested in all scenarios. Users should proceed with caution and verify functionality for their specific needs.
-* **Untested Gripper Functionality**: The `GripperCommand` for both pneumatic and electric grippers has been implemented based on the reference code but has not been tested on physical hardware. Please report any issues you encounter.
 
 ## 2. Safety Precautions & Disclaimer
 This control software includes several built-in safety features designed to prevent damage to the robot and ensure predictable operation:
