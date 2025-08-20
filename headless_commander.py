@@ -28,7 +28,7 @@ import struct
 import keyboard
 from spatialmath.base import trinterp
 from collections import namedtuple, deque
-import PAROL6_ROBOT
+import GUI.files.PAROL6_ROBOT as PAROL6_ROBOT
 
 # Set interval
 INTERVAL_S = 0.01
@@ -42,7 +42,6 @@ logging.disable(logging.DEBUG)
 
 
 my_os = platform.system()
-
 if my_os == "Windows":
     # Try to read the COM port from a file
     try:
@@ -1572,6 +1571,11 @@ class GripperCommand:
         if self.is_finished or not self.is_valid:
             return True
 
+        self.timeout_counter -= 1
+        if self.timeout_counter <= 0:
+            print(f"  -> ERROR: Gripper command timed out in state {self.state}.")
+            self.is_finished = True
+            return True
 
         # --- Pneumatic Logic (Instantaneous) ---
         if self.gripper_type == 'pneumatic':
@@ -1792,6 +1796,15 @@ while timer.elapsed_time < 1100000:
                     # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
                     print(f"Responded with gripper status to {addr}")
+
+                elif command_name == 'GET_SPEEDS':
+                    # The Speed_in variable is already in steps/sec from the firmware
+                    speeds_str = ",".join(map(str, Speed_in))
+                    response_message = f"SPEEDS|{speeds_str}"
+                    
+                    # Send the response back to the client
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    print(f"Responded with current joint speeds to {addr}")
 
                 else:
                     incoming_command_buffer.append((message, addr))

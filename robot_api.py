@@ -410,3 +410,80 @@ def get_electric_gripper_status():
         except Exception as e:
             print(f"An error occurred while getting gripper status: {e}")
             return None
+        
+def get_robot_pose_matrix():
+    """
+    Requests the robot's current end-effector pose as a 4x4 transformation matrix.
+    Sends a 'GET_POSE' request and waits for a response.
+    Returns a 4x4 numpy array or None if it fails.
+    """
+    SERVER_IP = "127.0.0.1"
+    SERVER_PORT = 5001
+    
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
+        client_socket.settimeout(2.0)
+        
+        request_message = "GET_POSE"
+        client_socket.sendto(request_message.encode('utf-8'), (SERVER_IP, SERVER_PORT))
+        
+        try:
+            data, _ = client_socket.recvfrom(2048)
+            response_str = data.decode('utf-8')
+            
+            parts = response_str.split('|')
+            if parts[0] == 'POSE' and len(parts) == 2:
+                pose_values = [float(v) for v in parts[1].split(',')]
+                if len(pose_values) == 16:
+                    # We have a valid 4x4 matrix, reshape and return it
+                    pose_matrix = np.array(pose_values).reshape((4, 4))
+                    
+                    print(f"Successfully received and parsed robot pose matrix:\n{pose_matrix}")
+                    return pose_matrix
+                else:
+                    print(f"Error: Received pose data has incorrect length: {len(pose_values)}")
+                    return None
+            else:
+                print(f"Error: Received malformed pose data: {response_str}")
+                return None
+
+        except socket.timeout:
+            print("Error: Timeout waiting for pose response from robot controller.")
+            return None
+        except Exception as e:
+            print(f"An error occurred while getting robot pose matrix: {e}")
+            return None
+        
+def get_robot_joint_speeds():
+    """
+    Requests the robot's current joint speeds in steps/sec.
+    Returns a list of 6 speed values or None if it fails.
+    """
+    SERVER_IP = "127.0.0.1"
+    SERVER_PORT = 5001
+    
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
+        client_socket.settimeout(2.0)
+        
+        # This new command will be handled by headless_commander
+        request_message = "GET_SPEEDS"
+        client_socket.sendto(request_message.encode('utf-8'), (SERVER_IP, SERVER_PORT))
+        
+        try:
+            data, _ = client_socket.recvfrom(1024)
+            response_str = data.decode('utf-8')
+            
+            parts = response_str.split('|')
+            if parts[0] == 'SPEEDS' and len(parts) == 2:
+                speed_values = [float(v) for v in parts[1].split(',')]
+                print(f"Successfully received joint speeds: {speed_values}")
+                return speed_values
+            else:
+                print(f"Error: Received malformed speed data: {response_str}")
+                return None
+
+        except socket.timeout:
+            print("Error: Timeout waiting for speed response from robot controller.")
+            return None
+        except Exception as e:
+            print(f"An error occurred while getting robot speeds: {e}")
+            return None
