@@ -26,9 +26,11 @@ import re
 import logging
 import struct
 import keyboard
+from typing import Optional, Tuple
 from spatialmath.base import trinterp
 from collections import namedtuple, deque
 import GUI.files.PAROL6_ROBOT as PAROL6_ROBOT
+from smooth_motion import CircularMotion, SplineMotion, MotionBlender
 
 # Set interval
 INTERVAL_S = 0.01
@@ -324,8 +326,8 @@ def solve_ik_with_adaptive_tol_subdivision(
         else:
             # Check if we're near configuration-dependent max reach
             # print(f"current_reach:{current_reach:.3f}, max_reach_threshold:{max_reach_threshold:.3f}")
-            if current_reach >= max_reach_threshold:
-                print(f"Reach limit exceeded: {current_reach:.3f} >= {max_reach_threshold:.3f}")
+            if not is_recovery and target_reach > max_reach_threshold:
+                print(f"Target reach limit exceeded: {target_reach:.3f} > {max_reach_threshold:.3f}")
                 return [], False, depth, 0
             else:
                 damping = 0.0000001  # Normal low damping
@@ -703,6 +705,10 @@ def quintic_scaling(s: float) -> float:
     using a quintic polynomial, ensuring smooth start/end accelerations.
     """
     return 6 * (s**5) - 15 * (s**4) + 10 * (s**3)
+
+#########################################################################
+# Robot Commands Start Here
+#########################################################################
 
 class HomeCommand:
     """
@@ -1677,6 +1683,993 @@ class DelayCommand:
             self.is_finished = True
         
         return self.is_finished
+    
+#########################################################################
+# Smooth Motion Commands Start Here
+#########################################################################
+    
+class BaseSmoothMotionCommand:
+    """
+    Base class for all smooth motion commands with proper error tracking.
+    """
+    
+    def __init__(self, description="smooth motion"):
+        self.description = description
+        self.trajectory = None
+        self.trajectory_command = None
+        self.transition_command = None
+        self.is_valid = True
+        self.is_finished = False
+        self.specified_start_pose = None
+        self.transition_complete = False
+        self.trajectory_prepared = False
+        self.error_state = False
+        self.error_message = ""
+        self.trajectory_generated = False  # NEW: Track if trajectory is generated
+        
+    def create_transition_command(self, current_pose, target_pose):
+        """Create a MovePose command for smooth transition to start position."""
+        pos_error = np.linalg.norm(
+            np.array(target_pose[:3]) - np.array(current_pose[:3])
+        )
+        
+        # Lower threshold to 2mm for more aggressive transition generation
+        if pos_error < 2.0:  # Changed from 5.0mm to 2.0mm
+            print(f"  -> Already near start position (error: {pos_error:.1f}mm)")
+            return None
+        
+        print(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
+        
+        # Calculate transition speed based on distance
+        # Slower for short distances, faster for long distances
+        if pos_error < 10:
+            transition_speed = 20.0  # mm/s for short distances
+        elif pos_error < 30:
+            transition_speed = 30.0  # mm/s for medium distances
+        else:
+            transition_speed = 40.0  # mm/s for long distances
+        
+        transition_duration = max(pos_error / transition_speed, 0.5)  # Minimum 0.5s
+        
+        transition_cmd = MovePoseCommand(
+            pose=target_pose,
+            duration=transition_duration
+        )
+        
+        return transition_cmd
+    
+    def get_current_pose_from_position(self, position_in):
+        """Convert current position to pose [x,y,z,rx,ry,rz]"""
+        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
+                             for i, p in enumerate(position_in)])
+        current_pose_se3 = PAROL6_ROBOT.robot.fkine(current_q)
+        
+        current_xyz = current_pose_se3.t * 1000  # Convert to mm
+        current_rpy = current_pose_se3.rpy(unit='deg', order='xyz')
+        return np.concatenate([current_xyz, current_rpy]).tolist()
+        
+    def prepare_for_execution(self, current_position_in):
+        """Minimal preparation - just check if we need a transition."""
+        print(f"  -> Preparing {self.description}...")
+        
+        # If there's a specified start pose, prepare transition
+        if self.specified_start_pose:
+            actual_current_pose = self.get_current_pose_from_position(current_position_in)
+            self.transition_command = self.create_transition_command(
+                actual_current_pose, self.specified_start_pose
+            )
+            
+            if self.transition_command:
+                self.transition_command.prepare_for_execution(current_position_in)
+                if not self.transition_command.is_valid:
+                    print(f"  -> ERROR: Cannot reach specified start position")
+                    self.is_valid = False
+                    self.error_state = True
+                    self.error_message = "Cannot reach specified start position"
+                    return
+        else:
+            self.transition_command = None
+            
+        # DON'T generate trajectory yet - wait until execution
+        self.trajectory_generated = False
+        self.trajectory_prepared = False
+        print(f"  -> {self.description} preparation complete (trajectory will be generated at execution)")
+            
+    def generate_main_trajectory(self, effective_start_pose):
+        """Override this in subclasses to generate the specific motion trajectory."""
+        raise NotImplementedError("Subclasses must implement generate_main_trajectory")
+        
+    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
+        """Execute transition first if needed, then generate and execute trajectory."""
+        if self.is_finished or not self.is_valid:
+            return True
+        
+        # Execute transition first if needed
+        if self.transition_command and not self.transition_complete:
+            is_done = self.transition_command.execute_step(
+                Position_in, Homed_in, Speed_out, Command_out, **kwargs
+            )
+            
+            if is_done:
+                print(f"  -> Transition complete")
+                self.transition_complete = True
+            return False
+        
+        # Generate trajectory on first execution step (not during preparation!)
+        if not self.trajectory_generated:
+            # Get ACTUAL current position NOW
+            actual_current_pose = self.get_current_pose_from_position(Position_in)
+            print(f"  -> Generating {self.description} from ACTUAL position: {[round(p, 1) for p in actual_current_pose[:3]]}")
+            
+            # Generate trajectory from where we ACTUALLY are
+            self.trajectory = self.generate_main_trajectory(actual_current_pose)
+            self.trajectory_command = SmoothTrajectoryCommand(
+                self.trajectory, self.description
+            )
+            
+            # Quick validation of first point only
+            current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
+                                 for i, p in enumerate(Position_in)])
+            first_pose = self.trajectory[0]
+            target_se3 = SE3(first_pose[0]/1000, first_pose[1]/1000, first_pose[2]/1000) * \
+                        SE3.RPY(first_pose[3:], unit='deg', order='xyz')
+            
+            ik_result = solve_ik_with_adaptive_tol_subdivision(
+                PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
+            )
+            
+            if not ik_result.success:
+                print(f"  -> ERROR: Cannot reach first trajectory point")
+                self.is_finished = True
+                self.error_state = True
+                self.error_message = "Cannot reach trajectory start"
+                Speed_out[:] = [0] * 6
+                Command_out.value = 255
+                return True
+                
+            self.trajectory_generated = True
+            self.trajectory_prepared = True
+            
+            # Verify first point is close to current
+            distance = np.linalg.norm(first_pose[:3] - np.array(actual_current_pose[:3]))
+            if distance > 5.0:
+                print(f"  -> WARNING: First trajectory point {distance:.1f}mm from current!")
+        
+        # Execute main trajectory
+        if self.trajectory_command and self.trajectory_prepared:
+            is_done = self.trajectory_command.execute_step(
+                Position_in, Homed_in, Speed_out, Command_out, **kwargs
+            )
+            
+            # Check for errors in trajectory execution
+            if hasattr(self.trajectory_command, 'error_state') and self.trajectory_command.error_state:
+                self.error_state = True
+                self.error_message = self.trajectory_command.error_message
+            
+            if is_done:
+                self.is_finished = True
+            
+            return is_done
+        else:
+            self.is_finished = True
+            return True
+
+class SmoothTrajectoryCommand:
+    """Command class for executing pre-generated smooth trajectories."""
+    
+    def __init__(self, trajectory, description="smooth motion"):
+        self.trajectory = np.array(trajectory)
+        self.description = description
+        self.trajectory_index = 0
+        self.is_valid = True
+        self.is_finished = False
+        self.first_step = True
+        self.error_state = False
+        self.error_message = ""
+        
+        print(f"Initializing smooth {description} with {len(trajectory)} points")
+    
+    def prepare_for_execution(self, current_position_in):
+        """Skip validation - trajectory is already generated from correct position"""
+        # No validation needed since trajectory was just generated from current position
+        self.is_valid = True
+        return
+    
+    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, Position_out=None, **kwargs):
+        """Execute one step of the smooth trajectory"""
+        if self.is_finished or not self.is_valid:
+            return True
+        
+        # Get Position_out from kwargs if not provided
+        if Position_out is None:
+            Position_out = kwargs.get('Position_out', Position_in)
+        
+        if self.trajectory_index >= len(self.trajectory):
+            print(f"Smooth {self.description} finished.")
+            self.is_finished = True
+            Speed_out[:] = [0] * 6
+            Command_out.value = 255
+            return True
+        
+        # Get target pose for this step
+        target_pose = self.trajectory[self.trajectory_index]
+        
+        # Convert to SE3
+        target_se3 = SE3(target_pose[0]/1000, target_pose[1]/1000, target_pose[2]/1000) * \
+                    SE3.RPY(target_pose[3:], unit='deg', order='xyz')
+        
+        # Get current joint configuration
+        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
+                            for i, p in enumerate(Position_in)])
+        
+        # Solve IK
+        ik_result = solve_ik_with_adaptive_tol_subdivision(
+            PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
+        )
+        
+        if not ik_result.success:
+            print(f"  -> IK failed at trajectory point {self.trajectory_index}")
+            self.is_finished = True
+            self.error_state = True
+            self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
+            Speed_out[:] = [0] * 6
+            Command_out.value = 255
+            return True
+        
+        # Convert to steps
+        target_steps = [int(PAROL6_ROBOT.RAD2STEPS(q, i)) 
+                    for i, q in enumerate(ik_result.q)]
+        
+        # ADD VELOCITY LIMITING - This prevents violent movements
+        if self.trajectory_index > 0:
+            for i in range(6):
+                step_diff = abs(target_steps[i] - Position_in[i])
+                max_step_diff = PAROL6_ROBOT.Joint_max_speed[i] * 0.01  # Max steps in 10ms
+                
+                # Use 1.2x safety margin (not 2x as before)
+                if step_diff > max_step_diff * 1.2:
+                    #print(f"  -> WARNING: Joint {i+1} velocity limit exceeded at point {self.trajectory_index}")
+                    #print(f"     Step difference: {step_diff}, Max allowed: {max_step_diff * 1.2:.1f}")
+                    
+                    # Clamp the motion
+                    sign = 1 if target_steps[i] > Position_in[i] else -1
+                    target_steps[i] = Position_in[i] + sign * int(max_step_diff)
+        
+        # Send position command
+        Position_out[:] = target_steps
+        Speed_out[:] = [0] * 6
+        Command_out.value = 156
+        
+        # Advance to next point
+        self.trajectory_index += 1
+        
+        return False
+
+class SmoothCircleCommand(BaseSmoothMotionCommand):
+    def __init__(self, center, radius, plane, duration, clockwise, start_pose=None):
+        super().__init__(f"circle (r={radius}mm)")
+        self.center = center
+        self.radius = radius
+        self.plane = plane
+        self.duration = duration
+        self.clockwise = clockwise
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate circle starting from the actual start position."""
+        motion_gen = CircularMotion()
+        plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
+        normal = plane_normals.get(self.plane, [0, 0, 1])
+        
+        print(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
+        print(f"    Circle center: {[round(c, 1) for c in self.center]}")
+        
+        # Add geometry validation
+        center_np = np.array(self.center)
+        start_np = np.array(effective_start_pose[:3])
+        distance_to_center = np.linalg.norm(start_np[:2] - center_np[:2]) if self.plane == 'XY' else \
+                            np.linalg.norm([start_np[0] - center_np[0], start_np[2] - center_np[2]]) if self.plane == 'XZ' else \
+                            np.linalg.norm(start_np[1:3] - center_np[1:3])
+        
+        if abs(distance_to_center - self.radius) > self.radius * 0.3:
+            print(f"    WARNING: Robot is {distance_to_center:.1f}mm from center, but radius is {self.radius:.1f}mm")
+            print(f"    Circle geometry will be auto-corrected")
+        
+        # Generate circle that starts at effective_start_pose
+        trajectory = motion_gen.generate_circle_3d(
+            self.center, 
+            self.radius, 
+            normal, 
+            start_point=effective_start_pose[:3],
+            duration=self.duration
+        )
+        
+        if self.clockwise:
+            trajectory = trajectory[::-1]
+        
+        # Update orientations to match start pose
+        for i in range(len(trajectory)):
+            trajectory[i][3:] = effective_start_pose[3:]
+        
+        return trajectory
+    
+class SmoothArcCenterCommand(BaseSmoothMotionCommand):
+    def __init__(self, end_pose, center, duration, clockwise, start_pose=None):
+        super().__init__("arc (center-based)")
+        self.end_pose = end_pose
+        self.center = center
+        self.duration = duration
+        self.clockwise = clockwise
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate arc from actual start to end."""
+        motion_gen = CircularMotion()
+        return motion_gen.generate_arc_3d(
+            effective_start_pose, self.end_pose, self.center,
+            clockwise=self.clockwise, duration=self.duration
+        )
+    
+class SmoothArcParamCommand(BaseSmoothMotionCommand):
+    def __init__(self, end_pose, radius, arc_angle, duration, clockwise, start_pose=None):
+        super().__init__(f"parametric arc (r={radius}mm, θ={arc_angle}°)")
+        self.end_pose = end_pose
+        self.radius = radius
+        self.arc_angle = arc_angle
+        self.duration = duration
+        self.clockwise = clockwise
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate arc based on radius and angle from actual start."""
+        # Calculate arc center based on actual start and end
+        start_xy = np.array(effective_start_pose[:2])
+        end_xy = np.array(self.end_pose[:2])
+        
+        # Midpoint
+        mid = (start_xy + end_xy) / 2
+        
+        # Distance between points
+        d = np.linalg.norm(end_xy - start_xy)
+        
+        if d > 2 * self.radius:
+            print(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
+            self.radius = d / 2 + 1
+            
+        # Height of arc center from midpoint
+        h = np.sqrt(max(0, self.radius**2 - (d/2)**2))
+        
+        # Perpendicular direction
+        if d > 0:
+            perp = np.array([-(end_xy[1] - start_xy[1]), end_xy[0] - start_xy[0]])
+            perp = perp / np.linalg.norm(perp)
+        else:
+            perp = np.array([1, 0])
+        
+        # Arc center (choose based on clockwise)
+        if self.clockwise:
+            center_2d = mid - h * perp
+        else:
+            center_2d = mid + h * perp
+            
+        center_3d = [center_2d[0], center_2d[1], effective_start_pose[2]]
+        
+        # Generate arc trajectory from actual start
+        motion_gen = CircularMotion()
+        return motion_gen.generate_arc_3d(
+            effective_start_pose, self.end_pose, center_3d,
+            clockwise=self.clockwise, duration=self.duration
+        )
+
+class SmoothHelixCommand(BaseSmoothMotionCommand):
+    def __init__(self, center, radius, pitch, height, duration, clockwise, start_pose=None):
+        super().__init__(f"helix (h={height}mm)")
+        self.center = center
+        self.radius = radius
+        self.pitch = pitch
+        self.height = height
+        self.duration = duration
+        self.clockwise = clockwise
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate helix starting from actual position with smooth entry."""
+        num_revolutions = self.height / self.pitch if self.pitch > 0 else 1
+        num_points = int(self.duration * 100)  # 100Hz
+        
+        # Calculate starting angle based on actual start position
+        dx = effective_start_pose[0] - self.center[0]
+        dy = effective_start_pose[1] - self.center[1]
+        actual_radius = np.sqrt(dx**2 + dy**2)
+        start_angle = np.arctan2(dy, dx)
+        
+        # Calculate starting height
+        start_z = effective_start_pose[2]
+        
+        # Check if we need radius transition
+        radius_error = abs(actual_radius - self.radius)
+        needs_transition = radius_error > 1.0  # 1mm tolerance
+        
+        trajectory = []
+        for i in range(num_points):
+            t = i / (num_points - 1) if num_points > 1 else 0
+            
+            # Handle radius transition in first 10% of motion
+            if needs_transition and t < 0.1:
+                blend_factor = t / 0.1
+                # Smooth step function
+                blend_factor = blend_factor * blend_factor * (3 - 2 * blend_factor)
+                current_radius = actual_radius + (self.radius - actual_radius) * blend_factor
+            else:
+                current_radius = self.radius
+            
+            angle = start_angle + 2 * np.pi * num_revolutions * t
+            if self.clockwise:
+                angle = start_angle - 2 * np.pi * num_revolutions * t
+            
+            x = self.center[0] + current_radius * np.cos(angle)
+            y = self.center[1] + current_radius * np.sin(angle)
+            z = start_z + self.height * t
+            
+            # For first point, use exact start position
+            if i == 0:
+                x, y, z = effective_start_pose[:3]
+            
+            # Use orientation from effective start
+            trajectory.append([x, y, z] + effective_start_pose[3:])
+        
+        return np.array(trajectory)
+
+class SmoothSplineCommand(BaseSmoothMotionCommand):
+    def __init__(self, waypoints, duration, start_pose=None):
+        super().__init__(f"spline ({len(waypoints)} points)")
+        self.waypoints = waypoints
+        self.duration = duration
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate spline starting from actual position."""
+        motion_gen = SplineMotion()
+        
+        # Always start from the effective start pose
+        first_wp_error = np.linalg.norm(
+            np.array(self.waypoints[0][:3]) - np.array(effective_start_pose[:3])
+        )
+        
+        if first_wp_error > 5.0:
+            # First waypoint is far, prepend the start position
+            modified_waypoints = [effective_start_pose] + self.waypoints
+        else:
+            # Replace first waypoint with actual start to ensure continuity
+            modified_waypoints = [effective_start_pose] + self.waypoints[1:]
+        
+        timestamps = np.linspace(0, self.duration, len(modified_waypoints))
+        return motion_gen.generate_cubic_spline(modified_waypoints, timestamps)
+
+class SmoothBlendCommand(BaseSmoothMotionCommand):
+    def __init__(self, segment_definitions, blend_time, start_pose=None):
+        super().__init__(f"blended ({len(segment_definitions)} segments)")
+        self.segment_definitions = segment_definitions
+        self.blend_time = blend_time
+        self.specified_start_pose = start_pose
+        
+    def generate_main_trajectory(self, effective_start_pose):
+        """Generate blended trajectory starting from actual position."""
+        trajectories = []
+        motion_gen_circle = CircularMotion()
+        motion_gen_spline = SplineMotion()
+        
+        # Always start from effective start pose
+        last_end_pose = effective_start_pose
+        
+        for i, seg_def in enumerate(self.segment_definitions):
+            seg_type = seg_def['type']
+            
+            # First segment always starts from effective_start_pose
+            segment_start = effective_start_pose if i == 0 else last_end_pose
+            
+            if seg_type == 'LINE':
+                end = seg_def['end']
+                duration = seg_def['duration']
+                
+                # Generate line segment from actual position
+                num_points = int(duration * 100)
+                timestamps = np.linspace(0, duration, num_points)
+                
+                traj = []
+                for t in timestamps:
+                    s = t / duration if duration > 0 else 1
+                    pos = [
+                        segment_start[j] * (1-s) + end[j] * s
+                        for j in range(6)
+                    ]
+                    traj.append(pos)
+                
+                trajectories.append(np.array(traj))
+                last_end_pose = end
+                
+            elif seg_type == 'ARC':
+                end = seg_def['end']
+                center = seg_def['center']
+                duration = seg_def['duration']
+                clockwise = seg_def['clockwise']
+                
+                traj = motion_gen_circle.generate_arc_3d(
+                    segment_start, end, center, 
+                    clockwise=clockwise, duration=duration
+                )
+                trajectories.append(traj)
+                last_end_pose = end
+                
+            elif seg_type == 'CIRCLE':
+                center = seg_def['center']
+                radius = seg_def['radius']
+                plane = seg_def['plane']
+                duration = seg_def['duration']
+                clockwise = seg_def['clockwise']
+                
+                plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
+                normal = plane_normals.get(plane, [0, 0, 1])
+                
+                traj = motion_gen_circle.generate_circle_3d(
+                    center, radius, normal, 
+                    start_point=segment_start[:3],
+                    duration=duration
+                )
+                
+                if clockwise:
+                    traj = traj[::-1]
+                    
+                # Update orientations
+                for j in range(len(traj)):
+                    traj[j][3:] = segment_start[3:]
+                    
+                trajectories.append(traj)
+                last_end_pose = traj[-1].tolist()
+                
+            elif seg_type == 'SPLINE':
+                waypoints = seg_def['waypoints']
+                duration = seg_def['duration']
+                
+                wp_error = np.linalg.norm(
+                    np.array(waypoints[0][:3]) - np.array(segment_start[:3])
+                )
+                
+                if wp_error > 5.0:
+                    full_waypoints = [segment_start] + waypoints
+                else:
+                    full_waypoints = [segment_start] + waypoints[1:]
+                
+                timestamps = np.linspace(0, duration, len(full_waypoints))
+                traj = motion_gen_spline.generate_cubic_spline(full_waypoints, timestamps)
+                trajectories.append(traj)
+                last_end_pose = waypoints[-1]
+        
+        # Blend all trajectories
+        if len(trajectories) > 1:
+            blender = MotionBlender(self.blend_time)
+            blended = trajectories[0]
+            blend_samples = int(self.blend_time * 100)
+            
+            for i in range(1, len(trajectories)):
+                blended = blender.blend_trajectories(blended, trajectories[i], blend_samples)
+            
+            return blended
+        elif trajectories:
+            return trajectories[0]
+        else:
+            raise ValueError("No trajectories generated in blend")
+        
+def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
+    """
+    Calculate duration based on trajectory length and speed percentage.
+    
+    Args:
+        trajectory_length: Total path length in mm
+        speed_percentage: Speed as percentage (1-100)
+        
+    Returns:
+        Duration in seconds
+    """
+    # Map speed percentage to mm/s (adjustable based on robot capabilities)
+    # For example: 100% = 100mm/s, 50% = 50mm/s
+    speed_mm_s = np.interp(speed_percentage, [0, 100], 
+                          [PAROL6_ROBOT.Cartesian_linear_velocity_min * 1000,
+                           PAROL6_ROBOT.Cartesian_linear_velocity_max * 1000])
+    
+    if speed_mm_s > 0:
+        return trajectory_length / speed_mm_s
+    else:
+        return 5.0  # Default fallback
+    
+def parse_smooth_motion_commands(parts):
+    """
+    Parse smooth motion commands received via UDP and create appropriate command objects.
+    All commands support:
+    - Optional start position (CURRENT or specified pose)
+    - Both DURATION and SPEED timing modes
+    
+    Args:
+        parts: List of command parts split by '|'
+        
+    Returns:
+        Command object or None if parsing fails
+    """
+    command_type = parts[0]
+    
+    # Helper function for parsing optional start pose
+    def parse_start_pose(start_str):
+        """Parse start pose - returns None for CURRENT, or list of floats for specified pose."""
+        if start_str == 'CURRENT' or start_str == 'NONE':
+            return None
+        else:
+            try:
+                return list(map(float, start_str.split(',')))
+            except:
+                print(f"Warning: Invalid start pose format: {start_str}")
+                return None
+    
+    # Helper function for calculating duration from speed
+    def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
+        """Calculate duration based on trajectory length and speed percentage."""
+        # Map speed percentage to mm/s
+        min_speed = PAROL6_ROBOT.Cartesian_linear_velocity_min * 1000  # Convert to mm/s
+        max_speed = PAROL6_ROBOT.Cartesian_linear_velocity_max * 1000  # Convert to mm/s
+        speed_mm_s = np.interp(speed_percentage, [0, 100], [min_speed, max_speed])
+        
+        if speed_mm_s > 0:
+            return trajectory_length / speed_mm_s
+        else:
+            return 5.0  # Default fallback
+    
+    try:
+        if command_type == 'SMOOTH_CIRCLE':
+            # Format: SMOOTH_CIRCLE|center_x,center_y,center_z|radius|plane|start_pose|timing_type|timing_value|clockwise
+            center = list(map(float, parts[1].split(',')))
+            radius = float(parts[2])
+            plane = parts[3]
+            start_pose = parse_start_pose(parts[4])
+            timing_type = parts[5]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[6])
+            clockwise = parts[7] == '1'
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
+                # Circle circumference
+                path_length = 2 * np.pi * radius
+                duration = calculate_duration_from_speed(path_length, timing_value)
+            
+            print(f"  -> Parsed circle: r={radius}mm, {timing_type}={timing_value}, duration={duration:.2f}s")
+            
+            # Return command object that will generate trajectory when executed
+            return SmoothCircleCommand(center, radius, plane, duration, clockwise, start_pose)
+            
+        elif command_type == 'SMOOTH_ARC_CENTER':
+            # Format: SMOOTH_ARC_CENTER|end_pose|center|start_pose|timing_type|timing_value|clockwise
+            end_pose = list(map(float, parts[1].split(',')))
+            center = list(map(float, parts[2].split(',')))
+            start_pose = parse_start_pose(parts[3])
+            timing_type = parts[4]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[5])
+            clockwise = parts[6] == '1'
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
+                # Estimate arc length (will be more accurate when we have actual positions)
+                # Use a conservative estimate
+                estimated_radius = 50  # mm, conservative estimate
+                estimated_arc_angle = np.pi / 2  # 90 degrees estimate
+                arc_length = estimated_radius * estimated_arc_angle
+                duration = calculate_duration_from_speed(arc_length, timing_value)
+            
+            print(f"  -> Parsed arc (center): {timing_type}={timing_value}, duration={duration:.2f}s")
+            
+            # Return command that will generate trajectory with actual position
+            return SmoothArcCenterCommand(end_pose, center, duration, clockwise, start_pose)
+            
+        elif command_type == 'SMOOTH_ARC_PARAM':
+            # Format: SMOOTH_ARC_PARAM|end_pose|radius|angle|start_pose|timing_type|timing_value|clockwise
+            end_pose = list(map(float, parts[1].split(',')))
+            radius = float(parts[2])
+            arc_angle = float(parts[3])
+            start_pose = parse_start_pose(parts[4])
+            timing_type = parts[5]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[6])
+            clockwise = parts[7] == '1'
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
+                # Arc length = radius * angle (in radians)
+                arc_length = radius * np.deg2rad(arc_angle)
+                duration = calculate_duration_from_speed(arc_length, timing_value)
+            
+            print(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, duration={duration:.2f}s")
+            
+            # Return command object
+            return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, start_pose)
+            
+        elif command_type == 'SMOOTH_SPLINE':
+            # Format: SMOOTH_SPLINE|num_waypoints|start_pose|timing_type|timing_value|waypoint1|waypoint2|...
+            num_waypoints = int(parts[1])
+            start_pose = parse_start_pose(parts[2])
+            timing_type = parts[3]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[4])
+            
+            # Parse waypoints
+            waypoints = []
+            idx = 5
+            for i in range(num_waypoints):
+                wp = []
+                for j in range(6):
+                    wp.append(float(parts[idx]))
+                    idx += 1
+                waypoints.append(wp)
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
+                # Calculate total path length
+                total_dist = 0
+                for i in range(1, len(waypoints)):
+                    dist = np.linalg.norm(np.array(waypoints[i][:3]) - np.array(waypoints[i-1][:3]))
+                    total_dist += dist
+                
+                duration = calculate_duration_from_speed(total_dist, timing_value)
+            
+            print(f"  -> Parsed spline: {num_waypoints} points, duration={duration:.2f}s")
+            
+            # Return command object
+            return SmoothSplineCommand(waypoints, duration, start_pose)
+            
+        elif command_type == 'SMOOTH_HELIX':
+            # Format: SMOOTH_HELIX|center|radius|pitch|height|start_pose|timing_type|timing_value|clockwise
+            center = list(map(float, parts[1].split(',')))
+            radius = float(parts[2])
+            pitch = float(parts[3])
+            height = float(parts[4])
+            start_pose = parse_start_pose(parts[5])
+            timing_type = parts[6]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[7])
+            clockwise = parts[8] == '1'
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
+                # Calculate helix path length
+                num_revolutions = height / pitch if pitch > 0 else 1
+                horizontal_length = 2 * np.pi * radius * num_revolutions
+                helix_length = np.sqrt(horizontal_length**2 + height**2)
+                duration = calculate_duration_from_speed(helix_length, timing_value)
+            
+            print(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, duration={duration:.2f}s")
+            
+            # Return command object
+            return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, start_pose)
+            
+        elif command_type == 'SMOOTH_BLEND':
+            # Format: SMOOTH_BLEND|num_segments|blend_time|start_pose|timing_type|timing_value|segment1||segment2||...
+            num_segments = int(parts[1])
+            blend_time = float(parts[2])
+            start_pose = parse_start_pose(parts[3])
+            timing_type = parts[4]  # 'DEFAULT', 'DURATION', or 'SPEED'
+            
+            # Parse overall timing
+            if timing_type == 'DEFAULT':
+                # Use individual segment durations as-is
+                overall_duration = None
+                overall_speed = None
+                segments_start_idx = 5
+            else:
+                timing_value = float(parts[5])
+                if timing_type == 'DURATION':
+                    overall_duration = timing_value
+                    overall_speed = None
+                else:  # SPEED
+                    overall_speed = timing_value
+                    overall_duration = None
+                segments_start_idx = 6
+            
+            # Parse segments
+            segments_data = '|'.join(parts[segments_start_idx:])
+            segment_strs = segments_data.split('||')
+            
+            # Parse segment definitions
+            segment_definitions = []
+            total_original_duration = 0
+            total_estimated_length = 0
+            
+            for seg_str in segment_strs:
+                if not seg_str:  # Skip empty segments
+                    continue
+                    
+                seg_parts = seg_str.split('|')
+                seg_type = seg_parts[0]
+                
+                if seg_type == 'LINE':
+                    end = list(map(float, seg_parts[1].split(',')))
+                    segment_duration = float(seg_parts[2])
+                    total_original_duration += segment_duration
+                    
+                    # Estimate length (will be refined when we have actual start)
+                    estimated_length = 100  # mm, conservative estimate
+                    total_estimated_length += estimated_length
+                    
+                    segment_definitions.append({
+                        'type': 'LINE',
+                        'end': end,
+                        'duration': segment_duration,
+                        'original_duration': segment_duration
+                    })
+                    
+                elif seg_type == 'CIRCLE':
+                    center = list(map(float, seg_parts[1].split(',')))
+                    radius = float(seg_parts[2])
+                    plane = seg_parts[3]
+                    segment_duration = float(seg_parts[4])
+                    total_original_duration += segment_duration
+                    clockwise = seg_parts[5] == '1'
+                    
+                    # Circle circumference
+                    estimated_length = 2 * np.pi * radius
+                    total_estimated_length += estimated_length
+                    
+                    segment_definitions.append({
+                        'type': 'CIRCLE',
+                        'center': center,
+                        'radius': radius,
+                        'plane': plane,
+                        'duration': segment_duration,
+                        'original_duration': segment_duration,
+                        'clockwise': clockwise
+                    })
+                    
+                elif seg_type == 'ARC':
+                    end = list(map(float, seg_parts[1].split(',')))
+                    center = list(map(float, seg_parts[2].split(',')))
+                    segment_duration = float(seg_parts[3])
+                    total_original_duration += segment_duration
+                    clockwise = seg_parts[4] == '1'
+                    
+                    # Estimate arc length
+                    estimated_radius = 50  # mm
+                    estimated_arc_angle = np.pi / 2  # 90 degrees
+                    estimated_length = estimated_radius * estimated_arc_angle
+                    total_estimated_length += estimated_length
+                    
+                    segment_definitions.append({
+                        'type': 'ARC',
+                        'end': end,
+                        'center': center,
+                        'duration': segment_duration,
+                        'original_duration': segment_duration,
+                        'clockwise': clockwise
+                    })
+                    
+                elif seg_type == 'SPLINE':
+                    num_points = int(seg_parts[1])
+                    waypoints = []
+                    wp_strs = seg_parts[2].split(';')
+                    for wp_str in wp_strs:
+                        waypoints.append(list(map(float, wp_str.split(','))))
+                    segment_duration = float(seg_parts[3])
+                    total_original_duration += segment_duration
+                    
+                    # Estimate spline length
+                    estimated_length = 0
+                    for i in range(1, len(waypoints)):
+                        estimated_length += np.linalg.norm(
+                            np.array(waypoints[i][:3]) - np.array(waypoints[i-1][:3])
+                        )
+                    total_estimated_length += estimated_length
+                    
+                    segment_definitions.append({
+                        'type': 'SPLINE',
+                        'waypoints': waypoints,
+                        'duration': segment_duration,
+                        'original_duration': segment_duration
+                    })
+            
+            # Adjust segment durations if overall timing is specified
+            if overall_duration is not None:
+                # Scale all segment durations proportionally
+                if total_original_duration > 0:
+                    scale_factor = overall_duration / total_original_duration
+                    for seg in segment_definitions:
+                        seg['duration'] = seg['original_duration'] * scale_factor
+                print(f"  -> Scaled blend segments to total duration: {overall_duration:.2f}s")
+                        
+            elif overall_speed is not None:
+                # Calculate duration from speed and estimated path length
+                overall_duration = calculate_duration_from_speed(total_estimated_length, overall_speed)
+                if total_original_duration > 0:
+                    scale_factor = overall_duration / total_original_duration
+                    for seg in segment_definitions:
+                        seg['duration'] = seg['original_duration'] * scale_factor
+                print(f"  -> Calculated blend duration from speed: {overall_duration:.2f}s")
+            else:
+                print(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
+            
+            # Return command that generates trajectories from current/specified position
+            return SmoothBlendCommand(segment_definitions, blend_time, start_pose)
+            
+    except Exception as e:
+        print(f"Error parsing smooth motion command: {e}")
+        print(f"Command parts: {parts}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    print(f"Warning: Unknown smooth motion command type: {command_type}")
+    return None
+
+#########################################################################
+# Smooth Motion Commands and Robot Commands End Here
+#########################################################################
+
+# Acknowledgment system configuration
+CLIENT_ACK_PORT = 5002  # Port where clients listen for acknowledgments
+ack_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# Command tracking
+active_command_id = None
+command_id_map = {}  # Maps command objects to their IDs
+
+def send_acknowledgment(cmd_id: str, status: str, details: str = "", addr=None):
+    """Send acknowledgment back to client"""
+    if not cmd_id:
+        return
+        
+    ack_message = f"ACK|{cmd_id}|{status}|{details}"
+    
+    # Send to the original sender if we have their address
+    if addr:
+        try:
+            ack_socket.sendto(ack_message.encode('utf-8'), (addr[0], CLIENT_ACK_PORT))
+        except Exception as e:
+            print(f"Failed to send ack to {addr}: {e}")
+    
+    # Also broadcast to localhost in case the client is local
+    try:
+        ack_socket.sendto(ack_message.encode('utf-8'), ('127.0.0.1', CLIENT_ACK_PORT))
+    except:
+        pass
+
+def parse_command_with_id(message: str) -> Tuple[Optional[str], str]:
+    """
+    Parse command ID if present.
+    Format: [cmd_id|]COMMAND|params...
+    Returns: (cmd_id or None, command_string)
+    """
+    # Clean up any logging artifacts
+    if "ID:" in message or "):" in message:
+        # Extract the actual command after these artifacts
+        if "):" in message:
+            message = message[message.rindex("):")+2:].strip()
+        elif "ID:" in message:
+            message = message[message.index("ID:")+3:].strip()
+            # Remove any trailing parentheses or colons
+            message = message.lstrip('):').strip()
+    
+    parts = message.split('|', 1)
+    
+    # Check if first part looks like a valid command ID (8 chars, alphanumeric)
+    # IMPORTANT: Command IDs from uuid.uuid4()[:8] will contain lowercase letters/numbers
+    # Actual commands are all uppercase, so exclude all-uppercase strings
+    if (len(parts) > 1 and 
+        len(parts[0]) == 8 and 
+        parts[0].replace('-', '').isalnum() and 
+        not parts[0].isupper()):  # This prevents "MOVEPOSE" from being treated as an ID
+        return parts[0], parts[1]
+    else:
+        return None, message
 
 
 # Create a new, empty command queue
@@ -1687,7 +2680,7 @@ command_queue = deque()
 # --------------------------------------------------------------------------
 
 # 1. Start with the mandatory Home command.
-command_queue.append(lambda: HomeCommand())
+command_queue.append(HomeCommand())
 
 # --- State variable for the currently running command ---
 active_command = None
@@ -1703,9 +2696,10 @@ COMMAND_COOLDOWN_S = 0.1 # 100ms
 # Set interval
 timer = Timer(interval=INTERVAL_S, warnings=False, precise=True)
 
-# ==========================================================
-# === MODIFIED MAIN LOOP WITH COMMAND QUEUE ================
-# ==========================================================
+# ============================================================================
+# MODIFIED MAIN LOOP WITH ACKNOWLEDGMENTS
+# ============================================================================
+
 timer = Timer(interval=INTERVAL_S, warnings=False, precise=True)
 prev_time = 0
 
@@ -1713,307 +2707,405 @@ while timer.elapsed_time < 1100000:
     
     # --- Connection Handling ---
     if ser is None or not ser.is_open:
-        # This block handles reconnections if the device is unplugged
         print("Serial port not open. Attempting to reconnect...")
         try:
-            # CORRECTED LOGIC: Use the known, working com_port_str
             ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
             if ser.is_open:
                 print(f"Successfully reconnected to {com_port_str}")
         except serial.SerialException as e:
-            # If reconnection fails, wait and try again on the next loop
             ser = None
             time.sleep(1) 
-        continue # Skip the rest of this loop iteration until connected
+        continue
 
     # =======================================================================
-    # === UPDATED BLOCK to listen for network commands ===
+    # === NETWORK COMMAND RECEPTION WITH ID PARSING ===
     # =======================================================================
     try:
-        # Use a while loop with select to read all pending data from the socket buffer
         while sock in select.select([sock], [], [], 0)[0]:
             data, addr = sock.recvfrom(1024)
-            message = data.decode('utf-8').strip()
-            if message: # Ensure we don't buffer empty messages
-                #print(f"Buffering command from {addr}: {message}")
-                # Append the full message and its origin address to the queue
-                parts=message.split('|')
-                command_name=parts[0].upper()
+            raw_message = data.decode('utf-8').strip()
+            if raw_message:
+                # Parse command ID if present
+                cmd_id, message = parse_command_with_id(raw_message)
+                
+                parts = message.split('|')
+                command_name = parts[0].upper()
 
+                # Handle immediate response commands
                 if command_name == 'STOP':
                     print("Received STOP command. Halting all motion and clearing queue.")
-                    # Cancel the currently running command
+                    
+                    # Cancel active command
+                    if active_command and active_command_id:
+                        send_acknowledgment(active_command_id, "CANCELLED", 
+                                          "Stopped by user", addr)
                     active_command = None
-                    # Clear all pending commands
+                    active_command_id = None
+                    
+                    # Clear queue and notify about cancelled commands
+                    for queued_cmd in command_id_map.keys():
+                        if queued_cmd != active_command:
+                            if queued_cmd in command_id_map:
+                                send_acknowledgment(command_id_map[queued_cmd], 
+                                                  "CANCELLED", "Queue cleared by STOP", addr)
+                    
                     command_queue.clear()
-                    # Immediately send an idle/stop command to the robot hardware
-                    Command_out.value = 255 # Idle command
-                    Speed_out[:] = [0] * 6  # Set all speeds to zero
+                    command_id_map.clear()
+                    
+                    # Stop robot
+                    Command_out.value = 255
+                    Speed_out[:] = [0] * 6
+                    
+                    # Send acknowledgment for STOP command itself
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Emergency stop executed", addr)
 
                 elif command_name == 'GET_POSE':
-                    # Calculate the current pose from the robot's joint angles
                     q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
-                    current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A # .A gets the 4x4 numpy array
-                    
-                    # Flatten the matrix into a 1D array and convert it to a comma-separated string
+                    current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
                     pose_flat = current_pose_matrix.flatten()
                     pose_str = ",".join(map(str, pose_flat))
                     response_message = f"POSE|{pose_str}"
-                    
-                    # Send the formatted pose string back to the address that sent the request
                     sock.sendto(response_message.encode('utf-8'), addr)
-                    print(f"Responded with current pose to {addr}")
-                    # Note: We don't queue a command for this, we just respond immediately.
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Pose data sent", addr)
 
                 elif command_name == 'GET_ANGLES':
-                    # Convert current joint positions (in steps) to degrees
                     angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)]
                     angles_deg = np.rad2deg(angles_rad)
-                    
-                    # Format the response string: "ANGLES|j1,j2,j3,..."
                     angles_str = ",".join(map(str, angles_deg))
                     response_message = f"ANGLES|{angles_str}"
-                    
-                    # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
-                    print(f"Responded with current joint angles to {addr}")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Angles data sent", addr)
 
                 elif command_name == 'GET_IO':
-                    # Format the I/O data into a comma-separated string
-                    # The InOut_in list is [IN1, IN2, OUT1, OUT2, ESTOP, ...]
                     io_status_str = ",".join(map(str, InOut_in[:5]))
                     response_message = f"IO|{io_status_str}"
-                    
-                    # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
-                    print(f"Responded with I/O status to {addr}")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "IO data sent", addr)
 
                 elif command_name == 'GET_GRIPPER':
-                    # Format the gripper data into a comma-separated string
                     gripper_status_str = ",".join(map(str, Gripper_data_in))
                     response_message = f"GRIPPER|{gripper_status_str}"
-                    
-                    # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
-                    print(f"Responded with gripper status to {addr}")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Gripper data sent", addr)
 
                 elif command_name == 'GET_SPEEDS':
-                    # The Speed_in variable is already in steps/sec from the firmware
                     speeds_str = ",".join(map(str, Speed_in))
                     response_message = f"SPEEDS|{speeds_str}"
-                    
-                    # Send the response back to the client
                     sock.sendto(response_message.encode('utf-8'), addr)
-                    print(f"Responded with current joint speeds to {addr}")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Speed data sent", addr)
 
                 else:
-                    incoming_command_buffer.append((message, addr))
+                    # Queue command for processing
+                    incoming_command_buffer.append((raw_message, addr))
 
     except Exception as e:
         print(f"Network receive error: {e}")
-    # Depending on the error, you might want to handle it more gracefully
 
     # =======================================================================
-    # === REVISED BLOCK 2: PROCESS ONE COMMAND FROM THE BUFFER            ===
+    # === PROCESS COMMANDS FROM BUFFER WITH ACKNOWLEDGMENTS ===
     # =======================================================================
     current_time = time.time()
-    # Check if the buffer is not empty AND the cooldown period has passed
-    if incoming_command_buffer and (current_time - last_command_time) > COMMAND_COOLDOWN_S:
-        # --- PROCESS THE OLDEST COMMAND IN THE QUEUE ---
-        message, addr = incoming_command_buffer.popleft() # Get the oldest command (FIFO)
-        last_command_time = current_time # Reset the cooldown timer
-        print(f"Processing command: {message}")
+    if incoming_command_buffer and (current_time - last_command_time) > COMMAND_COOLDOWN_S and not e_stop_active:
+        raw_message, addr = incoming_command_buffer.popleft()
+        last_command_time = current_time
+        
+        # Parse command ID
+        cmd_id, message = parse_command_with_id(raw_message)
+        print(f"Processing command{' (ID: ' + cmd_id + ')' if cmd_id else ''}: {message[:50]}...")
         
         parts = message.split('|')
         command_name = parts[0].upper()
-        # --- PROCESS THE VALID COMMAND ---
-
-        # --- Parse the command and add it to the queue ---
-        # Protocol: MOVEPOSE|x|y|z|r|p|y|duration|speed_percentage
-        if command_name == 'MOVEPOSE' and len(parts) == 9:
-            pose_vals = [float(p) for p in parts[1:7]]
-            duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            speed = None if parts[8].upper() == 'NONE' else float(parts[8])
-            command_queue.append(
-                lambda p=pose_vals, d=duration, s=speed: MovePoseCommand(pose=p, duration=d, velocity_percent=s)
-            )
-        # Protocol: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed_percentage
-        elif command_name == 'MOVEJOINT' and len(parts) == 9:
-            joint_vals = [float(p) for p in parts[1:7]]
-            duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            speed = None if parts[8].upper() == 'NONE' else float(parts[8])
-            command_queue.append(
-                lambda j=joint_vals, d=duration, s=speed: MoveJointCommand(target_angles=j, duration=d, velocity_percent=s)
-            )
         
-        elif command_name == 'DELAY' and len(parts) == 2:
-            duration = float(parts[1])
-            command_queue.append(lambda d=duration: DelayCommand(duration=d))
-        
-        elif command_name == 'HOME':
-            print("Queueing Home command.")
-            command_queue.append(lambda: HomeCommand())
+        # Variable to track if command was successfully queued
+        command_queued = False
+        command_obj = None
+        error_details = ""
 
-        elif command_name == 'CARTJOG' and len(parts) == 5:
-            frame, axis, speed, duration = parts[1].upper(), parts[2], float(parts[3]), float(parts[4])
-            print(f"Queueing CartesianJog: {frame} {axis}")
-            command_queue.append(lambda f=frame, a=axis, s=speed, d=duration: CartesianJogCommand(frame=f, axis=a, speed_percentage=s, duration=d))
-
-        elif command_name == 'JOG' and len(parts) == 5:
-            joint_idx, speed = int(parts[1]), float(parts[2])
-            duration = None if parts[3].upper() == 'NONE' else float(parts[3])
-            distance = None if parts[4].upper() == 'NONE' else float(parts[4])
-            print(f"Queueing Jog for joint {joint_idx+1}")
-            command_queue.append(lambda j=joint_idx, s=speed, d=duration, dist=distance: JogCommand(joint=j, speed_percentage=s, duration=d, distance_deg=dist))
-        
-        # Protocol: MOVECART|x|y|z|r|p|y|duration|speed_percentage
-        elif command_name == 'MOVECART' and len(parts) == 9:
-            pose_vals = [float(p) for p in parts[1:7]]
-            duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            speed = None if parts[8].upper() == 'NONE' else float(parts[8])
-            print(f"Queueing MoveCart to {pose_vals}.")
-            command_queue.append(
-                lambda p=pose_vals, d=duration, s=speed: MoveCartCommand(pose=p, duration=d, velocity_percent=s)
-            )
-
-        # Protocol: MULTIJOG|joint1,joint2|speed1,speed2|duration
-        elif command_name == 'MULTIJOG' and len(parts) == 4:
-            try:
-                # Parse comma-separated strings into lists of numbers
+        # Parse and create command objects
+        try:
+            if command_name == 'MOVEPOSE' and len(parts) == 9:
+                pose_vals = [float(p) for p in parts[1:7]]
+                duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+                speed = None if parts[8].upper() == 'NONE' else float(parts[8])
+                command_obj = MovePoseCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                command_queued = True
+                
+            elif command_name == 'MOVEJOINT' and len(parts) == 9:
+                joint_vals = [float(p) for p in parts[1:7]]
+                duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+                speed = None if parts[8].upper() == 'NONE' else float(parts[8])
+                command_obj = MoveJointCommand(target_angles=joint_vals, duration=duration, velocity_percent=speed)
+                command_queued = True
+            
+            elif command_name in ['SMOOTH_CIRCLE', 'SMOOTH_ARC_CENTER', 'SMOOTH_ARC_PARAM', 
+                                 'SMOOTH_SPLINE', 'SMOOTH_HELIX', 'SMOOTH_BLEND']:
+                command_obj = parse_smooth_motion_commands(parts)
+                if command_obj:
+                    command_queued = True
+                else:
+                    error_details = "Failed to parse smooth motion parameters"
+            
+            elif command_name == 'MOVECART' and len(parts) == 9:
+                pose_vals = [float(p) for p in parts[1:7]]
+                duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+                speed = None if parts[8].upper() == 'NONE' else float(parts[8])
+                command_obj = MoveCartCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                command_queued = True
+            
+            elif command_name == 'DELAY' and len(parts) == 2:
+                duration = float(parts[1])
+                command_obj = DelayCommand(duration=duration)
+                command_queued = True
+            
+            elif command_name == 'HOME':
+                command_obj = HomeCommand()
+                command_queued = True
+                
+            elif command_name == 'CARTJOG' and len(parts) == 5:
+                frame, axis, speed, duration = parts[1].upper(), parts[2], float(parts[3]), float(parts[4])
+                command_obj = CartesianJogCommand(frame=frame, axis=axis, speed_percentage=speed, duration=duration)
+                command_queued = True
+                
+            elif command_name == 'JOG' and len(parts) == 5:
+                joint_idx, speed = int(parts[1]), float(parts[2])
+                duration = None if parts[3].upper() == 'NONE' else float(parts[3])
+                distance = None if parts[4].upper() == 'NONE' else float(parts[4])
+                command_obj = JogCommand(joint=joint_idx, speed_percentage=speed, duration=duration, distance_deg=distance)
+                command_queued = True
+            
+            elif command_name == 'MULTIJOG' and len(parts) == 4:
                 joint_indices = [int(j) for j in parts[1].split(',')]
                 speeds = [float(s) for s in parts[2].split(',')]
                 duration = float(parts[3])
+                command_obj = MultiJogCommand(joints=joint_indices, speed_percentages=speeds, duration=duration)
+                command_queued = True
                 
-                print(f"Queueing MultiJog for joints {joint_indices}")
-                command_queue.append(
-                    lambda js=joint_indices, spds=speeds, d=duration: MultiJogCommand(joints=js, speed_percentages=spds, duration=d)
-                )
-            except ValueError:
-                print(f"Warning: Malformed MULTIJOG command: {message}")
-
-        elif command_name == 'PNEUMATICGRIPPER' and len(parts) == 3:
-            action, port = parts[1].lower(), int(parts[2])
-            print(f"Queueing Pneumatic Gripper command: {action} on port {port}")
-            command_queue.append(lambda act=action, p=port: GripperCommand(gripper_type='pneumatic', action=act, output_port=p))
-
-        elif command_name == 'ELECTRICGRIPPER' and len(parts) == 5:
-            action = None if parts[1].upper() == 'NONE' or parts[1].upper() == 'MOVE' else parts[1].lower()
-            pos, spd, curr = int(parts[2]), int(parts[3]), int(parts[4])
-            print(f"Queueing Electric Gripper command: action={action}, pos={pos}")
-            command_queue.append(lambda act=action, p=pos, s=spd, c=curr: GripperCommand(gripper_type='electric', action=act, position=p, speed=s, current=c))
-
-        else:
-            print(f"Warning: Received unknown or malformed command: {message}")
-
-    # --- Main Logic Block (only runs if ser is open) ---
-    try:
-        # --- A. High-Priority Safety and State Checks ---
+            elif command_name == 'PNEUMATICGRIPPER' and len(parts) == 3:
+                action, port = parts[1].lower(), int(parts[2])
+                command_obj = GripperCommand(gripper_type='pneumatic', action=action, output_port=port)
+                command_queued = True
+                
+            elif command_name == 'ELECTRICGRIPPER' and len(parts) == 5:
+                action = None if parts[1].upper() == 'NONE' or parts[1].upper() == 'MOVE' else parts[1].lower()
+                pos, spd, curr = int(parts[2]), int(parts[3]), int(parts[4])
+                command_obj = GripperCommand(gripper_type='electric', action=action, position=pos, speed=spd, current=curr)
+                command_queued = True
+            
+            else:
+                error_details = f"Unknown or malformed command: {command_name}"
+                
+        except Exception as e:
+            error_details = f"Error parsing command: {str(e)}"
+            command_queued = False
         
-        # Check 1: Is the E-Stop button currently pressed?
-        if InOut_in[4] == 0:
-            if not e_stop_active:
-                # --- MODIFIED: Log the cancelled command ---
-                cancelled_command_info = "None (robot was idle)"
-                if active_command is not None:
-                    # Get the class name of the command for logging
-                    cancelled_command_info = type(active_command).__name__
-                
-                print(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' and all queued commands have been cancelled.")
-                print("Release E-Stop and press 'e' to re-enable.")
-                # --- END MODIFICATION ---
+        # Handle command queueing and acknowledgments
+        if command_queued and command_obj:
+            # Check if command is initially valid
+            if hasattr(command_obj, 'is_valid') and not command_obj.is_valid:
+                if cmd_id:
+                    send_acknowledgment(cmd_id, "INVALID", 
+                                       "Command failed validation", addr)
+            else:
+                # Add to queue
+                command_queue.append(command_obj)
+                if cmd_id:
+                    command_id_map[command_obj] = (cmd_id, addr)
+                    send_acknowledgment(cmd_id, "QUEUED", 
+                                       f"Position {len(command_queue)} in queue", addr)
+        else:
+            # Command was not queued
+            if cmd_id:
+                send_acknowledgment(cmd_id, "INVALID", error_details, addr)
+            print(f"Warning: {error_details}")
 
+    # =======================================================================
+    # === MAIN EXECUTION LOGIC WITH ACKNOWLEDGMENTS ===
+    # =======================================================================
+    try:
+        # --- E-Stop Handling ---
+        if InOut_in[4] == 0:  # E-Stop pressed
+            if not e_stop_active:
+                cancelled_command_info = "None"
+                if active_command is not None:
+                    cancelled_command_info = type(active_command).__name__
+                    if active_command_id:
+                        send_acknowledgment(active_command_id, "CANCELLED", 
+                                          "E-Stop activated")
+                
+                # Cancel all queued commands
+                for cmd_obj in command_queue:
+                    if cmd_obj in command_id_map:
+                        cmd_id, addr = command_id_map[cmd_obj]
+                        send_acknowledgment(cmd_id, "CANCELLED", "E-Stop activated", addr)
+                
+                # Cancel all buffered but unprocessed commands
+                for raw_message, addr in incoming_command_buffer:
+                    cmd_id, _ = parse_command_with_id(raw_message)
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "CANCELLED", "E-Stop activated - command not processed", addr)
+                
+                print(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' cancelled.")
+                print("Release E-Stop and press 'e' to re-enable.")
                 e_stop_active = True
             
-            # Continuously send the "Disable" command and clear any active tasks
             Command_out.value = 102
             Speed_out[:] = [0] * 6
-
-            # --- ADDED LINE FOR GRIPPER SAFETY ---
-            # Set the gripper command byte to 0 to deactivate it.
-            # This corresponds to: [activate=0, action_status=0, ...]
             Gripper_data_out[3] = 0
-
             active_command = None
+            active_command_id = None
             command_queue.clear()
-        
-        # Check 2: Has the E-Stop been released, but we are still in a disabled state?
+            command_id_map.clear()
+            incoming_command_buffer.clear()
+            
         elif e_stop_active:
-            # The robot is now waiting for the user to explicitly re-enable it.
+            # Waiting for re-enable
             if keyboard.is_pressed('e'):
                 print("Re-enabling robot...")
-                Command_out.value = 101  # Send the "Enable" command
-                e_stop_active = False    # Return to normal operational state
+                Command_out.value = 101
+                e_stop_active = False
             else:
-                # While waiting, keep the robot idle.
                 Command_out.value = 255
                 Speed_out[:] = [0] * 6
-        
-        # Check 3: If not E-Stopped, run normal command processing.
+                Position_out[:] = Position_in[:]
+                
         else:
-            # --- B. Process Network Commands (if any) ---
-            try:
-                ready_to_read, _, _ = select.select([sock], [], [], 0)
-                if ready_to_read:
-                    data, addr = sock.recvfrom(1024)
-                    message = data.decode('utf-8')
-                    print(f"Received command from {addr}: {message}")
-                    # ... (Your network command parsing logic goes here) ...
-
-            except Exception as e:
-                print(f"Network error: {e}")
-
-            # --- C. Process Command Queue ---
+            # --- Normal Command Processing ---
+            
+            # Start new command if none active
             if active_command is None and command_queue:
-                command_creator_function = command_queue.popleft()
-                new_command_object = command_creator_function()
-
-                # First, check if the command was validated successfully during its initialization.
-                if new_command_object.is_valid:
-                    # Only if it's valid, run the 'prepare' step (if it exists).
-                    if hasattr(new_command_object, 'prepare_for_execution'):
-                        new_command_object.prepare_for_execution(
-                            current_position_in=Position_in
-                        )
-
-                    # After preparation, the command could have become invalid. Check again.
-                    if new_command_object.is_valid:
-                        active_command = new_command_object
-                    else:
-                        print("Skipping invalid command: failed during preparation step.")
+                new_command = command_queue.popleft()
+                
+                # Get command ID and address if tracked
+                cmd_info = command_id_map.get(new_command, (None, None))
+                new_cmd_id, new_addr = cmd_info
+                
+                # Initial validation
+                if hasattr(new_command, 'is_valid') and not new_command.is_valid:
+                    # Command was invalid from the start
+                    if new_cmd_id:
+                        send_acknowledgment(new_cmd_id, "INVALID", 
+                                        "Initial validation failed", new_addr)
+                    if new_command in command_id_map:
+                        del command_id_map[new_command]
+                    continue  # Skip to next command
+                
+                # Prepare command
+                if hasattr(new_command, 'prepare_for_execution'):
+                    try:
+                        new_command.prepare_for_execution(current_position_in=Position_in)
+                    except Exception as e:
+                        print(f"Command preparation failed: {e}")
+                        if hasattr(new_command, 'is_valid'):
+                            new_command.is_valid = False
+                        if hasattr(new_command, 'error_message'):
+                            new_command.error_message = str(e)
+                
+                # Check if still valid after preparation
+                if hasattr(new_command, 'is_valid') and not new_command.is_valid:
+                    # Failed during preparation
+                    error_msg = "Failed during preparation"
+                    if hasattr(new_command, 'error_message'):
+                        error_msg = new_command.error_message
+                    
+                    if new_cmd_id:
+                        send_acknowledgment(new_cmd_id, "FAILED", error_msg, new_addr)
+                    
+                    # Clean up
+                    if new_command in command_id_map:
+                        del command_id_map[new_command]
                 else:
-                    # This handles commands that fail validation in their __init__ method.
-                    print("Skipping invalid command: failed during initialization.")
-
+                    # Command is valid, make it active
+                    active_command = new_command
+                    active_command_id = new_cmd_id
+                    
+                    if new_cmd_id:
+                        send_acknowledgment(new_cmd_id, "EXECUTING", 
+                                        f"Starting {type(new_command).__name__}", new_addr)
+            
+            # Execute active command
             if active_command:
-                is_done = active_command.execute_step(
-                    Position_in=Position_in,
-                    Homed_in=Homed_in,
-                    Speed_out=Speed_out,
-                    Command_out=Command_out,
-                    Gripper_data_out=Gripper_data_out,
-                    InOut_out=InOut_out,
-                    InOut_in=InOut_in,  # Added for E-Stop status
-                    Gripper_data_in=Gripper_data_in # The missing argument
-                )
-                if is_done:
+                try:
+                    is_done = active_command.execute_step(
+                        Position_in=Position_in,
+                        Homed_in=Homed_in,
+                        Speed_out=Speed_out,
+                        Command_out=Command_out,
+                        Gripper_data_out=Gripper_data_out,
+                        InOut_out=InOut_out,
+                        InOut_in=InOut_in,
+                        Gripper_data_in=Gripper_data_in,
+                        Position_out=Position_out  # Add this if needed
+                    )
+                    
+                    if is_done:
+                        # Command completed
+                        if active_command_id:
+                            # Check for error state in smooth motion commands
+                            if hasattr(active_command, 'error_state') and active_command.error_state:
+                                error_msg = getattr(active_command, 'error_message', 'Command failed during execution')
+                                send_acknowledgment(active_command_id, "FAILED", error_msg)
+                            else:
+                                send_acknowledgment(active_command_id, "COMPLETED", 
+                                                f"{type(active_command).__name__} finished successfully")
+                        
+                        # Clean up
+                        if active_command in command_id_map:
+                            del command_id_map[active_command]
+                        
+                        active_command = None
+                        active_command_id = None
+                        
+                except Exception as e:
+                    # Command execution error
+                    print(f"Command execution error: {e}")
+                    if active_command_id:
+                        send_acknowledgment(active_command_id, "FAILED", 
+                                          f"Execution error: {str(e)}")
+                    
+                    # Clean up
+                    if active_command in command_id_map:
+                        del command_id_map[active_command]
+                    
                     active_command = None
+                    active_command_id = None
+                    
             else:
+                # No active command - idle
                 Command_out.value = 255
                 Speed_out[:] = [0] * 6
+                Position_out[:] = Position_in[:]
 
-        # --- D. Communication with Robot (This always runs) ---
-        s = Pack_data(Position_out, Speed_out, Command_out.value, Affected_joint_out, InOut_out, Timeout_out, Gripper_data_out)
+        # --- Communication with Robot ---
+        s = Pack_data(Position_out, Speed_out, Command_out.value, 
+                     Affected_joint_out, InOut_out, Timeout_out, Gripper_data_out)
         for chunk in s:
             ser.write(chunk)
             
-        Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
+        Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
+                Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
 
     except serial.SerialException as e:
         print(f"Serial communication error: {e}")
+        
+        # Send failure acknowledgments for active command
+        if active_command_id:
+            send_acknowledgment(active_command_id, "FAILED", "Serial communication lost")
+        
         if ser:
             ser.close()
         ser = None
         active_command = None
+        active_command_id = None
 
-    # This enforces the 100Hz loop frequency, just like the original code.
     timer.checkpt()
