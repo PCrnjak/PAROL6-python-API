@@ -595,11 +595,6 @@ pip3 install oclock
 
 # User input
 pip3 install keyboard
-
-# Optional visualization (if using GUI components)
-pip3 install swift-sim==1.0.1
-pip3 install customtkinter
-pip3 install customtkinter --upgrade
 ```
 
 #### Client Dependencies (for `robot_api.py`)
@@ -738,3 +733,5 @@ while True:
 * **Smooth Motion Errors**: Verify waypoints are reachable and properly formatted
 
 For additional support, refer to the [PAROL commander software repository](https://github.com/PCrnjak/PAROL-commander-software).
+
+Or you can head over to the [PAROL6 Discord channel](https://discord.com/invite/prjUvjmGpZ) for extra support
