@@ -54,7 +54,7 @@ def test_smooth_circle_basic(start_pose):
     center_point = [start_pose[0], start_pose[1] + radius, start_pose[2]]  # Changed from +50 to +radius
 
     # Test 1: XY plane, counter-clockwise with DURATION
-    print("\n[1/3] Testing Circle: XY Plane, Counter-Clockwise (Duration mode)")
+    print("\n[1/4] Testing Circle: XY Plane, Counter-Clockwise (Duration mode)")
     result = robot_api.smooth_circle(
         center=center_point,
         radius=radius,
@@ -67,8 +67,23 @@ def test_smooth_circle_basic(start_pose):
     robot_api.wait_for_robot_stopped(timeout=10)
     time.sleep(2)
 
+    # Test 1: XY plane, counter-clockwise with DURATION in TRF
+    print("\n[2/4] Testing Circle: XY Plane, Counter-Clockwise (Duration mode)")
+    result = robot_api.smooth_circle(
+        center=center_point,
+        radius=radius,
+        frame='TRF',  # NEW: Test in TRF
+        plane='XY',
+        duration=5.0,  # Using duration
+        clockwise=False,
+        wait_for_ack=True
+    )
+    print(f"--> Command result: {result}")
+    robot_api.wait_for_robot_stopped(timeout=10)
+    time.sleep(2)
+
     # Test 2: XZ plane, clockwise with SPEED PERCENTAGE
-    print("\n[2/3] Testing Circle: XZ Plane, Clockwise (Speed percentage mode)")
+    print("\n[3/4] Testing Circle: XZ Plane, Clockwise (Speed percentage mode)")
     result = robot_api.smooth_circle(
         center=center_point,
         radius=radius,
@@ -82,7 +97,7 @@ def test_smooth_circle_basic(start_pose):
     time.sleep(2)
     
     # Test 3: YZ plane with specified start position (NEW)
-    print("\n[3/3] Testing Circle: YZ Plane with SPECIFIED START POSITION")
+    print("\n[4/4] Testing Circle: YZ Plane with SPECIFIED START POSITION")
     # Define a start position slightly offset from current
     specified_start = [start_pose[0] + 10, start_pose[1] + 10, start_pose[2], 
                       start_pose[3], start_pose[4], start_pose[5]]
@@ -103,7 +118,7 @@ def test_smooth_arc_with_start_positions(start_pose):
     print("\n--- TESTING SMOOTH ARC WITH START POSITIONS ---")
 
     # Test 1: Arc with FAR start position (should see smooth transition)
-    print("\n[1/3] Testing Arc with FAR START POSITION (big transition)")
+    print("\n[1/4] Testing Arc with FAR START POSITION (big transition)")
     far_start = [start_pose[0] + 40, start_pose[1] - 20, start_pose[2] + 10,
                  start_pose[3], start_pose[4], start_pose[5]]
     arc_center = [far_start[0] - 20, far_start[1], far_start[2]]
@@ -131,7 +146,7 @@ def test_smooth_arc_with_start_positions(start_pose):
     if not current_pose: return
 
     # Test 2: Arc with CLOSE start position (minimal transition)
-    print("\n[2/3] Testing Arc with CLOSE START POSITION (minimal transition)")
+    print("\n[2/4] Testing Arc with CLOSE START POSITION (minimal transition)")
     close_start = [current_pose[0] + 2, current_pose[1] + 2, current_pose[2],
                    current_pose[3], current_pose[4], current_pose[5]]
     arc_center = [close_start[0] - 15, close_start[1], close_start[2]]
@@ -155,7 +170,7 @@ def test_smooth_arc_with_start_positions(start_pose):
     time.sleep(2)
 
     # Test 3: Parametric arc with specified start
-    print("\n[3/3] Testing PARAMETRIC Arc with specified start")
+    print("\n[3/4] Testing PARAMETRIC Arc with specified start")
     param_start = [current_pose[0] - 10, current_pose[1] + 5, current_pose[2],
                    current_pose[3], current_pose[4], current_pose[5]]
     end_pose_param = [param_start[0] + 20, param_start[1] - 10, param_start[2],
@@ -167,6 +182,28 @@ def test_smooth_arc_with_start_positions(start_pose):
         arc_angle=60.0,
         start_pose=param_start,
         duration=4.0,
+        clockwise=False,
+        wait_for_ack=True
+    )
+    print(f"--> Command result: {result}")
+    robot_api.wait_for_robot_stopped(timeout=10)
+
+    # Test 4: Arc in TRF - arc plane follows tool orientation
+    print("\n[4/4] Testing Arc in TOOL REFERENCE FRAME (TRF)")
+    # In TRF, the arc is defined relative to the tool's coordinate system
+    trf_start = [10, 10, 10, 0, 0, 0]  # Position relative to tool
+    trf_center = [0, 0, 0]  # Center at tool origin
+    trf_end = [10, -10, 10, 0, 0, 45]  # End position in tool frame
+    
+    print(f"  TRF Arc - all coordinates relative to tool position/orientation")
+    print(f"  If tool is tilted, the arc plane will be tilted too!")
+    
+    result = robot_api.smooth_arc_center(
+        end_pose=trf_end,
+        center=trf_center,
+        frame='TRF',  # NEW: Using Tool Reference Frame
+        start_pose=trf_start,
+        duration=5.0,
         clockwise=False,
         wait_for_ack=True
     )
@@ -195,20 +232,22 @@ def test_motion_chaining(start_pose):
     robot_api.wait_for_robot_stopped(timeout=8)
     time.sleep(1)
     
-    # Motion 2: Circle starting exactly where arc ended
-    print("\n[2/4] Second Motion: Circle starting at arc's end position")
-    circle_center = [arc_end[0], arc_end[1] + 25, arc_end[2]]
+    # Motion 2: Circle in TRF starting exactly where arc ended
+    print("\n[2/4] Second Motion: Circle in TRF starting at arc's end position")
+    # In TRF, center is relative to current tool position
+    trf_circle_center = [0, 25, 0]  # 25mm forward in tool Y-axis
     
     result = robot_api.smooth_circle(
-        center=circle_center,
+        center=trf_circle_center,
         radius=25.0,
-        plane='XY',
+        plane='XY',  # This is the tool's XY plane, not world XY!
+        frame='TRF',  # NEW: Circle plane follows tool orientation
         start_pose=arc_end,  # Start exactly where arc ended
         speed_percentage=35,
         clockwise=False,
         wait_for_ack=True
     )
-    print(f"--> Circle completed")
+    print(f"--> Circle in TRF completed (plane followed tool orientation)")
     robot_api.wait_for_robot_stopped(timeout=10)
     time.sleep(1)
     
@@ -266,7 +305,7 @@ def test_smooth_spline_with_starts(start_pose):
     print("\n--- TESTING SMOOTH SPLINE WITH START POSITIONS ---")
     
     # Test 1: Spline with default start (current position)
-    print("\n[1/3] Spline with DEFAULT start (from current position)")
+    print("\n[1/4] Spline with DEFAULT start (from current position)")
     waypoints = []
     for i in range(4):
         x = start_pose[0] + i * 15
@@ -289,7 +328,7 @@ def test_smooth_spline_with_starts(start_pose):
     if not current_pose: return
     
     # Test 2: Spline with specified start far from first waypoint
-    print("\n[2/3] Spline with SPECIFIED start (different from first waypoint)")
+    print("\n[2/4] Spline with SPECIFIED start (different from first waypoint)")
     specified_start = [current_pose[0] - 20, current_pose[1] + 15, current_pose[2],
                       current_pose[3], current_pose[4], current_pose[5]]
     
@@ -321,7 +360,7 @@ def test_smooth_spline_with_starts(start_pose):
     if not current_pose: return
     
     # Test 3: Spline with start matching first waypoint (no transition needed)
-    print("\n[3/3] Spline with start MATCHING first waypoint (no transition)")
+    print("\n[3/4] Spline with start MATCHING first waypoint (no transition)")
     first_waypoint = [current_pose[0] + 5, current_pose[1] + 5, current_pose[2],
                      current_pose[3], current_pose[4], current_pose[5]]
     
@@ -342,12 +381,34 @@ def test_smooth_spline_with_starts(start_pose):
     print(f"--> Command result: {result}")
     robot_api.wait_for_robot_stopped(timeout=8)
 
+    # Test 4: Spline in TRF - waypoints relative to tool
+    print("\n[4/4] Spline in TOOL REFERENCE FRAME (TRF)")
+    # In TRF, all waypoints are relative to the tool's coordinate system
+    trf_waypoints = [
+        [20, 0, 0, 0, 0, 0],     # 20mm forward in tool X
+        [20, 20, 0, 0, 0, 15],   # Add 20mm in tool Y
+        [0, 20, 10, 0, 0, 30],   # Move to tool Y=20, Z=10
+        [0, 0, 0, 0, 0, 0]       # Return to tool origin
+    ]
+    
+    print(f"  TRF Spline - all waypoints relative to tool coordinate system")
+    print(f"  If tool is rotated, entire spline path rotates with it!")
+    
+    result = robot_api.smooth_spline(
+        waypoints=trf_waypoints,
+        frame='TRF',  # NEW: Waypoints interpreted in tool frame
+        duration=6.0,
+        wait_for_ack=True
+    )
+    print(f"--> Command result: {result}")
+    robot_api.wait_for_robot_stopped(timeout=10)
+
 def test_smooth_helix_with_starts(start_pose):
     """Tests smooth_helix with specified start positions."""
     print("\n--- TESTING SMOOTH HELIX WITH START POSITIONS ---")
     
     # Test 1: Helix with default start
-    print("\n[1/2] Helix with DEFAULT start (from current position)")
+    print("\n[1/3] Helix with DEFAULT start (from current position)")
     center = [start_pose[0], start_pose[1] + 30, start_pose[2] - 40]
     
     result = robot_api.smooth_helix(
@@ -369,7 +430,7 @@ def test_smooth_helix_with_starts(start_pose):
     if not current_pose: return
     
     # Test 2: Helix with specified start on the helix perimeter
-    print("\n[2/2] Helix with SPECIFIED start on perimeter")
+    print("\n[2/3] Helix with SPECIFIED start on perimeter")
     center = [current_pose[0], current_pose[1] + 30, current_pose[2] - 40]
     # Start position on the helix perimeter (different angle)
     start_on_perimeter = [
@@ -395,12 +456,35 @@ def test_smooth_helix_with_starts(start_pose):
     print(f"--> Command result: {result}")
     robot_api.wait_for_robot_stopped(timeout=12)
 
+    # Test 3: Helix in TRF - helix axis follows tool Z-axis
+    print("\n[3/3] Helix in TOOL REFERENCE FRAME (TRF)")
+    # In TRF, the helix rises along the tool's Z-axis, not world Z
+    trf_center = [0, 30, -40]  # Center relative to tool
+    trf_start = [20, 30, -40, 0, 0, 0]  # Start on perimeter
+    
+    print(f"  TRF Helix - rises along TOOL'S Z-axis")
+    print(f"  If tool is horizontal, helix will be horizontal too!")
+    
+    result = robot_api.smooth_helix(
+        center=trf_center,
+        radius=20.0,
+        pitch=12.0,
+        height=36.0,
+        frame='TRF',  # NEW: Helix axis follows tool orientation
+        start_pose=trf_start,
+        duration=8.0,
+        clockwise=True,
+        wait_for_ack=True
+    )
+    print(f"--> Command result: {result}")
+    robot_api.wait_for_robot_stopped(timeout=12)
+
 def test_smooth_blend_with_starts(start_pose):
     """Tests smooth_blend with specified start position for first segment."""
     print("\n--- TESTING SMOOTH BLEND WITH START POSITIONS ---")
     
     # Test 1: Blend with default start
-    print("\n[1/3] Blend with DEFAULT start")
+    print("\n[1/4] Blend with DEFAULT start")
     p1 = start_pose
     p2 = [p1[0] + 25, p1[1] + 10, p1[2], p1[3], p1[4], p1[5] + 20]
     arc_center = [p2[0] - 10, p2[1] + 10, p2[2]]
@@ -428,7 +512,7 @@ def test_smooth_blend_with_starts(start_pose):
     if not current_pose: return
     
     # Test 2: Blend with specified start for first segment
-    print("\n[2/3] Blend with SPECIFIED start (adds transition)")
+    print("\n[2/4] Blend with SPECIFIED start (adds transition)")
     specified_start = [current_pose[0] + 15, current_pose[1] - 10, current_pose[2],
                       current_pose[3], current_pose[4], current_pose[5]]
     p2 = [specified_start[0] + 20, specified_start[1] + 15, specified_start[2],
@@ -462,7 +546,7 @@ def test_smooth_blend_with_starts(start_pose):
     if not current_pose: return
     
     # Test 3: Complex blend with spline segment and specified start
-    print("\n[3/3] Complex blend with SPLINE segment and specified start")
+    print("\n[3/4] Complex blend with SPLINE segment and specified start")
     blend_start = [current_pose[0] - 10, current_pose[1] + 10, current_pose[2],
                    current_pose[3], current_pose[4], current_pose[5]]
     
@@ -489,6 +573,30 @@ def test_smooth_blend_with_starts(start_pose):
         blend_time=0.5,
         start_pose=blend_start,
         duration=10.0,  # Overall duration
+        wait_for_ack=True,
+        timeout=20
+    )
+    print(f"--> Command result: {result}")
+    robot_api.wait_for_robot_stopped(timeout=20)
+
+    # Test 4: Blend in TRF - all segments relative to tool
+    print("\n[4/4] Blend in TOOL REFERENCE FRAME (TRF)")
+    # All segment coordinates are relative to tool position/orientation
+    trf_segments = [
+        {'type': 'LINE', 'end': [30, 0, 0, 0, 0, 0], 'duration': 2.0},
+        {'type': 'CIRCLE', 'center': [30, 20, 0], 'radius': 20, 'plane': 'XY', 
+         'duration': 4.0, 'clockwise': False},  # Tool's XY plane
+        {'type': 'LINE', 'end': [0, 20, 0, 0, 0, 0], 'duration': 2.0}
+    ]
+    
+    print(f"  TRF Blend - all segments in tool coordinate system")
+    print(f"  Circle plane is tool's XY, not world XY!")
+    
+    result = robot_api.smooth_blend(
+        segments=trf_segments,
+        blend_time=0.5,
+        frame='TRF',  # NEW: All segments in tool frame
+        duration=10.0,
         wait_for_ack=True,
         timeout=20
     )
@@ -557,6 +665,27 @@ def test_transition_distances():
         if test_cases.index((description, distance)) < len(test_cases) - 1:
             initialize_test_position()
 
+    # Additional test: Transition in TRF
+    print("\n[BONUS] Testing transition in TRF")
+    print("In TRF, transition is relative to tool, not world")
+    
+    # TRF start position (30mm forward in tool X)
+    trf_transition_start = [30, 0, 0, 0, 0, 0]
+    trf_circle_center = [30, 30, 0]  # Center in tool frame
+    
+    result = robot_api.smooth_circle(
+        center=trf_circle_center,
+        radius=30.0,
+        plane='XY',  # Tool's XY plane
+        frame='TRF',  # NEW: Transition happens in tool space
+        start_pose=trf_transition_start,
+        duration=5.0,
+        clockwise=False,
+        wait_for_ack=True
+    )
+    print(f"  -> TRF transition completed")
+    robot_api.wait_for_robot_stopped(timeout=10)
+
 def test_timing_comparison_with_starts():
     """Compare timing modes with specified start positions."""
     print("\n--- TESTING TIMING MODES WITH START POSITIONS ---")
@@ -571,7 +700,7 @@ def test_timing_comparison_with_starts():
     center = [test_start[0], test_start[1] + 30, test_start[2]]
     radius = 30.0
     
-    print("\n[1/2] Circle with specified start + 5-second DURATION")
+    print("\n[1/3] Circle with specified start + 5-second DURATION")
     print(f"  Transition from: {[round(p, 1) for p in start_pose[:3]]}")
     print(f"  To start position: {[round(p, 1) for p in test_start[:3]]}")
     
@@ -593,7 +722,7 @@ def test_timing_comparison_with_starts():
     # Return to start
     initialize_test_position()
     
-    print("\n[2/2] Same circle with specified start + 40% SPEED")
+    print("\n[2/3] Same circle with specified start + 40% SPEED")
     print(f"  Same transition and circle path")
     
     start_time = time.time()
@@ -609,6 +738,29 @@ def test_timing_comparison_with_starts():
     robot_api.wait_for_robot_stopped(timeout=12)
     elapsed = time.time() - start_time
     print(f"--> Total execution time (including transition): {elapsed:.2f}s")
+
+    print("\n[3/3] Same circle in TRF with 40% SPEED")
+    print(f"  Testing how TRF affects timing with transitions")
+    
+    # TRF coordinates (relative to tool)
+    trf_start = [20, -10, 0, 0, 0, 0]
+    trf_center = [20, 20, 0]  # 30mm forward in tool Y from start
+    
+    start_time = time.time()
+    result = robot_api.smooth_circle(
+        center=trf_center,
+        radius=30.0,
+        plane='XY',  # Tool's XY plane
+        frame='TRF',  # NEW: Using tool reference frame
+        start_pose=trf_start,
+        speed_percentage=40,
+        clockwise=False,
+        wait_for_ack=True
+    )
+    robot_api.wait_for_robot_stopped(timeout=12)
+    elapsed = time.time() - start_time
+    print(f"--> TRF execution time: {elapsed:.2f}s")
+    print(f"  Note: TRF doesn't change timing, just coordinate interpretation")
     
     # Calculate expected times
     circumference = 2 * np.pi * radius
@@ -627,7 +779,7 @@ if __name__ == "__main__":
     print("Testing NEW features: Start Positions & Automatic Transitions")
     print("="*70)
     
-    '''
+    
     # Test 1: Basic tests with new start position feature
     print("\n[TEST GROUP 1: BASIC COMMANDS WITH START POSITIONS]")
     start_pose = initialize_test_position()
@@ -651,13 +803,13 @@ if __name__ == "__main__":
     start_pose = initialize_test_position()
     if start_pose:
         test_smooth_spline_with_starts(start_pose)
-    '''
+    
     # Test 5: Helix with start positions
     print("\n[TEST GROUP 5: HELIX WITH START POSITIONS]")
     start_pose = initialize_test_position()
     if start_pose:
         test_smooth_helix_with_starts(start_pose)
-    '''
+    
     # Test 6: Blend with start positions
     print("\n[TEST GROUP 6: BLEND WITH START POSITIONS]")
     start_pose = initialize_test_position()
@@ -671,7 +823,7 @@ if __name__ == "__main__":
     # Test 8: Timing comparison with transitions
     print("\n[TEST GROUP 8: TIMING MODES WITH TRANSITIONS]")
     test_timing_comparison_with_starts()
-    '''
+    
     print("\n" + "="*70)
     print("COMPREHENSIVE TEST SUITE COMPLETE")
     print("Tested features:")
