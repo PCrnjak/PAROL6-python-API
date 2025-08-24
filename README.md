@@ -233,7 +233,13 @@ if status and status['completed']:
 
 ### Smooth Motion Commands
 
-These commands create smooth, curved trajectories with continuous velocity profiles:
+These commands create smooth, curved trajectories with continuous velocity profiles. All commands support reference frame selection via the `frame` parameter:
+
+- **WRF (World Reference Frame)**: Default. All coordinates are interpreted relative to the robot's base coordinate system.
+- **TRF (Tool Reference Frame)**: All coordinates are interpreted relative to the tool's current position and orientation. This means:
+  - Positions are relative to the tool's origin
+  - Planes (XY, XZ, YZ) are the tool's local planes, not world planes
+  - If the tool is rotated, the entire motion rotates with it
 
 #### `smooth_circle()`
 * **Purpose**: Execute a smooth circular motion.
@@ -241,6 +247,7 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `center` (List[float]): Center point [x, y, z] in mm
     * `radius` (float): Circle radius in mm
     * `plane` (str, optional): Plane of circle ('XY', 'XZ', or 'YZ'). Default: 'XY'
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose [x, y, z, rx, ry, rz], or None for current position. Default: None
     * `duration` (float, optional): Time to complete circle in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -252,8 +259,12 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_circle
-    # Draw a 50mm radius circle in XY plane
+    
+    # Draw a 50mm radius circle in world XY plane
     smooth_circle(center=[200, 0, 200], radius=50, plane='XY', duration=5.0)
+    
+    # Draw a circle in tool's XY plane (follows tool orientation)
+    smooth_circle(center=[0, 30, 0], radius=25, plane='XY', frame='TRF', duration=4.0)
     ```
 
 #### `smooth_arc_center()`
@@ -261,6 +272,7 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Parameters**:
     * `end_pose` (List[float]): End pose [x, y, z, rx, ry, rz] in mm and degrees
     * `center` (List[float]): Arc center point [x, y, z] in mm
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete arc in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -272,8 +284,16 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_arc_center
+    
+    # Arc in world coordinates
     smooth_arc_center(end_pose=[250, 50, 200, 0, 0, 90], 
                      center=[200, 0, 200], 
+                     duration=3.0)
+    
+    # Arc in tool coordinates (relative to tool position/orientation)
+    smooth_arc_center(end_pose=[30, 30, 0, 0, 0, 45],
+                     center=[15, 15, 0],
+                     frame='TRF',
                      duration=3.0)
     ```
 
@@ -283,6 +303,7 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `end_pose` (List[float]): End pose [x, y, z, rx, ry, rz] in mm and degrees
     * `radius` (float): Arc radius in mm
     * `arc_angle` (float): Arc angle in degrees
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete arc in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -294,14 +315,23 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_arc_parametric
+    
+    # Parametric arc in world frame
     smooth_arc_parametric(end_pose=[250, 50, 200, 0, 0, 90],
                          radius=50, arc_angle=90, duration=3.0)
+    
+    # Parametric arc in tool frame
+    smooth_arc_parametric(end_pose=[40, 0, 0, 0, 0, 60],
+                         radius=25, arc_angle=60,
+                         frame='TRF',
+                         speed_percentage=40)
     ```
 
 #### `smooth_spline()`
 * **Purpose**: Create smooth spline through waypoints.
 * **Parameters**:
     * `waypoints` (List[List[float]]): List of poses [x, y, z, rx, ry, rz] to pass through
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Total time for motion in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -312,12 +342,22 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_spline
+    
+    # Spline through world coordinates
     waypoints = [
         [200, 0, 100, 0, 0, 0],
         [250, 50, 150, 0, 15, 45],
         [200, 100, 200, 0, 30, 90]
     ]
     smooth_spline(waypoints, duration=8.0)
+    
+    # Spline through tool-relative coordinates
+    tool_waypoints = [
+        [20, 0, 0, 0, 0, 0],
+        [20, 20, 10, 0, 0, 30],
+        [0, 20, 20, 0, 0, 60]
+    ]
+    smooth_spline(tool_waypoints, frame='TRF', duration=6.0)
     ```
 
 #### `smooth_helix()`
@@ -327,6 +367,7 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `radius` (float): Helix radius in mm
     * `pitch` (float): Vertical distance per revolution in mm
     * `height` (float): Total height of helix in mm
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete helix in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -335,11 +376,18 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
 * > *Note: You must provide either `duration` or `speed_percentage`, but not both.*
+* > *Note: In TRF mode, the helix rises along the tool's Z-axis, not the world Z-axis.*
 * **Python API Usage**:
     ```python
     from robot_api import smooth_helix
+    
+    # Vertical helix in world frame
     smooth_helix(center=[200, 0, 150], radius=30, pitch=20, 
                 height=100, duration=10.0)
+    
+    # Helix along tool's Z-axis (follows tool orientation)
+    smooth_helix(center=[0, 30, 0], radius=20, pitch=15,
+                height=60, frame='TRF', duration=8.0)
     ```
 
 #### `smooth_blend()`
@@ -347,6 +395,7 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Parameters**:
     * `segments` (List[Dict]): List of segment dictionaries defining the motion path
     * `blend_time` (float, optional): Time for blending between segments in seconds. Default: 0.5
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for all segments. Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Total time for entire motion in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -356,6 +405,8 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_blend
+    
+    # Blend in world coordinates
     segments = [
         {'type': 'LINE', 'end': [250, 0, 200, 0, 0, 0], 'duration': 2.0},
         {'type': 'CIRCLE', 'center': [250, 0, 200], 'radius': 50, 
@@ -363,6 +414,78 @@ These commands create smooth, curved trajectories with continuous velocity profi
         {'type': 'LINE', 'end': [200, 0, 200, 0, 0, 0], 'duration': 2.0}
     ]
     smooth_blend(segments, blend_time=0.5, duration=10.0)
+    
+    # Blend in tool coordinates (all segments relative to tool)
+    tool_segments = [
+        {'type': 'LINE', 'end': [30, 0, 0, 0, 0, 0], 'duration': 2.0},
+        {'type': 'CIRCLE', 'center': [30, 20, 0], 'radius': 20, 
+         'plane': 'XY', 'duration': 4.0, 'clockwise': False},
+        {'type': 'LINE', 'end': [0, 20, 0, 0, 0, 0], 'duration': 2.0}
+    ]
+    smooth_blend(tool_segments, frame='TRF', blend_time=0.5, duration=10.0)
+    ```
+
+### Updated Helper Functions
+
+#### `chain_smooth_motions()`
+* **Purpose**: Chain multiple smooth motions with automatic continuity.
+* **Parameters**:
+    * `motions` (List[Dict]): List of motion dictionaries
+    * `ensure_continuity` (bool, optional): Automatically set start_pose for continuity. Default: True
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for all motions. Default: 'WRF'
+    * `wait_for_ack` (bool, optional): Enable command tracking. Default: True
+    * `timeout` (float, optional): Timeout per motion in seconds. Default: 30.0
+* **Returns**: List of results for each motion
+* **Python API Usage**:
+    ```python
+    from robot_api import chain_smooth_motions
+    
+    # Chain motions in world frame (default)
+    motions = [
+        {'type': 'circle', 'center': [200, 0, 200], 'radius': 50, 'duration': 5},
+        {'type': 'arc', 'end_pose': [250, 50, 200, 0, 0, 90], 
+         'center': [225, 25, 200], 'duration': 3}
+    ]
+    chain_smooth_motions(motions, ensure_continuity=True)
+    
+    # Chain motions in tool frame
+    tool_motions = [
+        {'type': 'circle', 'center': [0, 30, 0], 'radius': 25, 'duration': 4},
+        {'type': 'arc', 'end_pose': [30, 30, 0, 0, 0, 45], 
+         'center': [15, 15, 0], 'duration': 3}
+    ]
+    chain_smooth_motions(tool_motions, frame='TRF', ensure_continuity=True)
+    ```
+
+#### `execute_trajectory()`
+* **Purpose**: High-level trajectory execution with best method selection.
+* **Parameters**:
+    * `trajectory` (List[List[float]]): List of poses [x, y, z, rx, ry, rz]
+    * `timing_mode` (str, optional): Either 'duration' or 'speed'. Default: 'duration'
+    * `timing_value` (float, optional): Duration in seconds or speed percentage. Default: 5.0
+    * `motion_type` (str, optional): Either 'spline' or 'linear'. Default: 'spline'
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for spline motion. Default: 'WRF'
+    * `wait_for_ack` (bool, optional): Enable command tracking. Default: True
+    * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 30.0
+* > *Note: The `frame` parameter only applies when `motion_type='spline'`. Linear motions are always in WRF.*
+* **Python API Usage**:
+    ```python
+    from robot_api import execute_trajectory
+    
+    # Execute trajectory in world frame
+    trajectory = [[200, 0, 200, 0, 0, 0], 
+                  [250, 50, 200, 0, 0, 45],
+                  [200, 100, 200, 0, 0, 90]]
+    execute_trajectory(trajectory, timing_mode='duration', 
+                      timing_value=10.0, motion_type='spline')
+    
+    # Execute trajectory in tool frame (spline only)
+    tool_trajectory = [[20, 0, 0, 0, 0, 0],
+                      [20, 20, 0, 0, 0, 30],
+                      [0, 20, 10, 0, 0, 60]]
+    execute_trajectory(tool_trajectory, frame='TRF',
+                      timing_mode='speed', 
+                      timing_value=40, motion_type='spline')
     ```
 
 ### Gripper Commands
