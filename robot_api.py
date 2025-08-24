@@ -564,6 +564,7 @@ def smooth_circle(
     center: List[float],
     radius: float,
     plane: Literal['XY', 'XZ', 'YZ'] = 'XY',
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -579,6 +580,7 @@ def smooth_circle(
         center: [x, y, z] center point in mm
         radius: Circle radius in mm
         plane: Plane of the circle ('XY', 'XZ', or 'YZ')
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose (mm and degrees).
                    If None, starts from current position.
         duration: Time to complete the circle in seconds
@@ -606,7 +608,7 @@ def smooth_circle(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_CIRCLE|{center_str}|{radius}|{plane}|{start_str}|{timing_str}|{clockwise_str}"
+    command = f"SMOOTH_CIRCLE|{center_str}|{radius}|{plane}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -616,6 +618,7 @@ def smooth_circle(
 def smooth_arc_center(
     end_pose: List[float],
     center: List[float],
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -630,6 +633,7 @@ def smooth_arc_center(
     Args:
         end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
         center: [x, y, z] arc center point in mm
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose.
                    If None, starts from current position.
                    If specified, adds smooth transition from current position.
@@ -655,7 +659,7 @@ def smooth_arc_center(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{start_str}|{timing_str}|{clockwise_str}"
+    command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -666,6 +670,7 @@ def smooth_arc_parametric(
     end_pose: List[float],
     radius: float,
     arc_angle: float,
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -681,6 +686,7 @@ def smooth_arc_parametric(
         end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
         radius: Arc radius in mm
         arc_angle: Arc angle in degrees
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose.
                    If None, starts from current position.
         duration: Time to complete the arc in seconds
@@ -704,7 +710,7 @@ def smooth_arc_parametric(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_ARC_PARAM|{end_str}|{radius}|{arc_angle}|{start_str}|{timing_str}|{clockwise_str}"
+    command = f"SMOOTH_ARC_PARAM|{end_str}|{radius}|{arc_angle}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -713,6 +719,7 @@ def smooth_arc_parametric(
 
 def smooth_spline(
     waypoints: List[List[float]],
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -725,6 +732,7 @@ def smooth_spline(
     
     Args:
         waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose.
                    If None, starts from current position.
                    If specified and different from first waypoint, adds transition.
@@ -753,7 +761,7 @@ def smooth_spline(
         waypoint_strs.extend(map(str, wp))
     
     # Build command
-    command_parts = [f"SMOOTH_SPLINE", str(num_waypoints), start_str, timing_str]
+    command_parts = [f"SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
     command_parts.extend(waypoint_strs)
     command = "|".join(command_parts)
     
@@ -767,6 +775,7 @@ def smooth_helix(
     radius: float,
     pitch: float,
     height: float,
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -783,6 +792,7 @@ def smooth_helix(
         radius: Helix radius in mm
         pitch: Vertical distance per revolution in mm
         height: Total height of helix in mm
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose.
                    If None, starts from current position on helix perimeter.
         duration: Time to complete the helix in seconds
@@ -806,7 +816,7 @@ def smooth_helix(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_HELIX|{center_str}|{radius}|{pitch}|{height}|{start_str}|{timing_str}|{clockwise_str}"
+    command = f"SMOOTH_HELIX|{center_str}|{radius}|{pitch}|{height}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -816,6 +826,7 @@ def smooth_helix(
 def smooth_blend(
     segments: List[Dict],
     blend_time: float = 0.5,
+    frame: Literal['WRF', 'TRF'] = 'WRF',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -831,6 +842,7 @@ def smooth_blend(
             - 'type': 'LINE', 'CIRCLE', 'ARC', or 'SPLINE'
             - Additional parameters based on type
         blend_time: Time to blend between segments in seconds
+        frame: Reference frame ('WRF' for World, 'TRF' for Tool)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose for first segment.
                    If None, starts from current position.
         duration: Total time for entire motion (scales all segments proportionally)
@@ -890,10 +902,7 @@ def smooth_blend(
         segment_strs.append(seg_str)
     
     # Build command with || separators between segments
-    if timing_str == "DEFAULT":
-        command = f"SMOOTH_BLEND|{num_segments}|{blend_time}|{start_str}|{timing_str}|" + "||".join(segment_strs)
-    else:
-        command = f"SMOOTH_BLEND|{num_segments}|{blend_time}|{start_str}|{timing_str}|" + "||".join(segment_strs)
+    command = f"SMOOTH_BLEND|{num_segments}|{blend_time}|{frame}|{start_str}|{timing_str}|" + "||".join(segment_strs)
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -907,6 +916,7 @@ def smooth_blend(
 def chain_smooth_motions(
     motions: List[Dict],
     ensure_continuity: bool = True,
+    frame: Literal['WRF', 'TRF'] = 'WRF',  # ADD THIS
     wait_for_ack: bool = True,
     timeout: float = 30.0
 ):
@@ -917,6 +927,7 @@ def chain_smooth_motions(
         motions: List of motion dictionaries, each with 'type' and parameters
         ensure_continuity: If True, automatically sets start_pose of each motion
                           to end of previous motion for perfect continuity
+        frame: Reference frame for all motions ('WRF' or 'TRF')  # ADD THIS
         wait_for_ack: Enable command tracking
         timeout: Timeout per motion
         
@@ -925,7 +936,7 @@ def chain_smooth_motions(
             {'type': 'circle', 'center': [200, 0, 200], 'radius': 50, 'duration': 5},
             {'type': 'arc', 'end_pose': [250, 50, 200, 0, 0, 90], 'center': [225, 25, 200], 'duration': 3},
             {'type': 'helix', 'center': [250, 50, 150], 'radius': 30, 'pitch': 20, 'height': 100, 'duration': 8}
-        ])
+        ], frame='TRF')  # Can now specify frame
     """
     results = []
     last_end_pose = None
@@ -933,16 +944,18 @@ def chain_smooth_motions(
     for i, motion in enumerate(motions):
         motion_type = motion.get('type', '').lower()
         
+        # Add frame to motion parameters
+        motion['frame'] = frame
+        
         # Add start_pose from previous motion if ensuring continuity
         if ensure_continuity and last_end_pose and i > 0:
             motion['start_pose'] = last_end_pose
         
-        # Execute the appropriate motion
+        # Execute the appropriate motion (add frame parameter to each call)
         if motion_type == 'circle':
             result = smooth_circle(**{k: v for k, v in motion.items() if k != 'type'}, 
                                   wait_for_ack=wait_for_ack, timeout=timeout)
-            # Estimate end pose (would need actual calculation in production)
-            last_end_pose = None  # Circles return to start, so end is unpredictable
+            last_end_pose = None  # Circles return to start
             
         elif motion_type == 'arc' or motion_type == 'arc_center':
             result = smooth_arc_center(**{k: v for k, v in motion.items() if k != 'type'},
@@ -963,7 +976,6 @@ def chain_smooth_motions(
         elif motion_type == 'helix':
             result = smooth_helix(**{k: v for k, v in motion.items() if k != 'type'},
                                  wait_for_ack=wait_for_ack, timeout=timeout)
-            # Helix ends at a different position, would need calculation
             last_end_pose = None
             
         else:
@@ -977,6 +989,54 @@ def chain_smooth_motions(
             break
     
     return results
+
+def execute_trajectory(
+    trajectory: List[List[float]],
+    timing_mode: Literal['duration', 'speed'] = 'duration',
+    timing_value: float = 5.0,
+    motion_type: Literal['spline', 'linear'] = 'spline',
+    frame: Literal['WRF', 'TRF'] = 'WRF',  # ADD THIS
+    wait_for_ack: bool = True,
+    timeout: float = 30.0,
+):
+    """
+    High-level function to execute a trajectory using the best method.
+    
+    Args:
+        trajectory: List of poses [x, y, z, rx, ry, rz]
+        timing_mode: 'duration' for total time, 'speed' for percentage
+        timing_value: Duration in seconds or speed percentage
+        motion_type: 'spline' for smooth curves, 'linear' for point-to-point
+        frame: Reference frame ('WRF' or 'TRF')  # ADD THIS
+        wait_for_ack: Enable command tracking (recommended for trajectories)
+        timeout: Timeout for acknowledgment
+    """
+    if motion_type == 'spline':
+        if timing_mode == 'duration':
+            return smooth_spline(trajectory, frame=frame, duration=timing_value,  # ADD frame
+                               wait_for_ack=wait_for_ack, timeout=timeout)
+        else:
+            return smooth_spline(trajectory, frame=frame, speed_percentage=timing_value,  # ADD frame
+                               wait_for_ack=wait_for_ack, timeout=timeout)
+    else:
+        # Linear motion - send as individual move commands
+        results = []
+        for pose in trajectory:
+            if timing_mode == 'duration':
+                segment_duration = timing_value / len(trajectory)
+                # Note: move_robot_cartesian doesn't support TRF, only smooth motions do
+                result = move_robot_cartesian(pose, duration=segment_duration,
+                                             wait_for_ack=wait_for_ack, timeout=timeout)
+            else:
+                result = move_robot_cartesian(pose, speed_percentage=timing_value,
+                                             wait_for_ack=wait_for_ack, timeout=timeout)
+            results.append(result)
+            
+            # Check for failures if tracking
+            if wait_for_ack and result.get('status') == 'FAILED':
+                break
+        
+        return results
 
 # ============================================================================
 # BASIC FUNCTIONS
@@ -1349,51 +1409,6 @@ def get_tracking_stats() -> Dict:
 # ============================================================================
 # CONVENIENCE FUNCTIONS FOR COMMON OPERATIONS
 # ============================================================================
-
-def execute_trajectory(
-    trajectory: List[List[float]],
-    timing_mode: Literal['duration', 'speed'] = 'duration',
-    timing_value: float = 5.0,
-    motion_type: Literal['spline', 'linear'] = 'spline',
-    wait_for_ack: bool = True,
-    timeout: float = 30.0,
-):
-    """
-    High-level function to execute a trajectory using the best method.
-    
-    Args:
-        trajectory: List of poses [x, y, z, rx, ry, rz]
-        timing_mode: 'duration' for total time, 'speed' for percentage
-        timing_value: Duration in seconds or speed percentage
-        motion_type: 'spline' for smooth curves, 'linear' for point-to-point
-        wait_for_ack: Enable command tracking (recommended for trajectories)
-        timeout: Timeout for acknowledgment
-    """
-    if motion_type == 'spline':
-        if timing_mode == 'duration':
-            return smooth_spline(trajectory, duration=timing_value, 
-                               wait_for_ack=wait_for_ack, timeout=timeout)
-        else:
-            return smooth_spline(trajectory, speed_percentage=timing_value,
-                               wait_for_ack=wait_for_ack, timeout=timeout)
-    else:
-        # Linear motion - send as individual move commands
-        results = []
-        for pose in trajectory:
-            if timing_mode == 'duration':
-                segment_duration = timing_value / len(trajectory)
-                result = move_robot_cartesian(pose, duration=segment_duration,
-                                             wait_for_ack=wait_for_ack, timeout=timeout)
-            else:
-                result = move_robot_cartesian(pose, speed_percentage=timing_value,
-                                             wait_for_ack=wait_for_ack, timeout=timeout)
-            results.append(result)
-            
-            # Check for failures if tracking
-            if wait_for_ack and result.get('status') == 'FAILED':
-                break
-        
-        return results
 
 def wait_for_robot_stopped(timeout: float = 10.0, poll_rate: float = 0.1) -> bool:
     """

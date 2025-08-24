@@ -467,7 +467,6 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
     Gripper_data_in[5] = object_detection_status
     # --- End of Corrected Logic ---
 
-
 def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Timeout_out,Gripper_data_out):
 
     # Len is defined by all bytes EXCEPT start bytes and len
@@ -554,9 +553,6 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
     
     #print(test_list)
     return test_list
-
-
-
 
 def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
@@ -1946,20 +1942,64 @@ class SmoothTrajectoryCommand:
         return False
 
 class SmoothCircleCommand(BaseSmoothMotionCommand):
-    def __init__(self, center, radius, plane, duration, clockwise, start_pose=None):
-        super().__init__(f"circle (r={radius}mm)")
+    def __init__(self, center, radius, plane, duration, clockwise, frame='WRF', start_pose=None):
+        super().__init__(f"circle (r={radius}mm, {frame})")
         self.center = center
         self.radius = radius
         self.plane = plane
         self.duration = duration
         self.clockwise = clockwise
+        self.frame = frame  # Store reference frame
         self.specified_start_pose = start_pose
+        self.normal_vector = None  # Will be set if TRF
+        self.current_position_in = None  # Store for TRF transformation
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF, then prepare normally."""
+        # Store current position for potential use in generate_main_trajectory
+        self.current_position_in = current_position_in
+        
+        if self.frame == 'TRF':
+            # Transform parameters to WRF
+            params = {
+                'center': self.center,
+                'plane': self.plane
+            }
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_CIRCLE', params, 'TRF', current_position_in
+            )
+            
+            # Update with transformed values
+            self.center = transformed['center']
+            self.normal_vector = transformed.get('normal_vector')
+            
+            print(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
+            
+            # Also transform start_pose if specified
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_CIRCLE', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        # Now do normal preparation with transformed parameters
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate circle starting from the actual start position."""
         motion_gen = CircularMotion()
-        plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
-        normal = plane_normals.get(self.plane, [0, 0, 1])
+        
+        # Use transformed normal for TRF, or standard for WRF
+        if self.normal_vector is not None:
+            # TRF - use the transformed normal vector
+            normal = np.array(self.normal_vector)
+            print(f"    Using transformed normal: {normal.round(3)}")
+        else:
+            # WRF - use standard plane definition
+            plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
+            normal = np.array(plane_normals.get(self.plane, [0, 0, 1]))  # Convert to numpy array
+            print(f"    Using WRF plane {self.plane} with normal: {normal}")
         
         print(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
         print(f"    Circle center: {[round(c, 1) for c in self.center]}")
@@ -1967,9 +2007,11 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         # Add geometry validation
         center_np = np.array(self.center)
         start_np = np.array(effective_start_pose[:3])
-        distance_to_center = np.linalg.norm(start_np[:2] - center_np[:2]) if self.plane == 'XY' else \
-                            np.linalg.norm([start_np[0] - center_np[0], start_np[2] - center_np[2]]) if self.plane == 'XZ' else \
-                            np.linalg.norm(start_np[1:3] - center_np[1:3])
+        
+        # Project start point onto circle plane to check distance
+        to_start = start_np - center_np
+        to_start_plane = to_start - np.dot(to_start, normal) * normal
+        distance_to_center = np.linalg.norm(to_start_plane)
         
         if abs(distance_to_center - self.radius) > self.radius * 0.3:
             print(f"    WARNING: Robot is {distance_to_center:.1f}mm from center, but radius is {self.radius:.1f}mm")
@@ -1979,7 +2021,7 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         trajectory = motion_gen.generate_circle_3d(
             self.center, 
             self.radius, 
-            normal, 
+            normal,  # This normal now correctly represents the plane
             start_point=effective_start_pose[:3],
             duration=self.duration
         )
@@ -1994,138 +2036,307 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         return trajectory
     
 class SmoothArcCenterCommand(BaseSmoothMotionCommand):
-    def __init__(self, end_pose, center, duration, clockwise, start_pose=None):
-        super().__init__("arc (center-based)")
+    def __init__(self, end_pose, center, duration, clockwise, frame='WRF', start_pose=None):
+        super().__init__(f"arc (center-based, {frame})")
         self.end_pose = end_pose
         self.center = center
         self.duration = duration
         self.clockwise = clockwise
+        self.frame = frame
         self.specified_start_pose = start_pose
+        self.normal_vector = None
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF."""
+        if self.frame == 'TRF':
+            params = {
+                'end_pose': self.end_pose,
+                'center': self.center
+            }
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_ARC_CENTER', params, 'TRF', current_position_in
+            )
+            self.end_pose = transformed['end_pose']
+            self.center = transformed['center']
+            self.normal_vector = transformed.get('normal_vector')
+            
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_ARC_CENTER', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate arc from actual start to end."""
         motion_gen = CircularMotion()
         return motion_gen.generate_arc_3d(
             effective_start_pose, self.end_pose, self.center,
+            normal=self.normal_vector,  # Use transformed normal if TRF
             clockwise=self.clockwise, duration=self.duration
         )
     
 class SmoothArcParamCommand(BaseSmoothMotionCommand):
-    def __init__(self, end_pose, radius, arc_angle, duration, clockwise, start_pose=None):
-        super().__init__(f"parametric arc (r={radius}mm, θ={arc_angle}°)")
+    def __init__(self, end_pose, radius, arc_angle, duration, clockwise, frame='WRF', start_pose=None):
+        super().__init__(f"parametric arc (r={radius}mm, θ={arc_angle}°, {frame})")
         self.end_pose = end_pose
         self.radius = radius
         self.arc_angle = arc_angle
         self.duration = duration
         self.clockwise = clockwise
+        self.frame = frame
         self.specified_start_pose = start_pose
+        self.normal_vector = None  # Will be set if TRF
+        self.current_position_in = None
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF, then prepare normally."""
+        self.current_position_in = current_position_in
+        
+        if self.frame == 'TRF':
+            # Transform parameters to WRF
+            params = {
+                'end_pose': self.end_pose,
+                'plane': 'XY'  # Default plane for parametric arc
+            }
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_ARC_PARAM', params, 'TRF', current_position_in
+            )
+            
+            # Update with transformed values
+            self.end_pose = transformed['end_pose']
+            self.normal_vector = transformed.get('normal_vector')
+            
+            print(f"  -> TRF Parametric Arc: end {self.end_pose[:3]} (WRF)")
+            
+            # Also transform start_pose if specified
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_ARC_PARAM', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate arc based on radius and angle from actual start."""
-        # Calculate arc center based on actual start and end
-        start_xy = np.array(effective_start_pose[:2])
-        end_xy = np.array(self.end_pose[:2])
+        # Get start and end positions
+        start_xyz = np.array(effective_start_pose[:3])
+        end_xyz = np.array(self.end_pose[:3])
         
-        # Midpoint
-        mid = (start_xy + end_xy) / 2
-        
-        # Distance between points
-        d = np.linalg.norm(end_xy - start_xy)
-        
-        if d > 2 * self.radius:
-            print(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
-            self.radius = d / 2 + 1
+        # If we have a transformed normal (TRF), use it to define the arc plane
+        if self.normal_vector is not None:
+            normal = np.array(self.normal_vector)
             
-        # Height of arc center from midpoint
-        h = np.sqrt(max(0, self.radius**2 - (d/2)**2))
-        
-        # Perpendicular direction
-        if d > 0:
-            perp = np.array([-(end_xy[1] - start_xy[1]), end_xy[0] - start_xy[0]])
-            perp = perp / np.linalg.norm(perp)
-        else:
-            perp = np.array([1, 0])
-        
-        # Arc center (choose based on clockwise)
-        if self.clockwise:
-            center_2d = mid - h * perp
-        else:
-            center_2d = mid + h * perp
+            # Project start and end onto the plane perpendicular to normal
+            # This ensures the arc stays in the correct plane for TRF
             
-        center_3d = [center_2d[0], center_2d[1], effective_start_pose[2]]
+            # Find center of arc using radius and angle
+            chord_vec = end_xyz - start_xyz
+            chord_length = np.linalg.norm(chord_vec)
+            
+            if chord_length > 2 * self.radius:
+                print(f"  -> Warning: Points too far apart ({chord_length:.1f}mm) for radius {self.radius}mm")
+                self.radius = chord_length / 2 + 1
+            
+            # Calculate center position using the normal vector
+            chord_mid = (start_xyz + end_xyz) / 2
+            
+            # Height from chord midpoint to arc center
+            if chord_length > 0:
+                h = np.sqrt(max(0, self.radius**2 - (chord_length/2)**2))
+                
+                # Find perpendicular in the plane defined by normal
+                chord_dir = chord_vec / chord_length
+                perp_in_plane = np.cross(normal, chord_dir)
+                if np.linalg.norm(perp_in_plane) > 0.001:
+                    perp_in_plane = perp_in_plane / np.linalg.norm(perp_in_plane)
+                else:
+                    # Chord is parallel to normal (shouldn't happen)
+                    perp_in_plane = np.array([1, 0, 0])
+                
+                # Arc center
+                if self.clockwise:
+                    center_3d = chord_mid - h * perp_in_plane
+                else:
+                    center_3d = chord_mid + h * perp_in_plane
+            else:
+                center_3d = start_xyz
+            
+        else:
+            # WRF - use XY plane (standard behavior)
+            normal = np.array([0, 0, 1])
+            
+            # Calculate arc center in XY plane
+            start_xy = start_xyz[:2]
+            end_xy = end_xyz[:2]
+            
+            # Midpoint
+            mid = (start_xy + end_xy) / 2
+            
+            # Distance between points
+            d = np.linalg.norm(end_xy - start_xy)
+            
+            if d > 2 * self.radius:
+                print(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
+                self.radius = d / 2 + 1
+            
+            # Height of arc center from midpoint
+            h = np.sqrt(max(0, self.radius**2 - (d/2)**2))
+            
+            # Perpendicular direction
+            if d > 0:
+                perp = np.array([-(end_xy[1] - start_xy[1]), end_xy[0] - start_xy[0]])
+                perp = perp / np.linalg.norm(perp)
+            else:
+                perp = np.array([1, 0])
+            
+            # Arc center (choose based on clockwise)
+            if self.clockwise:
+                center_2d = mid - h * perp
+            else:
+                center_2d = mid + h * perp
+            
+            # Use average Z for center
+            center_3d = [center_2d[0], center_2d[1], (start_xyz[2] + end_xyz[2]) / 2]
         
         # Generate arc trajectory from actual start
         motion_gen = CircularMotion()
         return motion_gen.generate_arc_3d(
-            effective_start_pose, self.end_pose, center_3d,
+            effective_start_pose, self.end_pose, center_3d.tolist(),
+            normal=normal if self.normal_vector is not None else None,
             clockwise=self.clockwise, duration=self.duration
         )
 
 class SmoothHelixCommand(BaseSmoothMotionCommand):
-    def __init__(self, center, radius, pitch, height, duration, clockwise, start_pose=None):
-        super().__init__(f"helix (h={height}mm)")
+    def __init__(self, center, radius, pitch, height, duration, clockwise, frame='WRF', start_pose=None):
+        super().__init__(f"helix (h={height}mm, {frame})")
         self.center = center
         self.radius = radius
         self.pitch = pitch
         self.height = height
         self.duration = duration
         self.clockwise = clockwise
+        self.frame = frame
         self.specified_start_pose = start_pose
+        self.helix_axis = None
+        self.up_vector = None
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF."""
+        if self.frame == 'TRF':
+            params = {'center': self.center}
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_HELIX', params, 'TRF', current_position_in
+            )
+            self.center = transformed['center']
+            self.helix_axis = transformed.get('helix_axis', [0, 0, 1])
+            self.up_vector = transformed.get('up_vector', [0, 1, 0])
+            
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_HELIX', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
-        """Generate helix starting from actual position with smooth entry."""
+        """Generate helix with proper axis orientation."""
         num_revolutions = self.height / self.pitch if self.pitch > 0 else 1
         num_points = int(self.duration * 100)  # 100Hz
         
+        # Get helix axis (default Z for WRF, transformed for TRF)
+        if self.helix_axis is not None:
+            axis = np.array(self.helix_axis)
+        else:
+            axis = np.array([0, 0, 1])  # Default vertical
+        
+        # Create orthonormal basis for helix
+        if self.up_vector is not None:
+            up = np.array(self.up_vector)
+        else:
+            # Find perpendicular to axis
+            if abs(axis[2]) < 0.9:
+                up = np.array([0, 0, 1])
+            else:
+                up = np.array([1, 0, 0])
+        
+        # Ensure up is perpendicular to axis
+        up = up - np.dot(up, axis) * axis
+        up = up / np.linalg.norm(up)
+        
+        # Create right vector
+        right = np.cross(axis, up)
+        
         # Calculate starting angle based on actual start position
-        dx = effective_start_pose[0] - self.center[0]
-        dy = effective_start_pose[1] - self.center[1]
-        actual_radius = np.sqrt(dx**2 + dy**2)
-        start_angle = np.arctan2(dy, dx)
+        to_start = np.array(effective_start_pose[:3]) - np.array(self.center)
+        # Project onto plane perpendicular to axis
+        to_start_plane = to_start - np.dot(to_start, axis) * axis
         
-        # Calculate starting height
-        start_z = effective_start_pose[2]
-        
-        # Check if we need radius transition
-        radius_error = abs(actual_radius - self.radius)
-        needs_transition = radius_error > 1.0  # 1mm tolerance
+        if np.linalg.norm(to_start_plane) > 0.001:
+            to_start_normalized = to_start_plane / np.linalg.norm(to_start_plane)
+            start_angle = np.arctan2(np.dot(to_start_normalized, up), 
+                                    np.dot(to_start_normalized, right))
+        else:
+            start_angle = 0
         
         trajectory = []
         for i in range(num_points):
             t = i / (num_points - 1) if num_points > 1 else 0
             
-            # Handle radius transition in first 10% of motion
-            if needs_transition and t < 0.1:
-                blend_factor = t / 0.1
-                # Smooth step function
-                blend_factor = blend_factor * blend_factor * (3 - 2 * blend_factor)
-                current_radius = actual_radius + (self.radius - actual_radius) * blend_factor
-            else:
-                current_radius = self.radius
-            
             angle = start_angle + 2 * np.pi * num_revolutions * t
             if self.clockwise:
                 angle = start_angle - 2 * np.pi * num_revolutions * t
             
-            x = self.center[0] + current_radius * np.cos(angle)
-            y = self.center[1] + current_radius * np.sin(angle)
-            z = start_z + self.height * t
-            
-            # For first point, use exact start position
-            if i == 0:
-                x, y, z = effective_start_pose[:3]
+            # Position on helix
+            pos = np.array(self.center) + \
+                  self.radius * (np.cos(angle) * right + np.sin(angle) * up) + \
+                  self.height * t * axis
             
             # Use orientation from effective start
-            trajectory.append([x, y, z] + effective_start_pose[3:])
+            trajectory.append(np.concatenate([pos, effective_start_pose[3:]]))
         
         return np.array(trajectory)
 
 class SmoothSplineCommand(BaseSmoothMotionCommand):
-    def __init__(self, waypoints, duration, start_pose=None):
-        super().__init__(f"spline ({len(waypoints)} points)")
+    def __init__(self, waypoints, duration, frame='WRF', start_pose=None):
+        super().__init__(f"spline ({len(waypoints)} points, {frame})")
         self.waypoints = waypoints
         self.duration = duration
+        self.frame = frame
         self.specified_start_pose = start_pose
+        self.current_position_in = None
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF, then prepare normally."""
+        self.current_position_in = current_position_in
+        
+        if self.frame == 'TRF':
+            # Transform waypoints to WRF
+            params = {'waypoints': self.waypoints}
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_SPLINE', params, 'TRF', current_position_in
+            )
+            
+            # Update with transformed values
+            self.waypoints = transformed['waypoints']
+            
+            print(f"  -> TRF Spline: transformed {len(self.waypoints)} waypoints to WRF")
+            
+            # Also transform start_pose if specified
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_SPLINE', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate spline starting from actual position."""
@@ -2139,19 +2350,55 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         if first_wp_error > 5.0:
             # First waypoint is far, prepend the start position
             modified_waypoints = [effective_start_pose] + self.waypoints
+            print(f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)")
         else:
             # Replace first waypoint with actual start to ensure continuity
             modified_waypoints = [effective_start_pose] + self.waypoints[1:]
+            print(f"    Replaced first waypoint with actual start position")
         
         timestamps = np.linspace(0, self.duration, len(modified_waypoints))
-        return motion_gen.generate_cubic_spline(modified_waypoints, timestamps)
+        
+        # Generate the spline trajectory
+        trajectory = motion_gen.generate_cubic_spline(modified_waypoints, timestamps)
+        
+        print(f"    Generated spline with {len(trajectory)} points")
+        
+        return trajectory
 
 class SmoothBlendCommand(BaseSmoothMotionCommand):
-    def __init__(self, segment_definitions, blend_time, start_pose=None):
-        super().__init__(f"blended ({len(segment_definitions)} segments)")
+    def __init__(self, segment_definitions, blend_time, frame='WRF', start_pose=None):
+        super().__init__(f"blended ({len(segment_definitions)} segments, {frame})")
         self.segment_definitions = segment_definitions
         self.blend_time = blend_time
+        self.frame = frame
         self.specified_start_pose = start_pose
+        self.current_position_in = None
+        
+    def prepare_for_execution(self, current_position_in):
+        """Transform parameters if in TRF, then prepare normally."""
+        self.current_position_in = current_position_in
+        
+        if self.frame == 'TRF':
+            # Transform all segment definitions to WRF
+            params = {'segments': self.segment_definitions}
+            transformed = transform_command_params_to_wrf(
+                'SMOOTH_BLEND', params, 'TRF', current_position_in
+            )
+            
+            # Update with transformed values
+            self.segment_definitions = transformed['segments']
+            
+            print(f"  -> TRF Blend: transformed {len(self.segment_definitions)} segments to WRF")
+            
+            # Also transform start_pose if specified
+            if self.specified_start_pose:
+                params = {'start_pose': self.specified_start_pose}
+                transformed = transform_command_params_to_wrf(
+                    'SMOOTH_BLEND', params, 'TRF', current_position_in
+                )
+                self.specified_start_pose = transformed.get('start_pose')
+        
+        return super().prepare_for_execution(current_position_in)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate blended trajectory starting from actual position."""
@@ -2179,11 +2426,17 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
                 traj = []
                 for t in timestamps:
                     s = t / duration if duration > 0 else 1
+                    # Interpolate position
                     pos = [
                         segment_start[j] * (1-s) + end[j] * s
-                        for j in range(6)
+                        for j in range(3)
                     ]
-                    traj.append(pos)
+                    # Interpolate orientation
+                    orient = [
+                        segment_start[j+3] * (1-s) + end[j+3] * s
+                        for j in range(3)
+                    ]
+                    traj.append(pos + orient)
                 
                 trajectories.append(np.array(traj))
                 last_end_pose = end
@@ -2194,8 +2447,12 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
                 duration = seg_def['duration']
                 clockwise = seg_def['clockwise']
                 
+                # Check if we have a transformed normal (from TRF)
+                normal = seg_def.get('normal_vector', None)
+                
                 traj = motion_gen_circle.generate_arc_3d(
                     segment_start, end, center, 
+                    normal=normal,  # Use transformed normal if available
                     clockwise=clockwise, duration=duration
                 )
                 trajectories.append(traj)
@@ -2204,12 +2461,16 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             elif seg_type == 'CIRCLE':
                 center = seg_def['center']
                 radius = seg_def['radius']
-                plane = seg_def['plane']
+                plane = seg_def.get('plane', 'XY')
                 duration = seg_def['duration']
                 clockwise = seg_def['clockwise']
                 
-                plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
-                normal = plane_normals.get(plane, [0, 0, 1])
+                # Use transformed normal if available (from TRF)
+                if 'normal_vector' in seg_def:
+                    normal = seg_def['normal_vector']
+                else:
+                    plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
+                    normal = plane_normals.get(plane, [0, 0, 1])
                 
                 traj = motion_gen_circle.generate_circle_3d(
                     center, radius, normal, 
@@ -2225,12 +2486,14 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
                     traj[j][3:] = segment_start[3:]
                     
                 trajectories.append(traj)
+                # Circle returns to start, so last pose is last point of trajectory
                 last_end_pose = traj[-1].tolist()
                 
             elif seg_type == 'SPLINE':
                 waypoints = seg_def['waypoints']
                 duration = seg_def['duration']
                 
+                # Check if first waypoint is close to segment start
                 wp_error = np.linalg.norm(
                     np.array(waypoints[0][:3]) - np.array(segment_start[:3])
                 )
@@ -2254,6 +2517,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             for i in range(1, len(trajectories)):
                 blended = blender.blend_trajectories(blended, trajectories[i], blend_samples)
             
+            print(f"    Blended {len(trajectories)} segments into {len(blended)} points")
             return blended
         elif trajectories:
             return trajectories[0]
@@ -2286,6 +2550,7 @@ def parse_smooth_motion_commands(parts):
     """
     Parse smooth motion commands received via UDP and create appropriate command objects.
     All commands support:
+    - Reference frame selection (WRF or TRF)
     - Optional start position (CURRENT or specified pose)
     - Both DURATION and SPEED timing modes
     
@@ -2324,14 +2589,15 @@ def parse_smooth_motion_commands(parts):
     
     try:
         if command_type == 'SMOOTH_CIRCLE':
-            # Format: SMOOTH_CIRCLE|center_x,center_y,center_z|radius|plane|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_CIRCLE|center_x,center_y,center_z|radius|plane|frame|start_pose|timing_type|timing_value|clockwise
             center = list(map(float, parts[1].split(',')))
             radius = float(parts[2])
             plane = parts[3]
-            start_pose = parse_start_pose(parts[4])
-            timing_type = parts[5]  # 'DURATION' or 'SPEED'
-            timing_value = float(parts[6])
-            clockwise = parts[7] == '1'
+            frame = parts[4]  # 'WRF' or 'TRF'
+            start_pose = parse_start_pose(parts[5])
+            timing_type = parts[6]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[7])
+            clockwise = parts[8] == '1'
             
             # Calculate duration
             if timing_type == 'DURATION':
@@ -2341,41 +2607,16 @@ def parse_smooth_motion_commands(parts):
                 path_length = 2 * np.pi * radius
                 duration = calculate_duration_from_speed(path_length, timing_value)
             
-            print(f"  -> Parsed circle: r={radius}mm, {timing_type}={timing_value}, duration={duration:.2f}s")
+            print(f"  -> Parsed circle: r={radius}mm, plane={plane}, frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
             
-            # Return command object that will generate trajectory when executed
-            return SmoothCircleCommand(center, radius, plane, duration, clockwise, start_pose)
+            # Return command object with frame parameter
+            return SmoothCircleCommand(center, radius, plane, duration, clockwise, frame, start_pose)
             
         elif command_type == 'SMOOTH_ARC_CENTER':
-            # Format: SMOOTH_ARC_CENTER|end_pose|center|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_ARC_CENTER|end_pose|center|frame|start_pose|timing_type|timing_value|clockwise
             end_pose = list(map(float, parts[1].split(',')))
             center = list(map(float, parts[2].split(',')))
-            start_pose = parse_start_pose(parts[3])
-            timing_type = parts[4]  # 'DURATION' or 'SPEED'
-            timing_value = float(parts[5])
-            clockwise = parts[6] == '1'
-            
-            # Calculate duration
-            if timing_type == 'DURATION':
-                duration = timing_value
-            else:  # SPEED
-                # Estimate arc length (will be more accurate when we have actual positions)
-                # Use a conservative estimate
-                estimated_radius = 50  # mm, conservative estimate
-                estimated_arc_angle = np.pi / 2  # 90 degrees estimate
-                arc_length = estimated_radius * estimated_arc_angle
-                duration = calculate_duration_from_speed(arc_length, timing_value)
-            
-            print(f"  -> Parsed arc (center): {timing_type}={timing_value}, duration={duration:.2f}s")
-            
-            # Return command that will generate trajectory with actual position
-            return SmoothArcCenterCommand(end_pose, center, duration, clockwise, start_pose)
-            
-        elif command_type == 'SMOOTH_ARC_PARAM':
-            # Format: SMOOTH_ARC_PARAM|end_pose|radius|angle|start_pose|timing_type|timing_value|clockwise
-            end_pose = list(map(float, parts[1].split(',')))
-            radius = float(parts[2])
-            arc_angle = float(parts[3])
+            frame = parts[3]  # 'WRF' or 'TRF'
             start_pose = parse_start_pose(parts[4])
             timing_type = parts[5]  # 'DURATION' or 'SPEED'
             timing_value = float(parts[6])
@@ -2385,28 +2626,56 @@ def parse_smooth_motion_commands(parts):
             if timing_type == 'DURATION':
                 duration = timing_value
             else:  # SPEED
+                # Estimate arc length (will be more accurate when we have actual positions)
+                # Use a conservative estimate based on radius
+                radius_estimate = np.linalg.norm(np.array(center) - np.array(end_pose[:3]))
+                estimated_arc_angle = np.pi / 2  # 90 degrees estimate
+                arc_length = radius_estimate * estimated_arc_angle
+                duration = calculate_duration_from_speed(arc_length, timing_value)
+            
+            print(f"  -> Parsed arc (center): frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
+            
+            # Return command with frame
+            return SmoothArcCenterCommand(end_pose, center, duration, clockwise, frame, start_pose)
+            
+        elif command_type == 'SMOOTH_ARC_PARAM':
+            # Format: SMOOTH_ARC_PARAM|end_pose|radius|angle|frame|start_pose|timing_type|timing_value|clockwise
+            end_pose = list(map(float, parts[1].split(',')))
+            radius = float(parts[2])
+            arc_angle = float(parts[3])
+            frame = parts[4]  # 'WRF' or 'TRF'
+            start_pose = parse_start_pose(parts[5])
+            timing_type = parts[6]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[7])
+            clockwise = parts[8] == '1'
+            
+            # Calculate duration
+            if timing_type == 'DURATION':
+                duration = timing_value
+            else:  # SPEED
                 # Arc length = radius * angle (in radians)
                 arc_length = radius * np.deg2rad(arc_angle)
                 duration = calculate_duration_from_speed(arc_length, timing_value)
             
-            print(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, duration={duration:.2f}s")
+            print(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, frame={frame}, duration={duration:.2f}s")
             
-            # Return command object
-            return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, start_pose)
+            # Return command object with frame
+            return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, frame, start_pose)
             
         elif command_type == 'SMOOTH_SPLINE':
-            # Format: SMOOTH_SPLINE|num_waypoints|start_pose|timing_type|timing_value|waypoint1|waypoint2|...
+            # Format: SMOOTH_SPLINE|num_waypoints|frame|start_pose|timing_type|timing_value|waypoint1|waypoint2|...
             num_waypoints = int(parts[1])
-            start_pose = parse_start_pose(parts[2])
-            timing_type = parts[3]  # 'DURATION' or 'SPEED'
-            timing_value = float(parts[4])
+            frame = parts[2]  # 'WRF' or 'TRF'
+            start_pose = parse_start_pose(parts[3])
+            timing_type = parts[4]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[5])
             
             # Parse waypoints
             waypoints = []
-            idx = 5
+            idx = 6
             for i in range(num_waypoints):
                 wp = []
-                for j in range(6):
+                for j in range(6):  # Each waypoint has 6 values (x,y,z,rx,ry,rz)
                     wp.append(float(parts[idx]))
                     idx += 1
                 waypoints.append(wp)
@@ -2423,21 +2692,22 @@ def parse_smooth_motion_commands(parts):
                 
                 duration = calculate_duration_from_speed(total_dist, timing_value)
             
-            print(f"  -> Parsed spline: {num_waypoints} points, duration={duration:.2f}s")
+            print(f"  -> Parsed spline: {num_waypoints} points, frame={frame}, duration={duration:.2f}s")
             
-            # Return command object
-            return SmoothSplineCommand(waypoints, duration, start_pose)
+            # Return command object with frame
+            return SmoothSplineCommand(waypoints, duration, frame, start_pose)
             
         elif command_type == 'SMOOTH_HELIX':
-            # Format: SMOOTH_HELIX|center|radius|pitch|height|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_HELIX|center|radius|pitch|height|frame|start_pose|timing_type|timing_value|clockwise
             center = list(map(float, parts[1].split(',')))
             radius = float(parts[2])
             pitch = float(parts[3])
             height = float(parts[4])
-            start_pose = parse_start_pose(parts[5])
-            timing_type = parts[6]  # 'DURATION' or 'SPEED'
-            timing_value = float(parts[7])
-            clockwise = parts[8] == '1'
+            frame = parts[5]  # 'WRF' or 'TRF'
+            start_pose = parse_start_pose(parts[6])
+            timing_type = parts[7]  # 'DURATION' or 'SPEED'
+            timing_value = float(parts[8])
+            clockwise = parts[9] == '1'
             
             # Calculate duration
             if timing_type == 'DURATION':
@@ -2449,35 +2719,36 @@ def parse_smooth_motion_commands(parts):
                 helix_length = np.sqrt(horizontal_length**2 + height**2)
                 duration = calculate_duration_from_speed(helix_length, timing_value)
             
-            print(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, duration={duration:.2f}s")
+            print(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, frame={frame}, duration={duration:.2f}s")
             
-            # Return command object
-            return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, start_pose)
+            # Return command object with frame
+            return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, frame, start_pose)
             
         elif command_type == 'SMOOTH_BLEND':
-            # Format: SMOOTH_BLEND|num_segments|blend_time|start_pose|timing_type|timing_value|segment1||segment2||...
+            # Format: SMOOTH_BLEND|num_segments|blend_time|frame|start_pose|timing_type|timing_value|segment1||segment2||...
             num_segments = int(parts[1])
             blend_time = float(parts[2])
-            start_pose = parse_start_pose(parts[3])
-            timing_type = parts[4]  # 'DEFAULT', 'DURATION', or 'SPEED'
+            frame = parts[3]  # 'WRF' or 'TRF'
+            start_pose = parse_start_pose(parts[4])
+            timing_type = parts[5]  # 'DEFAULT', 'DURATION', or 'SPEED'
             
             # Parse overall timing
             if timing_type == 'DEFAULT':
                 # Use individual segment durations as-is
                 overall_duration = None
                 overall_speed = None
-                segments_start_idx = 5
+                segments_start_idx = 6
             else:
-                timing_value = float(parts[5])
+                timing_value = float(parts[6])
                 if timing_type == 'DURATION':
                     overall_duration = timing_value
                     overall_speed = None
                 else:  # SPEED
                     overall_speed = timing_value
                     overall_duration = None
-                segments_start_idx = 6
+                segments_start_idx = 7
             
-            # Parse segments
+            # Parse segments (separated by ||)
             segments_data = '|'.join(parts[segments_start_idx:])
             segment_strs = segments_data.split('||')
             
@@ -2494,6 +2765,7 @@ def parse_smooth_motion_commands(parts):
                 seg_type = seg_parts[0]
                 
                 if seg_type == 'LINE':
+                    # Format: LINE|end_x,end_y,end_z,end_rx,end_ry,end_rz|duration
                     end = list(map(float, seg_parts[1].split(',')))
                     segment_duration = float(seg_parts[2])
                     total_original_duration += segment_duration
@@ -2510,6 +2782,7 @@ def parse_smooth_motion_commands(parts):
                     })
                     
                 elif seg_type == 'CIRCLE':
+                    # Format: CIRCLE|center_x,center_y,center_z|radius|plane|duration|clockwise
                     center = list(map(float, seg_parts[1].split(',')))
                     radius = float(seg_parts[2])
                     plane = seg_parts[3]
@@ -2532,6 +2805,7 @@ def parse_smooth_motion_commands(parts):
                     })
                     
                 elif seg_type == 'ARC':
+                    # Format: ARC|end_x,end_y,end_z,end_rx,end_ry,end_rz|center_x,center_y,center_z|duration|clockwise
                     end = list(map(float, seg_parts[1].split(',')))
                     center = list(map(float, seg_parts[2].split(',')))
                     segment_duration = float(seg_parts[3])
@@ -2554,6 +2828,7 @@ def parse_smooth_motion_commands(parts):
                     })
                     
                 elif seg_type == 'SPLINE':
+                    # Format: SPLINE|num_points|waypoint1;waypoint2;...|duration
                     num_points = int(seg_parts[1])
                     waypoints = []
                     wp_strs = seg_parts[2].split(';')
@@ -2597,8 +2872,10 @@ def parse_smooth_motion_commands(parts):
             else:
                 print(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
             
-            # Return command that generates trajectories from current/specified position
-            return SmoothBlendCommand(segment_definitions, blend_time, start_pose)
+            print(f"  -> Parsed blend: {num_segments} segments, frame={frame}, blend_time={blend_time}s")
+            
+            # Return command with frame
+            return SmoothBlendCommand(segment_definitions, blend_time, frame, start_pose)
             
     except Exception as e:
         print(f"Error parsing smooth motion command: {e}")
@@ -2609,6 +2886,224 @@ def parse_smooth_motion_commands(parts):
     
     print(f"Warning: Unknown smooth motion command type: {command_type}")
     return None
+
+def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
+    """
+    Transform command parameters from TRF to WRF.
+    Handles position, orientation, and directional vectors correctly.
+    """
+    if frame == 'WRF':
+        return params
+    
+    # Get current tool pose
+    current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
+                         for i, p in enumerate(current_position_in)])
+    tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
+    
+    transformed = params.copy()
+    
+    # SMOOTH_CIRCLE - Transform center and plane normal
+    if command_type == 'SMOOTH_CIRCLE':
+        if 'center' in params:
+            center_trf = SE3(params['center'][0]/1000, 
+                           params['center'][1]/1000, 
+                           params['center'][2]/1000)
+            center_wrf = tool_pose * center_trf
+            transformed['center'] = (center_wrf.t * 1000).tolist()
+        
+        if 'plane' in params:
+            plane_normals_trf = {
+                'XY': [0, 0, 1],   # Tool's Z-axis
+                'XZ': [0, 1, 0],   # Tool's Y-axis  
+                'YZ': [1, 0, 0]    # Tool's X-axis
+            }
+            normal_trf = np.array(plane_normals_trf[params['plane']])
+            normal_wrf = tool_pose.R @ normal_trf
+            transformed['normal_vector'] = normal_wrf.tolist()
+            print(f"  -> TRF circle plane {params['plane']} transformed to WRF")
+    
+    # SMOOTH_ARC_CENTER - Transform center, end_pose, and implied plane
+    elif command_type == 'SMOOTH_ARC_CENTER':
+        if 'center' in params:
+            center_trf = SE3(params['center'][0]/1000, 
+                           params['center'][1]/1000, 
+                           params['center'][2]/1000)
+            center_wrf = tool_pose * center_trf
+            transformed['center'] = (center_wrf.t * 1000).tolist()
+        
+        if 'end_pose' in params:
+            end_trf = SE3(params['end_pose'][0]/1000, 
+                         params['end_pose'][1]/1000, 
+                         params['end_pose'][2]/1000) * \
+                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
+            end_wrf = tool_pose * end_trf
+            transformed['end_pose'] = np.concatenate([
+                end_wrf.t * 1000,
+                end_wrf.rpy(unit='deg', order='xyz')
+            ]).tolist()
+        
+        # Arc plane is determined by start, end, and center points
+        # But we should transform any specified plane normal
+        if 'plane' in params:
+            # Similar to circle plane transformation
+            plane_normals_trf = {
+                'XY': [0, 0, 1],
+                'XZ': [0, 1, 0],
+                'YZ': [1, 0, 0]
+            }
+            normal_trf = np.array(plane_normals_trf[params['plane']])
+            normal_wrf = tool_pose.R @ normal_trf
+            transformed['normal_vector'] = normal_wrf.tolist()
+    
+    # SMOOTH_ARC_PARAM - Transform end_pose and arc plane
+    elif command_type == 'SMOOTH_ARC_PARAM':
+        if 'end_pose' in params:
+            end_trf = SE3(params['end_pose'][0]/1000, 
+                         params['end_pose'][1]/1000, 
+                         params['end_pose'][2]/1000) * \
+                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
+            end_wrf = tool_pose * end_trf
+            transformed['end_pose'] = np.concatenate([
+                end_wrf.t * 1000,
+                end_wrf.rpy(unit='deg', order='xyz')
+            ]).tolist()
+        
+        # For parametric arc, the plane is usually XY of the tool
+        # Transform the assumed plane normal
+        if 'plane' not in params:
+            params['plane'] = 'XY'  # Default to XY plane
+        
+        plane_normals_trf = {
+            'XY': [0, 0, 1],
+            'XZ': [0, 1, 0],
+            'YZ': [1, 0, 0]
+        }
+        normal_trf = np.array(plane_normals_trf[params.get('plane', 'XY')])
+        normal_wrf = tool_pose.R @ normal_trf
+        transformed['normal_vector'] = normal_wrf.tolist()
+    
+    # SMOOTH_HELIX - Transform center and helix axis
+    elif command_type == 'SMOOTH_HELIX':
+        if 'center' in params:
+            center_trf = SE3(params['center'][0]/1000, 
+                           params['center'][1]/1000, 
+                           params['center'][2]/1000)
+            center_wrf = tool_pose * center_trf
+            transformed['center'] = (center_wrf.t * 1000).tolist()
+        
+        # Helix axis - default is Z-axis (vertical in TRF)
+        # In TRF, helix rises along tool's Z-axis
+        helix_axis_trf = np.array([0, 0, 1])  # Tool's Z-axis
+        helix_axis_wrf = tool_pose.R @ helix_axis_trf
+        transformed['helix_axis'] = helix_axis_wrf.tolist()
+        
+        # Also need to transform the "up" direction for proper orientation
+        up_vector_trf = np.array([0, 1, 0])  # Tool's Y-axis
+        up_vector_wrf = tool_pose.R @ up_vector_trf
+        transformed['up_vector'] = up_vector_wrf.tolist()
+    
+    # SMOOTH_SPLINE - Transform all waypoints
+    elif command_type == 'SMOOTH_SPLINE':
+        if 'waypoints' in params:
+            transformed_waypoints = []
+            for wp in params['waypoints']:
+                wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
+                         SE3.RPY(wp[3:], unit='deg', order='xyz')
+                wp_wrf = tool_pose * wp_trf
+                wp_transformed = np.concatenate([
+                    wp_wrf.t * 1000,
+                    wp_wrf.rpy(unit='deg', order='xyz')
+                ]).tolist()
+                transformed_waypoints.append(wp_transformed)
+            transformed['waypoints'] = transformed_waypoints
+    
+    # SMOOTH_BLEND - Transform all segments recursively
+    elif command_type == 'SMOOTH_BLEND':
+        if 'segments' in params:
+            transformed_segments = []
+            for seg in params['segments']:
+                seg_copy = seg.copy()
+                seg_type = seg['type']
+                
+                if seg_type == 'LINE':
+                    if 'end' in seg:
+                        end_trf = SE3(seg['end'][0]/1000, 
+                                    seg['end'][1]/1000, 
+                                    seg['end'][2]/1000) * \
+                                  SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
+                        end_wrf = tool_pose * end_trf
+                        seg_copy['end'] = np.concatenate([
+                            end_wrf.t * 1000,
+                            end_wrf.rpy(unit='deg', order='xyz')
+                        ]).tolist()
+                
+                elif seg_type == 'CIRCLE':
+                    if 'center' in seg:
+                        center_trf = SE3(seg['center'][0]/1000, 
+                                       seg['center'][1]/1000, 
+                                       seg['center'][2]/1000)
+                        center_wrf = tool_pose * center_trf
+                        seg_copy['center'] = (center_wrf.t * 1000).tolist()
+                    
+                    if 'plane' in seg:
+                        plane_normals_trf = {
+                            'XY': [0, 0, 1],
+                            'XZ': [0, 1, 0],
+                            'YZ': [1, 0, 0]
+                        }
+                        normal_trf = np.array(plane_normals_trf[seg['plane']])
+                        normal_wrf = tool_pose.R @ normal_trf
+                        seg_copy['normal_vector'] = normal_wrf.tolist()
+                
+                elif seg_type == 'ARC':
+                    if 'center' in seg:
+                        center_trf = SE3(seg['center'][0]/1000, 
+                                       seg['center'][1]/1000, 
+                                       seg['center'][2]/1000)
+                        center_wrf = tool_pose * center_trf
+                        seg_copy['center'] = (center_wrf.t * 1000).tolist()
+                    
+                    if 'end' in seg:
+                        end_trf = SE3(seg['end'][0]/1000, 
+                                    seg['end'][1]/1000, 
+                                    seg['end'][2]/1000) * \
+                                  SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
+                        end_wrf = tool_pose * end_trf
+                        seg_copy['end'] = np.concatenate([
+                            end_wrf.t * 1000,
+                            end_wrf.rpy(unit='deg', order='xyz')
+                        ]).tolist()
+                
+                elif seg_type == 'SPLINE':
+                    if 'waypoints' in seg:
+                        transformed_waypoints = []
+                        for wp in seg['waypoints']:
+                            wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
+                                     SE3.RPY(wp[3:], unit='deg', order='xyz')
+                            wp_wrf = tool_pose * wp_trf
+                            wp_transformed = np.concatenate([
+                                wp_wrf.t * 1000,
+                                wp_wrf.rpy(unit='deg', order='xyz')
+                            ]).tolist()
+                            transformed_waypoints.append(wp_transformed)
+                        seg_copy['waypoints'] = transformed_waypoints
+                
+                transformed_segments.append(seg_copy)
+            transformed['segments'] = transformed_segments
+    
+    # Transform start_pose if specified (common to all commands)
+    if 'start_pose' in params and params['start_pose'] is not None:
+        start_trf = SE3(params['start_pose'][0]/1000, 
+                       params['start_pose'][1]/1000, 
+                       params['start_pose'][2]/1000) * \
+                    SE3.RPY(params['start_pose'][3:], unit='deg', order='xyz')
+        start_wrf = tool_pose * start_trf
+        transformed['start_pose'] = np.concatenate([
+            start_wrf.t * 1000,
+            start_wrf.rpy(unit='deg', order='xyz')
+        ]).tolist()
+    
+    return transformed
 
 #########################################################################
 # Smooth Motion Commands and Robot Commands End Here
