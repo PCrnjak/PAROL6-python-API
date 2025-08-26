@@ -1658,23 +1658,28 @@ class DelayCommand:
         print(f"Initializing Delay for {duration} seconds...")
         
         self.duration = duration
-        self.end_time = time.time() + self.duration
+        self.end_time = None  # Will be set in prepare_for_execution
         self.is_valid = True
+
+    def prepare_for_execution(self, current_position_in):
+        """Set the end time when the command actually starts."""
+        self.end_time = time.time() + self.duration
+        print(f"  -> Delay starting for {self.duration} seconds...")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         """
         Checks if the delay duration has passed and keeps the robot idle.
-        This method is called on every loop cycle (~{INTERVAL_S}s).
+        This method is called on every loop cycle (~0.01s).
         """
         if self.is_finished or not self.is_valid:
             return True
 
         # --- A. Keep the robot idle during the delay ---
-        Command_out.value = 255 # Set command to idle
-        Speed_out[:] = [0] * 6  # Set all speeds to zero
+        Command_out.value = 255  # Set command to idle
+        Speed_out[:] = [0] * 6   # Set all speeds to zero
 
         # --- B. Check for completion ---
-        if time.time() >= self.end_time:
+        if self.end_time and time.time() >= self.end_time:
             print(f"Delay finished after {self.duration} seconds.")
             self.is_finished = True
         
