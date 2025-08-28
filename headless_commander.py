@@ -874,7 +874,9 @@ class JogCommand:
                 print("Error: 'speed_percentage' must be provided if not calculating automatically.")
                 self.is_valid = False
                 return
-            speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[self.joint_index] * 2]))
+            # Map jog speed to dedicated jog caps (old GUI behavior), not 2x global max
+            max_joint_speed = PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]
+            speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, max_joint_speed]))
 
         self.speed_out = speed_steps_per_sec * self.direction
         self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
@@ -985,8 +987,9 @@ class MultiJogCommand:
                 self.is_valid = False
                 return
 
-            # Calculate speed in steps/sec
-            speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[joint_index]]))
+            # Calculate speed in steps/sec (use jog caps like old GUI)
+            max_joint_speed = PAROL6_ROBOT.Joint_max_jog_speed[joint_index]
+            speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, max_joint_speed]))
             self.speeds_out[joint_index] = speed_steps_per_sec * direction
 
         print("  -> MultiJog command is ready.")
