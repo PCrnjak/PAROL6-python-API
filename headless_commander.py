@@ -67,6 +67,8 @@ disabled_reason = ""
 # Ensure serial globals exist on all platforms
 ser: Optional[serial.Serial] = None
 com_port_str: Optional[str] = None
+# Non-blocking serial reconnect throttle
+last_reconnect_attempt = 0.0
 
 
 my_os = platform.system()
@@ -3246,29 +3248,28 @@ prev_time = 0
 
 while timer.elapsed_time < 1100000:
     
-    # --- Connection Handling ---
+    # --- Connection Handling (non-blocking) ---
     if ser is None or not ser.is_open:
-        print("Serial port not open. Attempting to reconnect...")
-        try:
-            # Load port from com_port.txt if not already set
-            if not com_port_str:
-                try:
-                    with open("com_port.txt", "r") as f:
-                        com_port_str = f.read().strip()
-                except FileNotFoundError:
-                    com_port_str = None
+        now = time.time()
+        if now - last_reconnect_attempt > 1.0:
+            print("Serial port not open. Attempting to reconnect...")
+            last_reconnect_attempt = now
+            try:
+                # Load port from com_port.txt if not already set
+                if not com_port_str:
+                    try:
+                        with open("com_port.txt", "r") as f:
+                            com_port_str = f.read().strip()
+                    except FileNotFoundError:
+                        com_port_str = None
 
-            if com_port_str:
-                ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
-                if ser.is_open:
-                    print(f"Successfully reconnected to {com_port_str}")
-            else:
-                # No port configured yet; wait and retry
-                time.sleep(1)
-        except serial.SerialException as e:
-            ser = None
-            time.sleep(1) 
-        continue
+                if com_port_str:
+                    ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
+                    if ser.is_open:
+                        print(f"Successfully reconnected to {com_port_str}")
+            except serial.SerialException:
+                ser = None
+        # Do not block or continue; proceed to UDP handling every tick
 
     # =======================================================================
     # === NETWORK COMMAND RECEPTION WITH ID PARSING ===
