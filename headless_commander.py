@@ -25,11 +25,23 @@ import os
 import re
 import logging
 import struct
-import keyboard
+try:
+    import keyboard  # type: ignore
+except Exception:
+    keyboard = None
 from typing import Optional, Tuple
 from spatialmath.base import trinterp
 from collections import namedtuple, deque
-import GUI.files.PAROL6_ROBOT as PAROL6_ROBOT
+try:
+    import PAROL6_ROBOT as PAROL6_ROBOT
+except ModuleNotFoundError:
+    import os, sys
+    legacy = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'PAROL-commander-software', 'GUI', 'files')
+    if os.path.exists(os.path.join(legacy, 'PAROL6_ROBOT.py')):
+        sys.path.append(legacy)
+        import PAROL6_ROBOT as PAROL6_ROBOT
+    else:
+        raise
 from smooth_motion import CircularMotion, SplineMotion, MotionBlender
 
 # Set interval
@@ -41,6 +53,17 @@ logging.basicConfig(level = logging.DEBUG,
     datefmt='%H:%M:%S'
 )
 logging.disable(logging.DEBUG)
+
+# =========================
+# Runtime flags and globals
+# =========================
+enabled = True
+soft_error = False
+disabled_reason = ""
+
+# Ensure serial globals exist on all platforms
+ser: Optional[serial.Serial] = None
+com_port_str: Optional[str] = None
 
 
 my_os = platform.system()
@@ -54,8 +77,8 @@ if my_os == "Windows":
     except (FileNotFoundError, serial.SerialException):
         # If the file doesn't exist or the port is invalid, ask the user
         while True:
+            com_port = input("Enter the COM port (e.g., COM9): ")
             try:
-                com_port = input("Enter the COM port (e.g., COM9): ")
                 ser = serial.Serial(port=com_port, baudrate=3000000, timeout=0)
                 print(f"Successfully connected to {com_port}")
                 # Save the successful port to the file
@@ -97,7 +120,7 @@ start_cond3 = 0 #Flag if start_cond3_byte is received
 good_start = 0 #Flag if we got all 3 start condition bytes
 data_len = 0 #Length of the data after -3 start condition bytes and length byte, so -4 bytes
 
-data_buffer = [None]*255 #Here save all data after data length byte
+data_buffer = [b'']*255 #Here save all data after data length byte
 data_counter = 0 #Data counter for incoming bytes; compared to data length to see if we have correct length
 #######################################################################################
 #######################################################################################
@@ -557,6 +580,7 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
 def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
     global input_byte 
+    global ser
 
     global start_cond1_byte 
     global start_cond2_byte 
@@ -575,8 +599,12 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
     global data_buffer 
     global data_counter
 
-    while (ser.inWaiting() > 0):
-        input_byte = ser.read()
+    # Ensure serial is available before reading
+    if ser is None or not ser.is_open:
+        return
+
+    while ser.in_waiting > 0:
+        input_byte = ser.read(1)
 
         #UNCOMMENT THIS TO GET ALL DATA FROM THE ROBOT PRINTED
         #print(input_byte) 
@@ -1019,7 +1047,7 @@ class CartesianJogCommand:
     This is the final, refactored version using clean, standard spatial math
     operations now that the core unit bug has been fixed.
     """
-    def __init__(self, frame, axis, speed_percentage=50, duration=1.5, **kwargs):
+    def __init__(self, frame, axis, speed_percentage=50.0, duration=1.5, **kwargs):
         """
         Initializes and validates the Cartesian jog command.
         """
@@ -3179,8 +3207,11 @@ command_queue = deque()
 # --- Test 1: Homing and Initial Setup
 # --------------------------------------------------------------------------
 
-# 1. Start with the mandatory Home command.
-command_queue.append(HomeCommand())
+# 1. Optionally start with the Home command (can be bypassed via PAROL6_NOAUTOHOME)
+if not str(os.getenv("PAROL6_NOAUTOHOME", "0")).lower() in ("1", "true", "yes", "on"):
+    command_queue.append(HomeCommand())
+else:
+    print("PAROL6_NOAUTOHOME is set; skipping auto-home on startup.")
 
 # --- State variable for the currently running command ---
 active_command = None
@@ -3209,9 +3240,21 @@ while timer.elapsed_time < 1100000:
     if ser is None or not ser.is_open:
         print("Serial port not open. Attempting to reconnect...")
         try:
-            ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
-            if ser.is_open:
-                print(f"Successfully reconnected to {com_port_str}")
+            # Load port from com_port.txt if not already set
+            if not com_port_str:
+                try:
+                    with open("com_port.txt", "r") as f:
+                        com_port_str = f.read().strip()
+                except FileNotFoundError:
+                    com_port_str = None
+
+            if com_port_str:
+                ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
+                if ser.is_open:
+                    print(f"Successfully reconnected to {com_port_str}")
+            else:
+                # No port configured yet; wait and retry
+                time.sleep(1)
         except serial.SerialException as e:
             ser = None
             time.sleep(1) 
@@ -3243,11 +3286,9 @@ while timer.elapsed_time < 1100000:
                     active_command_id = None
                     
                     # Clear queue and notify about cancelled commands
-                    for queued_cmd in command_id_map.keys():
+                    for queued_cmd, (qid, qaddr) in list(command_id_map.items()):
                         if queued_cmd != active_command:
-                            if queued_cmd in command_id_map:
-                                send_acknowledgment(command_id_map[queued_cmd], 
-                                                  "CANCELLED", "Queue cleared by STOP", addr)
+                            send_acknowledgment(qid, "CANCELLED", "Queue cleared by STOP", qaddr)
                     
                     command_queue.clear()
                     command_id_map.clear()
@@ -3305,6 +3346,89 @@ while timer.elapsed_time < 1100000:
                     if cmd_id:
                         send_acknowledgment(cmd_id, "COMPLETED", "Speed data sent", addr)
 
+                elif command_name == 'PING':
+                    # Respond with PONG and ACK if cmd_id present
+                    sock.sendto("PONG".encode('utf-8'), addr)
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "PONG", addr)
+
+                elif command_name == 'GET_STATUS':
+                    # Aggregate POSE, ANGLES, IO, GRIPPER into one frame
+                    try:
+                        q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
+                        current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
+                        pose_flat = current_pose_matrix.flatten()
+                        pose_str = ",".join(map(str, pose_flat))
+                    except Exception:
+                        pose_str = ",".join(["0"] * 16)
+
+                    angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)]
+                    angles_deg = np.rad2deg(angles_rad)
+                    angles_str = ",".join(map(str, angles_deg))
+
+                    io_status_str = ",".join(map(str, InOut_in[:5]))
+                    gripper_status_str = ",".join(map(str, Gripper_data_in))
+
+                    response_message = f"STATUS|POSE={pose_str}|ANGLES={angles_str}|IO={io_status_str}|GRIPPER={gripper_status_str}"
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Status data sent", addr)
+
+                elif command_name == 'ENABLE':
+                    enabled = True
+                    disabled_reason = ""
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Controller enabled", addr)
+
+                elif command_name == 'DISABLE':
+                    enabled = False
+                    disabled_reason = "Disabled by user"
+                    # Cancel active command
+                    if active_command and active_command_id:
+                        send_acknowledgment(active_command_id, "CANCELLED", "Disabled by user", addr)
+                    active_command = None
+                    active_command_id = None
+                    # Cancel queued commands
+                    for queued_cmd, (qid, qaddr) in list(command_id_map.items()):
+                        send_acknowledgment(qid, "CANCELLED", "Controller disabled", qaddr)
+                    command_queue.clear()
+                    command_id_map.clear()
+                    # Stop robot motion
+                    Command_out.value = 255
+                    Speed_out[:] = [0] * 6
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Controller disabled", addr)
+
+                elif command_name == 'CLEAR_ERROR':
+                    soft_error = False
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Errors cleared", addr)
+
+                elif command_name == 'SET_PORT' and len(parts) >= 2:
+                    new_port = parts[1].strip()
+                    if new_port:
+                        # Persist and trigger reconnection
+                        try:
+                            with open("com_port.txt", "w") as f:
+                                f.write(new_port)
+                        except Exception as e:
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "FAILED", f"Could not write com_port.txt: {e}", addr)
+                            # Do not fall through to queuing
+                            continue
+                        try:
+                            if ser and ser.is_open:
+                                ser.close()
+                        except Exception:
+                            pass
+                        com_port_str = new_port
+                        ser = None  # main loop will reconnect
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", f"Port set to {new_port}; reconnecting...", addr)
+                    else:
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "No port specified", addr)
+
                 else:
                     # Queue command for processing
                     incoming_command_buffer.append((raw_message, addr))
@@ -3326,6 +3450,15 @@ while timer.elapsed_time < 1100000:
         
         parts = message.split('|')
         command_name = parts[0].upper()
+        
+        # Gate motion commands when controller is disabled
+        if not enabled and command_name in {'MOVEPOSE','MOVEJOINT','MOVECART','JOG','MULTIJOG','CARTJOG',
+                                            'SMOOTH_CIRCLE','SMOOTH_ARC_CENTER','SMOOTH_ARC_PARAM',
+                                            'SMOOTH_SPLINE','SMOOTH_HELIX','SMOOTH_BLEND','HOME'}:
+            if cmd_id:
+                send_acknowledgment(cmd_id, "FAILED", f"Controller disabled{(': ' + disabled_reason) if disabled_reason else ''}", addr)
+            # Skip processing this command
+            continue
         
         # Variable to track if command was successfully queued
         command_queued = False
@@ -3470,7 +3603,7 @@ while timer.elapsed_time < 1100000:
             
         elif e_stop_active:
             # Waiting for re-enable
-            if keyboard.is_pressed('e'):
+            if keyboard and keyboard.is_pressed('e'):
                 print("Re-enabling robot...")
                 Command_out.value = 101
                 e_stop_active = False
@@ -3589,11 +3722,14 @@ while timer.elapsed_time < 1100000:
         # --- Communication with Robot ---
         s = Pack_data(Position_out, Speed_out, Command_out.value, 
                      Affected_joint_out, InOut_out, Timeout_out, Gripper_data_out)
-        for chunk in s:
-            ser.write(chunk)
-            
-        Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
-                Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
+        if ser is not None and ser.is_open:
+            for chunk in s:
+                ser.write(chunk)
+            Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
+                    Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
+        else:
+            # Serial not available; skip IO this cycle
+            pass
 
     except serial.SerialException as e:
         print(f"Serial communication error: {e}")
