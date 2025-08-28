@@ -48,6 +48,9 @@ from smooth_motion import CircularMotion, SplineMotion, MotionBlender
 INTERVAL_S = 0.01
 prev_time = 0
 
+# Jogging speed scale to slightly increase jog caps while respecting absolute limits
+JOG_SPEED_SCALE = 1.2
+
 logging.basicConfig(level = logging.DEBUG,
     format='%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s',
     datefmt='%H:%M:%S'
@@ -874,8 +877,10 @@ class JogCommand:
                 print("Error: 'speed_percentage' must be provided if not calculating automatically.")
                 self.is_valid = False
                 return
-            # Map jog speed to dedicated jog caps (old GUI behavior), not 2x global max
-            max_joint_speed = PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]
+            # Map jog speed to jog caps scaled up slightly, clamped to absolute joint max
+            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index] * JOG_SPEED_SCALE)
+            abs_max = PAROL6_ROBOT.Joint_max_speed[self.joint_index]
+            max_joint_speed = min(abs_max, max_cap)
             speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, max_joint_speed]))
 
         self.speed_out = speed_steps_per_sec * self.direction
@@ -987,8 +992,10 @@ class MultiJogCommand:
                 self.is_valid = False
                 return
 
-            # Calculate speed in steps/sec (use jog caps like old GUI)
-            max_joint_speed = PAROL6_ROBOT.Joint_max_jog_speed[joint_index]
+            # Calculate speed in steps/sec using scaled jog caps, clamped to absolute joint max
+            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[joint_index] * JOG_SPEED_SCALE)
+            abs_max = PAROL6_ROBOT.Joint_max_speed[joint_index]
+            max_joint_speed = min(abs_max, max_cap)
             speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, max_joint_speed]))
             self.speeds_out[joint_index] = speed_steps_per_sec * direction
 
