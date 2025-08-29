@@ -51,11 +51,19 @@ prev_time = 0
 # Jogging speed scale to slightly increase jog caps while respecting absolute limits
 JOG_SPEED_SCALE = 1.2
 
-logging.basicConfig(level = logging.DEBUG,
-    format='%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s',
-    datefmt='%H:%M:%S'
-)
-logging.disable(logging.DEBUG)
+# Configure unified logging (PAROL_LOG_LEVEL) and simple console formatter
+PAROL_LOG_LEVEL = os.getenv("PAROL_LOG_LEVEL", "WARNING").upper()
+_level = getattr(logging, PAROL_LOG_LEVEL, logging.WARNING)
+root = logging.getLogger()
+root.setLevel(_level)
+for h in list(root.handlers):
+    if isinstance(h, logging.StreamHandler):
+        root.removeHandler(h)
+console = logging.StreamHandler()
+console.setLevel(_level)
+console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+root.addHandler(console)
+logger = logging.getLogger("parol6.server")
 
 # =========================
 # Runtime flags and globals
@@ -78,20 +86,20 @@ if my_os == "Windows":
         with open("com_port.txt", "r") as f:
             com_port_str = f.read().strip()
             ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
-            print(f"Connected to saved COM port: {com_port_str}")
+            logging.info(f"Connected to saved COM port: {com_port_str}")
     except (FileNotFoundError, serial.SerialException):
         # If the file doesn't exist or the port is invalid, ask the user
         while True:
             com_port = input("Enter the COM port (e.g., COM9): ")
             try:
                 ser = serial.Serial(port=com_port, baudrate=3000000, timeout=0)
-                print(f"Successfully connected to {com_port}")
+                logging.info(f"Successfully connected to {com_port}")
                 # Save the successful port to the file
                 with open("com_port.txt", "w") as f:
                     f.write(com_port)
                 break
             except serial.SerialException:
-                print(f"Could not open port {com_port}. Please try again.")
+                logging.warning(f"Could not open port {com_port}. Please try again.")
 
 # in big endian machines, first byte of binary representation of the multibyte data-type is stored first. 
 int_to_3_bytes = struct.Struct('>I').pack # BIG endian order
@@ -249,7 +257,7 @@ def calculate_adaptive_tolerance(robot, q, strict_tol=1e-10, loose_tol=1e-7):
     # Log tolerance changes (only log significant changes to avoid spam)
     if _prev_tolerance is None or abs(adaptive_tol - _prev_tolerance) / _prev_tolerance > 0.5:
         tol_category = "LOOSE" if adaptive_tol > 1e-7 else "MODERATE" if adaptive_tol > 5e-10 else "STRICT"
-        print(f"Adaptive IK tolerance: {adaptive_tol:.2e} ({tol_category}) - Manipulability: {manip:.8f} (threshold: {singularity_threshold})")
+        logging.debug(f"Adaptive IK tolerance: {adaptive_tol:.2e} ({tol_category}) - Manipulability: {manip:.8f} (threshold: {singularity_threshold})")
         _prev_tolerance = adaptive_tol
     
     return adaptive_tol
@@ -353,9 +361,9 @@ def solve_ik_with_adaptive_tol_subdivision(
             damping = 0.0000001
         else:
             # Check if we're near configuration-dependent max reach
-            # print(f"current_reach:{current_reach:.3f}, max_reach_threshold:{max_reach_threshold:.3f}")
+            # logging.debug(f"current_reach:{current_reach:.3f}, max_reach_threshold:{max_reach_threshold:.3f}")
             if not is_recovery and target_reach > max_reach_threshold:
-                print(f"Target reach limit exceeded: {target_reach:.3f} > {max_reach_threshold:.3f}")
+                logging.warning(f"Target reach limit exceeded: {target_reach:.3f} > {max_reach_threshold:.3f}")
                 return [], False, depth, 0
             else:
                 damping = 0.0000001  # Normal low damping
@@ -404,7 +412,7 @@ port = 5001
 # Create a UDP socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((ip, port))
-print(f'Start listening to {ip}:{port}')
+logging.info(f"Start listening to {ip}:{port}")
 
 def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
@@ -512,7 +520,7 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
 
 
     test_list = []
-    #print(test_list)
+    #logging.debug(test_list)
 
     #x = bytes(start_bytes)
     test_list.append((start_bytes))
@@ -579,7 +587,7 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
     # END bytes
     test_list.append((end_bytes))
     
-    #print(test_list)
+    #logging.debug(test_list)
     return test_list
 
 def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
@@ -670,9 +678,9 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
                     # ako je dobar paket je dobar i spremi ga u nove variable!
                 
                 # Print every byte
-                #print("podaci u data bufferu su:")
+                #logging.debug("podaci u data bufferu su:")
                 #for i in range(data_len):
-                    #print(data_buffer[i])
+                    #logging.debug(data_buffer[i])
 
                 good_start = 0
                 start_cond1 = 0
@@ -753,7 +761,7 @@ class HomeCommand:
         self.start_cmd_counter = 10  # Send command 100 for 10 cycles (0.1s)
         # Safety timeout (20 seconds at 0.01s interval)
         self.timeout_counter = 2000
-        print("Initializing Home command...")
+        logging.info("Initializing Home command...")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         """
@@ -765,7 +773,7 @@ class HomeCommand:
         # --- State: START ---
         # On the first few executions, continuously send the 'home' (100) command.
         if self.state == "START":
-            print(f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}")
+            logging.info(f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}")
             Command_out.value = 100
             self.start_cmd_counter -= 1
             if self.start_cmd_counter <= 0:
@@ -780,12 +788,12 @@ class HomeCommand:
             Command_out.value = 255
             # Check if at least one joint has started homing (is no longer homed)
             if any(h == 0 for h in Homed_in[:6]):
-                print("  -> Homing sequence initiated by robot.")
+                logging.info("  -> Homing sequence initiated by robot.")
                 self.state = "WAITING_FOR_HOMED"
             # Check for timeout
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                print("  -> ERROR: Timeout waiting for robot to start homing sequence.")
+                logging.error("  -> ERROR: Timeout waiting for robot to start homing sequence.")
                 self.is_finished = True
             return self.is_finished
 
@@ -795,7 +803,7 @@ class HomeCommand:
             Command_out.value = 255
             # Check if all joints have finished homing
             if all(h == 1 for h in Homed_in[:6]):
-                print("Homing sequence complete. All joints reported home.")
+                logging.info("Homing sequence complete. All joints reported home.")
                 self.is_finished = True
                 Speed_out[:] = [0] * 6 # Ensure robot is stopped
 
@@ -818,15 +826,15 @@ class JogCommand:
         # --- 1. Parameter Validation and Mode Selection ---
         if duration and distance_deg:
             self.mode = 'distance'
-            print(f"Initializing Jog: Joint {joint}, Distance {distance_deg} deg, Duration {duration}s.")
+            logging.info(f"Initializing Jog: Joint {joint}, Distance {distance_deg} deg, Duration {duration}s.")
         elif duration:
             self.mode = 'time'
-            print(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Duration {duration}s.")
+            logging.info(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Duration {duration}s.")
         elif distance_deg:
             self.mode = 'distance'
-            print(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Distance {distance_deg} deg.")
+            logging.info(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Distance {distance_deg} deg.")
         else:
-            print("Error: JogCommand requires either 'duration', 'distance_deg', or both.")
+            logging.error("Error: JogCommand requires either 'duration', 'distance_deg', or both.")
             return
 
         # --- 2. Store parameters for deferred calculation ---
@@ -847,7 +855,7 @@ class JogCommand:
 
     def prepare_for_execution(self, current_position_in):
         """Pre-computes speeds and target positions using live data."""
-        print(f"  -> Preparing for Jog command...")
+        logging.info(f"  -> Preparing for Jog command...")
 
         # Determine direction and joint index
         self.direction = 1 if 0 <= self.joint <= 5 else -1
@@ -861,7 +869,7 @@ class JogCommand:
             
             min_limit, max_limit = PAROL6_ROBOT.Joint_limits_steps[self.joint_index]
             if not (min_limit <= self.target_position <= max_limit):
-                print(f"  -> VALIDATION FAILED: Target position {self.target_position} is out of joint limits ({min_limit}, {max_limit}).")
+                logging.error(f"  -> VALIDATION FAILED: Target position {self.target_position} is out of joint limits ({min_limit}, {max_limit}).")
                 self.is_valid = False
                 return
 
@@ -871,12 +879,12 @@ class JogCommand:
             speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
             max_joint_speed = PAROL6_ROBOT.Joint_max_speed[self.joint_index]
             if speed_steps_per_sec > max_joint_speed:
-                print(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max speed ({max_joint_speed} steps/s).")
+                logging.error(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max speed ({max_joint_speed} steps/s).")
                 self.is_valid = False
                 return
         else:
             if self.speed_percentage is None:
-                print("Error: 'speed_percentage' must be provided if not calculating automatically.")
+                logging.error("Error: 'speed_percentage' must be provided if not calculating automatically.")
                 self.is_valid = False
                 return
             # Map jog speed to jog caps scaled up slightly, clamped to absolute joint max
@@ -887,7 +895,7 @@ class JogCommand:
 
         self.speed_out = speed_steps_per_sec * self.direction
         self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
-        print("  -> Jog command is ready.")
+        logging.info("  -> Jog command is ready.")
 
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
@@ -912,7 +920,7 @@ class JogCommand:
                 stop_reason = f"Limit reached on joint {self.joint_index + 1}."
 
         if stop_reason:
-            print(stop_reason)
+            logging.info(stop_reason)
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -939,15 +947,15 @@ class MultiJogCommand:
 
         # --- 1. Parameter Validation ---
         if not isinstance(joints, list) or not isinstance(speed_percentages, list):
-            print("Error: MultiJogCommand requires 'joints' and 'speed_percentages' to be lists.")
+            logging.error("Error: MultiJogCommand requires 'joints' and 'speed_percentages' to be lists.")
             return
 
         if len(joints) != len(speed_percentages):
-            print("Error: The number of joints must match the number of speed percentages.")
+            logging.error("Error: The number of joints must match the number of speed percentages.")
             return
 
         if not duration or duration <= 0:
-            print("Error: MultiJogCommand requires a positive 'duration'.")
+            logging.error("Error: MultiJogCommand requires a positive 'duration'.")
             return
 
         # ==========================================================
@@ -959,13 +967,13 @@ class MultiJogCommand:
             base_joint = joint % 6
             # If the base joint is already in our set, it's a conflict.
             if base_joint in base_joints:
-                print(f"  -> VALIDATION FAILED: Conflicting commands for Joint {base_joint + 1} (e.g., J1+ and J1-).")
+                logging.error(f"  -> VALIDATION FAILED: Conflicting commands for Joint {base_joint + 1} (e.g., J1+ and J1-).")
                 self.is_valid = False
                 return
             base_joints.add(base_joint)
         # ==========================================================
 
-        print(f"Initializing MultiJog for joints {joints} with speeds {speed_percentages}% for {duration}s.")
+        logging.info(f"Initializing MultiJog for joints {joints} with speeds {speed_percentages}% for {duration}s.")
 
         # --- 2. Store parameters ---
         self.joints = joints
@@ -980,7 +988,7 @@ class MultiJogCommand:
 
     def prepare_for_execution(self, current_position_in):
         """Pre-computes the speeds for each joint."""
-        print(f"  -> Preparing for MultiJog command...")
+        logging.info(f"  -> Preparing for MultiJog command...")
 
         for i, joint in enumerate(self.joints):
             # Determine direction and joint index (0-5 for positive, 6-11 for negative)
@@ -990,7 +998,7 @@ class MultiJogCommand:
 
             # Check for joint index validity
             if not (0 <= joint_index < 6):
-                print(f"  -> VALIDATION FAILED: Invalid joint index {joint_index}.")
+                logging.error(f"  -> VALIDATION FAILED: Invalid joint index {joint_index}.")
                 self.is_valid = False
                 return
 
@@ -1001,7 +1009,7 @@ class MultiJogCommand:
             speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, max_joint_speed]))
             self.speeds_out[joint_index] = speed_steps_per_sec * direction
 
-        print("  -> MultiJog command is ready.")
+        logging.info("  -> MultiJog command is ready.")
 
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
@@ -1011,7 +1019,7 @@ class MultiJogCommand:
 
         # Stop if the duration has elapsed
         if self.command_step >= self.command_len:
-            print("Timed multi-jog finished.")
+            logging.info("Timed multi-jog finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -1023,14 +1031,14 @@ class MultiJogCommand:
                     current_pos = Position_in[i]
                     # Hitting positive limit while moving positively
                     if self.speeds_out[i] > 0 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[i][1]:
-                         print(f"Limit reached on joint {i + 1}. Stopping jog.")
+                         logging.info(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
                          Speed_out[:] = [0] * 6
                          Command_out.value = 255
                          return True
                     # Hitting negative limit while moving negatively
                     elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
-                         print(f"Limit reached on joint {i + 1}. Stopping jog.")
+                         logging.info(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
                          Speed_out[:] = [0] * 6
                          Command_out.value = 255
@@ -1065,10 +1073,10 @@ class CartesianJogCommand:
         """
         self.is_valid = False
         self.is_finished = False
-        print(f"Initializing CartesianJog: Frame {frame}, Axis {axis}...")
+        logging.info(f"Initializing CartesianJog: Frame {frame}, Axis {axis}...")
 
         if axis not in AXIS_MAP:
-            print(f"  -> VALIDATION FAILED: Invalid axis '{axis}'.")
+            logging.error(f"  -> VALIDATION FAILED: Invalid axis '{axis}'.")
             return
         
         # Store all necessary parameters for use in execute_step
@@ -1080,7 +1088,7 @@ class CartesianJogCommand:
         self.end_time = time.time() + self.duration
         
         self.is_valid = True
-        print("  -> Command is valid and ready.")
+        logging.info("  -> Command is valid and ready.")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         if self.is_finished or not self.is_valid:
@@ -1088,7 +1096,7 @@ class CartesianJogCommand:
 
         # --- A. Check for completion ---
         if time.time() >= self.end_time:
-            print("Cartesian jog finished.")
+            logging.info("Cartesian jog finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -1131,7 +1139,7 @@ class CartesianJogCommand:
             for i in range(6):
                 Speed_out[i] = int(PAROL6_ROBOT.SPEED_RAD2STEP(q_velocities[i], i))
         else:
-            print("IK Warning: Could not find solution for jog step. Stopping.")
+            logging.warning("IK Warning: Could not find solution for jog step. Stopping.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -1162,7 +1170,7 @@ class MovePoseCommand:
         self.command_step = 0
         self.trajectory_steps = []
 
-        print(f"Initializing MovePose to {pose}...")
+        logging.info(f"Initializing MovePose to {pose}...")
 
         # --- MODIFICATION: Store parameters for deferred planning ---
         self.pose = pose
@@ -1185,7 +1193,7 @@ class MovePoseCommand:
     
     def prepare_for_execution(self, current_position_in):
         """Calculates the full trajectory just-in-time before execution."""
-        print(f"  -> Preparing trajectory for MovePose to {self.pose}...")
+        logging.info(f"  -> Preparing trajectory for MovePose to {self.pose}...")
 
         initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
         target_pose = SE3(self.pose[0] / 1000.0, self.pose[1] / 1000.0, self.pose[2] / 1000.0) * SE3.RPY(self.pose[3:6], unit='deg', order='xyz')
@@ -1194,7 +1202,7 @@ class MovePoseCommand:
             PAROL6_ROBOT.robot, target_pose, initial_pos_rad, ilimit=100)
 
         if not ik_solution.success:
-            print("  -> VALIDATION FAILED: Inverse kinematics failed at execution time.")
+            logging.error("  -> VALIDATION FAILED: Inverse kinematics failed at execution time.")
             self.is_valid = False
             return
 
@@ -1202,7 +1210,7 @@ class MovePoseCommand:
 
         if self.duration and self.duration > 0:
             if self.velocity_percent is not None:
-                print("  -> INFO: Both duration and velocity were provided. Using duration.")
+                logging.info("  -> INFO: Both duration and velocity were provided. Using duration.")
             command_len = int(self.duration / INTERVAL_S)
             traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
             
@@ -1261,15 +1269,15 @@ class MovePoseCommand:
                         all_qd.append(joint_traj.qd)
 
                 self.trajectory_steps = list(zip(np.array(all_q).T.astype(int), np.array(all_qd).T.astype(int)))
-                print(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
+                logging.info(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
 
             except Exception as e:
-                print(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
+                logging.error(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
                 self.is_valid = False
                 return
 
         else:
-            print("  -> Using conservative values for MovePose.")
+            logging.info("  -> Using conservative values for MovePose.")
             command_len = 200
             traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
             for i in range(len(traj_generator.q)):
@@ -1277,10 +1285,10 @@ class MovePoseCommand:
                 self.trajectory_steps.append((pos_step, None))
         
         if not self.trajectory_steps:
-             print(" -> Trajectory calculation resulted in no steps. Command is invalid.")
+             logging.error(" -> Trajectory calculation resulted in no steps. Command is invalid.")
              self.is_valid = False
         else:
-             print(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
+             logging.info(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         # This method remains unchanged.
@@ -1288,7 +1296,7 @@ class MovePoseCommand:
             return True
 
         if self.command_step >= len(self.trajectory_steps):
-            print(f"{type(self).__name__} finished.")
+            logging.info(f"{type(self).__name__} finished.")
             self.is_finished = True
             Position_out[:] = Position_in[:]
             Speed_out[:] = [0] * 6
@@ -1313,7 +1321,7 @@ class MoveJointCommand:
         self.command_step = 0
         self.trajectory_steps = []
 
-        print(f"Initializing MoveJoint to {target_angles}...")
+        logging.info(f"Initializing MoveJoint to {target_angles}...")
 
         # --- MODIFICATION: Store parameters for deferred planning ---
         self.target_angles = target_angles
@@ -1327,21 +1335,21 @@ class MoveJointCommand:
         for i in range(6):
             min_rad, max_rad = PAROL6_ROBOT.Joint_limits_radian[i]
             if not (min_rad <= target_pos_rad[i] <= max_rad):
-                print(f"  -> VALIDATION FAILED: Target for Joint {i+1} ({self.target_angles[i]} deg) is out of range.")
+                logging.error(f"  -> VALIDATION FAILED: Target for Joint {i+1} ({self.target_angles[i]} deg) is out of range.")
                 return
         
         self.is_valid = True
 
     def prepare_for_execution(self, current_position_in):
         """Calculates the trajectory just before execution begins."""
-        print(f"  -> Preparing trajectory for MoveJoint to {self.target_angles}...")
+        logging.info(f"  -> Preparing trajectory for MoveJoint to {self.target_angles}...")
         
         initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
         target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
 
         if self.duration and self.duration > 0:
             if self.velocity_percent is not None:
-                print("  -> INFO: Both duration and velocity were provided. Using duration.")
+                logging.info("  -> INFO: Both duration and velocity were provided. Using duration.")
             command_len = int(self.duration / INTERVAL_S)
             traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
             
@@ -1399,16 +1407,16 @@ class MoveJointCommand:
                         all_qd.append(joint_traj.qd)
 
                 self.trajectory_steps = list(zip(np.array(all_q).T.astype(int), np.array(all_qd).T.astype(int)))
-                print(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
+                logging.info(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
 
             except Exception as e:
-                print(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
-                print(f"  -> Please check Joint_min/max_speed and Joint_min/max_acc values in PAROL6_ROBOT.py.")
+                logging.error(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
+                logging.error(f"  -> Please check Joint_min/max_speed and Joint_min/max_acc values in PAROL6_ROBOT.py.")
                 self.is_valid = False
                 return
         
         else:
-            print("  -> Using conservative values for MoveJoint.")
+            logging.info("  -> Using conservative values for MoveJoint.")
             command_len = 200
             traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
             for i in range(len(traj_generator.q)):
@@ -1416,10 +1424,10 @@ class MoveJointCommand:
                 self.trajectory_steps.append((pos_step, None))
         
         if not self.trajectory_steps:
-             print(" -> Trajectory calculation resulted in no steps. Command is invalid.")
+             logging.error(" -> Trajectory calculation resulted in no steps. Command is invalid.")
              self.is_valid = False
         else:
-             print(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
+             logging.info(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         # This method remains unchanged.
@@ -1427,7 +1435,7 @@ class MoveJointCommand:
             return True
 
         if self.command_step >= len(self.trajectory_steps):
-            print(f"{type(self).__name__} finished.")
+            logging.info(f"{type(self).__name__} finished.")
             self.is_finished = True
             Position_out[:] = Position_in[:]
             Speed_out[:] = [0] * 6
@@ -1457,10 +1465,10 @@ class MoveCartCommand:
 
         # --- MODIFICATION: Validate that at least one timing parameter is given ---
         if duration is None and velocity_percent is None:
-            print("  -> VALIDATION FAILED: MoveCartCommand requires either 'duration' or 'velocity_percent'.")
+            logging.error("  -> VALIDATION FAILED: MoveCartCommand requires either 'duration' or 'velocity_percent'.")
             return
         if duration is not None and velocity_percent is not None:
-            print("  -> INFO: Both duration and velocity_percent provided. Using duration.")
+            logging.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
             self.velocity_percent = None # Prioritize duration
         else:
             self.velocity_percent = velocity_percent
@@ -1475,28 +1483,28 @@ class MoveCartCommand:
 
     def prepare_for_execution(self, current_position_in):
         """Captures the initial state and validates the path just before execution."""
-        print(f"  -> Preparing for MoveCart to {self.pose}...")
+        logging.info(f"  -> Preparing for MoveCart to {self.pose}...")
         
         # --- MOVED LOGIC: Capture initial state from live data ---
         initial_q_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
         self.initial_pose = PAROL6_ROBOT.robot.fkine(initial_q_rad)
         self.target_pose = SE3(self.pose[0]/1000.0, self.pose[1]/1000.0, self.pose[2]/1000.0) * SE3.RPY(self.pose[3:6], unit='deg', order='xyz')
 
-        print("  -> Pre-validating final target pose...")
+        logging.info("  -> Pre-validating final target pose...")
         ik_check = solve_ik_with_adaptive_tol_subdivision(
             PAROL6_ROBOT.robot, self.target_pose, initial_q_rad
         )
 
         if not ik_check.success:
-            print("  -> VALIDATION FAILED: The final target pose is unreachable.")
+            logging.error("  -> VALIDATION FAILED: The final target pose is unreachable.")
             if ik_check.violations:
-                print(f"     Reason: Solution violates joint limits: {ik_check.violations}")
+                logging.error(f"     Reason: Solution violates joint limits: {ik_check.violations}")
             self.is_valid = False # Mark as invalid if path fails
             return
 
         # --- NEW BLOCK: Calculate duration from velocity if needed ---
         if self.velocity_percent is not None:
-            print(f"  -> Calculating duration for {self.velocity_percent}% speed...")
+            logging.info(f"  -> Calculating duration for {self.velocity_percent}% speed...")
             # Calculate the total distance for translation and rotation
             linear_distance = np.linalg.norm(self.target_pose.t - self.initial_pose.t)
             angular_distance_rad = self.initial_pose.angdist(self.target_pose)
@@ -1514,15 +1522,15 @@ class MoveCartCommand:
             calculated_duration = max(time_linear, time_angular)
 
             if calculated_duration <= 0:
-                print("  -> INFO: MoveCart has zero duration. Marking as finished.")
+                logging.info("  -> INFO: MoveCart has zero duration. Marking as finished.")
                 self.is_finished = True
                 self.is_valid = True # It's valid, just already done.
                 return
 
             self.duration = calculated_duration
-            print(f"  -> Calculated MoveCart duration: {self.duration:.2f}s")
+            logging.info(f"  -> Calculated MoveCart duration: {self.duration:.2f}s")
 
-        print("  -> Command is valid and ready for execution.")
+        logging.info("  -> Command is valid and ready for execution.")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         if self.is_finished or not self.is_valid:
@@ -1543,9 +1551,9 @@ class MoveCartCommand:
         )
 
         if not ik_solution.success:
-            print("  -> ERROR: MoveCart failed. An intermediate point on the path is unreachable.")
+            logging.error("  -> ERROR: MoveCart failed. An intermediate point on the path is unreachable.")
             if ik_solution.violations:
-                 print(f"     Reason: Path violates joint limits: {ik_solution.violations}")
+                 logging.error(f"     Reason: Path violates joint limits: {ik_solution.violations}")
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -1561,7 +1569,7 @@ class MoveCartCommand:
         # --- END MODIFIED BLOCK ---
 
         if s >= 1.0:
-            print(f"MoveCart finished in ~{elapsed_time:.2f}s.")
+            logging.info(f"MoveCart finished in ~{elapsed_time:.2f}s.")
             self.is_finished = True
             # The main loop will handle holding the final position.
 
@@ -1607,7 +1615,7 @@ class GripperCommand:
             self.is_valid = False
 
         if not self.is_valid:
-            print(f"  -> VALIDATION FAILED for GripperCommand with action: '{self.action}'")
+            logging.error(f"  -> VALIDATION FAILED for GripperCommand with action: '{self.action}'")
 
     def execute_step(self, Gripper_data_out, InOut_out, Gripper_data_in, InOut_in, **kwargs):
         if self.is_finished or not self.is_valid:
@@ -1615,14 +1623,14 @@ class GripperCommand:
 
         self.timeout_counter -= 1
         if self.timeout_counter <= 0:
-            print(f"  -> ERROR: Gripper command timed out in state {self.state}.")
+            logging.error(f"  -> ERROR: Gripper command timed out in state {self.state}.")
             self.is_finished = True
             return True
 
         # --- Pneumatic Logic (Instantaneous) ---
         if self.gripper_type == 'pneumatic':
             InOut_out[self.port_index] = self.state_to_set
-            print("  -> Pneumatic gripper command sent.")
+            logging.info("  -> Pneumatic gripper command sent.")
             self.is_finished = True
             return True
 
@@ -1637,7 +1645,7 @@ class GripperCommand:
             
             # --- Calibrate Logic (Timed Delay) ---
             if self.state == "SEND_CALIBRATE":
-                print("  -> Sending one-shot calibrate command...")
+                logging.info("  -> Sending one-shot calibrate command...")
                 Gripper_data_out[4] = 1 # Set mode to calibrate
                 self.state = "WAITING_CALIBRATION"
                 return False
@@ -1645,7 +1653,7 @@ class GripperCommand:
             if self.state == "WAITING_CALIBRATION":
                 self.wait_counter -= 1
                 if self.wait_counter <= 0:
-                    print("  -> Calibration delay finished.")
+                    logging.info("  -> Calibration delay finished.")
                     Gripper_data_out[4] = 0 # Reset to operation mode
                     self.is_finished = True
                     return True
@@ -1663,7 +1671,7 @@ class GripperCommand:
                 # Check for completion
                 current_position = Gripper_data_in[1]
                 if abs(current_position - self.target_position) <= 5:
-                    print(f"  -> Gripper move complete.")
+                    logging.info(f"  -> Gripper move complete.")
                     self.is_finished = True
                     # Set command back to idle
                     bitfield = [1, 0, not InOut_in[4], 1, 0, 0, 0, 0]
@@ -1692,10 +1700,10 @@ class DelayCommand:
 
         # --- 1. Parameter Validation ---
         if not isinstance(duration, (int, float)) or duration <= 0:
-            print(f"  -> VALIDATION FAILED: Delay duration must be a positive number, but got {duration}.")
+            logging.error(f"  -> VALIDATION FAILED: Delay duration must be a positive number, but got {duration}.")
             return
 
-        print(f"Initializing Delay for {duration} seconds...")
+        logging.info(f"Initializing Delay for {duration} seconds...")
         
         self.duration = duration
         self.end_time = None  # Will be set in prepare_for_execution
@@ -1704,7 +1712,7 @@ class DelayCommand:
     def prepare_for_execution(self, current_position_in):
         """Set the end time when the command actually starts."""
         self.end_time = time.time() + self.duration
-        print(f"  -> Delay starting for {self.duration} seconds...")
+        logging.info(f"  -> Delay starting for {self.duration} seconds...")
 
     def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
         """
@@ -1720,7 +1728,7 @@ class DelayCommand:
 
         # --- B. Check for completion ---
         if self.end_time and time.time() >= self.end_time:
-            print(f"Delay finished after {self.duration} seconds.")
+            logging.info(f"Delay finished after {self.duration} seconds.")
             self.is_finished = True
         
         return self.is_finished
@@ -1756,10 +1764,10 @@ class BaseSmoothMotionCommand:
         
         # Lower threshold to 2mm for more aggressive transition generation
         if pos_error < 2.0:  # Changed from 5.0mm to 2.0mm
-            print(f"  -> Already near start position (error: {pos_error:.1f}mm)")
+            logging.info(f"  -> Already near start position (error: {pos_error:.1f}mm)")
             return None
         
-        print(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
+        logging.info(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
         
         # Calculate transition speed based on distance
         # Slower for short distances, faster for long distances
@@ -1791,7 +1799,7 @@ class BaseSmoothMotionCommand:
         
     def prepare_for_execution(self, current_position_in):
         """Minimal preparation - just check if we need a transition."""
-        print(f"  -> Preparing {self.description}...")
+        logging.info(f"  -> Preparing {self.description}...")
         
         # If there's a specified start pose, prepare transition
         if self.specified_start_pose:
@@ -1803,7 +1811,7 @@ class BaseSmoothMotionCommand:
             if self.transition_command:
                 self.transition_command.prepare_for_execution(current_position_in)
                 if not self.transition_command.is_valid:
-                    print(f"  -> ERROR: Cannot reach specified start position")
+                    logging.error(f"  -> ERROR: Cannot reach specified start position")
                     self.is_valid = False
                     self.error_state = True
                     self.error_message = "Cannot reach specified start position"
@@ -1814,7 +1822,7 @@ class BaseSmoothMotionCommand:
         # DON'T generate trajectory yet - wait until execution
         self.trajectory_generated = False
         self.trajectory_prepared = False
-        print(f"  -> {self.description} preparation complete (trajectory will be generated at execution)")
+        logging.info(f"  -> {self.description} preparation complete (trajectory will be generated at execution)")
             
     def generate_main_trajectory(self, effective_start_pose):
         """Override this in subclasses to generate the specific motion trajectory."""
@@ -1832,7 +1840,7 @@ class BaseSmoothMotionCommand:
             )
             
             if is_done:
-                print(f"  -> Transition complete")
+                logging.info(f"  -> Transition complete")
                 self.transition_complete = True
             return False
         
@@ -1840,7 +1848,7 @@ class BaseSmoothMotionCommand:
         if not self.trajectory_generated:
             # Get ACTUAL current position NOW
             actual_current_pose = self.get_current_pose_from_position(Position_in)
-            print(f"  -> Generating {self.description} from ACTUAL position: {[round(p, 1) for p in actual_current_pose[:3]]}")
+            logging.info(f"  -> Generating {self.description} from ACTUAL position: {[round(p, 1) for p in actual_current_pose[:3]]}")
             
             # Generate trajectory from where we ACTUALLY are
             self.trajectory = self.generate_main_trajectory(actual_current_pose)
@@ -1860,7 +1868,7 @@ class BaseSmoothMotionCommand:
             )
             
             if not ik_result.success:
-                print(f"  -> ERROR: Cannot reach first trajectory point")
+                logging.error(f"  -> ERROR: Cannot reach first trajectory point")
                 self.is_finished = True
                 self.error_state = True
                 self.error_message = "Cannot reach trajectory start"
@@ -1874,7 +1882,7 @@ class BaseSmoothMotionCommand:
             # Verify first point is close to current
             distance = np.linalg.norm(first_pose[:3] - np.array(actual_current_pose[:3]))
             if distance > 5.0:
-                print(f"  -> WARNING: First trajectory point {distance:.1f}mm from current!")
+                logging.warning(f"  -> WARNING: First trajectory point {distance:.1f}mm from current!")
         
         # Execute main trajectory
         if self.trajectory_command and self.trajectory_prepared:
@@ -1908,7 +1916,7 @@ class SmoothTrajectoryCommand:
         self.error_state = False
         self.error_message = ""
         
-        print(f"Initializing smooth {description} with {len(trajectory)} points")
+        logging.info(f"Initializing smooth {description} with {len(trajectory)} points")
     
     def prepare_for_execution(self, current_position_in):
         """Skip validation - trajectory is already generated from correct position"""
@@ -1926,7 +1934,7 @@ class SmoothTrajectoryCommand:
             Position_out = kwargs.get('Position_out', Position_in)
         
         if self.trajectory_index >= len(self.trajectory):
-            print(f"Smooth {self.description} finished.")
+            logging.info(f"Smooth {self.description} finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
             Command_out.value = 255
@@ -1949,7 +1957,7 @@ class SmoothTrajectoryCommand:
         )
         
         if not ik_result.success:
-            print(f"  -> IK failed at trajectory point {self.trajectory_index}")
+            logging.error(f"  -> IK failed at trajectory point {self.trajectory_index}")
             self.is_finished = True
             self.error_state = True
             self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
@@ -1969,8 +1977,8 @@ class SmoothTrajectoryCommand:
                 
                 # Use 1.2x safety margin (not 2x as before)
                 if step_diff > max_step_diff * 1.2:
-                    #print(f"  -> WARNING: Joint {i+1} velocity limit exceeded at point {self.trajectory_index}")
-                    #print(f"     Step difference: {step_diff}, Max allowed: {max_step_diff * 1.2:.1f}")
+                    #logging.debug(f"  -> WARNING: Joint {i+1} velocity limit exceeded at point {self.trajectory_index}")
+                    #logging.debug(f"     Step difference: {step_diff}, Max allowed: {max_step_diff * 1.2:.1f}")
                     
                     # Clamp the motion
                     sign = 1 if target_steps[i] > Position_in[i] else -1
@@ -2018,7 +2026,7 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             self.center = transformed['center']
             self.normal_vector = transformed.get('normal_vector')
             
-            print(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
+            logging.info(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
             
             # Also transform start_pose if specified
             if self.specified_start_pose:
@@ -2039,15 +2047,15 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         if self.normal_vector is not None:
             # TRF - use the transformed normal vector
             normal = np.array(self.normal_vector)
-            print(f"    Using transformed normal: {normal.round(3)}")
+            logging.info(f"    Using transformed normal: {normal.round(3)}")
         else:
             # WRF - use standard plane definition
             plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
             normal = np.array(plane_normals.get(self.plane, [0, 0, 1]))  # Convert to numpy array
-            print(f"    Using WRF plane {self.plane} with normal: {normal}")
+            logging.info(f"    Using WRF plane {self.plane} with normal: {normal}")
         
-        print(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
-        print(f"    Circle center: {[round(c, 1) for c in self.center]}")
+        logging.info(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
+        logging.info(f"    Circle center: {[round(c, 1) for c in self.center]}")
         
         # Add geometry validation
         center_np = np.array(self.center)
@@ -2059,8 +2067,8 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         distance_to_center = np.linalg.norm(to_start_plane)
         
         if abs(distance_to_center - self.radius) > self.radius * 0.3:
-            print(f"    WARNING: Robot is {distance_to_center:.1f}mm from center, but radius is {self.radius:.1f}mm")
-            print(f"    Circle geometry will be auto-corrected")
+            logging.warning(f"    WARNING: Robot is {distance_to_center:.1f}mm from center, but radius is {self.radius:.1f}mm")
+            logging.info(f"    Circle geometry will be auto-corrected")
         
         # Generate circle that starts at effective_start_pose
         trajectory = motion_gen.generate_circle_3d(
@@ -2154,7 +2162,7 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
             self.end_pose = transformed['end_pose']
             self.normal_vector = transformed.get('normal_vector')
             
-            print(f"  -> TRF Parametric Arc: end {self.end_pose[:3]} (WRF)")
+            logging.info(f"  -> TRF Parametric Arc: end {self.end_pose[:3]} (WRF)")
             
             # Also transform start_pose if specified
             if self.specified_start_pose:
@@ -2184,7 +2192,7 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
             chord_length = np.linalg.norm(chord_vec)
             
             if chord_length > 2 * self.radius:
-                print(f"  -> Warning: Points too far apart ({chord_length:.1f}mm) for radius {self.radius}mm")
+                logging.warning(f"  -> Warning: Points too far apart ({chord_length:.1f}mm) for radius {self.radius}mm")
                 self.radius = chord_length / 2 + 1
             
             # Calculate center position using the normal vector
@@ -2226,7 +2234,7 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
             d = np.linalg.norm(end_xy - start_xy)
             
             if d > 2 * self.radius:
-                print(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
+                logging.warning(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
                 self.radius = d / 2 + 1
             
             # Height of arc center from midpoint
@@ -2371,7 +2379,7 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
             # Update with transformed values
             self.waypoints = transformed['waypoints']
             
-            print(f"  -> TRF Spline: transformed {len(self.waypoints)} waypoints to WRF")
+            logging.info(f"  -> TRF Spline: transformed {len(self.waypoints)} waypoints to WRF")
             
             # Also transform start_pose if specified
             if self.specified_start_pose:
@@ -2395,18 +2403,18 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         if first_wp_error > 5.0:
             # First waypoint is far, prepend the start position
             modified_waypoints = [effective_start_pose] + self.waypoints
-            print(f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)")
+            logging.info(f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)")
         else:
             # Replace first waypoint with actual start to ensure continuity
             modified_waypoints = [effective_start_pose] + self.waypoints[1:]
-            print(f"    Replaced first waypoint with actual start position")
+            logging.info(f"    Replaced first waypoint with actual start position")
         
         timestamps = np.linspace(0, self.duration, len(modified_waypoints))
         
         # Generate the spline trajectory
         trajectory = motion_gen.generate_cubic_spline(modified_waypoints, timestamps)
         
-        print(f"    Generated spline with {len(trajectory)} points")
+        logging.info(f"    Generated spline with {len(trajectory)} points")
         
         return trajectory
 
@@ -2433,7 +2441,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             # Update with transformed values
             self.segment_definitions = transformed['segments']
             
-            print(f"  -> TRF Blend: transformed {len(self.segment_definitions)} segments to WRF")
+            logging.info(f"  -> TRF Blend: transformed {len(self.segment_definitions)} segments to WRF")
             
             # Also transform start_pose if specified
             if self.specified_start_pose:
@@ -2562,7 +2570,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             for i in range(1, len(trajectories)):
                 blended = blender.blend_trajectories(blended, trajectories[i], blend_samples)
             
-            print(f"    Blended {len(trajectories)} segments into {len(blended)} points")
+            logging.info(f"    Blended {len(trajectories)} segments into {len(blended)} points")
             return blended
         elif trajectories:
             return trajectories[0]
@@ -2616,7 +2624,7 @@ def parse_smooth_motion_commands(parts):
             try:
                 return list(map(float, start_str.split(',')))
             except:
-                print(f"Warning: Invalid start pose format: {start_str}")
+                logging.warning(f"Warning: Invalid start pose format: {start_str}")
                 return None
     
     # Helper function for calculating duration from speed
@@ -2652,7 +2660,7 @@ def parse_smooth_motion_commands(parts):
                 path_length = 2 * np.pi * radius
                 duration = calculate_duration_from_speed(path_length, timing_value)
             
-            print(f"  -> Parsed circle: r={radius}mm, plane={plane}, frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
+            logging.info(f"  -> Parsed circle: r={radius}mm, plane={plane}, frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
             
             # Return command object with frame parameter
             return SmoothCircleCommand(center, radius, plane, duration, clockwise, frame, start_pose)
@@ -2678,7 +2686,7 @@ def parse_smooth_motion_commands(parts):
                 arc_length = radius_estimate * estimated_arc_angle
                 duration = calculate_duration_from_speed(arc_length, timing_value)
             
-            print(f"  -> Parsed arc (center): frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
+            logging.info(f"  -> Parsed arc (center): frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
             
             # Return command with frame
             return SmoothArcCenterCommand(end_pose, center, duration, clockwise, frame, start_pose)
@@ -2702,7 +2710,7 @@ def parse_smooth_motion_commands(parts):
                 arc_length = radius * np.deg2rad(arc_angle)
                 duration = calculate_duration_from_speed(arc_length, timing_value)
             
-            print(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, frame={frame}, duration={duration:.2f}s")
+            logging.info(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, frame={frame}, duration={duration:.2f}s")
             
             # Return command object with frame
             return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, frame, start_pose)
@@ -2737,7 +2745,7 @@ def parse_smooth_motion_commands(parts):
                 
                 duration = calculate_duration_from_speed(total_dist, timing_value)
             
-            print(f"  -> Parsed spline: {num_waypoints} points, frame={frame}, duration={duration:.2f}s")
+            logging.info(f"  -> Parsed spline: {num_waypoints} points, frame={frame}, duration={duration:.2f}s")
             
             # Return command object with frame
             return SmoothSplineCommand(waypoints, duration, frame, start_pose)
@@ -2764,7 +2772,7 @@ def parse_smooth_motion_commands(parts):
                 helix_length = np.sqrt(horizontal_length**2 + height**2)
                 duration = calculate_duration_from_speed(helix_length, timing_value)
             
-            print(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, frame={frame}, duration={duration:.2f}s")
+            logging.info(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, frame={frame}, duration={duration:.2f}s")
             
             # Return command object with frame
             return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, frame, start_pose)
@@ -2904,7 +2912,7 @@ def parse_smooth_motion_commands(parts):
                     scale_factor = overall_duration / total_original_duration
                     for seg in segment_definitions:
                         seg['duration'] = seg['original_duration'] * scale_factor
-                print(f"  -> Scaled blend segments to total duration: {overall_duration:.2f}s")
+                logging.info(f"  -> Scaled blend segments to total duration: {overall_duration:.2f}s")
                         
             elif overall_speed is not None:
                 # Calculate duration from speed and estimated path length
@@ -2913,23 +2921,21 @@ def parse_smooth_motion_commands(parts):
                     scale_factor = overall_duration / total_original_duration
                     for seg in segment_definitions:
                         seg['duration'] = seg['original_duration'] * scale_factor
-                print(f"  -> Calculated blend duration from speed: {overall_duration:.2f}s")
+                logging.info(f"  -> Calculated blend duration from speed: {overall_duration:.2f}s")
             else:
-                print(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
+                logging.info(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
             
-            print(f"  -> Parsed blend: {num_segments} segments, frame={frame}, blend_time={blend_time}s")
+            logging.info(f"  -> Parsed blend: {num_segments} segments, frame={frame}, blend_time={blend_time}s")
             
             # Return command with frame
             return SmoothBlendCommand(segment_definitions, blend_time, frame, start_pose)
             
     except Exception as e:
-        print(f"Error parsing smooth motion command: {e}")
-        print(f"Command parts: {parts}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Error parsing smooth motion command: {e}")
+        logging.error(f"Command parts: {parts}")
         return None
     
-    print(f"Warning: Unknown smooth motion command type: {command_type}")
+    logging.warning(f"Warning: Unknown smooth motion command type: {command_type}")
     return None
 
 def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
@@ -2965,7 +2971,7 @@ def transform_command_params_to_wrf(command_type: str, params: dict, frame: str,
             normal_trf = np.array(plane_normals_trf[params['plane']])
             normal_wrf = tool_pose.R @ normal_trf
             transformed['normal_vector'] = normal_wrf.tolist()
-            print(f"  -> TRF circle plane {params['plane']} transformed to WRF")
+            logging.info(f"  -> TRF circle plane {params['plane']} transformed to WRF")
     
     # SMOOTH_ARC_CENTER - Transform center, end_pose, and implied plane
     elif command_type == 'SMOOTH_ARC_CENTER':
@@ -3174,7 +3180,7 @@ def send_acknowledgment(cmd_id: str, status: str, details: str = "", addr=None):
         try:
             ack_socket.sendto(ack_message.encode('utf-8'), (addr[0], CLIENT_ACK_PORT))
         except Exception as e:
-            print(f"Failed to send ack to {addr}: {e}")
+            logging.error(f"Failed to send ack to {addr}: {e}")
     
     # Also broadcast to localhost in case the client is local
     try:
@@ -3223,7 +3229,7 @@ command_queue = deque()
 if not str(os.getenv("PAROL6_NOAUTOHOME", "0")).lower() in ("1", "true", "yes", "on"):
     command_queue.append(HomeCommand())
 else:
-    print("PAROL6_NOAUTOHOME is set; skipping auto-home on startup.")
+    logging.info("PAROL6_NOAUTOHOME is set; skipping auto-home on startup.")
 
 # --- State variable for the currently running command ---
 active_command = None
@@ -3252,7 +3258,7 @@ while timer.elapsed_time < 1100000:
     if ser is None or not ser.is_open:
         now = time.time()
         if now - last_reconnect_attempt > 1.0:
-            print("Serial port not open. Attempting to reconnect...")
+            logging.warning("Serial port not open. Attempting to reconnect...")
             last_reconnect_attempt = now
             try:
                 # Load port from com_port.txt if not already set
@@ -3266,7 +3272,7 @@ while timer.elapsed_time < 1100000:
                 if com_port_str:
                     ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
                     if ser.is_open:
-                        print(f"Successfully reconnected to {com_port_str}")
+                        logging.info(f"Successfully reconnected to {com_port_str}")
             except serial.SerialException:
                 ser = None
         # Do not block or continue; proceed to UDP handling every tick
@@ -3287,7 +3293,7 @@ while timer.elapsed_time < 1100000:
 
                 # Handle immediate response commands
                 if command_name == 'STOP':
-                    print("Received STOP command. Halting all motion and clearing queue.")
+                    logging.warning("Received STOP command. Halting all motion and clearing queue.")
                     
                     # Cancel active command
                     if active_command and active_command_id:
@@ -3445,7 +3451,7 @@ while timer.elapsed_time < 1100000:
                     incoming_command_buffer.append((raw_message, addr))
 
     except Exception as e:
-        print(f"Network receive error: {e}")
+        logging.error(f"Network receive error: {e}")
 
     # =======================================================================
     # === PROCESS COMMANDS FROM BUFFER WITH ACKNOWLEDGMENTS ===
@@ -3457,7 +3463,7 @@ while timer.elapsed_time < 1100000:
         
         # Parse command ID
         cmd_id, message = parse_command_with_id(raw_message)
-        print(f"Processing command{' (ID: ' + cmd_id + ')' if cmd_id else ''}: {message[:50]}...")
+        logging.info(f"Processing command{' (ID: ' + cmd_id + ')' if cmd_id else ''}: {message[:50]}...")
         
         parts = message.split('|')
         command_name = parts[0].upper()
@@ -3571,7 +3577,7 @@ while timer.elapsed_time < 1100000:
             # Command was not queued
             if cmd_id:
                 send_acknowledgment(cmd_id, "INVALID", error_details, addr)
-            print(f"Warning: {error_details}")
+            logging.warning(f"Warning: {error_details}")
 
     # =======================================================================
     # === MAIN EXECUTION LOGIC WITH ACKNOWLEDGMENTS ===
@@ -3599,8 +3605,8 @@ while timer.elapsed_time < 1100000:
                     if cmd_id:
                         send_acknowledgment(cmd_id, "CANCELLED", "E-Stop activated - command not processed", addr)
                 
-                print(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' cancelled.")
-                print("Release E-Stop and press 'e' to re-enable.")
+                logging.warning(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' cancelled.")
+                logging.warning("Release E-Stop and press 'e' to re-enable.")
                 e_stop_active = True
             
             Command_out.value = 102
@@ -3615,7 +3621,7 @@ while timer.elapsed_time < 1100000:
         elif e_stop_active:
             # Waiting for re-enable
             if keyboard and keyboard.is_pressed('e'):
-                print("Re-enabling robot...")
+                logging.info("Re-enabling robot...")
                 Command_out.value = 101
                 e_stop_active = False
             else:
@@ -3649,7 +3655,7 @@ while timer.elapsed_time < 1100000:
                     try:
                         new_command.prepare_for_execution(current_position_in=Position_in)
                     except Exception as e:
-                        print(f"Command preparation failed: {e}")
+                        logging.error(f"Command preparation failed: {e}")
                         if hasattr(new_command, 'is_valid'):
                             new_command.is_valid = False
                         if hasattr(new_command, 'error_message'):
@@ -3711,8 +3717,7 @@ while timer.elapsed_time < 1100000:
                         active_command_id = None
                         
                 except Exception as e:
-                    # Command execution error
-                    print(f"Command execution error: {e}")
+                    logging.error(f"Command execution error: {e}")
                     if active_command_id:
                         send_acknowledgment(active_command_id, "FAILED", 
                                           f"Execution error: {str(e)}")
@@ -3743,7 +3748,7 @@ while timer.elapsed_time < 1100000:
             pass
 
     except serial.SerialException as e:
-        print(f"Serial communication error: {e}")
+        logging.error(f"Serial communication error: {e}")
         
         # Send failure acknowledgments for active command
         if active_command_id:
