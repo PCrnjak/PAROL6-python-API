@@ -959,7 +959,10 @@ class JogCommand:
             speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, max_joint_speed]))
 
         self.speed_out = speed_steps_per_sec * self.direction
-        self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
+        if self.duration:
+            self.command_len = max(1, int(self.duration / INTERVAL_S))
+        else:
+            self.command_len = float('inf')
         logging.info("  -> Jog command is ready.")
 
 
@@ -1044,7 +1047,7 @@ class MultiJogCommand:
         self.joints = joints
         self.speed_percentages = speed_percentages
         self.duration = duration
-        self.command_len = int(self.duration / INTERVAL_S)
+        self.command_len = max(1, int(self.duration / INTERVAL_S))
 
         # --- This will be calculated in the prepare step ---
         self.speeds_out = [0] * 6
@@ -3305,7 +3308,7 @@ incoming_command_buffer = deque()
 # Timestamp of the last processed network command
 last_command_time = 0
 # Cooldown period in seconds to prevent command flooding
-COMMAND_COOLDOWN_S = 0.1 # 100ms
+COMMAND_COOLDOWN_S = 0.01 # 10ms
 
 # Set interval
 timer = Timer(interval=INTERVAL_S, warnings=False, precise=True)
@@ -3512,7 +3515,17 @@ while timer.elapsed_time < 1100000:
                             send_acknowledgment(cmd_id, "FAILED", "No port specified", addr)
 
                 else:
-                    # Queue command for processing
+                    # Queue command for processing (coalesce jog-type commands to avoid backlog)
+                    cmd_upper = parts[0].upper()
+                    if cmd_upper in {'JOG', 'CARTJOG', 'MULTIJOG'}:
+                        filtered = []
+                        for m, a in incoming_command_buffer:
+                            _, m2 = parse_command_with_id(m)
+                            c2 = m2.split('|', 1)[0].upper()
+                            if c2 not in {'JOG', 'CARTJOG', 'MULTIJOG'}:
+                                filtered.append((m, a))
+                        incoming_command_buffer.clear()
+                        incoming_command_buffer.extend(filtered)
                     incoming_command_buffer.append((raw_message, addr))
 
     except Exception as e:
@@ -3632,7 +3645,12 @@ while timer.elapsed_time < 1100000:
                     send_acknowledgment(cmd_id, "INVALID", 
                                        "Command failed validation", addr)
             else:
-                # Add to queue
+                # Add to queue (purge existing jogs first to avoid backlog)
+                if isinstance(command_obj, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                    filtered = deque(c for c in command_queue if not isinstance(c, (JogCommand, CartesianJogCommand, MultiJogCommand)))
+                    command_queue.clear()
+                    command_queue.extend(filtered)
+
                 command_queue.append(command_obj)
                 if cmd_id:
                     command_id_map[command_obj] = (cmd_id, addr)
