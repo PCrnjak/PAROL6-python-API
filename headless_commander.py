@@ -65,6 +65,9 @@ console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 root.addHandler(console)
 logger = logging.getLogger("parol6.server")
 
+# Enable optional fake-serial simulation for hardware-free tests
+FAKE_SERIAL = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower() in ("1", "true", "yes", "on")
+
 # =========================
 # Runtime flags and globals
 # =========================
@@ -742,6 +745,68 @@ def quintic_scaling(s: float) -> float:
     using a quintic polynomial, ensuring smooth start/end accelerations.
     """
     return 6 * (s**5) - 15 * (s**4) + 10 * (s**3)
+
+
+def simulate_robot_step(dt: float) -> None:
+    """
+    Simulate firmware feedback at 100 Hz when no serial is present.
+    Updates Position_in/Speed_in based on Command_out and Speed_out/Position_out.
+    """
+    # Mark robot as homed and ensure E-Stop released bit
+    for i in range(6):
+        Homed_in[i] = 1
+    if len(InOut_in) > 4:
+        InOut_in[4] = 1  # 1 = not pressed; main loop treats 0 as E-Stop
+
+    # Integrate motion according to current command type
+    if Command_out.value == 123:
+        # Jog/speed control: integrate Speed_out (steps/sec) over dt
+        for i in range(6):
+            v = int(Speed_out[i])
+            max_v = int(PAROL6_ROBOT.Joint_max_speed[i])
+            if v > max_v:
+                v = max_v
+            elif v < -max_v:
+                v = -max_v
+            new_pos = int(Position_in[i] + v * dt)
+            # Clamp to limits
+            jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+            if new_pos < jmin:
+                new_pos = jmin
+                v = 0
+            elif new_pos > jmax:
+                new_pos = jmax
+                v = 0
+            Speed_in[i] = v
+            Position_in[i] = new_pos
+
+    elif Command_out.value == 156:
+        # Position control: move toward Position_out with capped delta per tick
+        for i in range(6):
+            err = int(Position_out[i] - Position_in[i])
+            if err == 0:
+                Speed_in[i] = 0
+                continue
+            max_step = int(PAROL6_ROBOT.Joint_max_speed[i] * dt)
+            if max_step < 1:
+                max_step = 1
+            step = max(-max_step, min(max_step, err))
+            new_pos = Position_in[i] + step
+            # Clamp to limits
+            jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+            if new_pos < jmin:
+                new_pos = jmin
+                step = 0
+            elif new_pos > jmax:
+                new_pos = jmax
+                step = 0
+            Position_in[i] = int(new_pos)
+            Speed_in[i] = int(step / dt) if dt > 0 else 0
+
+    else:
+        # Idle/other: hold position
+        for i in range(6):
+            Speed_in[i] = 0
 
 #########################################################################
 # Robot Commands Start Here
@@ -3744,8 +3809,11 @@ while timer.elapsed_time < 1100000:
             Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
                     Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
         else:
-            # Serial not available; skip IO this cycle
-            pass
+            # Serial not available; optionally simulate plant
+            if FAKE_SERIAL:
+                simulate_robot_step(INTERVAL_S)
+            else:
+                pass
 
     except serial.SerialException as e:
         logging.error(f"Serial communication error: {e}")
