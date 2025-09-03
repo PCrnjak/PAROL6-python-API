@@ -25,6 +25,7 @@ import os
 import re
 import logging
 import struct
+from enum import Enum
 try:
     import keyboard  # type: ignore
 except Exception:
@@ -49,7 +50,7 @@ INTERVAL_S = 0.01
 prev_time = 0
 
 # Jogging speed scale to slightly increase jog caps while respecting absolute limits
-JOG_SPEED_SCALE = 1.2
+JOG_SPEED_SCALE = 2
 
 # Configure unified logging (PAROL_LOG_LEVEL) and simple console formatter
 PAROL_LOG_LEVEL = os.getenv("PAROL_LOG_LEVEL", "WARNING").upper()
@@ -67,6 +68,20 @@ logger = logging.getLogger("parol6.server")
 
 # Enable optional fake-serial simulation for hardware-free tests
 FAKE_SERIAL = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower() in ("1", "true", "yes", "on")
+
+# Streaming toggle: STREAM|ON enables zero-queue latest-wins for JOG/CARTJOG; STREAM|OFF disables
+stream_mode = False
+
+class JogFrame(str, Enum):
+    WRF = "WRF"
+    TRF = "TRF"
+
+# Jacobian damping
+JACOBIAN_DAMPING_LAMBDA = float(os.getenv("PAROL6_JAC_LAMBDA", "1e-6"))
+
+# Simplified streaming state - just track when to stop current streaming motion
+streaming_timeout_time = 0.0
+streaming_active = False
 
 # =========================
 # Runtime flags and globals
@@ -808,6 +823,64 @@ def simulate_robot_step(dt: float) -> None:
         for i in range(6):
             Speed_in[i] = 0
 
+# =========================
+# Jog helpers
+# =========================
+def compute_twist(frame: str, axis: str, speed_percent: float, current_T: SE3):
+    """
+    Compute tool twist (vx,vy,vz,wx,wy,wx) in BASE/WRF frame.
+    Linear units m/s, angular units rad/s.
+    """
+    # Map speed% to linear/rotational speeds using existing caps
+    linear_speed_ms = float(np.interp(speed_percent, [0, 100], [PAROL6_ROBOT.Cartesian_linear_velocity_min_JOG, PAROL6_ROBOT.Cartesian_linear_velocity_max_JOG]))
+    angular_speed_rads = np.deg2rad(float(np.interp(speed_percent, [0, 100], [PAROL6_ROBOT.Cartesian_angular_velocity_min, PAROL6_ROBOT.Cartesian_angular_velocity_max])))
+
+    lin_axis, rot_axis = AXIS_MAP.get(axis, ([0,0,0],[0,0,0]))
+
+    v_lin = np.array(lin_axis, dtype=float) * linear_speed_ms  # m/s
+    v_rot = np.array(rot_axis, dtype=float) * angular_speed_rads  # rad/s
+
+    if frame.upper() == JogFrame.TRF.value:
+        # Transform tool-frame twist directions to base
+        R = current_T.R
+        v_lin = R @ v_lin
+        v_rot = R @ v_rot
+
+    return v_lin, v_rot
+
+
+def jacobian_qdot(robot: DHRobot, q: np.ndarray, v_lin: np.ndarray, v_rot: np.ndarray, lambda_: float) -> np.ndarray:
+    """
+    Damped least-squares inverse: qdot = J^T (J J^T + λ^2 I)^{-1} v
+    v is 6x1 [vx vy vz wx wy wz]^T with units [m/s, rad/s]
+    """
+    J = robot.jacob0(q)  # 6x6
+    v = np.hstack([v_lin, v_rot]).reshape(6, )
+    JJt = J @ J.T
+    damp = (lambda_ ** 2) * np.eye(6)
+    qdot = J.T @ np.linalg.solve(JJt + damp, v)
+    return qdot
+
+
+def apply_streaming_velocities(qdot: np.ndarray, Speed_out: list) -> None:
+    """
+    Simple velocity scaling: convert qdot to steps/s and scale proportionally if any exceed limits.
+    """
+    # Convert rad/s to steps/s
+    speeds_steps = np.array([PAROL6_ROBOT.SPEED_RAD2STEP(qdot[i], i) for i in range(6)])
+    
+    # Find max ratio of speed to limit across all joints
+    max_ratios = np.array([abs(speeds_steps[i]) / PAROL6_ROBOT.Joint_max_speed[i] for i in range(6)])
+    max_ratio = np.max(max_ratios)
+    
+    # Scale all velocities proportionally if any exceed limits
+    if max_ratio > 1.0:
+        speeds_steps = speeds_steps / max_ratio
+    
+    # Convert to int and apply
+    for i in range(6):
+        Speed_out[i] = int(speeds_steps[i])
+
 #########################################################################
 # Robot Commands Start Here
 #########################################################################
@@ -1199,31 +1272,10 @@ class CartesianJogCommand:
             # Post-multiply to apply the change in the Tool Reference Frame
             target_pose = T_current * delta_pose
         
-        # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
-
-        if var.success:
-            q_velocities = (var.q - q_current) / INTERVAL_S
-            for i in range(6):
-                Speed_out[i] = int(PAROL6_ROBOT.SPEED_RAD2STEP(q_velocities[i], i))
-        else:
-            logging.warning("IK Warning: Could not find solution for jog step. Stopping.")
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-
-        # --- D. Speed Scaling ---
-        max_scale_factor = 1.0
-        for i in range(6):
-            if abs(Speed_out[i]) > PAROL6_ROBOT.Joint_max_speed[i]:
-                scale = abs(Speed_out[i]) / PAROL6_ROBOT.Joint_max_speed[i]
-                if scale > max_scale_factor:
-                    max_scale_factor = scale
-        
-        if max_scale_factor > 1.0:
-            for i in range(6):
-                Speed_out[i] = int(Speed_out[i] / max_scale_factor)
+        # --- C. Solve IK / Qdot and Calculate Velocities ---
+        v_lin, v_rot = compute_twist(self.frame, [k for k in AXIS_MAP.keys() if AXIS_MAP[k] == self.axis_vectors][0] if self.axis_vectors in AXIS_MAP.values() else 'X+', self.speed_percentage, T_current)
+        qdot = jacobian_qdot(PAROL6_ROBOT.robot, q_current, v_lin, v_rot, JACOBIAN_DAMPING_LAMBDA)
+        apply_streaming_velocities(qdot, Speed_out)
 
         return False # Command is still running
 
@@ -3514,6 +3566,83 @@ while timer.elapsed_time < 1100000:
                         if cmd_id:
                             send_acknowledgment(cmd_id, "FAILED", "No port specified", addr)
 
+                elif command_name == 'STREAM' and len(parts) >= 2:
+                    arg = parts[1].strip().upper()
+                    if arg == 'ON':
+                        stream_mode = True
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", "Stream mode ON", addr)
+                    elif arg == 'OFF':
+                        stream_mode = False
+                        streaming_active = False
+                        streaming_timeout_time = 0.0
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", "Stream mode OFF", addr)
+                    else:
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Expected ON or OFF", addr)
+
+                elif command_name == 'JOG' and stream_mode and len(parts) == 5:
+                    # Direct streaming: compute velocities immediately for joint jog
+                    try:
+                        joint_index = int(parts[1])
+                        speed_percent = float(parts[2])
+                        timeout_s = float(parts[3]) if parts[3].upper() != 'NONE' else 0.2
+                        
+                        # Immediate joint velocity computation
+                        direction = 1 if 0 <= joint_index <= 5 else -1
+                        j = joint_index if direction == 1 else joint_index - 6
+                        if 0 <= j < 6:
+                            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[j] * JOG_SPEED_SCALE)
+                            abs_max = int(PAROL6_ROBOT.Joint_max_speed[j])
+                            max_joint_speed = min(abs_max, max_cap)
+                            speed_steps_per_sec = int(np.interp(speed_percent, [0, 100], [0, max_joint_speed])) * direction
+                            
+                            Speed_out[:] = [0] * 6
+                            Speed_out[j] = speed_steps_per_sec
+                            Command_out.value = 123
+                            streaming_timeout_time = time.time() + timeout_s
+                            streaming_active = True
+                            
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "EXECUTING", "", addr)
+                        else:
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "FAILED", "Invalid joint index", addr)
+                    except Exception as e:
+                        logging.error(e)
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Malformed JOG (stream)", addr)
+
+                elif command_name == 'CARTJOG' and stream_mode and len(parts) == 5:
+                    # Direct streaming: compute Jacobian velocities immediately
+                    try:
+                        frame = parts[1].upper()
+                        axis = parts[2]
+                        speed_percent = float(parts[3])
+                        timeout_s = float(parts[4]) if parts[4].upper() != 'NONE' else 0.2
+                        
+                        # Immediate Jacobian computation
+                        q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
+                        T_current = PAROL6_ROBOT.robot.fkine(q_current)
+                        if isinstance(T_current, SE3) and axis in AXIS_MAP:
+                            v_lin, v_rot = compute_twist(frame, axis, speed_percent, T_current)
+                            qdot = jacobian_qdot(PAROL6_ROBOT.robot, q_current, v_lin, v_rot, JACOBIAN_DAMPING_LAMBDA)
+                            apply_streaming_velocities(qdot, Speed_out)
+                            Command_out.value = 123
+                            streaming_timeout_time = time.time() + timeout_s
+                            streaming_active = True
+                            
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "EXECUTING", "", addr)
+                        else:
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "FAILED", "Invalid frame/axis or no pose", addr)
+                    except Exception as e:
+                        logging.error(e)
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Malformed CARTJOG (stream)", addr)
+
                 else:
                     # Queue command for processing (coalesce jog-type commands to avoid backlog)
                     cmd_upper = parts[0].upper()
@@ -3813,9 +3942,17 @@ while timer.elapsed_time < 1100000:
                     active_command_id = None
                     
             else:
-                # No active command - idle
-                Command_out.value = 255
-                Speed_out[:] = [0] * 6
+                # No active command - check streaming timeout, else idle
+                if streaming_active and time.time() > streaming_timeout_time:
+                    # Streaming timeout: stop motion
+                    streaming_active = False
+                    Speed_out[:] = [0] * 6
+                    Speed_in[:] = [0] * 6  # Also zero feedback speeds for test consistency
+                    Command_out.value = 255
+                elif not streaming_active:
+                    # No streaming, no command: idle
+                    Command_out.value = 255
+                    Speed_out[:] = [0] * 6
                 Position_out[:] = Position_in[:]
 
         # --- Communication with Robot ---
