@@ -11,6 +11,7 @@ import time
 import threading
 import queue
 import uuid
+import json
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -77,7 +78,7 @@ class LazyCommandTracker:
         try:
             print("[Tracker] First tracking request - initializing resources...")
             
-            # Create socket
+            # Socket initialization
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.bind(('', self.listen_port))
             self._socket.settimeout(0.1)
@@ -276,7 +277,7 @@ def send_and_wait(
             status_dict['command_id'] = cmd_id
             return status_dict
     
-    # Handle cases where a command_id could not be generated
+    # Fallback for tracking failures
     if non_blocking:
         return None
     else:
@@ -565,10 +566,14 @@ def smooth_circle(
     radius: float,
     plane: Literal['XY', 'XZ', 'YZ'] = 'XY',
     frame: Literal['WRF', 'TRF'] = 'WRF',
+    center_mode: Literal['ABSOLUTE', 'TOOL', 'RELATIVE'] = 'ABSOLUTE',
+    entry_mode: Literal['AUTO', 'TANGENT', 'DIRECT', 'NONE'] = 'NONE',
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
     clockwise: bool = False,
+    trajectory_type: Literal['cubic', 'quintic', 's_curve'] = 'cubic',
+    jerk_limit: Optional[float] = None,
     wait_for_ack: bool = False,
     timeout: float = 10.0,
     non_blocking: bool = False
@@ -581,11 +586,22 @@ def smooth_circle(
         radius: Circle radius in mm
         plane: Plane of the circle ('XY', 'XZ', or 'YZ')
         frame: Reference frame ('WRF' for World, 'TRF' for Tool)
+        center_mode: How to interpret center point:
+                    'ABSOLUTE' - Use exact coordinates (default)
+                    'TOOL' - Center at current tool position
+                    'RELATIVE' - Offset from current position
+        entry_mode: How to approach circle if not on perimeter:
+                   'AUTO' - Generate smooth entry trajectory
+                   'TANGENT' - Approach tangentially
+                   'DIRECT' - Direct line to nearest point
+                   'NONE' - Start immediately (default)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose (mm and degrees).
                    If None, starts from current position.
         duration: Time to complete the circle in seconds
         speed_percentage: Speed as percentage (1-100)
         clockwise: Direction of motion
+        trajectory_type: Type of trajectory ('cubic', 'quintic', 's_curve'). Default 'cubic'
+        jerk_limit: Optional jerk limit for s_curve trajectory (units/s³)
         wait_for_ack: Enable command tracking (default False)
         timeout: Timeout for acknowledgment
         non_blocking: Return immediately with command ID
@@ -608,7 +624,17 @@ def smooth_circle(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_CIRCLE|{center_str}|{radius}|{plane}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
+    # Add trajectory type and new parameters
+    traj_params = f"|{trajectory_type}"
+    if trajectory_type == 's_curve' and jerk_limit is not None:
+        traj_params += f"|{jerk_limit}"
+    elif trajectory_type != 'cubic':
+        traj_params += "|DEFAULT"  # Use default jerk limit for s_curve
+    
+    # Add center_mode and entry_mode parameters
+    mode_params = f"|{center_mode}|{entry_mode}"
+    
+    command = f"SMOOTH_CIRCLE|{center_str}|{radius}|{plane}|{frame}|{start_str}|{timing_str}|{clockwise_str}{traj_params}{mode_params}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -623,6 +649,8 @@ def smooth_arc_center(
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
     clockwise: bool = False,
+    trajectory_type: Literal['cubic', 'quintic', 's_curve'] = 'cubic',
+    jerk_limit: Optional[float] = None,
     wait_for_ack: bool = False,
     timeout: float = 10.0,
     non_blocking: bool = False
@@ -640,6 +668,8 @@ def smooth_arc_center(
         duration: Time to complete the arc in seconds
         speed_percentage: Speed as percentage (1-100)
         clockwise: Direction of motion
+        trajectory_type: Type of trajectory ('cubic', 'quintic', 's_curve'). Default 'cubic'
+        jerk_limit: Optional jerk limit for s_curve trajectory (units/s³)
         wait_for_ack: Enable command tracking
         timeout: Timeout for acknowledgment
         non_blocking: Return immediately with command ID
@@ -659,7 +689,14 @@ def smooth_arc_center(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
+    # Add trajectory type if not default
+    traj_params = f"|{trajectory_type}"
+    if trajectory_type == 's_curve' and jerk_limit is not None:
+        traj_params += f"|{jerk_limit}"
+    elif trajectory_type != 'cubic':
+        traj_params += "|DEFAULT"
+    
+    command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|{timing_str}|{clockwise_str}{traj_params}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -675,6 +712,8 @@ def smooth_arc_parametric(
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
     clockwise: bool = False,
+    trajectory_type: Literal['cubic', 'quintic', 's_curve'] = 'cubic',
+    jerk_limit: Optional[float] = None,
     wait_for_ack: bool = False,
     timeout: float = 10.0,
     non_blocking: bool = False
@@ -692,6 +731,8 @@ def smooth_arc_parametric(
         duration: Time to complete the arc in seconds
         speed_percentage: Speed as percentage (1-100)
         clockwise: Direction of motion
+        trajectory_type: Type of trajectory profile ('cubic', 'quintic', or 's_curve')
+        jerk_limit: Maximum jerk for s_curve trajectory (mm/s^3)
         wait_for_ack: Enable command tracking
         timeout: Timeout for acknowledgment
         non_blocking: Return immediately with command ID
@@ -710,7 +751,14 @@ def smooth_arc_parametric(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_ARC_PARAM|{end_str}|{radius}|{arc_angle}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
+    # Add trajectory type if not default
+    traj_params = f"|{trajectory_type}"
+    if trajectory_type == 's_curve' and jerk_limit is not None:
+        traj_params += f"|{jerk_limit}"
+    elif trajectory_type != 'cubic':
+        traj_params += "|DEFAULT"
+    
+    command = f"SMOOTH_ARC_PARAM|{end_str}|{radius}|{arc_angle}|{frame}|{start_str}|{timing_str}|{clockwise_str}{traj_params}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -723,6 +771,8 @@ def smooth_spline(
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
+    trajectory_type: Literal['cubic', 'quintic', 's_curve'] = 'cubic',
+    jerk_limit: Optional[float] = None,
     wait_for_ack: bool = False,
     timeout: float = 10.0,
     non_blocking: bool = False
@@ -738,6 +788,8 @@ def smooth_spline(
                    If specified and different from first waypoint, adds transition.
         duration: Total time for the motion in seconds
         speed_percentage: Speed as percentage (1-100)
+        trajectory_type: Type of trajectory ('cubic', 'quintic', 's_curve'). Default 'cubic'
+        jerk_limit: Optional jerk limit for s_curve trajectory (units/s³)
         wait_for_ack: Enable command tracking
         timeout: Timeout for acknowledgment
         non_blocking: Return immediately with command ID
@@ -760,8 +812,17 @@ def smooth_spline(
     for wp in waypoints:
         waypoint_strs.extend(map(str, wp))
     
-    # Build command
+    # Build command with trajectory type
     command_parts = [f"SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
+    
+    # Add trajectory type
+    command_parts.append(trajectory_type)
+    if trajectory_type == 's_curve' and jerk_limit is not None:
+        command_parts.append(str(jerk_limit))
+    elif trajectory_type == 's_curve':
+        command_parts.append("DEFAULT")
+    
+    # Add waypoints
     command_parts.extend(waypoint_strs)
     command = "|".join(command_parts)
     
@@ -776,6 +837,8 @@ def smooth_helix(
     pitch: float,
     height: float,
     frame: Literal['WRF', 'TRF'] = 'WRF',
+    trajectory_type: Literal['cubic', 'quintic', 's_curve'] = 'cubic',
+    jerk_limit: Optional[float] = None,
     start_pose: Optional[List[float]] = None,
     duration: Optional[float] = None,
     speed_percentage: Optional[float] = None,
@@ -793,6 +856,8 @@ def smooth_helix(
         pitch: Vertical distance per revolution in mm
         height: Total height of helix in mm
         frame: Reference frame ('WRF' for World, 'TRF' for Tool)
+        trajectory_type: Type of trajectory ('cubic', 'quintic', 's_curve'). Default 'cubic'
+        jerk_limit: Optional jerk limit for s_curve trajectory (units/s³)
         start_pose: Optional [x, y, z, rx, ry, rz] start pose.
                    If None, starts from current position on helix perimeter.
         duration: Time to complete the helix in seconds
@@ -816,7 +881,14 @@ def smooth_helix(
     else:
         timing_str = f"SPEED|{speed_percentage}"
     
-    command = f"SMOOTH_HELIX|{center_str}|{radius}|{pitch}|{height}|{frame}|{start_str}|{timing_str}|{clockwise_str}"
+    # Add trajectory type parameters
+    traj_params = f"|{trajectory_type}"
+    if trajectory_type == 's_curve' and jerk_limit is not None:
+        traj_params += f"|{jerk_limit}"
+    elif trajectory_type != 'cubic':
+        traj_params += "|DEFAULT"  # Use default jerk limit for s_curve
+    
+    command = f"SMOOTH_HELIX|{center_str}|{radius}|{pitch}|{height}|{frame}|{start_str}|{timing_str}|{clockwise_str}{traj_params}"
     
     if wait_for_ack:
         return send_and_wait(command, timeout, non_blocking)
@@ -909,6 +981,102 @@ def smooth_blend(
     else:
         return send_robot_command(command)
 
+def smooth_waypoints(
+    waypoints: List[List[float]],
+    blend_radii: Union[str, List[float]] = 'auto',
+    blend_mode: Literal['parabolic', 'circular', 'none'] = 'parabolic',
+    via_modes: Optional[List[Literal['via', 'stop']]] = None,
+    max_velocity: Optional[float] = None,
+    max_acceleration: Optional[float] = None,
+    trajectory_type: Literal['quintic', 's_curve', 'cubic'] = 'quintic',
+    frame: Literal['WRF', 'TRF'] = 'WRF',
+    duration: Optional[float] = None,
+    wait_for_ack: bool = True,
+    timeout: float = 30.0,
+    non_blocking: bool = False
+):
+    """
+    Move through waypoints with corner cutting (mstraj-style).
+    
+    Implements smooth trajectory planning through multiple waypoints with
+    automatic corner blending to avoid acceleration spikes at sharp turns.
+    
+    Args:
+        waypoints: List of waypoint poses [x, y, z, rx, ry, rz]
+        blend_radii: 'auto' for automatic calculation, or list of radii in mm
+        blend_mode: Type of corner blend ('parabolic', 'circular', 'none')
+        via_modes: 'via' (pass through) or 'stop' for each waypoint
+        max_velocity: Override maximum velocity (mm/s)
+        max_acceleration: Override maximum acceleration (mm/s²)
+        trajectory_type: Trajectory interpolation type
+        frame: Reference frame ('WRF' or 'TRF')
+        duration: Optional total duration for trajectory
+        wait_for_ack: Enable command acknowledgment
+        timeout: Command timeout in seconds
+        non_blocking: If True with wait_for_ack, returns immediately with command ID
+        
+    Returns:
+        Command ID string or response dictionary
+        
+    Example:
+        # Simple square path with automatic corner blending
+        waypoints = [
+            [100, 0, 100, 0, 0, 0],
+            [100, 100, 100, 0, 0, 0],
+            [0, 100, 100, 0, 0, 0],
+            [0, 0, 100, 0, 0, 0]
+        ]
+        smooth_waypoints(waypoints, blend_radii='auto')
+        
+        # Manual blend radii with stop at second waypoint
+        smooth_waypoints(
+            waypoints, 
+            blend_radii=[0, 20, 30, 0],  # No blend at start/end
+            via_modes=['via', 'stop', 'via', 'via']
+        )
+    """
+    if len(waypoints) < 2:
+        raise ValueError("At least 2 waypoints required")
+    
+    # Format waypoints
+    waypoints_str = ""
+    for wp in waypoints:
+        if len(wp) != 6:
+            raise ValueError("Each waypoint must have 6 values [x,y,z,rx,ry,rz]")
+        waypoints_str += f"{wp[0]},{wp[1]},{wp[2]},{wp[3]},{wp[4]},{wp[5]}|"
+    waypoints_str = waypoints_str.rstrip('|')
+    
+    # Format blend radii
+    if blend_radii == 'auto':
+        blend_str = "auto"
+    else:
+        if len(blend_radii) != len(waypoints):
+            raise ValueError("blend_radii must match number of waypoints")
+        blend_str = ",".join(str(r) for r in blend_radii)
+    
+    # Format via modes
+    if via_modes is None:
+        via_str = ",".join(['via'] * len(waypoints))
+    else:
+        if len(via_modes) != len(waypoints):
+            raise ValueError("via_modes must match number of waypoints")
+        via_str = ",".join(via_modes)
+    
+    # Format constraints
+    vel_str = str(max_velocity) if max_velocity else "default"
+    acc_str = str(max_acceleration) if max_acceleration else "default"
+    dur_str = str(duration) if duration else "auto"
+    
+    # Build command
+    command = (f"SMOOTH_WAYPOINTS|{len(waypoints)}|{blend_str}|{blend_mode}|"
+              f"{via_str}|{vel_str}|{acc_str}|{trajectory_type}|"
+              f"{frame}|{dur_str}|{waypoints_str}")
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout, non_blocking)
+    else:
+        return send_robot_command(command)
+
 # ============================================================================
 # CONVENIENCE FUNCTIONS FOR SMOOTH MOTION CHAINS
 # ============================================================================
@@ -983,7 +1151,7 @@ def chain_smooth_motions(
         
         results.append(result)
         
-        # Check for failures if tracking
+        # Track command result validation
         if wait_for_ack and isinstance(result, dict) and result.get('status') == 'FAILED':
             print(f"Motion {i+1} failed: {result.get('details')}")
             break
@@ -1032,7 +1200,7 @@ def execute_trajectory(
                                              wait_for_ack=wait_for_ack, timeout=timeout)
             results.append(result)
             
-            # Check for failures if tracking
+            # Track command result validation
             if wait_for_ack and result.get('status') == 'FAILED':
                 break
         
@@ -1475,3 +1643,291 @@ def safe_move_with_retry(
             return result
     
     return {'status': 'FAILED', 'details': f'Failed after {max_retries} attempts'}
+
+# =============================================================================
+# GCODE FUNCTIONALITY
+# =============================================================================
+
+def execute_gcode(gcode_line: str, wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Execute a single GCODE line.
+    
+    Args:
+        gcode_line: The GCODE command to execute (e.g., "G0 X100 Y100 Z50")
+        wait_for_ack: If True, wait for command acknowledgment
+        timeout: Maximum time to wait for acknowledgment in seconds
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    
+    Examples:
+        # Simple rapid move
+        execute_gcode("G0 X100 Y100 Z50")
+        
+        # Linear move with feed rate
+        execute_gcode("G1 X150 Y150 Z30 F1000")
+        
+        # Set work coordinate system
+        execute_gcode("G54")
+        
+        # Dwell for 2 seconds
+        execute_gcode("G4 P2000")
+    """
+    command = f"GCODE|{gcode_line}"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def execute_gcode_program(program_lines: list, wait_for_ack: bool = False, timeout: float = 30.0):
+    """
+    Execute a GCODE program from a list of lines.
+    
+    Args:
+        program_lines: List of GCODE lines to execute
+        wait_for_ack: If True, wait for program to be loaded
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    
+    Example:
+        program = [
+            "G21",           # Set units to mm
+            "G90",           # Absolute positioning
+            "G0 Z50",        # Raise Z
+            "G0 X0 Y0",      # Go to origin
+            "G1 Z10 F500",   # Lower Z slowly
+            "G1 X100 F1000", # Move X
+            "G1 Y100",       # Move Y
+            "G1 X0",         # Move back X
+            "G1 Y0",         # Move back Y
+            "G0 Z50",        # Raise Z
+            "M30"            # Program end
+        ]
+        execute_gcode_program(program)
+    """
+    # Validate program lines don't contain problematic characters
+    for i, line in enumerate(program_lines):
+        if '|' in line:
+            error_msg = f"Line {i+1} contains pipe character '|' which is not allowed"
+            if wait_for_ack:
+                return {'status': 'INVALID', 'details': error_msg}
+            else:
+                print(f"Warning: {error_msg}")
+                # Remove pipe characters as fallback
+                program_lines[i] = line.replace('|', '')
+    
+    # Join lines with semicolons for inline program
+    program_str = ';'.join(program_lines)
+    command = f"GCODE_PROGRAM|INLINE|{program_str}"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def load_gcode_file(filepath: str, wait_for_ack: bool = False, timeout: float = 10.0):
+    """
+    Load and execute a GCODE program from a file.
+    
+    Args:
+        filepath: Path to the GCODE file
+        wait_for_ack: If True, wait for file to be loaded
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    
+    Example:
+        load_gcode_file("path/to/program.gcode")
+    """
+    command = f"GCODE_PROGRAM|FILE|{filepath}"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def get_gcode_status():
+    """
+    Get the current status of the GCODE interpreter.
+    
+    Returns:
+        Dict containing GCODE interpreter status including:
+        - state: Current modal state (G90/G91, G20/G21, etc.)
+        - work_coordinate: Active work coordinate system (G54-G59)
+        - position: Current position in work coordinates
+        - program_running: Whether a program is executing
+        - program_line: Current line number being executed
+        - errors: Any error messages
+    
+    Example:
+        status = get_gcode_status()
+        print(f"Current work coordinate: {status['work_coordinate']}")
+        print(f"Program running: {status['program_running']}")
+    """
+    # Use the same pattern as other GET functions
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
+            client_socket.settimeout(2.0)
+            
+            request_message = "GET_GCODE_STATUS"
+            client_socket.sendto(request_message.encode('utf-8'), (SERVER_IP, SERVER_PORT))
+            
+            data, _ = client_socket.recvfrom(2048)
+            response = data.decode('utf-8')
+            
+            if response and response.startswith("GCODE_STATUS|"):
+                status_json = response.split('|', 1)[1]
+                try:
+                    return json.loads(status_json)
+                except json.JSONDecodeError:
+                    print(f"Error parsing GCODE status: {status_json}")
+                    return None
+            
+            return None
+            
+    except socket.timeout:
+        print("Timeout waiting for GCODE status response")
+        return None
+    except Exception as e:
+        print(f"Error getting GCODE status: {e}")
+        return None
+
+def pause_gcode_program(wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Pause the currently running GCODE program.
+    
+    Args:
+        wait_for_ack: If True, wait for pause confirmation
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    """
+    command = "GCODE_PAUSE"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def resume_gcode_program(wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Resume a paused GCODE program.
+    
+    Args:
+        wait_for_ack: If True, wait for resume confirmation
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    """
+    command = "GCODE_RESUME"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def stop_gcode_program(wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Stop the currently running GCODE program.
+    
+    Args:
+        wait_for_ack: If True, wait for stop confirmation
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    """
+    command = "GCODE_STOP"
+    
+    if wait_for_ack:
+        return send_and_wait(command, timeout=timeout)
+    else:
+        return send_robot_command(command)
+
+def set_work_coordinate_offset(coordinate_system: str, x: float = None, y: float = None, 
+                              z: float = None, wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Set work coordinate system offsets (G54-G59).
+    
+    Args:
+        coordinate_system: Work coordinate system to set ('G54' through 'G59')
+        x: X axis offset in mm (None to keep current)
+        y: Y axis offset in mm (None to keep current)
+        z: Z axis offset in mm (None to keep current)
+        wait_for_ack: If True, wait for confirmation
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    
+    Example:
+        # Set G54 origin to current position
+        set_work_coordinate_offset('G54', x=0, y=0, z=0)
+        
+        # Offset G55 by 100mm in X
+        set_work_coordinate_offset('G55', x=100)
+    """
+    # Validate coordinate system format
+    valid_systems = ['G54', 'G55', 'G56', 'G57', 'G58', 'G59']
+    if coordinate_system not in valid_systems:
+        error_msg = f'Invalid coordinate system: {coordinate_system}. Must be one of {valid_systems}'
+        if wait_for_ack:
+            return {'status': 'INVALID', 'details': error_msg}
+        else:
+            print(error_msg)
+            return False
+    
+    # Build GCODE command to set work offsets
+    gcode_commands = []
+    
+    # Select the coordinate system
+    gcode_commands.append(coordinate_system)
+    
+    # Set offsets using G10 L2 P[n] X[x] Y[y] Z[z]
+    # P1=G54, P2=G55, etc.
+    coord_num = int(coordinate_system[1:]) - 53  # G54=1, G55=2, etc.
+    
+    offset_params = []
+    if x is not None:
+        offset_params.append(f"X{x}")
+    if y is not None:
+        offset_params.append(f"Y{y}")
+    if z is not None:
+        offset_params.append(f"Z{z}")
+    
+    if offset_params:
+        gcode_commands.append(f"G10 L2 P{coord_num} {' '.join(offset_params)}")
+    
+    # Execute the commands
+    for cmd in gcode_commands:
+        result = execute_gcode(cmd, wait_for_ack=wait_for_ack, timeout=timeout)
+        if wait_for_ack and isinstance(result, dict) and result.get('status') != 'COMPLETED':
+            return result
+    
+    return True if not wait_for_ack else {'status': 'COMPLETED', 'details': 'Work offsets set'}
+
+def zero_work_coordinates(coordinate_system: str = 'G54', wait_for_ack: bool = False, timeout: float = 5.0):
+    """
+    Set the current position as zero in the specified work coordinate system.
+    
+    Args:
+        coordinate_system: Work coordinate system to zero ('G54' through 'G59')
+        wait_for_ack: If True, wait for confirmation
+        timeout: Maximum time to wait for acknowledgment
+    
+    Returns:
+        True if successful, or dict with status details if wait_for_ack is True
+    
+    Example:
+        # Set current position as origin in G54
+        zero_work_coordinates('G54')
+    """
+    # This sets the current position as 0,0,0 in the work coordinate system
+    return set_work_coordinate_offset(coordinate_system, x=0, y=0, z=0, 
+                                    wait_for_ack=wait_for_ack, timeout=timeout)
