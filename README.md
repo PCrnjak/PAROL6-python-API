@@ -63,6 +63,19 @@ The system uses a UDP-based client-server architecture that separates robot cont
   - `smooth_motion.py`: Advanced trajectory generation algorithms
   - `PAROL6_ROBOT.py`: Robot-specific parameters and kinematic model
 
+### Command Module Architecture
+The robot controller organizes command execution through a modular architecture. All command classes are located in `./commands/`, with each module containing functionally related commands:
+
+* **`ik_helpers.py`** - Inverse kinematics solving and helper functions
+* **`basic_commands.py`** - Home, Jog, and MultiJog commands
+* **`cartesian_commands.py`** - Cartesian space movement commands
+* **`joint_commands.py`** - Joint space movement commands
+* **`gripper_commands.py`** - Pneumatic and electric gripper control
+* **`utility_commands.py`** - Delay and utility functions
+* **`smooth_commands.py`** - Advanced smooth trajectory generation
+
+This modular structure keeps the main controller lean while organizing functionality logically.
+
 ### Why UDP?
 The UDP protocol was chosen for several reasons:
 - **Simplicity**: No connection management overhead
@@ -233,13 +246,15 @@ if status and status['completed']:
 
 ### Smooth Motion Commands
 
-These commands create smooth, curved trajectories with continuous velocity profiles. All commands support reference frame selection via the `frame` parameter:
+These commands create smooth, curved trajectories with continuous velocity profiles. All smooth motion commands support multiple trajectory types through the `trajectory_type` parameter:
 
-- **WRF (World Reference Frame)**: Default. All coordinates are interpreted relative to the robot's base coordinate system.
-- **TRF (Tool Reference Frame)**: All coordinates are interpreted relative to the tool's current position and orientation. This means:
-  - Positions are relative to the tool's origin
-  - Planes (XY, XZ, YZ) are the tool's local planes, not world planes
-  - If the tool is rotated, the entire motion rotates with it
+* **'cubic'** (default): Smooth acceleration profile with continuous velocity
+* **'quintic'**: Smoother motion with continuous acceleration and zero jerk at endpoints
+* **'s_curve'**: Jerk-limited motion for ultra-smooth movement (specify `jerk_limit` in mm/s³)
+
+> **Note on Jerk**: Jerk is the rate of change of acceleration. Lower jerk values result in smoother motion with less mechanical stress on the robot, but may increase movement time. The jerk limit parameter controls the maximum allowed jerk during S-curve trajectories.
+
+All smooth commands also support reference frame selection through the `frame` parameter ('WRF' for World Reference Frame or 'TRF' for Tool Reference Frame).
 
 #### `smooth_circle()`
 * **Purpose**: Execute a smooth circular motion.
@@ -247,11 +262,22 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `center` (List[float]): Center point [x, y, z] in mm
     * `radius` (float): Circle radius in mm
     * `plane` (str, optional): Plane of circle ('XY', 'XZ', or 'YZ'). Default: 'XY'
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
+    * `center_mode` (str, optional): How the center point is interpreted. Default: 'ABSOLUTE'
+        - `'ABSOLUTE'`: Center is an absolute position in the selected frame
+        - `'TOOL'`: Center is relative to the current tool position
+        - `'RELATIVE'`: Center is an offset from the current position
+    * `entry_mode` (str, optional): How to transition into the circle. Default: 'NONE'
+        - `'AUTO'`: Automatically choose best entry strategy based on current position
+        - `'TANGENT'`: Enter the circle tangentially for smooth transition
+        - `'DIRECT'`: Move directly to the closest point on the circle
+        - `'NONE'`: Start circle from current position (assumes already on circle)
     * `start_pose` (List[float], optional): Starting pose [x, y, z, rx, ry, rz], or None for current position. Default: None
     * `duration` (float, optional): Time to complete circle in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
     * `clockwise` (bool, optional): Direction of motion. Default: False
+    * `trajectory_type` (str, optional): Motion profile - 'cubic', 'quintic', or 's_curve'. Default: 'cubic'
+    * `jerk_limit` (float, optional): Maximum jerk for s_curve trajectories in mm/s³. Default: None
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: False
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
@@ -260,11 +286,16 @@ These commands create smooth, curved trajectories with continuous velocity profi
     ```python
     from robot_api import smooth_circle
     
-    # Draw a 50mm radius circle in world XY plane
+    # Draw a 50mm radius circle at absolute position
     smooth_circle(center=[200, 0, 200], radius=50, plane='XY', duration=5.0)
     
-    # Draw a circle in tool's XY plane (follows tool orientation)
-    smooth_circle(center=[0, 30, 0], radius=25, plane='XY', frame='TRF', duration=4.0)
+    # Draw a circle centered 30mm ahead of current tool position
+    smooth_circle(center=[30, 0, 0], radius=25, center_mode='TOOL', 
+                 entry_mode='TANGENT', duration=4.0)
+    
+    # Draw a circle with automatic entry from current position
+    smooth_circle(center=[250, 50, 200], radius=40, entry_mode='AUTO', 
+                 speed_percentage=60)
     ```
 
 #### `smooth_arc_center()`
@@ -272,11 +303,13 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Parameters**:
     * `end_pose` (List[float]): End pose [x, y, z, rx, ry, rz] in mm and degrees
     * `center` (List[float]): Arc center point [x, y, z] in mm
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete arc in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
     * `clockwise` (bool, optional): Direction of motion. Default: False
+    * `trajectory_type` (str, optional): Motion profile - 'cubic', 'quintic', or 's_curve'. Default: 'cubic'
+    * `jerk_limit` (float, optional): Maximum jerk for s_curve trajectories in mm/s³. Default: None
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: False
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
@@ -284,16 +317,8 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_arc_center
-    
-    # Arc in world coordinates
     smooth_arc_center(end_pose=[250, 50, 200, 0, 0, 90], 
                      center=[200, 0, 200], 
-                     duration=3.0)
-    
-    # Arc in tool coordinates (relative to tool position/orientation)
-    smooth_arc_center(end_pose=[30, 30, 0, 0, 0, 45],
-                     center=[15, 15, 0],
-                     frame='TRF',
                      duration=3.0)
     ```
 
@@ -303,11 +328,13 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `end_pose` (List[float]): End pose [x, y, z, rx, ry, rz] in mm and degrees
     * `radius` (float): Arc radius in mm
     * `arc_angle` (float): Arc angle in degrees
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete arc in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
     * `clockwise` (bool, optional): Direction of motion. Default: False
+    * `trajectory_type` (str, optional): Motion profile - 'cubic', 'quintic', or 's_curve'. Default: 'cubic'
+    * `jerk_limit` (float, optional): Maximum jerk for s_curve trajectories in mm/s³. Default: None
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: False
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
@@ -315,26 +342,20 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_arc_parametric
-    
-    # Parametric arc in world frame
     smooth_arc_parametric(end_pose=[250, 50, 200, 0, 0, 90],
                          radius=50, arc_angle=90, duration=3.0)
-    
-    # Parametric arc in tool frame
-    smooth_arc_parametric(end_pose=[40, 0, 0, 0, 0, 60],
-                         radius=25, arc_angle=60,
-                         frame='TRF',
-                         speed_percentage=40)
     ```
 
 #### `smooth_spline()`
 * **Purpose**: Create smooth spline through waypoints.
 * **Parameters**:
     * `waypoints` (List[List[float]]): List of poses [x, y, z, rx, ry, rz] to pass through
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Total time for motion in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
+    * `trajectory_type` (str, optional): Motion profile - 'cubic', 'quintic', or 's_curve'. Default: 'cubic'
+    * `jerk_limit` (float, optional): Maximum jerk for s_curve trajectories in mm/s³. Default: None
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: False
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
@@ -342,22 +363,12 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_spline
-    
-    # Spline through world coordinates
     waypoints = [
         [200, 0, 100, 0, 0, 0],
         [250, 50, 150, 0, 15, 45],
         [200, 100, 200, 0, 30, 90]
     ]
     smooth_spline(waypoints, duration=8.0)
-    
-    # Spline through tool-relative coordinates
-    tool_waypoints = [
-        [20, 0, 0, 0, 0, 0],
-        [20, 20, 10, 0, 0, 30],
-        [0, 20, 20, 0, 0, 60]
-    ]
-    smooth_spline(tool_waypoints, frame='TRF', duration=6.0)
     ```
 
 #### `smooth_helix()`
@@ -367,7 +378,9 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `radius` (float): Helix radius in mm
     * `pitch` (float): Vertical distance per revolution in mm
     * `height` (float): Total height of helix in mm
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF'). Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
+    * `trajectory_type` (str, optional): Motion profile - 'cubic', 'quintic', or 's_curve'. Default: 'cubic'
+    * `jerk_limit` (float, optional): Maximum jerk for s_curve trajectories in mm/s³. Default: None
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Time to complete helix in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -376,26 +389,19 @@ These commands create smooth, curved trajectories with continuous velocity profi
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 10.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
 * > *Note: You must provide either `duration` or `speed_percentage`, but not both.*
-* > *Note: In TRF mode, the helix rises along the tool's Z-axis, not the world Z-axis.*
 * **Python API Usage**:
     ```python
     from robot_api import smooth_helix
-    
-    # Vertical helix in world frame
     smooth_helix(center=[200, 0, 150], radius=30, pitch=20, 
                 height=100, duration=10.0)
-    
-    # Helix along tool's Z-axis (follows tool orientation)
-    smooth_helix(center=[0, 30, 0], radius=20, pitch=15,
-                height=60, frame='TRF', duration=8.0)
     ```
 
 #### `smooth_blend()`
-* **Purpose**: Blend multiple motion segments smoothly.
+* **Purpose**: Blend multiple motion segments smoothly using AdvancedMotionBlender.
 * **Parameters**:
     * `segments` (List[Dict]): List of segment dictionaries defining the motion path
     * `blend_time` (float, optional): Time for blending between segments in seconds. Default: 0.5
-    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for all segments. Default: 'WRF'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
     * `start_pose` (List[float], optional): Starting pose, or None for current position. Default: None
     * `duration` (float, optional): Total time for entire motion in seconds
     * `speed_percentage` (float, optional): Speed as percentage (1-100)
@@ -405,8 +411,6 @@ These commands create smooth, curved trajectories with continuous velocity profi
 * **Python API Usage**:
     ```python
     from robot_api import smooth_blend
-    
-    # Blend in world coordinates
     segments = [
         {'type': 'LINE', 'end': [250, 0, 200, 0, 0, 0], 'duration': 2.0},
         {'type': 'CIRCLE', 'center': [250, 0, 200], 'radius': 50, 
@@ -414,16 +418,83 @@ These commands create smooth, curved trajectories with continuous velocity profi
         {'type': 'LINE', 'end': [200, 0, 200, 0, 0, 0], 'duration': 2.0}
     ]
     smooth_blend(segments, blend_time=0.5, duration=10.0)
-    
-    # Blend in tool coordinates (all segments relative to tool)
-    tool_segments = [
-        {'type': 'LINE', 'end': [30, 0, 0, 0, 0, 0], 'duration': 2.0},
-        {'type': 'CIRCLE', 'center': [30, 20, 0], 'radius': 20, 
-         'plane': 'XY', 'duration': 4.0, 'clockwise': False},
-        {'type': 'LINE', 'end': [0, 20, 0, 0, 0, 0], 'duration': 2.0}
-    ]
-    smooth_blend(tool_segments, frame='TRF', blend_time=0.5, duration=10.0)
     ```
+
+#### `smooth_waypoints()`
+* **Purpose**: Execute advanced waypoint trajectory with automatic blending and constraint optimization.
+* **Parameters**:
+    * `waypoints` (List[List[float]]): List of waypoint poses [x, y, z, rx, ry, rz] in mm and degrees
+    * `blend_radii` (Union[str, List[float]], optional): Blend radius for each waypoint or 'auto'. Default: 'auto'
+    * `blend_mode` (str, optional): Blending algorithm - 'parabolic', 'circular', or 'none'. Default: 'parabolic'
+    * `via_modes` (List[str], optional): Mode for each waypoint - 'via' (pass through) or 'stop'. Default: All 'via'
+    * `max_velocity` (float, optional): Maximum velocity constraint in mm/s. Default: None
+    * `max_acceleration` (float, optional): Maximum acceleration constraint in mm/s². Default: None
+    * `trajectory_type` (str, optional): Motion profile - 'quintic', 's_curve', or 'cubic'. Default: 'quintic'
+    * `frame` (str, optional): Reference frame ('WRF' for World, 'TRF' for Tool). Default: 'WRF'
+    * `duration` (float, optional): Total time for entire motion in seconds. Default: Auto-calculated
+    * `wait_for_ack` (bool, optional): Enable command tracking. Default: True
+    * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 15.0
+    * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
+* **Python API Usage**:
+    ```python
+    from robot_api import smooth_waypoints
+    waypoints = [
+        [200, 0, 200, 0, 0, 0],
+        [250, 50, 200, 0, 0, 45],
+        [200, 100, 200, 0, 0, 90],
+        [150, 50, 200, 0, 0, 45]
+    ]
+    # Automatic blending with quintic trajectories
+    smooth_waypoints(waypoints, blend_radii='auto', trajectory_type='quintic')
+    
+    # Custom blend radii with S-curve profile
+    smooth_waypoints(waypoints, blend_radii=[10, 15, 10], 
+                    trajectory_type='s_curve', max_velocity=100.0)
+    ```
+
+### GCODE Support
+
+The robot controller includes a comprehensive GCODE interpreter that allows CNC-style control using standard G-code commands. The interpreter supports linear moves, circular arcs, work coordinate systems, and various M-codes for gripper control.
+
+#### Key GCODE Functions
+
+* `execute_gcode()` - Execute a single GCODE line
+* `execute_gcode_program()` - Execute a multi-line GCODE program (string or list)
+* `load_gcode_file()` - Load and execute a GCODE file
+* `get_gcode_status()` - Query the current state of the GCODE interpreter
+* `pause_gcode_program()`, `resume_gcode_program()`, `stop_gcode_program()` - Program control
+
+#### Supported Commands
+* **G-codes**: G0 (rapid), G1 (linear), G2/G3 (circular arcs), G4 (dwell), G17-G19 (plane selection), G20/G21 (units), G28 (home), G54-G59 (work coordinates), G90/G91 (absolute/incremental)
+* **M-codes**: M0 (stop), M1 (optional stop), M3 (gripper close), M5 (gripper open), M30 (program end)
+
+#### Python API Usage
+```python
+from robot_api import execute_gcode, load_gcode_file, get_gcode_status
+
+# Execute single GCODE line
+execute_gcode("G1 X200 Y100 Z150 F100")
+
+# Execute GCODE program
+program = [
+    "G21 ; Set units to mm",
+    "G90 ; Absolute positioning", 
+    "G1 X200 Y0 Z200 F150",
+    "G2 X250 Y50 I25 J25 ; Arc move",
+    "M3 ; Close gripper"
+]
+execute_gcode_program(program)
+
+# Load from file
+load_gcode_file("path/to/program.gcode")
+
+# Check status
+status = get_gcode_status()
+print(f"Current line: {status['current_line']}")
+```
+
+See `GCODE_DOCUMENTATION.md` for comprehensive GCODE reference including all supported commands, coordinate systems, and advanced features.
+
 ### Gripper Commands
 
 #### `control_pneumatic_gripper()`
@@ -701,10 +772,26 @@ Required files in the same folder:
 * `headless_commander.py` - Main server/controller
 * `PAROL6_ROBOT.py` - Robot configuration and kinematic model  
 * `smooth_motion.py` - Advanced trajectory generation
-* `GUI/files/` folder structure - For imports to work correctly
+* `commands/` - Modular command classes directory
+  - `ik_helpers.py` - IK solving and helper functions
+  - `basic_commands.py` - Home, Jog, MultiJog commands
+  - `cartesian_commands.py` - Cartesian movement commands
+  - `joint_commands.py` - Joint space movements
+  - `gripper_commands.py` - Gripper control
+  - `utility_commands.py` - Delay and utility functions
+  - `smooth_commands.py` - Advanced trajectory commands
+* `gcode/` - GCODE interpreter and parser
+  - `interpreter.py` - Main GCODE interpreter
+  - `parser.py` - GCODE parsing and validation
+  - `commands.py` - GCODE to robot command mapping
+  - `state.py` - Modal state tracking
+  - `coordinates.py` - Work coordinate systems
+  - `utils.py` - Utility functions
+* `GCODE_DOCUMENTATION.md` - Comprehensive GCODE reference
 
 Optional:
 * `com_port.txt` - Contains the USB COM port (e.g., COM5)
+* `GUI/files/` folder structure - For GUI mode compatibility
 
 #### Client Side (Any Computer)
 Only required file:

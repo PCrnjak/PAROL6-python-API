@@ -30,6 +30,10 @@ a5 = 176.35 / 1000
 a6 = 62.8 / 1000
 a7 = 45.25 / 1000
 
+# robot length values for electric gripper (metres) [replace a6 and a7 values with the below values]
+# a6 = 117 / 1000
+# a7 = 0 / 1000
+
 alpha_DH = [-pi / 2,pi,pi/2,-pi/2,pi/2,pi]
 
 robot = DHRobot(

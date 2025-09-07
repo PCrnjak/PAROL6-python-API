@@ -2,10 +2,6 @@
 A full fledged "API" for the PAROL6 robot. To use this, you should pair it with the "robot_api.py" where you can import commands
 from said file and use them anywhere within your code. This Python script will handle sending and performing all the commands
 to the PAROL6 robot, as well as E-Stop functionality and safety limitations.
-
-To run this program, you must use the "experimental-kinematics" branch of the "PAROL-commander-software" on GitHub
-which can be found through this link: https://github.com/PCrnjak/PAROL-commander-software/tree/experimental_kinematics.
-You must also save these files into the following folder: "Project Files\PAROL-commander-software\GUI\files".
 '''
 
 # * If you press estop robot will stop and you need to enable it by pressing e
@@ -26,45 +22,41 @@ import re
 import logging
 import struct
 from enum import Enum
-try:
-    import keyboard  # type: ignore
-except Exception:
-    keyboard = None
+import keyboard
+import argparse
+import sys
+import json
 from typing import Optional, Tuple
 from spatialmath.base import trinterp
 from collections import namedtuple, deque
-try:
-    import PAROL6_ROBOT as PAROL6_ROBOT
-except ModuleNotFoundError:
-    import os, sys
-    legacy = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'PAROL-commander-software', 'GUI', 'files')
-    if os.path.exists(os.path.join(legacy, 'PAROL6_ROBOT.py')):
-        sys.path.append(legacy)
-        import PAROL6_ROBOT as PAROL6_ROBOT
-    else:
-        raise
-from smooth_motion import CircularMotion, SplineMotion, MotionBlender
+import PAROL6_ROBOT
+from smooth_motion import CircularMotion, SplineMotion, MotionBlender, SCurveProfile, QuinticPolynomial, MotionConstraints
+from gcode import GcodeInterpreter
+
+# Import all command classes from the modular commands directory
+from commands import (
+    # Helper class
+    CommandValue,
+    # Basic commands
+    HomeCommand, JogCommand, MultiJogCommand,
+    # Cartesian commands  
+    CartesianJogCommand, MovePoseCommand, MoveCartCommand,
+    # Joint commands
+    MoveJointCommand,
+    # Gripper commands
+    GripperCommand,
+    # Utility commands
+    DelayCommand,
+    # Smooth motion commands
+    SmoothTrajectoryCommand, SmoothCircleCommand,
+    SmoothArcCenterCommand, SmoothArcParamCommand,
+    SmoothHelixCommand, SmoothSplineCommand,
+    SmoothBlendCommand, SmoothWaypointsCommand
+)
 
 # Set interval
 INTERVAL_S = 0.01
 prev_time = 0
-
-# Jogging speed scale to slightly increase jog caps while respecting absolute limits
-JOG_SPEED_SCALE = 2
-
-# Configure unified logging (PAROL_LOG_LEVEL) and simple console formatter
-PAROL_LOG_LEVEL = os.getenv("PAROL_LOG_LEVEL", "WARNING").upper()
-_level = getattr(logging, PAROL_LOG_LEVEL, logging.WARNING)
-root = logging.getLogger()
-root.setLevel(_level)
-for h in list(root.handlers):
-    if isinstance(h, logging.StreamHandler):
-        root.removeHandler(h)
-console = logging.StreamHandler()
-console.setLevel(_level)
-console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-root.addHandler(console)
-logger = logging.getLogger("parol6.server")
 
 # Enable optional fake-serial simulation for hardware-free tests
 FAKE_SERIAL = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower() in ("1", "true", "yes", "on")
@@ -83,6 +75,9 @@ JACOBIAN_DAMPING_LAMBDA = float(os.getenv("PAROL6_JAC_LAMBDA", "1e-6"))
 streaming_timeout_time = 0.0
 streaming_active = False
 
+# Global verbosity level - can be changed programmatically
+GLOBAL_LOG_LEVEL = logging.INFO
+
 # =========================
 # Runtime flags and globals
 # =========================
@@ -96,28 +91,127 @@ com_port_str: Optional[str] = None
 # Non-blocking serial reconnect throttle
 last_reconnect_attempt = 0.0
 
+# Logging configuration
+def setup_logging(verbosity_level=None):
+    """Configure logging with the specified verbosity level.
+    
+    Args:
+        verbosity_level: Can be 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL' or None
+    """
+    global GLOBAL_LOG_LEVEL
+    
+    if verbosity_level:
+        GLOBAL_LOG_LEVEL = getattr(logging, verbosity_level.upper(), logging.INFO)
+    
+    # Setup basic logging configuration
+    logging.basicConfig(
+        level=GLOBAL_LOG_LEVEL,
+        format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ],
+        force=True  # Force reconfiguration if already configured
+    )
+    
+    # Module-specific logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(GLOBAL_LOG_LEVEL)
+    
+    return logger
+
+# Parse command-line arguments
+def parse_arguments():
+    """Parse command-line arguments for the headless commander."""
+    parser = argparse.ArgumentParser(
+        description='PAROL6 Headless Commander - Robot control server',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Verbosity levels:
+  DEBUG    : All messages including detailed debug information
+  INFO     : Normal operation messages (default)
+  WARNING  : Only warnings and errors
+  ERROR    : Only error messages
+  CRITICAL : Only critical error messages
+  
+Examples:
+  python headless_commander.py --verbose              # Enable DEBUG level
+  python headless_commander.py --log-level DEBUG      # Same as --verbose
+  python headless_commander.py --log-level WARNING    # Only show warnings and above
+  python headless_commander.py --quiet                # Minimal output (WARNING level)
+        '''
+    )
+    
+    # Verbosity options (mutually exclusive)
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose output (DEBUG level)'
+    )
+    verbosity_group.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Minimize output (WARNING level)'
+    )
+    verbosity_group.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        help='Set specific logging level'
+    )
+    
+    parser.add_argument(
+        '--com-port',
+        type=str,
+        help='Specify COM port for robot connection (e.g., COM5 or /dev/ttyACM0)'
+    )
+    
+    parser.add_argument(
+        '--no-auto-home',
+        action='store_true',
+        help='Disable automatic homing on startup'
+    )
+    
+    return parser.parse_args()
+
+# Initialize command-line arguments and logging
+args = parse_arguments()
+
+# Set log level from command line args
+if args.verbose:
+    log_level = 'DEBUG'
+elif args.quiet:
+    log_level = 'WARNING'
+elif args.log_level:
+    log_level = args.log_level
+else:
+    log_level = 'INFO'
+
+# Setup logging with determined level
+logger = setup_logging(log_level)
+
 
 my_os = platform.system()
 if my_os == "Windows":
-    # Try to read the COM port from a file
+    # Load COM port from saved configuration
     try:
         with open("com_port.txt", "r") as f:
             com_port_str = f.read().strip()
             ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
-            logging.info(f"Connected to saved COM port: {com_port_str}")
+            logger.info(f"Connected to saved COM port: {com_port_str}")
     except (FileNotFoundError, serial.SerialException):
-        # If the file doesn't exist or the port is invalid, ask the user
+        # Fallback to user input for COM port
         while True:
             com_port = input("Enter the COM port (e.g., COM9): ")
             try:
                 ser = serial.Serial(port=com_port, baudrate=3000000, timeout=0)
-                logging.info(f"Successfully connected to {com_port}")
-                # Save the successful port to the file
+                logger.info(f"Successfully connected to {com_port}")
+                # Cache successful port for future runs
                 with open("com_port.txt", "w") as f:
                     f.write(com_port)
                 break
             except serial.SerialException:
-                logging.warning(f"Could not open port {com_port}. Please try again.")
+                logger.error(f"Could not open port {com_port}. Please try again.")
 
 # in big endian machines, first byte of binary representation of the multibyte data-type is stored first. 
 int_to_3_bytes = struct.Struct('>I').pack # BIG endian order
@@ -135,7 +229,7 @@ end_bytes = bytes(end_bytes)
 # data for input string (Data that is being sent by the robot)
 #######################################################################################
 #######################################################################################
-input_byte = 0 # Here save incoming bytes from serial
+input_byte = 0 # Serial byte buffer
 
 start_cond1_byte = bytes([0xff])
 start_cond2_byte = bytes([0xff])
@@ -160,11 +254,6 @@ prev_speed = [0,0,0,0,0,0]
 robot_pose = [0,0,0,0,0,0] #np.array([0,0,0,0,0,0])
 #######################################################################################
 #######################################################################################
-
-# --- Wrapper class to make integers mutable when passed to functions ---
-class CommandValue:
-    def __init__(self, value):
-        self.value = value
 
 #######################################################################################
 #######################################################################################
@@ -208,229 +297,13 @@ Gripper_data_in = [1,1,1,1,1,1]
 # Global variable to track previous tolerance for logging changes
 _prev_tolerance = None
 
-def normalize_angle(angle):
-    """Normalize angle to [-pi, pi] range to handle angle wrapping"""
-    while angle > np.pi:
-        angle -= 2 * np.pi
-    while angle < -np.pi:
-        angle += 2 * np.pi
-    return angle
-
-def unwrap_angles(q_solution, q_current):
-    """
-    Unwrap angles in the solution to be closest to current position.
-    This handles the angle wrapping issue where -179° and 181° are close but appear far.
-    """
-    q_unwrapped = q_solution.copy()
-    
-    for i in range(len(q_solution)):
-        # Calculate the difference
-        diff = q_solution[i] - q_current[i]
-        
-        # If the difference is more than pi, we need to unwrap
-        if diff > np.pi:
-            # Solution is too far in positive direction, subtract 2*pi
-            q_unwrapped[i] = q_solution[i] - 2 * np.pi
-        elif diff < -np.pi:
-            # Solution is too far in negative direction, add 2*pi
-            q_unwrapped[i] = q_solution[i] + 2 * np.pi
-    
-    return q_unwrapped
-
-IKResult = namedtuple('IKResult', 'success q iterations residual tolerance_used violations')
-
-def calculate_adaptive_tolerance(robot, q, strict_tol=1e-10, loose_tol=1e-7):
-    """
-    Calculate adaptive tolerance based on proximity to singularities.
-    Near singularities: looser tolerance for easier convergence.
-    Away from singularities: stricter tolerance for precise solutions.
-    
-    Parameters
-    ----------
-    robot : DHRobot
-        Robot model
-    q : array_like
-        Joint configuration
-    strict_tol : float
-        Strict tolerance away from singularities (default: 1e-10)
-    loose_tol : float
-        Loose tolerance near singularities (1e-7)
-        
-    Returns
-    -------
-    float
-        Adaptive tolerance value
-    """
-    global _prev_tolerance
-    
-    q_array = np.array(q, dtype=float)
-    
-    # Calculate manipulability measure (closer to 0 = closer to singularity)
-    manip = robot.manipulability(q_array)
-    singularity_threshold = 0.001
-    
-    sing_normalized = np.clip(manip / singularity_threshold, 0.0, 1.0)
-    adaptive_tol = loose_tol + (strict_tol - loose_tol) * sing_normalized
-    
-    # Log tolerance changes (only log significant changes to avoid spam)
-    if _prev_tolerance is None or abs(adaptive_tol - _prev_tolerance) / _prev_tolerance > 0.5:
-        tol_category = "LOOSE" if adaptive_tol > 1e-7 else "MODERATE" if adaptive_tol > 5e-10 else "STRICT"
-        logging.debug(f"Adaptive IK tolerance: {adaptive_tol:.2e} ({tol_category}) - Manipulability: {manip:.8f} (threshold: {singularity_threshold})")
-        _prev_tolerance = adaptive_tol
-    
-    return adaptive_tol
-
-def calculate_configuration_dependent_max_reach(q_seed):
-    """
-    Calculate maximum reach based on joint configuration, particularly joint 5.
-    When joint 5 is at 90 degrees, the effective reach is reduced by approximately 0.045.
-    
-    Parameters
-    ----------
-    q_seed : array_like
-        Current joint configuration in radians
-        
-    Returns
-    -------
-    float
-        Configuration-dependent maximum reach threshold
-    """
-    base_max_reach = 0.44  # Base maximum reach from experimentation
-    
-    j5_angle = q_seed[4] if len(q_seed) > 4 else 0.0
-    j5_normalized = normalize_angle(j5_angle)
-    angle_90_deg = np.pi / 2
-    angle_neg_90_deg = -np.pi / 2
-    dist_from_90 = abs(j5_normalized - angle_90_deg)
-    dist_from_neg_90 = abs(j5_normalized - angle_neg_90_deg)
-    dist_from_90_deg = min(dist_from_90, dist_from_neg_90)
-    reduction_range = np.pi / 4  # 45 degrees
-    if dist_from_90_deg <= reduction_range:
-        # Calculate reduction factor based on proximity to 90°
-        proximity_factor = 1.0 - (dist_from_90_deg / reduction_range)
-        reach_reduction = 0.045 * proximity_factor
-        effective_max_reach = base_max_reach - reach_reduction
-        
-        return effective_max_reach
-    else:
-        return base_max_reach
-
-def solve_ik_with_adaptive_tol_subdivision(
-        robot: DHRobot,
-        target_pose: SE3,
-        current_q,
-        current_pose: SE3 | None = None,
-        max_depth: int = 4,
-        ilimit: int = 100,
-        jogging: bool = False
-):
-    """
-    Uses adaptive tolerance based on proximity to singularities:
-    - Near singularities: looser tolerance for easier convergence
-    - Away from singularities: stricter tolerance for precise solutions
-    If necessary, recursively subdivide the motion until ikine_LMS converges
-    on every segment. Finally check that solution respects joint limits. From experimentation,
-    jogging with lower tolerances often produces q_paths that do not differ from current_q,
-    essentially freezing the robot.
-
-    Parameters
-    ----------
-    robot : DHRobot
-        Robot model
-    target_pose : SE3
-        Target pose to reach
-    current_q : array_like
-        Current joint configuration
-    current_pose : SE3, optional
-        Current pose (computed if None)
-    max_depth : int, optional
-        Maximum subdivision depth (default: 8)
-    ilimit : int, optional
-        Maximum iterations for IK solver (default: 100)
-
-    Returns
-    -------
-    IKResult
-        success  - True/False
-        q_path   - (mxn) array of the final joint configuration 
-        iterations, residual  - aggregated diagnostics
-        tolerance_used - which tolerance was used
-        violations - joint limit violations (if any)
-    """
-    if current_pose is None:
-        current_pose = robot.fkine(current_q)
-
-    # ── inner recursive solver───────────────────
-    def _solve(Ta: SE3, Tb: SE3, q_seed, depth, tol):
-        """Return (path_list, success_flag, iterations, residual)."""
-        # Calculate current and target reach
-        current_reach = np.linalg.norm(Ta.t)
-        target_reach = np.linalg.norm(Tb.t)
-        
-        # Check if this is an inward movement (recovery)
-        is_recovery = target_reach < current_reach
-        
-        # Calculate configuration-dependent maximum reach based on joint 5 position
-        max_reach_threshold = calculate_configuration_dependent_max_reach(q_seed)
-        
-        # Determine damping based on reach and movement direction
-        if is_recovery:
-            # Recovery mode - always use low damping
-            damping = 0.0000001
-        else:
-            # Check if we're near configuration-dependent max reach
-            # logging.debug(f"current_reach:{current_reach:.3f}, max_reach_threshold:{max_reach_threshold:.3f}")
-            if not is_recovery and target_reach > max_reach_threshold:
-                logging.warning(f"Target reach limit exceeded: {target_reach:.3f} > {max_reach_threshold:.3f}")
-                return [], False, depth, 0
-            else:
-                damping = 0.0000001  # Normal low damping
-        
-        res = robot.ikine_LMS(Tb, q0=q_seed, ilimit=ilimit, tol=tol, wN=damping)
-        if res.success:
-            q_good = unwrap_angles(res.q, q_seed)      # << unwrap vs *previous*
-            return [q_good], True, res.iterations, res.residual
-
-        if depth >= max_depth:
-            return [], False, res.iterations, res.residual
-        # split the segment and recurse
-        Tc = SE3(trinterp(Ta.A, Tb.A, 0.5))            # mid-pose (screw interp)
-
-        left_path,  ok_L, it_L, r_L = _solve(Ta, Tc, q_seed, depth+1, tol)
-        if not ok_L:
-            return [], False, it_L, r_L
-
-        q_mid = left_path[-1]                          # last solved joint set
-        right_path, ok_R, it_R, r_R = _solve(Tc, Tb, q_mid, depth+1, tol)
-
-        return (
-            left_path + right_path,
-            ok_R,
-            it_L + it_R,
-            r_R
-        )
-
-    # ── kick-off with adaptive tolerance ──────────────────────────────────
-    if jogging:
-        adaptive_tol = 1e-10
-    else:
-        adaptive_tol = calculate_adaptive_tolerance(robot, current_q)
-    path, ok, its, resid = _solve(current_pose, target_pose, current_q, 0, adaptive_tol)
-    # Check if solution respects joint limits
-    target_q = path[-1] if len(path) != 0 else None
-    solution_valid, violations = PAROL6_ROBOT.check_joint_limits(current_q, target_q)
-    if ok and solution_valid:
-        return IKResult(True, path[-1], its, resid, adaptive_tol, violations)
-    else:
-        return IKResult(False, None, its, resid, adaptive_tol, violations)
-
 #Setup IP address and Simulator port
 ip = "127.0.0.1" #Loopback address
 port = 5001
-# Create a UDP socket
+# UDP server setup
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((ip, port))
-logging.info(f"Start listening to {ip}:{port}")
+logger.info(f'Start listening to {ip}:{port}')
 
 def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
@@ -588,10 +461,9 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
     test_list.append(bytes([Gripper_data[4]]))
     
     # ==========================================================
-    # === FIX: Make sure calibrate is a one-shot command      ====
+    # One-shot command reset for calibration and error clearing
     # ==========================================================
-    # If the mode was set to calibrate (1) or clear_error (2), reset it
-    # back to normal (0) for the next cycle. This prevents an endless loop.
+    # Reset mode to normal after calibration/error clear commands
     if Gripper_data_out[4] == 1 or Gripper_data_out[4] == 2:
         Gripper_data_out[4] = 0
     # ==========================================================
@@ -648,9 +520,9 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
                 good_start = 1
                 data_len = input_byte
                 data_len = struct.unpack('B', data_len)[0]
-                logging.debug("data len we got from robot packet= ")
-                logging.debug(input_byte)
-                logging.debug("good start for DATA that we received at PC")
+                #logging.debug("data len we got from robot packet= ")
+                #logging.debug(input_byte)
+                #logging.debug("good start for DATA that we received at PC")
             # Third start byte is good
             if (input_byte == start_cond3_byte and start_cond2 == 1 and start_cond1 == 1):
                 start_cond3 = 1
@@ -673,24 +545,24 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
                 start_cond1 = 1
                 #print("good cond 1 PC")
         else:
-            # Here data goes after good  start
+            # Valid start sequence detected
             data_buffer[data_counter] = input_byte
             if (data_counter == data_len - 1):
 
-                logging.debug("Data len PC")
-                logging.debug(data_len)
-                logging.debug("End bytes are:")
-                logging.debug(data_buffer[data_len -1])
-                logging.debug(data_buffer[data_len -2])
+                #logging.debug("Data len PC")
+                #logging.debug(data_len)
+                #logging.debug("End bytes are:")
+                #logging.debug(data_buffer[data_len -1])
+                #logging.debug(data_buffer[data_len -2])
 
-                # Here if last 2 bytes are end condition bytes we process the data 
+                # End sequence validation and data processing 
                 if (data_buffer[data_len -1] == end_cond2_byte and data_buffer[data_len - 2] == end_cond1_byte):
 
-                    logging.debug("GOOD END CONDITION PC")
-                    logging.debug("I UNPACKED RAW DATA RECEIVED FROM THE ROBOT")
+                    #logging.debug("GOOD END CONDITION PC")
+                    #logging.debug("I UNPACKED RAW DATA RECEIVED FROM THE ROBOT")
                     Unpack_data(data_buffer, Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
                     XTR_data,Gripper_data_in)
-                    logging.debug("DATA UNPACK FINISHED")
+                    #logging.debug("DATA UNPACK FINISHED")
                     # ako su dobri izračunaj crc
                     # if crc dobar raspakiraj podatke
                     # ako je dobar paket je dobar i spremi ga u nove variable!
@@ -746,21 +618,13 @@ def Fuse_bitfield_2_bytearray(var_in):
         number = (2 * number) + b
     return bytes([number])
 
-# Check if there is element 1 in the list. 
+# Find first occurrence of value 1 in list 
 # If yes return its index, if no element is 1 return -1
 def check_elements(lst):
     for i, element in enumerate(lst):
         if element == 1:
             return i
     return -1  # Return -1 if no element is 1
-
-def quintic_scaling(s: float) -> float:
-    """
-    Calculates a smooth 0-to-1 scaling factor for progress 's'
-    using a quintic polynomial, ensuring smooth start/end accelerations.
-    """
-    return 6 * (s**5) - 15 * (s**4) + 10 * (s**3)
-
 
 def simulate_robot_step(dt: float) -> None:
     """
@@ -881,1822 +745,8 @@ def apply_streaming_velocities(qdot: np.ndarray, Speed_out: list) -> None:
     for i in range(6):
         Speed_out[i] = int(speeds_steps[i])
 
-#########################################################################
-# Robot Commands Start Here
-#########################################################################
 
-class HomeCommand:
-    """
-    A non-blocking command that tells the robot to perform its internal homing sequence.
-    This version uses a state machine to allow re-homing even if the robot is already homed.
-    """
-    def __init__(self):
-        self.is_valid = True
-        self.is_finished = False
-        # State machine: START -> WAIT_FOR_UNHOMED -> WAIT_FOR_HOMED -> FINISHED
-        self.state = "START"
-        # Counter to send the home command for multiple cycles
-        self.start_cmd_counter = 10  # Send command 100 for 10 cycles (0.1s)
-        # Safety timeout (20 seconds at 0.01s interval)
-        self.timeout_counter = 2000
-        logging.info("Initializing Home command...")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """
-        Manages the homing command and monitors for completion using a state machine.
-        """
-        if self.is_finished:
-            return True
-
-        # --- State: START ---
-        # On the first few executions, continuously send the 'home' (100) command.
-        if self.state == "START":
-            logging.info(f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}")
-            Command_out.value = 100
-            self.start_cmd_counter -= 1
-            if self.start_cmd_counter <= 0:
-                # Once sent for enough cycles, move to the next state
-                self.state = "WAITING_FOR_UNHOMED"
-            return False
-
-        # --- State: WAITING_FOR_UNHOMED ---
-        # The robot's firmware should reset the homed status. We wait to see that happen.
-        # During this time, we send 'idle' (255) to let the robot's controller take over.
-        if self.state == "WAITING_FOR_UNHOMED":
-            Command_out.value = 255
-            # Check if at least one joint has started homing (is no longer homed)
-            if any(h == 0 for h in Homed_in[:6]):
-                logging.info("  -> Homing sequence initiated by robot.")
-                self.state = "WAITING_FOR_HOMED"
-            # Check for timeout
-            self.timeout_counter -= 1
-            if self.timeout_counter <= 0:
-                logging.error("  -> ERROR: Timeout waiting for robot to start homing sequence.")
-                self.is_finished = True
-            return self.is_finished
-
-        # --- State: WAITING_FOR_HOMED ---
-        # Now we wait for all joints to report that they are homed (all flags are 1).
-        if self.state == "WAITING_FOR_HOMED":
-            Command_out.value = 255
-            # Check if all joints have finished homing
-            if all(h == 1 for h in Homed_in[:6]):
-                logging.info("Homing sequence complete. All joints reported home.")
-                self.is_finished = True
-                Speed_out[:] = [0] * 6 # Ensure robot is stopped
-
-        return self.is_finished
-
-class JogCommand:
-    """
-    A non-blocking command to jog a joint for a specific duration or distance.
-    It performs all safety and validity checks upon initialization.
-    """
-    def __init__(self, joint, speed_percentage=None, duration=None, distance_deg=None):
-        """
-        Initializes and validates the jog command. This is the SETUP phase.
-        """
-        self.is_valid = False
-        self.is_finished = False
-        self.mode = None
-        self.command_step = 0
-
-        # --- 1. Parameter Validation and Mode Selection ---
-        if duration and distance_deg:
-            self.mode = 'distance'
-            logging.info(f"Initializing Jog: Joint {joint}, Distance {distance_deg} deg, Duration {duration}s.")
-        elif duration:
-            self.mode = 'time'
-            logging.info(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Duration {duration}s.")
-        elif distance_deg:
-            self.mode = 'distance'
-            logging.info(f"Initializing Jog: Joint {joint}, Speed {speed_percentage}%, Distance {distance_deg} deg.")
-        else:
-            logging.error("Error: JogCommand requires either 'duration', 'distance_deg', or both.")
-            return
-
-        # --- 2. Store parameters for deferred calculation ---
-        self.joint = joint
-        self.speed_percentage = speed_percentage
-        self.duration = duration
-        self.distance_deg = distance_deg
-
-        # --- These will be calculated later ---
-        self.direction = 1
-        self.joint_index = 0
-        self.speed_out = 0
-        self.command_len = 0
-        self.target_position = 0
-
-        self.is_valid = True # Mark as valid for now; preparation step will confirm.
-
-
-    def prepare_for_execution(self, current_position_in):
-        """Pre-computes speeds and target positions using live data."""
-        logging.info(f"  -> Preparing for Jog command...")
-
-        # Determine direction and joint index
-        self.direction = 1 if 0 <= self.joint <= 5 else -1
-        self.joint_index = self.joint if self.direction == 1 else self.joint - 6
-        
-        distance_steps = 0
-        if self.distance_deg:
-            distance_steps = int(PAROL6_ROBOT.DEG2STEPS(abs(self.distance_deg), self.joint_index))
-            # --- MOVED LOGIC: Calculate target using the LIVE position ---
-            self.target_position = current_position_in[self.joint_index] + (distance_steps * self.direction)
-            
-            min_limit, max_limit = PAROL6_ROBOT.Joint_limits_steps[self.joint_index]
-            if not (min_limit <= self.target_position <= max_limit):
-                logging.error(f"  -> VALIDATION FAILED: Target position {self.target_position} is out of joint limits ({min_limit}, {max_limit}).")
-                self.is_valid = False
-                return
-
-        # Calculate speed and duration
-        speed_steps_per_sec = 0
-        if self.mode == 'distance' and self.duration:
-            speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
-            max_joint_speed = PAROL6_ROBOT.Joint_max_speed[self.joint_index]
-            if speed_steps_per_sec > max_joint_speed:
-                logging.error(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max speed ({max_joint_speed} steps/s).")
-                self.is_valid = False
-                return
-        else:
-            if self.speed_percentage is None:
-                logging.error("Error: 'speed_percentage' must be provided if not calculating automatically.")
-                self.is_valid = False
-                return
-            # Map jog speed to jog caps scaled up slightly, clamped to absolute joint max
-            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index] * JOG_SPEED_SCALE)
-            abs_max = PAROL6_ROBOT.Joint_max_speed[self.joint_index]
-            max_joint_speed = min(abs_max, max_cap)
-            speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, max_joint_speed]))
-
-        self.speed_out = speed_steps_per_sec * self.direction
-        if self.duration:
-            self.command_len = max(1, int(self.duration / INTERVAL_S))
-        else:
-            self.command_len = float('inf')
-        logging.info("  -> Jog command is ready.")
-
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """This is the EXECUTION phase. It runs on every loop cycle."""
-        if self.is_finished or not self.is_valid:
-            return True
-
-        stop_reason = None
-        current_pos = Position_in[self.joint_index]
-
-        if self.mode == 'time':
-            if self.command_step >= self.command_len:
-                stop_reason = "Timed jog finished."
-        elif self.mode == 'distance':
-            if (self.direction == 1 and current_pos >= self.target_position) or \
-               (self.direction == -1 and current_pos <= self.target_position):
-                stop_reason = "Distance jog finished."
-        
-        if not stop_reason:
-            if (self.direction == 1 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[self.joint_index][1]) or \
-               (self.direction == -1 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[self.joint_index][0]):
-                stop_reason = f"Limit reached on joint {self.joint_index + 1}."
-
-        if stop_reason:
-            logging.info(stop_reason)
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-        else:
-            Speed_out[:] = [0] * 6
-            Speed_out[self.joint_index] = self.speed_out
-            Command_out.value = 123
-            self.command_step += 1
-            return False
-        
-class MultiJogCommand:
-    """
-    A non-blocking command to jog multiple joints simultaneously for a specific duration.
-    It performs all safety and validity checks upon initialization.
-    """
-    def __init__(self, joints, speed_percentages, duration):
-        """
-        Initializes and validates the multi-jog command.
-        """
-        self.is_valid = False
-        self.is_finished = False
-        self.command_step = 0
-
-        # --- 1. Parameter Validation ---
-        if not isinstance(joints, list) or not isinstance(speed_percentages, list):
-            logging.error("Error: MultiJogCommand requires 'joints' and 'speed_percentages' to be lists.")
-            return
-
-        if len(joints) != len(speed_percentages):
-            logging.error("Error: The number of joints must match the number of speed percentages.")
-            return
-
-        if not duration or duration <= 0:
-            logging.error("Error: MultiJogCommand requires a positive 'duration'.")
-            return
-
-        # ==========================================================
-        # === NEW: Check for conflicting joint commands          ===
-        # ==========================================================
-        base_joints = set()
-        for joint in joints:
-            # Normalize the joint index to its base (0-5)
-            base_joint = joint % 6
-            # If the base joint is already in our set, it's a conflict.
-            if base_joint in base_joints:
-                logging.error(f"  -> VALIDATION FAILED: Conflicting commands for Joint {base_joint + 1} (e.g., J1+ and J1-).")
-                self.is_valid = False
-                return
-            base_joints.add(base_joint)
-        # ==========================================================
-
-        logging.info(f"Initializing MultiJog for joints {joints} with speeds {speed_percentages}% for {duration}s.")
-
-        # --- 2. Store parameters ---
-        self.joints = joints
-        self.speed_percentages = speed_percentages
-        self.duration = duration
-        self.command_len = max(1, int(self.duration / INTERVAL_S))
-
-        # --- This will be calculated in the prepare step ---
-        self.speeds_out = [0] * 6
-
-        self.is_valid = True
-
-    def prepare_for_execution(self, current_position_in):
-        """Pre-computes the speeds for each joint."""
-        logging.info(f"  -> Preparing for MultiJog command...")
-
-        for i, joint in enumerate(self.joints):
-            # Determine direction and joint index (0-5 for positive, 6-11 for negative)
-            direction = 1 if 0 <= joint <= 5 else -1
-            joint_index = joint if direction == 1 else joint - 6
-            speed_percentage = self.speed_percentages[i]
-
-            # Check for joint index validity
-            if not (0 <= joint_index < 6):
-                logging.error(f"  -> VALIDATION FAILED: Invalid joint index {joint_index}.")
-                self.is_valid = False
-                return
-
-            # Calculate speed in steps/sec using scaled jog caps, clamped to absolute joint max
-            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[joint_index] * JOG_SPEED_SCALE)
-            abs_max = PAROL6_ROBOT.Joint_max_speed[joint_index]
-            max_joint_speed = min(abs_max, max_cap)
-            speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, max_joint_speed]))
-            self.speeds_out[joint_index] = speed_steps_per_sec * direction
-
-        logging.info("  -> MultiJog command is ready.")
-
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """This is the EXECUTION phase. It runs on every loop cycle."""
-        if self.is_finished or not self.is_valid:
-            return True
-
-        # Stop if the duration has elapsed
-        if self.command_step >= self.command_len:
-            logging.info("Timed multi-jog finished.")
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-        else:
-            # Continuously check for joint limits during the jog
-            for i in range(6):
-                if self.speeds_out[i] != 0:
-                    current_pos = Position_in[i]
-                    # Hitting positive limit while moving positively
-                    if self.speeds_out[i] > 0 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[i][1]:
-                         logging.info(f"Limit reached on joint {i + 1}. Stopping jog.")
-                         self.is_finished = True
-                         Speed_out[:] = [0] * 6
-                         Command_out.value = 255
-                         return True
-                    # Hitting negative limit while moving negatively
-                    elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
-                         logging.info(f"Limit reached on joint {i + 1}. Stopping jog.")
-                         self.is_finished = True
-                         Speed_out[:] = [0] * 6
-                         Command_out.value = 255
-                         return True
-
-            # If no limits are hit, apply the speeds
-            Speed_out[:] = self.speeds_out
-            Command_out.value = 123 # Jog command
-            self.command_step += 1
-            return False # Command is still running
-        
-# This dictionary maps descriptive axis names to movement vectors, which is cleaner.
-# Format: ([x, y, z], [rx, ry, rz])
-AXIS_MAP = {
-    'X+': ([1, 0, 0], [0, 0, 0]), 'X-': ([-1, 0, 0], [0, 0, 0]),
-    'Y+': ([0, 1, 0], [0, 0, 0]), 'Y-': ([0, -1, 0], [0, 0, 0]),
-    'Z+': ([0, 0, 1], [0, 0, 0]), 'Z-': ([0, 0, -1], [0, 0, 0]),
-    'RX+': ([0, 0, 0], [1, 0, 0]), 'RX-': ([0, 0, 0], [-1, 0, 0]),
-    'RY+': ([0, 0, 0], [0, 1, 0]), 'RY-': ([0, 0, 0], [0, -1, 0]),
-    'RZ+': ([0, 0, 0], [0, 0, 1]), 'RZ-': ([0, 0, 0], [0, 0, -1]),
-}
-
-class CartesianJogCommand:
-    """
-    A non-blocking command to jog the robot's end-effector in Cartesian space.
-    This is the final, refactored version using clean, standard spatial math
-    operations now that the core unit bug has been fixed.
-    """
-    def __init__(self, frame, axis, speed_percentage=50.0, duration=1.5, **kwargs):
-        """
-        Initializes and validates the Cartesian jog command.
-        """
-        self.is_valid = False
-        self.is_finished = False
-        logging.info(f"Initializing CartesianJog: Frame {frame}, Axis {axis}...")
-
-        if axis not in AXIS_MAP:
-            logging.error(f"  -> VALIDATION FAILED: Invalid axis '{axis}'.")
-            return
-        
-        # Store all necessary parameters for use in execute_step
-        self.frame = frame
-        self.axis_vectors = AXIS_MAP[axis]
-        self.is_rotation = any(self.axis_vectors[1])
-        self.speed_percentage = speed_percentage
-        self.duration = duration
-        self.end_time = time.time() + self.duration
-        
-        self.is_valid = True
-        logging.info("  -> Command is valid and ready.")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        if self.is_finished or not self.is_valid:
-            return True
-
-        # --- A. Check for completion ---
-        if time.time() >= self.end_time:
-            logging.info("Cartesian jog finished.")
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-
-        # --- B. Calculate Target Pose using clean vector math ---
-        Command_out.value = 123 # Set jog command
-        
-        q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
-        T_current = PAROL6_ROBOT.robot.fkine(q_current)
-
-        if not isinstance(T_current, SE3):
-            return False # Wait for valid pose data
-
-        # Calculate speed and displacement for this cycle
-        linear_speed_ms = float(np.interp(self.speed_percentage, [0, 100], [PAROL6_ROBOT.Cartesian_linear_velocity_min_JOG, PAROL6_ROBOT.Cartesian_linear_velocity_max_JOG]))
-        angular_speed_degs = float(np.interp(self.speed_percentage, [0, 100], [PAROL6_ROBOT.Cartesian_angular_velocity_min, PAROL6_ROBOT.Cartesian_angular_velocity_max]))
-
-        delta_linear = linear_speed_ms * INTERVAL_S
-        delta_angular_rad = np.deg2rad(angular_speed_degs * INTERVAL_S)
-
-        # Create the small incremental transformation (delta_pose)
-        trans_vec = np.array(self.axis_vectors[0]) * delta_linear
-        rot_vec = np.array(self.axis_vectors[1]) * delta_angular_rad
-        delta_pose = SE3.Rt(SE3.Eul(rot_vec).R, trans_vec)
-
-        # Apply the transformation in the correct reference frame
-        if self.frame == 'WRF':
-            # Pre-multiply to apply the change in the World Reference Frame
-            target_pose = delta_pose * T_current
-        else: # TRF
-            # Post-multiply to apply the change in the Tool Reference Frame
-            target_pose = T_current * delta_pose
-        
-        # --- C. Solve IK / Qdot and Calculate Velocities ---
-        v_lin, v_rot = compute_twist(self.frame, [k for k in AXIS_MAP.keys() if AXIS_MAP[k] == self.axis_vectors][0] if self.axis_vectors in AXIS_MAP.values() else 'X+', self.speed_percentage, T_current)
-        qdot = jacobian_qdot(PAROL6_ROBOT.robot, q_current, v_lin, v_rot, JACOBIAN_DAMPING_LAMBDA)
-        apply_streaming_velocities(qdot, Speed_out)
-
-        return False # Command is still running
-
-class MovePoseCommand:
-    """
-    A non-blocking command to move the robot to a specific Cartesian pose.
-    The movement itself is a joint-space interpolation.
-    """
-    def __init__(self, pose, duration=None, velocity_percent=None, accel_percent=50, trajectory_type='poly'):
-        self.is_valid = True  # Assume valid; preparation step will confirm.
-        self.is_finished = False
-        self.command_step = 0
-        self.trajectory_steps = []
-
-        logging.info(f"Initializing MovePose to {pose}...")
-
-        # --- MODIFICATION: Store parameters for deferred planning ---
-        self.pose = pose
-        self.duration = duration
-        self.velocity_percent = velocity_percent
-        self.accel_percent = accel_percent
-        self.trajectory_type = trajectory_type
-
-    """
-        Initializes, validates, and pre-computes the trajectory for a move-to-pose command.
-
-        Args:
-            pose (list): A list of 6 values [x, y, z, r, p, y] for the target pose.
-                         Positions are in mm, rotations are in degrees.
-            duration (float, optional): The total time for the movement in seconds.
-            velocity_percent (float, optional): The target velocity as a percentage (0-100).
-            accel_percent (float, optional): The target acceleration as a percentage (0-100).
-            trajectory_type (str, optional): The type of trajectory ('poly' or 'trap').
-        """
     
-    def prepare_for_execution(self, current_position_in):
-        """Calculates the full trajectory just-in-time before execution."""
-        logging.info(f"  -> Preparing trajectory for MovePose to {self.pose}...")
-
-        initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
-        target_pose = SE3(self.pose[0] / 1000.0, self.pose[1] / 1000.0, self.pose[2] / 1000.0) * SE3.RPY(self.pose[3:6], unit='deg', order='xyz')
-        
-        ik_solution = solve_ik_with_adaptive_tol_subdivision(
-            PAROL6_ROBOT.robot, target_pose, initial_pos_rad, ilimit=100)
-
-        if not ik_solution.success:
-            logging.error("  -> VALIDATION FAILED: Inverse kinematics failed at execution time.")
-            self.is_valid = False
-            return
-
-        target_pos_rad = ik_solution.q
-
-        if self.duration and self.duration > 0:
-            if self.velocity_percent is not None:
-                logging.info("  -> INFO: Both duration and velocity were provided. Using duration.")
-            command_len = int(self.duration / INTERVAL_S)
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
-            
-            for i in range(len(traj_generator.q)):
-                pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
-                self.trajectory_steps.append((pos_step, None))
-
-        elif self.velocity_percent is not None:
-            try:
-                accel_percent = self.accel_percent if self.accel_percent is not None else 50
-                
-                initial_pos_steps = np.array(current_position_in)
-                target_pos_steps = np.array([int(PAROL6_ROBOT.RAD2STEPS(rad, i)) for i, rad in enumerate(target_pos_rad)])
-
-                all_joint_times = []
-                for i in range(6):
-                    path_to_travel = abs(target_pos_steps[i] - initial_pos_steps[i])
-                    if path_to_travel == 0:
-                        all_joint_times.append(0)
-                        continue
-                    
-                    v_max_joint = np.interp(self.velocity_percent, [0, 100], [PAROL6_ROBOT.Joint_min_speed[i], PAROL6_ROBOT.Joint_max_speed[i]])
-                    a_max_rad = np.interp(accel_percent, [0, 100], [PAROL6_ROBOT.Joint_min_acc, PAROL6_ROBOT.Joint_max_acc])
-                    a_max_steps = PAROL6_ROBOT.SPEED_RAD2STEP(a_max_rad, i)
-
-                    if v_max_joint <= 0 or a_max_steps <= 0:
-                        raise ValueError(f"Invalid speed/acceleration for joint {i+1}. Must be positive.")
-
-                    t_accel = v_max_joint / a_max_steps
-                    if path_to_travel < v_max_joint * t_accel:
-                        t_accel = np.sqrt(path_to_travel / a_max_steps)
-                        joint_time = 2 * t_accel
-                    else:
-                        joint_time = path_to_travel / v_max_joint + t_accel
-                    all_joint_times.append(joint_time)
-            
-                total_time = max(all_joint_times)
-
-                if total_time <= 0:
-                    self.is_finished = True
-                    return
-
-                if total_time < (2 * INTERVAL_S):
-                    total_time = 2 * INTERVAL_S
-
-                execution_time = np.arange(0, total_time, INTERVAL_S)
-                
-                all_q, all_qd = [], []
-                for i in range(6):
-                    if abs(target_pos_steps[i] - initial_pos_steps[i]) == 0:
-                        all_q.append(np.full(len(execution_time), initial_pos_steps[i]))
-                        all_qd.append(np.zeros(len(execution_time)))
-                    else:
-                        joint_traj = rp.trapezoidal(initial_pos_steps[i], target_pos_steps[i], execution_time)
-                        all_q.append(joint_traj.q)
-                        all_qd.append(joint_traj.qd)
-
-                self.trajectory_steps = list(zip(np.array(all_q).T.astype(int), np.array(all_qd).T.astype(int)))
-                logging.info(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
-
-            except Exception as e:
-                logging.error(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
-                self.is_valid = False
-                return
-
-        else:
-            logging.info("  -> Using conservative values for MovePose.")
-            command_len = 200
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
-            for i in range(len(traj_generator.q)):
-                pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
-                self.trajectory_steps.append((pos_step, None))
-        
-        if not self.trajectory_steps:
-             logging.error(" -> Trajectory calculation resulted in no steps. Command is invalid.")
-             self.is_valid = False
-        else:
-             logging.info(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        # This method remains unchanged.
-        if self.is_finished or not self.is_valid:
-            return True
-
-        if self.command_step >= len(self.trajectory_steps):
-            logging.info(f"{type(self).__name__} finished.")
-            self.is_finished = True
-            Position_out[:] = Position_in[:]
-            Speed_out[:] = [0] * 6
-            Command_out.value = 156
-            return True
-        else:
-            pos_step, _ = self.trajectory_steps[self.command_step]
-            Position_out[:] = pos_step
-            Speed_out[:] = [0] * 6
-            Command_out.value = 156
-            self.command_step += 1
-            return False
-        
-class MoveJointCommand:
-    """
-    A non-blocking command to move the robot's joints to a specific configuration.
-    It pre-calculates the entire trajectory upon initialization.
-    """
-    def __init__(self, target_angles, duration=None, velocity_percent=None, accel_percent=50, trajectory_type='poly'):
-        self.is_valid = False  # Will be set to True after basic validation
-        self.is_finished = False
-        self.command_step = 0
-        self.trajectory_steps = []
-
-        logging.info(f"Initializing MoveJoint to {target_angles}...")
-
-        # --- MODIFICATION: Store parameters for deferred planning ---
-        self.target_angles = target_angles
-        self.duration = duration
-        self.velocity_percent = velocity_percent
-        self.accel_percent = accel_percent
-        self.trajectory_type = trajectory_type
-
-        # --- Perform only state-independent validation ---
-        target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
-        for i in range(6):
-            min_rad, max_rad = PAROL6_ROBOT.Joint_limits_radian[i]
-            if not (min_rad <= target_pos_rad[i] <= max_rad):
-                logging.error(f"  -> VALIDATION FAILED: Target for Joint {i+1} ({self.target_angles[i]} deg) is out of range.")
-                return
-        
-        self.is_valid = True
-
-    def prepare_for_execution(self, current_position_in):
-        """Calculates the trajectory just before execution begins."""
-        logging.info(f"  -> Preparing trajectory for MoveJoint to {self.target_angles}...")
-        
-        initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
-        target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
-
-        if self.duration and self.duration > 0:
-            if self.velocity_percent is not None:
-                logging.info("  -> INFO: Both duration and velocity were provided. Using duration.")
-            command_len = int(self.duration / INTERVAL_S)
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
-            
-            for i in range(len(traj_generator.q)):
-                pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
-                self.trajectory_steps.append((pos_step, None))
-
-        elif self.velocity_percent is not None:
-            try:
-                accel_percent = self.accel_percent if self.accel_percent is not None else 50
-                initial_pos_steps = np.array(current_position_in)
-                target_pos_steps = np.array([int(PAROL6_ROBOT.RAD2STEPS(rad, i)) for i, rad in enumerate(target_pos_rad)])
-                
-                all_joint_times = []
-                for i in range(6):
-                    path_to_travel = abs(target_pos_steps[i] - initial_pos_steps[i])
-                    if path_to_travel == 0:
-                        all_joint_times.append(0)
-                        continue
-
-                    v_max_joint = np.interp(self.velocity_percent, [0, 100], [PAROL6_ROBOT.Joint_min_speed[i], PAROL6_ROBOT.Joint_max_speed[i]])
-                    a_max_rad = np.interp(accel_percent, [0, 100], [PAROL6_ROBOT.Joint_min_acc, PAROL6_ROBOT.Joint_max_acc])
-                    a_max_steps = PAROL6_ROBOT.SPEED_RAD2STEP(a_max_rad, i)
-
-                    if v_max_joint <= 0 or a_max_steps <= 0:
-                        raise ValueError(f"Invalid speed/acceleration for joint {i+1}. Must be positive.")
-
-                    t_accel = v_max_joint / a_max_steps
-                    if path_to_travel < v_max_joint * t_accel:
-                        t_accel = np.sqrt(path_to_travel / a_max_steps)
-                        joint_time = 2 * t_accel
-                    else:
-                        joint_time = path_to_travel / v_max_joint + t_accel
-                    all_joint_times.append(joint_time)
-
-                total_time = max(all_joint_times)
-
-                if total_time <= 0:
-                    self.is_finished = True
-                    return
-
-                if total_time < (2 * INTERVAL_S):
-                    total_time = 2 * INTERVAL_S
-
-                execution_time = np.arange(0, total_time, INTERVAL_S)
-                
-                all_q, all_qd = [], []
-                for i in range(6):
-                    if abs(target_pos_steps[i] - initial_pos_steps[i]) == 0:
-                        all_q.append(np.full(len(execution_time), initial_pos_steps[i]))
-                        all_qd.append(np.zeros(len(execution_time)))
-                    else:
-                        joint_traj = rp.trapezoidal(initial_pos_steps[i], target_pos_steps[i], execution_time)
-                        all_q.append(joint_traj.q)
-                        all_qd.append(joint_traj.qd)
-
-                self.trajectory_steps = list(zip(np.array(all_q).T.astype(int), np.array(all_qd).T.astype(int)))
-                logging.info(f"  -> Command is valid (duration calculated from speed: {total_time:.2f}s).")
-
-            except Exception as e:
-                logging.error(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
-                logging.error(f"  -> Please check Joint_min/max_speed and Joint_min/max_acc values in PAROL6_ROBOT.py.")
-                self.is_valid = False
-                return
-        
-        else:
-            logging.info("  -> Using conservative values for MoveJoint.")
-            command_len = 200
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
-            for i in range(len(traj_generator.q)):
-                pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
-                self.trajectory_steps.append((pos_step, None))
-        
-        if not self.trajectory_steps:
-             logging.error(" -> Trajectory calculation resulted in no steps. Command is invalid.")
-             self.is_valid = False
-        else:
-             logging.info(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        # This method remains unchanged.
-        if self.is_finished or not self.is_valid:
-            return True
-
-        if self.command_step >= len(self.trajectory_steps):
-            logging.info(f"{type(self).__name__} finished.")
-            self.is_finished = True
-            Position_out[:] = Position_in[:]
-            Speed_out[:] = [0] * 6
-            Command_out.value = 156
-            return True
-        else:
-            pos_step, _ = self.trajectory_steps[self.command_step]
-            Position_out[:] = pos_step
-            Speed_out[:] = [0] * 6
-            Command_out.value = 156
-            self.command_step += 1
-            return False
-        
-class MoveCartCommand:
-    """
-    A non-blocking command to move the robot's end-effector in a straight line
-    in Cartesian space, completing the move in an exact duration.
-
-    It works by:
-    1. Pre-validating the final target pose.
-    2. Interpolating the pose in Cartesian space in real-time.
-    3. Solving Inverse Kinematics for each intermediate step to ensure path validity.
-    """
-    def __init__(self, pose, duration=None, velocity_percent=None):
-        self.is_valid = False
-        self.is_finished = False
-
-        # --- MODIFICATION: Validate that at least one timing parameter is given ---
-        if duration is None and velocity_percent is None:
-            logging.error("  -> VALIDATION FAILED: MoveCartCommand requires either 'duration' or 'velocity_percent'.")
-            return
-        if duration is not None and velocity_percent is not None:
-            logging.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
-            self.velocity_percent = None # Prioritize duration
-        else:
-            self.velocity_percent = velocity_percent
-
-        # --- Store parameters and set placeholders ---
-        self.duration = duration
-        self.pose = pose
-        self.start_time = None
-        self.initial_pose = None
-        self.target_pose = None
-        self.is_valid = True
-
-    def prepare_for_execution(self, current_position_in):
-        """Captures the initial state and validates the path just before execution."""
-        logging.info(f"  -> Preparing for MoveCart to {self.pose}...")
-        
-        # --- MOVED LOGIC: Capture initial state from live data ---
-        initial_q_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
-        self.initial_pose = PAROL6_ROBOT.robot.fkine(initial_q_rad)
-        self.target_pose = SE3(self.pose[0]/1000.0, self.pose[1]/1000.0, self.pose[2]/1000.0) * SE3.RPY(self.pose[3:6], unit='deg', order='xyz')
-
-        logging.info("  -> Pre-validating final target pose...")
-        ik_check = solve_ik_with_adaptive_tol_subdivision(
-            PAROL6_ROBOT.robot, self.target_pose, initial_q_rad
-        )
-
-        if not ik_check.success:
-            logging.error("  -> VALIDATION FAILED: The final target pose is unreachable.")
-            if ik_check.violations:
-                logging.error(f"     Reason: Solution violates joint limits: {ik_check.violations}")
-            self.is_valid = False # Mark as invalid if path fails
-            return
-
-        # --- NEW BLOCK: Calculate duration from velocity if needed ---
-        if self.velocity_percent is not None:
-            logging.info(f"  -> Calculating duration for {self.velocity_percent}% speed...")
-            # Calculate the total distance for translation and rotation
-            linear_distance = np.linalg.norm(self.target_pose.t - self.initial_pose.t)
-            angular_distance_rad = self.initial_pose.angdist(self.target_pose)
-
-            # Interpolate the target speeds from percentages, assuming constants exist in PAROL6_ROBOT
-            target_linear_speed = np.interp(self.velocity_percent, [0, 100], [PAROL6_ROBOT.Cartesian_linear_velocity_min, PAROL6_ROBOT.Cartesian_linear_velocity_max])
-            target_angular_speed = np.interp(self.velocity_percent, [0, 100], [PAROL6_ROBOT.Cartesian_angular_velocity_min, PAROL6_ROBOT.Cartesian_angular_velocity_max])
-            target_angular_speed_rad = np.deg2rad(target_angular_speed)
-
-            # Calculate time required for each component of the movement
-            time_linear = linear_distance / target_linear_speed if target_linear_speed > 0 else 0
-            time_angular = angular_distance_rad / target_angular_speed_rad if target_angular_speed_rad > 0 else 0
-
-            # The total duration is the longer of the two times to ensure synchronization
-            calculated_duration = max(time_linear, time_angular)
-
-            if calculated_duration <= 0:
-                logging.info("  -> INFO: MoveCart has zero duration. Marking as finished.")
-                self.is_finished = True
-                self.is_valid = True # It's valid, just already done.
-                return
-
-            self.duration = calculated_duration
-            logging.info(f"  -> Calculated MoveCart duration: {self.duration:.2f}s")
-
-        logging.info("  -> Command is valid and ready for execution.")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        if self.is_finished or not self.is_valid:
-            return True
-
-        if self.start_time is None:
-            self.start_time = time.time()
-
-        elapsed_time = time.time() - self.start_time
-        s = min(elapsed_time / self.duration, 1.0)
-        s_scaled = quintic_scaling(s)
-
-        current_target_pose = self.initial_pose.interp(self.target_pose, s_scaled)
-
-        current_q_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
-        ik_solution = solve_ik_with_adaptive_tol_subdivision(
-            PAROL6_ROBOT.robot, current_target_pose, current_q_rad
-        )
-
-        if not ik_solution.success:
-            logging.error("  -> ERROR: MoveCart failed. An intermediate point on the path is unreachable.")
-            if ik_solution.violations:
-                 logging.error(f"     Reason: Path violates joint limits: {ik_solution.violations}")
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-
-        current_pos_rad = ik_solution.q
-
-        # --- MODIFIED BLOCK ---
-        # Send only the target position and let the firmware's P-controller handle speed.
-        Position_out[:] = [int(PAROL6_ROBOT.RAD2STEPS(p, i)) for i, p in enumerate(current_pos_rad)]
-        Speed_out[:] = [0] * 6 # Set feed-forward velocity to zero for smooth P-control.
-        Command_out.value = 156
-        # --- END MODIFIED BLOCK ---
-
-        if s >= 1.0:
-            logging.info(f"MoveCart finished in ~{elapsed_time:.2f}s.")
-            self.is_finished = True
-            # The main loop will handle holding the final position.
-
-        return self.is_finished
-        
-class GripperCommand:
-    """
-    A single, unified, non-blocking command to control all gripper functions.
-    It internally selects the correct logic (position-based waiting, timed delay,
-    or instantaneous) based on the specified action.
-    """
-    def __init__(self, gripper_type, action=None, position=100, speed=100, current=500, output_port=1):
-        """
-        Initializes the Gripper command and configures its internal state machine
-        based on the requested action.
-        """
-        self.is_valid = True
-        self.is_finished = False
-        self.gripper_type = gripper_type.lower()
-        self.action = action.lower() if action else 'move'
-        self.state = "START"
-        self.timeout_counter = 1000 # 10-second safety timeout for all waiting states
-
-        # --- Configure based on Gripper Type and Action ---
-        if self.gripper_type == 'electric':
-            if self.action == 'move':
-                self.target_position = position
-                self.speed = speed
-                self.current = current
-                if not (0 <= position <= 255 and 0 <= speed <= 255 and 100 <= current <= 1000):
-                    self.is_valid = False
-            elif self.action == 'calibrate':
-                self.wait_counter = 200 # 2-second fixed delay for calibration
-            else:
-                self.is_valid = False # Invalid action
-
-        elif self.gripper_type == 'pneumatic':
-            if self.action not in ['open', 'close']:
-                self.is_valid = False
-            self.state_to_set = 1 if self.action == 'open' else 0
-            self.port_index = 2 if output_port == 1 else 3
-        else:
-            self.is_valid = False
-
-        if not self.is_valid:
-            logging.error(f"  -> VALIDATION FAILED for GripperCommand with action: '{self.action}'")
-
-    def execute_step(self, Gripper_data_out, InOut_out, Gripper_data_in, InOut_in, **kwargs):
-        if self.is_finished or not self.is_valid:
-            return True
-
-        self.timeout_counter -= 1
-        if self.timeout_counter <= 0:
-            logging.error(f"  -> ERROR: Gripper command timed out in state {self.state}.")
-            self.is_finished = True
-            return True
-
-        # --- Pneumatic Logic (Instantaneous) ---
-        if self.gripper_type == 'pneumatic':
-            InOut_out[self.port_index] = self.state_to_set
-            logging.info("  -> Pneumatic gripper command sent.")
-            self.is_finished = True
-            return True
-
-        # --- Electric Gripper Logic ---
-        if self.gripper_type == 'electric':
-            # On the first run, transition to the correct state for the action
-            if self.state == "START":
-                if self.action == 'calibrate':
-                    self.state = "SEND_CALIBRATE"
-                else: # 'move'
-                    self.state = "WAIT_FOR_POSITION"
-            
-            # --- Calibrate Logic (Timed Delay) ---
-            if self.state == "SEND_CALIBRATE":
-                logging.info("  -> Sending one-shot calibrate command...")
-                Gripper_data_out[4] = 1 # Set mode to calibrate
-                self.state = "WAITING_CALIBRATION"
-                return False
-
-            if self.state == "WAITING_CALIBRATION":
-                self.wait_counter -= 1
-                if self.wait_counter <= 0:
-                    logging.info("  -> Calibration delay finished.")
-                    Gripper_data_out[4] = 0 # Reset to operation mode
-                    self.is_finished = True
-                    return True
-                return False
-
-            # --- Move Logic (Position-Based) ---
-            if self.state == "WAIT_FOR_POSITION":
-                # Persistently send the move command
-                Gripper_data_out[0], Gripper_data_out[1], Gripper_data_out[2] = self.target_position, self.speed, self.current
-                Gripper_data_out[4] = 0 # Operation mode
-                bitfield = [1, 1, not InOut_in[4], 1, 0, 0, 0, 0]
-                fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
-                Gripper_data_out[3] = int(fused.hex(), 16)
-
-                # Check for completion
-                current_position = Gripper_data_in[1]
-                if abs(current_position - self.target_position) <= 5:
-                    logging.info(f"  -> Gripper move complete.")
-                    self.is_finished = True
-                    # Set command back to idle
-                    bitfield = [1, 0, not InOut_in[4], 1, 0, 0, 0, 0]
-                    fused = PAROL6_ROBOT.fuse_bitfield_2_bytearray(bitfield)
-                    Gripper_data_out[3] = int(fused.hex(), 16)
-                    return True
-                return False
-        
-        return self.is_finished
-
-class DelayCommand:
-    """
-    A non-blocking command that pauses execution for a specified duration.
-    During the delay, it ensures the robot remains idle by sending the
-    appropriate commands.
-    """
-    def __init__(self, duration):
-        """
-        Initializes and validates the Delay command.
-
-        Args:
-            duration (float): The delay time in seconds.
-        """
-        self.is_valid = False
-        self.is_finished = False
-
-        # --- 1. Parameter Validation ---
-        if not isinstance(duration, (int, float)) or duration <= 0:
-            logging.error(f"  -> VALIDATION FAILED: Delay duration must be a positive number, but got {duration}.")
-            return
-
-        logging.info(f"Initializing Delay for {duration} seconds...")
-        
-        self.duration = duration
-        self.end_time = None  # Will be set in prepare_for_execution
-        self.is_valid = True
-
-    def prepare_for_execution(self, current_position_in):
-        """Set the end time when the command actually starts."""
-        self.end_time = time.time() + self.duration
-        logging.info(f"  -> Delay starting for {self.duration} seconds...")
-
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """
-        Checks if the delay duration has passed and keeps the robot idle.
-        This method is called on every loop cycle (~0.01s).
-        """
-        if self.is_finished or not self.is_valid:
-            return True
-
-        # --- A. Keep the robot idle during the delay ---
-        Command_out.value = 255  # Set command to idle
-        Speed_out[:] = [0] * 6   # Set all speeds to zero
-
-        # --- B. Check for completion ---
-        if self.end_time and time.time() >= self.end_time:
-            logging.info(f"Delay finished after {self.duration} seconds.")
-            self.is_finished = True
-        
-        return self.is_finished
-    
-#########################################################################
-# Smooth Motion Commands Start Here
-#########################################################################
-    
-class BaseSmoothMotionCommand:
-    """
-    Base class for all smooth motion commands with proper error tracking.
-    """
-    
-    def __init__(self, description="smooth motion"):
-        self.description = description
-        self.trajectory = None
-        self.trajectory_command = None
-        self.transition_command = None
-        self.is_valid = True
-        self.is_finished = False
-        self.specified_start_pose = None
-        self.transition_complete = False
-        self.trajectory_prepared = False
-        self.error_state = False
-        self.error_message = ""
-        self.trajectory_generated = False  # NEW: Track if trajectory is generated
-        
-    def create_transition_command(self, current_pose, target_pose):
-        """Create a MovePose command for smooth transition to start position."""
-        pos_error = np.linalg.norm(
-            np.array(target_pose[:3]) - np.array(current_pose[:3])
-        )
-        
-        # Lower threshold to 2mm for more aggressive transition generation
-        if pos_error < 2.0:  # Changed from 5.0mm to 2.0mm
-            logging.info(f"  -> Already near start position (error: {pos_error:.1f}mm)")
-            return None
-        
-        logging.info(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
-        
-        # Calculate transition speed based on distance
-        # Slower for short distances, faster for long distances
-        if pos_error < 10:
-            transition_speed = 20.0  # mm/s for short distances
-        elif pos_error < 30:
-            transition_speed = 30.0  # mm/s for medium distances
-        else:
-            transition_speed = 40.0  # mm/s for long distances
-        
-        transition_duration = max(pos_error / transition_speed, 0.5)  # Minimum 0.5s
-        
-        transition_cmd = MovePoseCommand(
-            pose=target_pose,
-            duration=transition_duration
-        )
-        
-        return transition_cmd
-    
-    def get_current_pose_from_position(self, position_in):
-        """Convert current position to pose [x,y,z,rx,ry,rz]"""
-        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                             for i, p in enumerate(position_in)])
-        current_pose_se3 = PAROL6_ROBOT.robot.fkine(current_q)
-        
-        current_xyz = current_pose_se3.t * 1000  # Convert to mm
-        current_rpy = current_pose_se3.rpy(unit='deg', order='xyz')
-        return np.concatenate([current_xyz, current_rpy]).tolist()
-        
-    def prepare_for_execution(self, current_position_in):
-        """Minimal preparation - just check if we need a transition."""
-        logging.info(f"  -> Preparing {self.description}...")
-        
-        # If there's a specified start pose, prepare transition
-        if self.specified_start_pose:
-            actual_current_pose = self.get_current_pose_from_position(current_position_in)
-            self.transition_command = self.create_transition_command(
-                actual_current_pose, self.specified_start_pose
-            )
-            
-            if self.transition_command:
-                self.transition_command.prepare_for_execution(current_position_in)
-                if not self.transition_command.is_valid:
-                    logging.error(f"  -> ERROR: Cannot reach specified start position")
-                    self.is_valid = False
-                    self.error_state = True
-                    self.error_message = "Cannot reach specified start position"
-                    return
-        else:
-            self.transition_command = None
-            
-        # DON'T generate trajectory yet - wait until execution
-        self.trajectory_generated = False
-        self.trajectory_prepared = False
-        logging.info(f"  -> {self.description} preparation complete (trajectory will be generated at execution)")
-            
-    def generate_main_trajectory(self, effective_start_pose):
-        """Override this in subclasses to generate the specific motion trajectory."""
-        raise NotImplementedError("Subclasses must implement generate_main_trajectory")
-        
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """Execute transition first if needed, then generate and execute trajectory."""
-        if self.is_finished or not self.is_valid:
-            return True
-        
-        # Execute transition first if needed
-        if self.transition_command and not self.transition_complete:
-            is_done = self.transition_command.execute_step(
-                Position_in, Homed_in, Speed_out, Command_out, **kwargs
-            )
-            
-            if is_done:
-                logging.info(f"  -> Transition complete")
-                self.transition_complete = True
-            return False
-        
-        # Generate trajectory on first execution step (not during preparation!)
-        if not self.trajectory_generated:
-            # Get ACTUAL current position NOW
-            actual_current_pose = self.get_current_pose_from_position(Position_in)
-            logging.info(f"  -> Generating {self.description} from ACTUAL position: {[round(p, 1) for p in actual_current_pose[:3]]}")
-            
-            # Generate trajectory from where we ACTUALLY are
-            self.trajectory = self.generate_main_trajectory(actual_current_pose)
-            self.trajectory_command = SmoothTrajectoryCommand(
-                self.trajectory, self.description
-            )
-            
-            # Quick validation of first point only
-            current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                                 for i, p in enumerate(Position_in)])
-            first_pose = self.trajectory[0]
-            target_se3 = SE3(first_pose[0]/1000, first_pose[1]/1000, first_pose[2]/1000) * \
-                        SE3.RPY(first_pose[3:], unit='deg', order='xyz')
-            
-            ik_result = solve_ik_with_adaptive_tol_subdivision(
-                PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
-            )
-            
-            if not ik_result.success:
-                logging.error(f"  -> ERROR: Cannot reach first trajectory point")
-                self.is_finished = True
-                self.error_state = True
-                self.error_message = "Cannot reach trajectory start"
-                Speed_out[:] = [0] * 6
-                Command_out.value = 255
-                return True
-                
-            self.trajectory_generated = True
-            self.trajectory_prepared = True
-            
-            # Verify first point is close to current
-            distance = np.linalg.norm(first_pose[:3] - np.array(actual_current_pose[:3]))
-            if distance > 5.0:
-                logging.warning(f"  -> WARNING: First trajectory point {distance:.1f}mm from current!")
-        
-        # Execute main trajectory
-        if self.trajectory_command and self.trajectory_prepared:
-            is_done = self.trajectory_command.execute_step(
-                Position_in, Homed_in, Speed_out, Command_out, **kwargs
-            )
-            
-            # Check for errors in trajectory execution
-            if hasattr(self.trajectory_command, 'error_state') and self.trajectory_command.error_state:
-                self.error_state = True
-                self.error_message = self.trajectory_command.error_message
-            
-            if is_done:
-                self.is_finished = True
-            
-            return is_done
-        else:
-            self.is_finished = True
-            return True
-
-class SmoothTrajectoryCommand:
-    """Command class for executing pre-generated smooth trajectories."""
-    
-    def __init__(self, trajectory, description="smooth motion"):
-        self.trajectory = np.array(trajectory)
-        self.description = description
-        self.trajectory_index = 0
-        self.is_valid = True
-        self.is_finished = False
-        self.first_step = True
-        self.error_state = False
-        self.error_message = ""
-        
-        logging.info(f"Initializing smooth {description} with {len(trajectory)} points")
-    
-    def prepare_for_execution(self, current_position_in):
-        """Skip validation - trajectory is already generated from correct position"""
-        # No validation needed since trajectory was just generated from current position
-        self.is_valid = True
-        return
-    
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, Position_out=None, **kwargs):
-        """Execute one step of the smooth trajectory"""
-        if self.is_finished or not self.is_valid:
-            return True
-        
-        # Get Position_out from kwargs if not provided
-        if Position_out is None:
-            Position_out = kwargs.get('Position_out', Position_in)
-        
-        if self.trajectory_index >= len(self.trajectory):
-            logging.info(f"Smooth {self.description} finished.")
-            self.is_finished = True
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-        
-        # Get target pose for this step
-        target_pose = self.trajectory[self.trajectory_index]
-        
-        # Convert to SE3
-        target_se3 = SE3(target_pose[0]/1000, target_pose[1]/1000, target_pose[2]/1000) * \
-                    SE3.RPY(target_pose[3:], unit='deg', order='xyz')
-        
-        # Get current joint configuration
-        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                            for i, p in enumerate(Position_in)])
-        
-        # Solve IK
-        ik_result = solve_ik_with_adaptive_tol_subdivision(
-            PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
-        )
-        
-        if not ik_result.success:
-            logging.error(f"  -> IK failed at trajectory point {self.trajectory_index}")
-            self.is_finished = True
-            self.error_state = True
-            self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
-            Speed_out[:] = [0] * 6
-            Command_out.value = 255
-            return True
-        
-        # Convert to steps
-        target_steps = [int(PAROL6_ROBOT.RAD2STEPS(q, i)) 
-                    for i, q in enumerate(ik_result.q)]
-        
-        # ADD VELOCITY LIMITING - This prevents violent movements
-        if self.trajectory_index > 0:
-            for i in range(6):
-                step_diff = abs(target_steps[i] - Position_in[i])
-                max_step_diff = PAROL6_ROBOT.Joint_max_speed[i] * 0.01  # Max steps in 10ms
-                
-                # Use 1.2x safety margin (not 2x as before)
-                if step_diff > max_step_diff * 1.2:
-                    #logging.debug(f"  -> WARNING: Joint {i+1} velocity limit exceeded at point {self.trajectory_index}")
-                    #logging.debug(f"     Step difference: {step_diff}, Max allowed: {max_step_diff * 1.2:.1f}")
-                    
-                    # Clamp the motion
-                    sign = 1 if target_steps[i] > Position_in[i] else -1
-                    target_steps[i] = Position_in[i] + sign * int(max_step_diff)
-        
-        # Send position command
-        Position_out[:] = target_steps
-        Speed_out[:] = [0] * 6
-        Command_out.value = 156
-        
-        # Advance to next point
-        self.trajectory_index += 1
-        
-        return False
-
-class SmoothCircleCommand(BaseSmoothMotionCommand):
-    def __init__(self, center, radius, plane, duration, clockwise, frame='WRF', start_pose=None):
-        super().__init__(f"circle (r={radius}mm, {frame})")
-        self.center = center
-        self.radius = radius
-        self.plane = plane
-        self.duration = duration
-        self.clockwise = clockwise
-        self.frame = frame  # Store reference frame
-        self.specified_start_pose = start_pose
-        self.normal_vector = None  # Will be set if TRF
-        self.current_position_in = None  # Store for TRF transformation
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF, then prepare normally."""
-        # Store current position for potential use in generate_main_trajectory
-        self.current_position_in = current_position_in
-        
-        if self.frame == 'TRF':
-            # Transform parameters to WRF
-            params = {
-                'center': self.center,
-                'plane': self.plane
-            }
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_CIRCLE', params, 'TRF', current_position_in
-            )
-            
-            # Update with transformed values
-            self.center = transformed['center']
-            self.normal_vector = transformed.get('normal_vector')
-            
-            logging.info(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
-            
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_CIRCLE', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        # Now do normal preparation with transformed parameters
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate circle starting from the actual start position."""
-        motion_gen = CircularMotion()
-        
-        # Use transformed normal for TRF, or standard for WRF
-        if self.normal_vector is not None:
-            # TRF - use the transformed normal vector
-            normal = np.array(self.normal_vector)
-            logging.info(f"    Using transformed normal: {normal.round(3)}")
-        else:
-            # WRF - use standard plane definition
-            plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
-            normal = np.array(plane_normals.get(self.plane, [0, 0, 1]))  # Convert to numpy array
-            logging.info(f"    Using WRF plane {self.plane} with normal: {normal}")
-        
-        logging.info(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
-        logging.info(f"    Circle center: {[round(c, 1) for c in self.center]}")
-        
-        # Add geometry validation
-        center_np = np.array(self.center)
-        start_np = np.array(effective_start_pose[:3])
-        
-        # Project start point onto circle plane to check distance
-        to_start = start_np - center_np
-        to_start_plane = to_start - np.dot(to_start, normal) * normal
-        distance_to_center = np.linalg.norm(to_start_plane)
-        
-        if abs(distance_to_center - self.radius) > self.radius * 0.3:
-            logging.warning(f"    WARNING: Robot is {distance_to_center:.1f}mm from center, but radius is {self.radius:.1f}mm")
-            logging.info(f"    Circle geometry will be auto-corrected")
-        
-        # Generate circle that starts at effective_start_pose
-        trajectory = motion_gen.generate_circle_3d(
-            self.center, 
-            self.radius, 
-            normal,  # This normal now correctly represents the plane
-            start_point=effective_start_pose[:3],
-            duration=self.duration
-        )
-        
-        if self.clockwise:
-            trajectory = trajectory[::-1]
-        
-        # Update orientations to match start pose
-        for i in range(len(trajectory)):
-            trajectory[i][3:] = effective_start_pose[3:]
-        
-        return trajectory
-    
-class SmoothArcCenterCommand(BaseSmoothMotionCommand):
-    def __init__(self, end_pose, center, duration, clockwise, frame='WRF', start_pose=None):
-        super().__init__(f"arc (center-based, {frame})")
-        self.end_pose = end_pose
-        self.center = center
-        self.duration = duration
-        self.clockwise = clockwise
-        self.frame = frame
-        self.specified_start_pose = start_pose
-        self.normal_vector = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF."""
-        if self.frame == 'TRF':
-            params = {
-                'end_pose': self.end_pose,
-                'center': self.center
-            }
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_ARC_CENTER', params, 'TRF', current_position_in
-            )
-            self.end_pose = transformed['end_pose']
-            self.center = transformed['center']
-            self.normal_vector = transformed.get('normal_vector')
-            
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_ARC_CENTER', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate arc from actual start to end."""
-        motion_gen = CircularMotion()
-        return motion_gen.generate_arc_3d(
-            effective_start_pose, self.end_pose, self.center,
-            normal=self.normal_vector,  # Use transformed normal if TRF
-            clockwise=self.clockwise, duration=self.duration
-        )
-    
-class SmoothArcParamCommand(BaseSmoothMotionCommand):
-    def __init__(self, end_pose, radius, arc_angle, duration, clockwise, frame='WRF', start_pose=None):
-        super().__init__(f"parametric arc (r={radius}mm, θ={arc_angle}°, {frame})")
-        self.end_pose = end_pose
-        self.radius = radius
-        self.arc_angle = arc_angle
-        self.duration = duration
-        self.clockwise = clockwise
-        self.frame = frame
-        self.specified_start_pose = start_pose
-        self.normal_vector = None  # Will be set if TRF
-        self.current_position_in = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF, then prepare normally."""
-        self.current_position_in = current_position_in
-        
-        if self.frame == 'TRF':
-            # Transform parameters to WRF
-            params = {
-                'end_pose': self.end_pose,
-                'plane': 'XY'  # Default plane for parametric arc
-            }
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_ARC_PARAM', params, 'TRF', current_position_in
-            )
-            
-            # Update with transformed values
-            self.end_pose = transformed['end_pose']
-            self.normal_vector = transformed.get('normal_vector')
-            
-            logging.info(f"  -> TRF Parametric Arc: end {self.end_pose[:3]} (WRF)")
-            
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_ARC_PARAM', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate arc based on radius and angle from actual start."""
-        # Get start and end positions
-        start_xyz = np.array(effective_start_pose[:3])
-        end_xyz = np.array(self.end_pose[:3])
-        
-        # If we have a transformed normal (TRF), use it to define the arc plane
-        if self.normal_vector is not None:
-            normal = np.array(self.normal_vector)
-            
-            # Project start and end onto the plane perpendicular to normal
-            # This ensures the arc stays in the correct plane for TRF
-            
-            # Find center of arc using radius and angle
-            chord_vec = end_xyz - start_xyz
-            chord_length = np.linalg.norm(chord_vec)
-            
-            if chord_length > 2 * self.radius:
-                logging.warning(f"  -> Warning: Points too far apart ({chord_length:.1f}mm) for radius {self.radius}mm")
-                self.radius = chord_length / 2 + 1
-            
-            # Calculate center position using the normal vector
-            chord_mid = (start_xyz + end_xyz) / 2
-            
-            # Height from chord midpoint to arc center
-            if chord_length > 0:
-                h = np.sqrt(max(0, self.radius**2 - (chord_length/2)**2))
-                
-                # Find perpendicular in the plane defined by normal
-                chord_dir = chord_vec / chord_length
-                perp_in_plane = np.cross(normal, chord_dir)
-                if np.linalg.norm(perp_in_plane) > 0.001:
-                    perp_in_plane = perp_in_plane / np.linalg.norm(perp_in_plane)
-                else:
-                    # Chord is parallel to normal (shouldn't happen)
-                    perp_in_plane = np.array([1, 0, 0])
-                
-                # Arc center
-                if self.clockwise:
-                    center_3d = chord_mid - h * perp_in_plane
-                else:
-                    center_3d = chord_mid + h * perp_in_plane
-            else:
-                center_3d = start_xyz
-            
-        else:
-            # WRF - use XY plane (standard behavior)
-            normal = np.array([0, 0, 1])
-            
-            # Calculate arc center in XY plane
-            start_xy = start_xyz[:2]
-            end_xy = end_xyz[:2]
-            
-            # Midpoint
-            mid = (start_xy + end_xy) / 2
-            
-            # Distance between points
-            d = np.linalg.norm(end_xy - start_xy)
-            
-            if d > 2 * self.radius:
-                logging.warning(f"  -> Warning: Points too far apart ({d:.1f}mm) for radius {self.radius}mm")
-                self.radius = d / 2 + 1
-            
-            # Height of arc center from midpoint
-            h = np.sqrt(max(0, self.radius**2 - (d/2)**2))
-            
-            # Perpendicular direction
-            if d > 0:
-                perp = np.array([-(end_xy[1] - start_xy[1]), end_xy[0] - start_xy[0]])
-                perp = perp / np.linalg.norm(perp)
-            else:
-                perp = np.array([1, 0])
-            
-            # Arc center (choose based on clockwise)
-            if self.clockwise:
-                center_2d = mid - h * perp
-            else:
-                center_2d = mid + h * perp
-            
-            # Use average Z for center
-            center_3d = [center_2d[0], center_2d[1], (start_xyz[2] + end_xyz[2]) / 2]
-        
-        # Generate arc trajectory from actual start
-        motion_gen = CircularMotion()
-        return motion_gen.generate_arc_3d(
-            effective_start_pose, self.end_pose, center_3d.tolist(),
-            normal=normal if self.normal_vector is not None else None,
-            clockwise=self.clockwise, duration=self.duration
-        )
-
-class SmoothHelixCommand(BaseSmoothMotionCommand):
-    def __init__(self, center, radius, pitch, height, duration, clockwise, frame='WRF', start_pose=None):
-        super().__init__(f"helix (h={height}mm, {frame})")
-        self.center = center
-        self.radius = radius
-        self.pitch = pitch
-        self.height = height
-        self.duration = duration
-        self.clockwise = clockwise
-        self.frame = frame
-        self.specified_start_pose = start_pose
-        self.helix_axis = None
-        self.up_vector = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF."""
-        if self.frame == 'TRF':
-            params = {'center': self.center}
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_HELIX', params, 'TRF', current_position_in
-            )
-            self.center = transformed['center']
-            self.helix_axis = transformed.get('helix_axis', [0, 0, 1])
-            self.up_vector = transformed.get('up_vector', [0, 1, 0])
-            
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_HELIX', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate helix with proper axis orientation."""
-        num_revolutions = self.height / self.pitch if self.pitch > 0 else 1
-        num_points = int(self.duration * 100)  # 100Hz
-        
-        # Get helix axis (default Z for WRF, transformed for TRF)
-        if self.helix_axis is not None:
-            axis = np.array(self.helix_axis)
-        else:
-            axis = np.array([0, 0, 1])  # Default vertical
-        
-        # Create orthonormal basis for helix
-        if self.up_vector is not None:
-            up = np.array(self.up_vector)
-        else:
-            # Find perpendicular to axis
-            if abs(axis[2]) < 0.9:
-                up = np.array([0, 0, 1])
-            else:
-                up = np.array([1, 0, 0])
-        
-        # Ensure up is perpendicular to axis
-        up = up - np.dot(up, axis) * axis
-        up = up / np.linalg.norm(up)
-        
-        # Create right vector
-        right = np.cross(axis, up)
-        
-        # Calculate starting angle based on actual start position
-        to_start = np.array(effective_start_pose[:3]) - np.array(self.center)
-        # Project onto plane perpendicular to axis
-        to_start_plane = to_start - np.dot(to_start, axis) * axis
-        
-        if np.linalg.norm(to_start_plane) > 0.001:
-            to_start_normalized = to_start_plane / np.linalg.norm(to_start_plane)
-            start_angle = np.arctan2(np.dot(to_start_normalized, up), 
-                                    np.dot(to_start_normalized, right))
-        else:
-            start_angle = 0
-        
-        trajectory = []
-        for i in range(num_points):
-            t = i / (num_points - 1) if num_points > 1 else 0
-            
-            angle = start_angle + 2 * np.pi * num_revolutions * t
-            if self.clockwise:
-                angle = start_angle - 2 * np.pi * num_revolutions * t
-            
-            # Position on helix
-            pos = np.array(self.center) + \
-                  self.radius * (np.cos(angle) * right + np.sin(angle) * up) + \
-                  self.height * t * axis
-            
-            # Use orientation from effective start
-            trajectory.append(np.concatenate([pos, effective_start_pose[3:]]))
-        
-        return np.array(trajectory)
-
-class SmoothSplineCommand(BaseSmoothMotionCommand):
-    def __init__(self, waypoints, duration, frame='WRF', start_pose=None):
-        super().__init__(f"spline ({len(waypoints)} points, {frame})")
-        self.waypoints = waypoints
-        self.duration = duration
-        self.frame = frame
-        self.specified_start_pose = start_pose
-        self.current_position_in = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF, then prepare normally."""
-        self.current_position_in = current_position_in
-        
-        if self.frame == 'TRF':
-            # Transform waypoints to WRF
-            params = {'waypoints': self.waypoints}
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_SPLINE', params, 'TRF', current_position_in
-            )
-            
-            # Update with transformed values
-            self.waypoints = transformed['waypoints']
-            
-            logging.info(f"  -> TRF Spline: transformed {len(self.waypoints)} waypoints to WRF")
-            
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_SPLINE', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate spline starting from actual position."""
-        motion_gen = SplineMotion()
-        
-        # Always start from the effective start pose
-        first_wp_error = np.linalg.norm(
-            np.array(self.waypoints[0][:3]) - np.array(effective_start_pose[:3])
-        )
-        
-        if first_wp_error > 5.0:
-            # First waypoint is far, prepend the start position
-            modified_waypoints = [effective_start_pose] + self.waypoints
-            logging.info(f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)")
-        else:
-            # Replace first waypoint with actual start to ensure continuity
-            modified_waypoints = [effective_start_pose] + self.waypoints[1:]
-            logging.info(f"    Replaced first waypoint with actual start position")
-        
-        timestamps = np.linspace(0, self.duration, len(modified_waypoints))
-        
-        # Generate the spline trajectory
-        trajectory = motion_gen.generate_cubic_spline(modified_waypoints, timestamps)
-        
-        logging.info(f"    Generated spline with {len(trajectory)} points")
-        
-        return trajectory
-
-class SmoothBlendCommand(BaseSmoothMotionCommand):
-    def __init__(self, segment_definitions, blend_time, frame='WRF', start_pose=None):
-        super().__init__(f"blended ({len(segment_definitions)} segments, {frame})")
-        self.segment_definitions = segment_definitions
-        self.blend_time = blend_time
-        self.frame = frame
-        self.specified_start_pose = start_pose
-        self.current_position_in = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """Transform parameters if in TRF, then prepare normally."""
-        self.current_position_in = current_position_in
-        
-        if self.frame == 'TRF':
-            # Transform all segment definitions to WRF
-            params = {'segments': self.segment_definitions}
-            transformed = transform_command_params_to_wrf(
-                'SMOOTH_BLEND', params, 'TRF', current_position_in
-            )
-            
-            # Update with transformed values
-            self.segment_definitions = transformed['segments']
-            
-            logging.info(f"  -> TRF Blend: transformed {len(self.segment_definitions)} segments to WRF")
-            
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_BLEND', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
-        
-        return super().prepare_for_execution(current_position_in)
-        
-    def generate_main_trajectory(self, effective_start_pose):
-        """Generate blended trajectory starting from actual position."""
-        trajectories = []
-        motion_gen_circle = CircularMotion()
-        motion_gen_spline = SplineMotion()
-        
-        # Always start from effective start pose
-        last_end_pose = effective_start_pose
-        
-        for i, seg_def in enumerate(self.segment_definitions):
-            seg_type = seg_def['type']
-            
-            # First segment always starts from effective_start_pose
-            segment_start = effective_start_pose if i == 0 else last_end_pose
-            
-            if seg_type == 'LINE':
-                end = seg_def['end']
-                duration = seg_def['duration']
-                
-                # Generate line segment from actual position
-                num_points = int(duration * 100)
-                timestamps = np.linspace(0, duration, num_points)
-                
-                traj = []
-                for t in timestamps:
-                    s = t / duration if duration > 0 else 1
-                    # Interpolate position
-                    pos = [
-                        segment_start[j] * (1-s) + end[j] * s
-                        for j in range(3)
-                    ]
-                    # Interpolate orientation
-                    orient = [
-                        segment_start[j+3] * (1-s) + end[j+3] * s
-                        for j in range(3)
-                    ]
-                    traj.append(pos + orient)
-                
-                trajectories.append(np.array(traj))
-                last_end_pose = end
-                
-            elif seg_type == 'ARC':
-                end = seg_def['end']
-                center = seg_def['center']
-                duration = seg_def['duration']
-                clockwise = seg_def['clockwise']
-                
-                # Check if we have a transformed normal (from TRF)
-                normal = seg_def.get('normal_vector', None)
-                
-                traj = motion_gen_circle.generate_arc_3d(
-                    segment_start, end, center, 
-                    normal=normal,  # Use transformed normal if available
-                    clockwise=clockwise, duration=duration
-                )
-                trajectories.append(traj)
-                last_end_pose = end
-                
-            elif seg_type == 'CIRCLE':
-                center = seg_def['center']
-                radius = seg_def['radius']
-                plane = seg_def.get('plane', 'XY')
-                duration = seg_def['duration']
-                clockwise = seg_def['clockwise']
-                
-                # Use transformed normal if available (from TRF)
-                if 'normal_vector' in seg_def:
-                    normal = seg_def['normal_vector']
-                else:
-                    plane_normals = {'XY': [0, 0, 1], 'XZ': [0, 1, 0], 'YZ': [1, 0, 0]}
-                    normal = plane_normals.get(plane, [0, 0, 1])
-                
-                traj = motion_gen_circle.generate_circle_3d(
-                    center, radius, normal, 
-                    start_point=segment_start[:3],
-                    duration=duration
-                )
-                
-                if clockwise:
-                    traj = traj[::-1]
-                    
-                # Update orientations
-                for j in range(len(traj)):
-                    traj[j][3:] = segment_start[3:]
-                    
-                trajectories.append(traj)
-                # Circle returns to start, so last pose is last point of trajectory
-                last_end_pose = traj[-1].tolist()
-                
-            elif seg_type == 'SPLINE':
-                waypoints = seg_def['waypoints']
-                duration = seg_def['duration']
-                
-                # Check if first waypoint is close to segment start
-                wp_error = np.linalg.norm(
-                    np.array(waypoints[0][:3]) - np.array(segment_start[:3])
-                )
-                
-                if wp_error > 5.0:
-                    full_waypoints = [segment_start] + waypoints
-                else:
-                    full_waypoints = [segment_start] + waypoints[1:]
-                
-                timestamps = np.linspace(0, duration, len(full_waypoints))
-                traj = motion_gen_spline.generate_cubic_spline(full_waypoints, timestamps)
-                trajectories.append(traj)
-                last_end_pose = waypoints[-1]
-        
-        # Blend all trajectories
-        if len(trajectories) > 1:
-            blender = MotionBlender(self.blend_time)
-            blended = trajectories[0]
-            blend_samples = int(self.blend_time * 100)
-            
-            for i in range(1, len(trajectories)):
-                blended = blender.blend_trajectories(blended, trajectories[i], blend_samples)
-            
-            logging.info(f"    Blended {len(trajectories)} segments into {len(blended)} points")
-            return blended
-        elif trajectories:
-            return trajectories[0]
-        else:
-            raise ValueError("No trajectories generated in blend")
-        
 def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
     """
     Calculate duration based on trajectory length and speed percentage.
@@ -2735,7 +785,7 @@ def parse_smooth_motion_commands(parts):
     """
     command_type = parts[0]
     
-    # Helper function for parsing optional start pose
+    # Parse optional trajectory start pose
     def parse_start_pose(start_str):
         """Parse start pose - returns None for CURRENT, or list of floats for specified pose."""
         if start_str == 'CURRENT' or start_str == 'NONE':
@@ -2744,10 +794,10 @@ def parse_smooth_motion_commands(parts):
             try:
                 return list(map(float, start_str.split(',')))
             except:
-                logging.warning(f"Warning: Invalid start pose format: {start_str}")
+                logger.error(f"Warning: Invalid start pose format: {start_str}")
                 return None
     
-    # Helper function for calculating duration from speed
+    # Convert speed percentage to trajectory duration
     def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
         """Calculate duration based on trajectory length and speed percentage."""
         # Map speed percentage to mm/s
@@ -2762,7 +812,7 @@ def parse_smooth_motion_commands(parts):
     
     try:
         if command_type == 'SMOOTH_CIRCLE':
-            # Format: SMOOTH_CIRCLE|center_x,center_y,center_z|radius|plane|frame|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_CIRCLE|center_x,center_y,center_z|radius|plane|frame|start_pose|timing_type|timing_value|clockwise|trajectory_type|[jerk_limit]
             center = list(map(float, parts[1].split(',')))
             radius = float(parts[2])
             plane = parts[3]
@@ -2772,6 +822,25 @@ def parse_smooth_motion_commands(parts):
             timing_value = float(parts[7])
             clockwise = parts[8] == '1'
             
+            # Parse trajectory type (new parameter)
+            trajectory_type = 'cubic'  # default
+            jerk_limit = None
+            if len(parts) > 9:
+                trajectory_type = parts[9]
+                if trajectory_type == 's_curve' and len(parts) > 10 and parts[10] != 'DEFAULT':
+                    try:
+                        jerk_limit = float(parts[10])
+                    except ValueError:
+                        pass
+            
+            # Parse center_mode and entry_mode (new parameters)
+            center_mode = 'ABSOLUTE'  # default
+            entry_mode = 'NONE'  # default
+            if len(parts) > 11:
+                center_mode = parts[11]
+                if len(parts) > 12:
+                    entry_mode = parts[12]
+            
             # Calculate duration
             if timing_type == 'DURATION':
                 duration = timing_value
@@ -2780,13 +849,13 @@ def parse_smooth_motion_commands(parts):
                 path_length = 2 * np.pi * radius
                 duration = calculate_duration_from_speed(path_length, timing_value)
             
-            logging.info(f"  -> Parsed circle: r={radius}mm, plane={plane}, frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
+            logger.info(f"  -> Parsed circle: r={radius}mm, plane={plane}, frame={frame}, trajectory={trajectory_type}, center_mode={center_mode}, entry_mode={entry_mode}, duration={duration:.2f}s")
             
-            # Return command object with frame parameter
-            return SmoothCircleCommand(center, radius, plane, duration, clockwise, frame, start_pose)
+            # Return command object with frame parameter and trajectory type
+            return SmoothCircleCommand(center, radius, plane, duration, clockwise, frame, start_pose, trajectory_type, jerk_limit, center_mode, entry_mode)
             
         elif command_type == 'SMOOTH_ARC_CENTER':
-            # Format: SMOOTH_ARC_CENTER|end_pose|center|frame|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_ARC_CENTER|end_pose|center|frame|start_pose|timing_type|timing_value|clockwise|trajectory_type|[jerk_limit]
             end_pose = list(map(float, parts[1].split(',')))
             center = list(map(float, parts[2].split(',')))
             frame = parts[3]  # 'WRF' or 'TRF'
@@ -2794,6 +863,17 @@ def parse_smooth_motion_commands(parts):
             timing_type = parts[5]  # 'DURATION' or 'SPEED'
             timing_value = float(parts[6])
             clockwise = parts[7] == '1'
+            
+            # Parse trajectory type (new parameter)
+            trajectory_type = 'cubic'  # default
+            jerk_limit = None
+            if len(parts) > 8:
+                trajectory_type = parts[8]
+                if trajectory_type == 's_curve' and len(parts) > 9 and parts[9] != 'DEFAULT':
+                    try:
+                        jerk_limit = float(parts[9])
+                    except ValueError:
+                        pass
             
             # Calculate duration
             if timing_type == 'DURATION':
@@ -2806,13 +886,13 @@ def parse_smooth_motion_commands(parts):
                 arc_length = radius_estimate * estimated_arc_angle
                 duration = calculate_duration_from_speed(arc_length, timing_value)
             
-            logging.info(f"  -> Parsed arc (center): frame={frame}, {timing_type}={timing_value}, duration={duration:.2f}s")
+            logger.info(f"  -> Parsed arc (center): frame={frame}, trajectory={trajectory_type}, duration={duration:.2f}s")
             
-            # Return command with frame
-            return SmoothArcCenterCommand(end_pose, center, duration, clockwise, frame, start_pose)
+            # Return command with frame and trajectory type
+            return SmoothArcCenterCommand(end_pose, center, duration, clockwise, frame, start_pose, trajectory_type, jerk_limit)
             
         elif command_type == 'SMOOTH_ARC_PARAM':
-            # Format: SMOOTH_ARC_PARAM|end_pose|radius|angle|frame|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_ARC_PARAM|end_pose|radius|angle|frame|start_pose|timing_type|timing_value|clockwise|trajectory_type|[jerk_limit]
             end_pose = list(map(float, parts[1].split(',')))
             radius = float(parts[2])
             arc_angle = float(parts[3])
@@ -2822,6 +902,17 @@ def parse_smooth_motion_commands(parts):
             timing_value = float(parts[7])
             clockwise = parts[8] == '1'
             
+            # Parse trajectory type (optional, defaults to cubic)
+            trajectory_type = 'cubic'
+            jerk_limit = None
+            if len(parts) > 9:
+                trajectory_type = parts[9]
+            if len(parts) > 10 and parts[10] != 'DEFAULT':
+                try:
+                    jerk_limit = float(parts[10])
+                except (ValueError, IndexError):
+                    pass
+            
             # Calculate duration
             if timing_type == 'DURATION':
                 duration = timing_value
@@ -2830,22 +921,38 @@ def parse_smooth_motion_commands(parts):
                 arc_length = radius * np.deg2rad(arc_angle)
                 duration = calculate_duration_from_speed(arc_length, timing_value)
             
-            logging.info(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, frame={frame}, duration={duration:.2f}s")
+            logger.info(f"  -> Parsed arc (param): r={radius}mm, θ={arc_angle}°, frame={frame}, trajectory={trajectory_type}, duration={duration:.2f}s")
             
-            # Return command object with frame
-            return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, frame, start_pose)
+            # Return command object with frame and trajectory type
+            return SmoothArcParamCommand(end_pose, radius, arc_angle, duration, clockwise, frame, start_pose, trajectory_type, jerk_limit)
             
         elif command_type == 'SMOOTH_SPLINE':
-            # Format: SMOOTH_SPLINE|num_waypoints|frame|start_pose|timing_type|timing_value|waypoint1|waypoint2|...
+            # Format: SMOOTH_SPLINE|num_waypoints|frame|start_pose|timing_type|timing_value|trajectory_type|[jerk_limit]|waypoint1|waypoint2|...
             num_waypoints = int(parts[1])
             frame = parts[2]  # 'WRF' or 'TRF'
             start_pose = parse_start_pose(parts[3])
             timing_type = parts[4]  # 'DURATION' or 'SPEED'
             timing_value = float(parts[5])
             
+            # Parse trajectory type (new parameter)
+            idx = 6
+            trajectory_type = 'cubic'  # default
+            jerk_limit = None
+            if idx < len(parts) and parts[idx] in ['cubic', 'quintic', 's_curve']:
+                trajectory_type = parts[idx]
+                idx += 1
+                # Check for jerk limit if s_curve
+                if trajectory_type == 's_curve' and idx < len(parts) and parts[idx] != 'DEFAULT':
+                    try:
+                        jerk_limit = float(parts[idx])
+                        idx += 1
+                    except ValueError:
+                        idx += 1  # Skip if not a number
+                elif trajectory_type == 's_curve':
+                    idx += 1  # Skip DEFAULT
+            
             # Parse waypoints
             waypoints = []
-            idx = 6
             for i in range(num_waypoints):
                 wp = []
                 for j in range(6):  # Each waypoint has 6 values (x,y,z,rx,ry,rz)
@@ -2865,13 +972,13 @@ def parse_smooth_motion_commands(parts):
                 
                 duration = calculate_duration_from_speed(total_dist, timing_value)
             
-            logging.info(f"  -> Parsed spline: {num_waypoints} points, frame={frame}, duration={duration:.2f}s")
+            logger.info(f"  -> Parsed spline: {num_waypoints} points, frame={frame}, trajectory={trajectory_type}, duration={duration:.2f}s")
             
-            # Return command object with frame
-            return SmoothSplineCommand(waypoints, duration, frame, start_pose)
+            # Return command object with frame and trajectory type
+            return SmoothSplineCommand(waypoints, duration, frame, start_pose, trajectory_type, jerk_limit)
             
         elif command_type == 'SMOOTH_HELIX':
-            # Format: SMOOTH_HELIX|center|radius|pitch|height|frame|start_pose|timing_type|timing_value|clockwise
+            # Format: SMOOTH_HELIX|center|radius|pitch|height|frame|start_pose|timing_type|timing_value|clockwise|trajectory_type|[jerk_limit]
             center = list(map(float, parts[1].split(',')))
             radius = float(parts[2])
             pitch = float(parts[3])
@@ -2881,6 +988,17 @@ def parse_smooth_motion_commands(parts):
             timing_type = parts[7]  # 'DURATION' or 'SPEED'
             timing_value = float(parts[8])
             clockwise = parts[9] == '1'
+            
+            # Parse trajectory type (new parameter)
+            trajectory_type = 'cubic'  # default
+            jerk_limit = None
+            if len(parts) > 10:
+                trajectory_type = parts[10]
+                if trajectory_type == 's_curve' and len(parts) > 11 and parts[11] != 'DEFAULT':
+                    try:
+                        jerk_limit = float(parts[11])
+                    except ValueError:
+                        pass
             
             # Calculate duration
             if timing_type == 'DURATION':
@@ -2892,10 +1010,10 @@ def parse_smooth_motion_commands(parts):
                 helix_length = np.sqrt(horizontal_length**2 + height**2)
                 duration = calculate_duration_from_speed(helix_length, timing_value)
             
-            logging.info(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, frame={frame}, duration={duration:.2f}s")
+            logger.info(f"  -> Parsed helix: h={height}mm, pitch={pitch}mm, frame={frame}, trajectory={trajectory_type}, duration={duration:.2f}s")
             
-            # Return command object with frame
-            return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, frame, start_pose)
+            # Return command object with frame and trajectory type
+            return SmoothHelixCommand(center, radius, pitch, height, duration, clockwise, frame, start_pose, trajectory_type, jerk_limit)
             
         elif command_type == 'SMOOTH_BLEND':
             # Format: SMOOTH_BLEND|num_segments|blend_time|frame|start_pose|timing_type|timing_value|segment1||segment2||...
@@ -3032,7 +1150,7 @@ def parse_smooth_motion_commands(parts):
                     scale_factor = overall_duration / total_original_duration
                     for seg in segment_definitions:
                         seg['duration'] = seg['original_duration'] * scale_factor
-                logging.info(f"  -> Scaled blend segments to total duration: {overall_duration:.2f}s")
+                logger.info(f"  -> Scaled blend segments to total duration: {overall_duration:.2f}s")
                         
             elif overall_speed is not None:
                 # Calculate duration from speed and estimated path length
@@ -3041,244 +1159,72 @@ def parse_smooth_motion_commands(parts):
                     scale_factor = overall_duration / total_original_duration
                     for seg in segment_definitions:
                         seg['duration'] = seg['original_duration'] * scale_factor
-                logging.info(f"  -> Calculated blend duration from speed: {overall_duration:.2f}s")
+                logger.info(f"  -> Calculated blend duration from speed: {overall_duration:.2f}s")
             else:
-                logging.info(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
+                logger.info(f"  -> Using original segment durations (total: {total_original_duration:.2f}s)")
             
-            logging.info(f"  -> Parsed blend: {num_segments} segments, frame={frame}, blend_time={blend_time}s")
+            logger.info(f"  -> Parsed blend: {num_segments} segments, frame={frame}, blend_time={blend_time}s")
+            
+            # For now, use default trajectory type (backward compatibility)
+            # TODO: Add trajectory type parsing when needed
+            trajectory_type = 'cubic'  # Default
+            jerk_limit = None
             
             # Return command with frame
-            return SmoothBlendCommand(segment_definitions, blend_time, frame, start_pose)
+            return SmoothBlendCommand(segment_definitions, blend_time, frame, start_pose, trajectory_type, jerk_limit)
+        
+        elif command_type == 'SMOOTH_WAYPOINTS':
+            # Format: SMOOTH_WAYPOINTS|num_waypoints|blend_radii|blend_mode|via_modes|max_vel|max_acc|traj_type|frame|duration|waypoints
+            num_waypoints = int(parts[1])
+            blend_radii_str = parts[2]
+            blend_mode = parts[3]
+            via_modes_str = parts[4]
+            max_vel_str = parts[5]
+            max_acc_str = parts[6]
+            trajectory_type = parts[7]
+            frame = parts[8]
+            duration_str = parts[9]
+            
+            # Parse blend radii
+            if blend_radii_str == 'auto':
+                blend_radii = 'auto'
+            else:
+                blend_radii = [float(r) for r in blend_radii_str.split(',')]
+            
+            # Parse via modes
+            via_modes = via_modes_str.split(',')
+            
+            # Parse constraints
+            max_velocity = None if max_vel_str == 'default' else float(max_vel_str)
+            max_acceleration = None if max_acc_str == 'default' else float(max_acc_str)
+            duration = None if duration_str == 'auto' else float(duration_str)
+            
+            # Parse waypoints (remaining parts joined by |)
+            waypoints = []
+            waypoint_parts = parts[10:]  # All remaining parts are waypoint data
+            for wp_str in waypoint_parts:
+                if wp_str:  # Skip empty parts
+                    wp_values = [float(v) for v in wp_str.split(',')]
+                    waypoints.append(wp_values)
+            
+            logger.info(f"  -> Parsed waypoints: {num_waypoints} points, {blend_mode} blending, frame={frame}")
+            
+            # Return command object
+            return SmoothWaypointsCommand(
+                waypoints, blend_radii, blend_mode, via_modes,
+                max_velocity, max_acceleration, trajectory_type,
+                frame, duration
+            )
             
     except Exception as e:
-        logging.exception(f"Error parsing smooth motion command: {e}")
-        logging.error(f"Command parts: {parts}")
+        logger.error(f"Error parsing smooth motion command: {e}")
+        logger.info(f"Command parts: {parts}")
+        import traceback
+        traceback.print_exc()
         return None
     
-    logging.warning(f"Warning: Unknown smooth motion command type: {command_type}")
+    logger.warning(f"Warning: Unknown smooth motion command type: {command_type}")
     return None
-
-def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
-    """
-    Transform command parameters from TRF to WRF.
-    Handles position, orientation, and directional vectors correctly.
-    """
-    if frame == 'WRF':
-        return params
-    
-    # Get current tool pose
-    current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                         for i, p in enumerate(current_position_in)])
-    tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
-    
-    transformed = params.copy()
-    
-    # SMOOTH_CIRCLE - Transform center and plane normal
-    if command_type == 'SMOOTH_CIRCLE':
-        if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
-        
-        if 'plane' in params:
-            plane_normals_trf = {
-                'XY': [0, 0, 1],   # Tool's Z-axis
-                'XZ': [0, 1, 0],   # Tool's Y-axis  
-                'YZ': [1, 0, 0]    # Tool's X-axis
-            }
-            normal_trf = np.array(plane_normals_trf[params['plane']])
-            normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf.tolist()
-            logging.info(f"  -> TRF circle plane {params['plane']} transformed to WRF")
-    
-    # SMOOTH_ARC_CENTER - Transform center, end_pose, and implied plane
-    elif command_type == 'SMOOTH_ARC_CENTER':
-        if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
-        
-        if 'end_pose' in params:
-            end_trf = SE3(params['end_pose'][0]/1000, 
-                         params['end_pose'][1]/1000, 
-                         params['end_pose'][2]/1000) * \
-                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
-            end_wrf = tool_pose * end_trf
-            transformed['end_pose'] = np.concatenate([
-                end_wrf.t * 1000,
-                end_wrf.rpy(unit='deg', order='xyz')
-            ]).tolist()
-        
-        # Arc plane is determined by start, end, and center points
-        # But we should transform any specified plane normal
-        if 'plane' in params:
-            # Similar to circle plane transformation
-            plane_normals_trf = {
-                'XY': [0, 0, 1],
-                'XZ': [0, 1, 0],
-                'YZ': [1, 0, 0]
-            }
-            normal_trf = np.array(plane_normals_trf[params['plane']])
-            normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf.tolist()
-    
-    # SMOOTH_ARC_PARAM - Transform end_pose and arc plane
-    elif command_type == 'SMOOTH_ARC_PARAM':
-        if 'end_pose' in params:
-            end_trf = SE3(params['end_pose'][0]/1000, 
-                         params['end_pose'][1]/1000, 
-                         params['end_pose'][2]/1000) * \
-                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
-            end_wrf = tool_pose * end_trf
-            transformed['end_pose'] = np.concatenate([
-                end_wrf.t * 1000,
-                end_wrf.rpy(unit='deg', order='xyz')
-            ]).tolist()
-        
-        # For parametric arc, the plane is usually XY of the tool
-        # Transform the assumed plane normal
-        if 'plane' not in params:
-            params['plane'] = 'XY'  # Default to XY plane
-        
-        plane_normals_trf = {
-            'XY': [0, 0, 1],
-            'XZ': [0, 1, 0],
-            'YZ': [1, 0, 0]
-        }
-        normal_trf = np.array(plane_normals_trf[params.get('plane', 'XY')])
-        normal_wrf = tool_pose.R @ normal_trf
-        transformed['normal_vector'] = normal_wrf.tolist()
-    
-    # SMOOTH_HELIX - Transform center and helix axis
-    elif command_type == 'SMOOTH_HELIX':
-        if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
-        
-        # Helix axis - default is Z-axis (vertical in TRF)
-        # In TRF, helix rises along tool's Z-axis
-        helix_axis_trf = np.array([0, 0, 1])  # Tool's Z-axis
-        helix_axis_wrf = tool_pose.R @ helix_axis_trf
-        transformed['helix_axis'] = helix_axis_wrf.tolist()
-        
-        # Also need to transform the "up" direction for proper orientation
-        up_vector_trf = np.array([0, 1, 0])  # Tool's Y-axis
-        up_vector_wrf = tool_pose.R @ up_vector_trf
-        transformed['up_vector'] = up_vector_wrf.tolist()
-    
-    # SMOOTH_SPLINE - Transform all waypoints
-    elif command_type == 'SMOOTH_SPLINE':
-        if 'waypoints' in params:
-            transformed_waypoints = []
-            for wp in params['waypoints']:
-                wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
-                         SE3.RPY(wp[3:], unit='deg', order='xyz')
-                wp_wrf = tool_pose * wp_trf
-                wp_transformed = np.concatenate([
-                    wp_wrf.t * 1000,
-                    wp_wrf.rpy(unit='deg', order='xyz')
-                ]).tolist()
-                transformed_waypoints.append(wp_transformed)
-            transformed['waypoints'] = transformed_waypoints
-    
-    # SMOOTH_BLEND - Transform all segments recursively
-    elif command_type == 'SMOOTH_BLEND':
-        if 'segments' in params:
-            transformed_segments = []
-            for seg in params['segments']:
-                seg_copy = seg.copy()
-                seg_type = seg['type']
-                
-                if seg_type == 'LINE':
-                    if 'end' in seg:
-                        end_trf = SE3(seg['end'][0]/1000, 
-                                    seg['end'][1]/1000, 
-                                    seg['end'][2]/1000) * \
-                                  SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
-                        end_wrf = tool_pose * end_trf
-                        seg_copy['end'] = np.concatenate([
-                            end_wrf.t * 1000,
-                            end_wrf.rpy(unit='deg', order='xyz')
-                        ]).tolist()
-                
-                elif seg_type == 'CIRCLE':
-                    if 'center' in seg:
-                        center_trf = SE3(seg['center'][0]/1000, 
-                                       seg['center'][1]/1000, 
-                                       seg['center'][2]/1000)
-                        center_wrf = tool_pose * center_trf
-                        seg_copy['center'] = (center_wrf.t * 1000).tolist()
-                    
-                    if 'plane' in seg:
-                        plane_normals_trf = {
-                            'XY': [0, 0, 1],
-                            'XZ': [0, 1, 0],
-                            'YZ': [1, 0, 0]
-                        }
-                        normal_trf = np.array(plane_normals_trf[seg['plane']])
-                        normal_wrf = tool_pose.R @ normal_trf
-                        seg_copy['normal_vector'] = normal_wrf.tolist()
-                
-                elif seg_type == 'ARC':
-                    if 'center' in seg:
-                        center_trf = SE3(seg['center'][0]/1000, 
-                                       seg['center'][1]/1000, 
-                                       seg['center'][2]/1000)
-                        center_wrf = tool_pose * center_trf
-                        seg_copy['center'] = (center_wrf.t * 1000).tolist()
-                    
-                    if 'end' in seg:
-                        end_trf = SE3(seg['end'][0]/1000, 
-                                    seg['end'][1]/1000, 
-                                    seg['end'][2]/1000) * \
-                                  SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
-                        end_wrf = tool_pose * end_trf
-                        seg_copy['end'] = np.concatenate([
-                            end_wrf.t * 1000,
-                            end_wrf.rpy(unit='deg', order='xyz')
-                        ]).tolist()
-                
-                elif seg_type == 'SPLINE':
-                    if 'waypoints' in seg:
-                        transformed_waypoints = []
-                        for wp in seg['waypoints']:
-                            wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
-                                     SE3.RPY(wp[3:], unit='deg', order='xyz')
-                            wp_wrf = tool_pose * wp_trf
-                            wp_transformed = np.concatenate([
-                                wp_wrf.t * 1000,
-                                wp_wrf.rpy(unit='deg', order='xyz')
-                            ]).tolist()
-                            transformed_waypoints.append(wp_transformed)
-                        seg_copy['waypoints'] = transformed_waypoints
-                
-                transformed_segments.append(seg_copy)
-            transformed['segments'] = transformed_segments
-    
-    # Transform start_pose if specified (common to all commands)
-    if 'start_pose' in params and params['start_pose'] is not None:
-        start_trf = SE3(params['start_pose'][0]/1000, 
-                       params['start_pose'][1]/1000, 
-                       params['start_pose'][2]/1000) * \
-                    SE3.RPY(params['start_pose'][3:], unit='deg', order='xyz')
-        start_wrf = tool_pose * start_trf
-        transformed['start_pose'] = np.concatenate([
-            start_wrf.t * 1000,
-            start_wrf.rpy(unit='deg', order='xyz')
-        ]).tolist()
-    
-    return transformed
-
-#########################################################################
-# Smooth Motion Commands and Robot Commands End Here
-#########################################################################
 
 # Acknowledgment system configuration
 CLIENT_ACK_PORT = 5002  # Port where clients listen for acknowledgments
@@ -3300,7 +1246,7 @@ def send_acknowledgment(cmd_id: str, status: str, details: str = "", addr=None):
         try:
             ack_socket.sendto(ack_message.encode('utf-8'), (addr[0], CLIENT_ACK_PORT))
         except Exception as e:
-            logging.error(f"Failed to send ack to {addr}: {e}")
+            logger.error(f"Failed to send ack to {addr}: {e}")
     
     # Also broadcast to localhost in case the client is local
     try:
@@ -3340,6 +1286,10 @@ def parse_command_with_id(message: str) -> Tuple[Optional[str], str]:
 
 # Create a new, empty command queue
 command_queue = deque()
+
+# Initialize GCODE interpreter
+gcode_interpreter = GcodeInterpreter()
+logger.info("GCODE interpreter initialized")
 
 # --------------------------------------------------------------------------
 # --- Test 1: Homing and Initial Setup
@@ -3411,9 +1361,9 @@ while timer.elapsed_time < 1100000:
                 parts = message.split('|')
                 command_name = parts[0].upper()
 
-                # Handle immediate response commands
+                # Immediate command dispatch
                 if command_name == 'STOP':
-                    logging.warning("Received STOP command. Halting all motion and clearing queue.")
+                    logger.info("Received STOP command. Halting all motion and clearing queue.")
                     
                     # Cancel active command
                     if active_command and active_command_id:
@@ -3482,6 +1432,40 @@ while timer.elapsed_time < 1100000:
                     
                     if cmd_id:
                         send_acknowledgment(cmd_id, "COMPLETED", "Speed data sent", addr)
+
+                elif command_name == 'GET_GCODE_STATUS':
+                    # Get GCODE interpreter status
+                    gcode_status = gcode_interpreter.get_status()
+                    status_json = json.dumps(gcode_status)
+                    response_message = f"GCODE_STATUS|{status_json}"
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "GCODE status sent", addr)
+                
+                elif command_name == 'GCODE_STOP':
+                    # Stop GCODE program execution
+                    gcode_interpreter.stop_program()
+                    logger.info("GCODE program stopped")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "GCODE program stopped", addr)
+                
+                elif command_name == 'GCODE_PAUSE':
+                    # Pause GCODE program execution
+                    gcode_interpreter.pause_program()
+                    logger.info("GCODE program paused")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "GCODE program paused", addr)
+                
+                elif command_name == 'GCODE_RESUME':
+                    # Resume GCODE program execution
+                    gcode_interpreter.start_program()  # start_program resumes if already loaded
+                    logger.info("GCODE program resumed")
+                    
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "GCODE program resumed", addr)
 
                 elif command_name == 'PING':
                     # Respond with PONG and ACK if cmd_id present
@@ -3658,7 +1642,7 @@ while timer.elapsed_time < 1100000:
                     incoming_command_buffer.append((raw_message, addr))
 
     except Exception as e:
-        logging.error(f"Network receive error: {e}")
+        logger.error(f"Network receive error: {e}")
 
     # =======================================================================
     # === PROCESS COMMANDS FROM BUFFER WITH ACKNOWLEDGMENTS ===
@@ -3670,7 +1654,7 @@ while timer.elapsed_time < 1100000:
         
         # Parse command ID
         cmd_id, message = parse_command_with_id(raw_message)
-        logging.info(f"Processing command{' (ID: ' + cmd_id + ')' if cmd_id else ''}: {message[:50]}...")
+        logger.info(f"Processing command{' (ID: ' + cmd_id + ')' if cmd_id else ''}: {message[:50]}...")
         
         parts = message.split('|')
         command_name = parts[0].upper()
@@ -3706,7 +1690,7 @@ while timer.elapsed_time < 1100000:
                 command_queued = True
             
             elif command_name in ['SMOOTH_CIRCLE', 'SMOOTH_ARC_CENTER', 'SMOOTH_ARC_PARAM', 
-                                 'SMOOTH_SPLINE', 'SMOOTH_HELIX', 'SMOOTH_BLEND']:
+                                 'SMOOTH_SPLINE', 'SMOOTH_HELIX', 'SMOOTH_BLEND', 'SMOOTH_WAYPOINTS']:
                 command_obj = parse_smooth_motion_commands(parts)
                 if command_obj:
                     command_queued = True
@@ -3759,6 +1743,117 @@ while timer.elapsed_time < 1100000:
                 command_obj = GripperCommand(gripper_type='electric', action=action, position=pos, speed=spd, current=curr)
                 command_queued = True
             
+            elif command_name == 'GCODE' and len(parts) >= 2:
+                # Single GCODE line execution
+                gcode_line = '|'.join(parts[1:])  # Rejoin in case GCODE has | characters
+                try:
+                    # Update interpreter position with current robot position
+                    current_angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)]
+                    current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
+                    current_xyz = current_pose_matrix[:3, 3]
+                    # Convert from meters to millimeters
+                    gcode_interpreter.state.update_position({
+                        'X': current_xyz[0] * 1000,
+                        'Y': current_xyz[1] * 1000, 
+                        'Z': current_xyz[2] * 1000
+                    })
+                    
+                    # Parse GCODE line and get robot commands
+                    robot_commands = gcode_interpreter.parse_line(gcode_line)
+                    
+                    if robot_commands:
+                        # Process each generated robot command
+                        for robot_cmd_str in robot_commands:
+                            # Parse the generated robot command string
+                            cmd_parts = robot_cmd_str.split('|')
+                            cmd_name = cmd_parts[0].upper()
+                            
+                            # Create command objects from the generated strings
+                            if cmd_name == 'MOVEPOSE' and len(cmd_parts) == 9:
+                                pose_vals = [float(p) for p in cmd_parts[1:7]]
+                                duration = None if cmd_parts[7].upper() == 'NONE' else float(cmd_parts[7])
+                                speed = None if cmd_parts[8].upper() == 'NONE' else float(cmd_parts[8])
+                                cmd = MovePoseCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                                command_queue.append(cmd)
+                                if cmd_id:
+                                    command_id_map[cmd] = (cmd_id, addr)
+                            
+                            elif cmd_name == 'MOVECART' and len(cmd_parts) == 9:
+                                pose_vals = [float(p) for p in cmd_parts[1:7]]
+                                duration = None if cmd_parts[7].upper() == 'NONE' else float(cmd_parts[7])
+                                speed = None if cmd_parts[8].upper() == 'NONE' else float(cmd_parts[8])
+                                cmd = MoveCartCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                                command_queue.append(cmd)
+                                if cmd_id:
+                                    command_id_map[cmd] = (cmd_id, addr)
+                                    
+                            elif cmd_name == 'DELAY' and len(cmd_parts) == 2:
+                                duration = float(cmd_parts[1])
+                                cmd = DelayCommand(duration=duration)
+                                command_queue.append(cmd)
+                                if cmd_id:
+                                    command_id_map[cmd] = (cmd_id, addr)
+                                    
+                            elif cmd_name == 'HOME':
+                                cmd = HomeCommand()
+                                command_queue.append(cmd)
+                                if cmd_id:
+                                    command_id_map[cmd] = (cmd_id, addr)
+                                    
+                            elif cmd_name == 'PNEUMATICGRIPPER' and len(cmd_parts) == 3:
+                                action, port = cmd_parts[1].lower(), int(cmd_parts[2])
+                                cmd = GripperCommand(gripper_type='pneumatic', action=action, output_port=port)
+                                command_queue.append(cmd)
+                                if cmd_id:
+                                    command_id_map[cmd] = (cmd_id, addr)
+                        
+                        command_queued = True
+                        logger.info(f"GCODE '{gcode_line}' generated {len(robot_commands)} command(s)")
+                    else:
+                        # GCODE line didn't generate any motion commands (might be modal state change)
+                        command_queued = True
+                        logger.debug(f"GCODE '{gcode_line}' updated state only")
+                        
+                except Exception as e:
+                    error_details = f"GCODE parsing error: {str(e)}"
+                    command_queued = False
+            
+            elif command_name == 'GCODE_PROGRAM' and len(parts) >= 2:
+                # Load and execute GCODE program
+                program_type = parts[1].upper()
+                
+                try:
+                    if program_type == 'FILE' and len(parts) == 3:
+                        # Load from file
+                        filepath = parts[2]
+                        if gcode_interpreter.load_file(filepath):
+                            logger.info(f"Loaded GCODE file: {filepath}")
+                            # Start program execution
+                            gcode_interpreter.start_program()
+                            command_queued = True
+                        else:
+                            error_details = f"Failed to load GCODE file: {filepath}"
+                            command_queued = False
+                            
+                    elif program_type == 'INLINE':
+                        # Load inline program (lines separated by semicolons)
+                        program_lines = '|'.join(parts[2:]).split(';')
+                        if gcode_interpreter.load_program(program_lines):
+                            logger.info(f"Loaded inline GCODE program ({len(program_lines)} lines)")
+                            # Start program execution
+                            gcode_interpreter.start_program()
+                            command_queued = True
+                        else:
+                            error_details = "Failed to load inline GCODE program"
+                            command_queued = False
+                    else:
+                        error_details = f"Invalid GCODE_PROGRAM format"
+                        command_queued = False
+                        
+                except Exception as e:
+                    error_details = f"GCODE program error: {str(e)}"
+                    command_queued = False
+            
             else:
                 error_details = f"Unknown or malformed command: {command_name}"
                 
@@ -3766,7 +1861,7 @@ while timer.elapsed_time < 1100000:
             error_details = f"Error parsing command: {str(e)}"
             command_queued = False
         
-        # Handle command queueing and acknowledgments
+        # Command queue management with ACK
         if command_queued and command_obj:
             # Check if command is initially valid
             if hasattr(command_obj, 'is_valid') and not command_obj.is_valid:
@@ -3789,7 +1884,7 @@ while timer.elapsed_time < 1100000:
             # Command was not queued
             if cmd_id:
                 send_acknowledgment(cmd_id, "INVALID", error_details, addr)
-            logging.warning(f"Warning: {error_details}")
+            logger.error(f"Warning: {error_details}")
 
     # =======================================================================
     # === MAIN EXECUTION LOGIC WITH ACKNOWLEDGMENTS ===
@@ -3817,8 +1912,8 @@ while timer.elapsed_time < 1100000:
                     if cmd_id:
                         send_acknowledgment(cmd_id, "CANCELLED", "E-Stop activated - command not processed", addr)
                 
-                logging.warning(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' cancelled.")
-                logging.warning("Release E-Stop and press 'e' to re-enable.")
+                logger.info(f"E-STOP TRIGGERED! Active command '{cancelled_command_info}' cancelled.")
+                logger.info("Release E-Stop and press 'e' to re-enable.")
                 e_stop_active = True
             
             Command_out.value = 102
@@ -3832,8 +1927,8 @@ while timer.elapsed_time < 1100000:
             
         elif e_stop_active:
             # Waiting for re-enable
-            if keyboard and keyboard.is_pressed('e'):
-                logging.info("Re-enabling robot...")
+            if keyboard.is_pressed('e'):
+                logger.info("Re-enabling robot...")
                 Command_out.value = 101
                 e_stop_active = False
             else:
@@ -3843,6 +1938,44 @@ while timer.elapsed_time < 1100000:
                 
         else:
             # --- Normal Command Processing ---
+            
+            # Check if GCODE program is running and fetch next command
+            if active_command is None and not command_queue and gcode_interpreter.is_running:
+                # Get next command from GCODE program
+                next_gcode_cmd = gcode_interpreter.get_next_command()
+                if next_gcode_cmd:
+                    # Parse the generated robot command string
+                    cmd_parts = next_gcode_cmd.split('|')
+                    cmd_name = cmd_parts[0].upper()
+                    
+                    # Create command object from the generated string
+                    if cmd_name == 'MOVEPOSE' and len(cmd_parts) == 9:
+                        pose_vals = [float(p) for p in cmd_parts[1:7]]
+                        duration = None if cmd_parts[7].upper() == 'NONE' else float(cmd_parts[7])
+                        speed = None if cmd_parts[8].upper() == 'NONE' else float(cmd_parts[8])
+                        cmd = MovePoseCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                        command_queue.append(cmd)
+                    
+                    elif cmd_name == 'MOVECART' and len(cmd_parts) == 9:
+                        pose_vals = [float(p) for p in cmd_parts[1:7]]
+                        duration = None if cmd_parts[7].upper() == 'NONE' else float(cmd_parts[7])
+                        speed = None if cmd_parts[8].upper() == 'NONE' else float(cmd_parts[8])
+                        cmd = MoveCartCommand(pose=pose_vals, duration=duration, velocity_percent=speed)
+                        command_queue.append(cmd)
+                        
+                    elif cmd_name == 'DELAY' and len(cmd_parts) == 2:
+                        duration = float(cmd_parts[1])
+                        cmd = DelayCommand(duration=duration)
+                        command_queue.append(cmd)
+                        
+                    elif cmd_name == 'HOME':
+                        cmd = HomeCommand()
+                        command_queue.append(cmd)
+                        
+                    elif cmd_name == 'PNEUMATICGRIPPER' and len(cmd_parts) == 3:
+                        action, port = cmd_parts[1].lower(), int(cmd_parts[2])
+                        cmd = GripperCommand(gripper_type='pneumatic', action=action, output_port=port)
+                        command_queue.append(cmd)
             
             # Start new command if none active
             if active_command is None and command_queue:
@@ -3867,7 +2000,7 @@ while timer.elapsed_time < 1100000:
                     try:
                         new_command.prepare_for_execution(current_position_in=Position_in)
                     except Exception as e:
-                        logging.error(f"Command preparation failed: {e}")
+                        logger.error(f"Command preparation failed: {e}")
                         if hasattr(new_command, 'is_valid'):
                             new_command.is_valid = False
                         if hasattr(new_command, 'error_message'):
@@ -3929,7 +2062,8 @@ while timer.elapsed_time < 1100000:
                         active_command_id = None
                         
                 except Exception as e:
-                    logging.error(f"Command execution error: {e}")
+                    # Command execution error
+                    logger.error(f"Command execution error: {e}")
                     if active_command_id:
                         send_acknowledgment(active_command_id, "FAILED", 
                                           f"Execution error: {str(e)}")
@@ -3971,7 +2105,7 @@ while timer.elapsed_time < 1100000:
                 pass
 
     except serial.SerialException as e:
-        logging.error(f"Serial communication error: {e}")
+        logger.error(f"Serial communication error: {e}")
         
         # Send failure acknowledgments for active command
         if active_command_id:
