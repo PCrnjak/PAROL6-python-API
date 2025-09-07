@@ -77,9 +77,23 @@ class CartesianJogCommand:
         delta_angular_rad = np.deg2rad(angular_speed_degs * INTERVAL_S)
 
         # Create the small incremental transformation (delta_pose)
+        # Use explicit per-axis rotations to match original GUI behavior
         trans_vec = np.array(self.axis_vectors[0]) * delta_linear
         rot_vec = np.array(self.axis_vectors[1]) * delta_angular_rad
-        delta_pose = SE3.Rt(SE3.Eul(rot_vec).R, trans_vec)
+        
+        # Build delta transformation using explicit rotation matrices
+        if np.any(rot_vec != 0):
+            # Find which axis has rotation (should be only one for single-axis jog)
+            if rot_vec[0] != 0:  # RX rotation
+                delta_pose = SE3.Rx(rot_vec[0]) * SE3(trans_vec)
+            elif rot_vec[1] != 0:  # RY rotation
+                delta_pose = SE3.Ry(rot_vec[1]) * SE3(trans_vec)
+            elif rot_vec[2] != 0:  # RZ rotation
+                delta_pose = SE3.Rz(rot_vec[2]) * SE3(trans_vec)
+            else:
+                delta_pose = SE3(trans_vec)
+        else:
+            delta_pose = SE3(trans_vec)
 
         # Apply the transformation in the correct reference frame
         if self.frame == 'WRF':
