@@ -57,8 +57,27 @@ from commands import (
 INTERVAL_S = 0.01
 prev_time = 0
 
+# Enable optional fake-serial simulation for hardware-free tests
+FAKE_SERIAL = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower() in ("1", "true", "yes", "on")
+
+# Streaming toggle: STREAM|ON enables zero-queue latest-wins for JOG/CARTJOG; STREAM|OFF disables
+stream_mode = False
+
 # Global verbosity level - can be changed programmatically
 GLOBAL_LOG_LEVEL = logging.INFO
+
+# =========================
+# Runtime flags and globals
+# =========================
+enabled = True
+soft_error = False
+disabled_reason = ""
+
+# Ensure serial globals exist on all platforms
+ser: Optional[serial.Serial] = None
+com_port_str: Optional[str] = None
+# Non-blocking serial reconnect throttle
+last_reconnect_attempt = 0.0
 
 # Logging configuration
 def setup_logging(verbosity_level=None):
@@ -214,7 +233,7 @@ start_cond3 = 0 #Flag if start_cond3_byte is received
 good_start = 0 #Flag if we got all 3 start condition bytes
 data_len = 0 #Length of the data after -3 start condition bytes and length byte, so -4 bytes
 
-data_buffer = [None]*255 #Here save all data after data length byte
+data_buffer = [b'']*255 #Here save all data after data length byte
 data_counter = 0 #Data counter for incoming bytes; compared to data length to see if we have correct length
 #######################################################################################
 #######################################################################################
@@ -380,7 +399,7 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
 
 
     test_list = []
-    #print(test_list)
+    #logging.debug(test_list)
 
     #x = bytes(start_bytes)
     test_list.append((start_bytes))
@@ -446,12 +465,13 @@ def Pack_data(Position_out,Speed_out,Command_out,Affected_joint_out,InOut_out,Ti
     # END bytes
     test_list.append((end_bytes))
     
-    #print(test_list)
+    #logging.debug(test_list)
     return test_list
 
 def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
     global input_byte 
+    global ser
 
     global start_cond1_byte 
     global start_cond2_byte 
@@ -470,8 +490,12 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
     global data_buffer 
     global data_counter
 
-    while (ser.inWaiting() > 0):
-        input_byte = ser.read()
+    # Ensure serial is available before reading
+    if ser is None or not ser.is_open:
+        return
+
+    while ser.in_waiting > 0:
+        input_byte = ser.read(1)
 
         #UNCOMMENT THIS TO GET ALL DATA FROM THE ROBOT PRINTED
         #print(input_byte) 
@@ -532,9 +556,9 @@ def Get_data(Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Positio
                     # ako je dobar paket je dobar i spremi ga u nove variable!
                 
                 # Print every byte
-                #print("podaci u data bufferu su:")
+                #logging.debug("podaci u data bufferu su:")
                 #for i in range(data_len):
-                    #print(data_buffer[i])
+                    #logging.debug(data_buffer[i])
 
                 good_start = 0
                 start_cond1 = 0
@@ -589,8 +613,68 @@ def check_elements(lst):
         if element == 1:
             return i
     return -1  # Return -1 if no element is 1
-        
-        
+
+def simulate_robot_step(dt: float) -> None:
+    """
+    Simulate firmware feedback at 100 Hz when no serial is present.
+    Updates Position_in/Speed_in based on Command_out and Speed_out/Position_out.
+    """
+    # Mark robot as homed and ensure E-Stop released bit
+    for i in range(6):
+        Homed_in[i] = 1
+    if len(InOut_in) > 4:
+        InOut_in[4] = 1  # 1 = not pressed; main loop treats 0 as E-Stop
+
+    # Integrate motion according to current command type
+    if Command_out.value == 123:
+        # Jog/speed control: integrate Speed_out (steps/sec) over dt
+        for i in range(6):
+            v = int(Speed_out[i])
+            max_v = int(PAROL6_ROBOT.Joint_max_speed[i])
+            if v > max_v:
+                v = max_v
+            elif v < -max_v:
+                v = -max_v
+            new_pos = int(Position_in[i] + v * dt)
+            # Clamp to limits
+            jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+            if new_pos < jmin:
+                new_pos = jmin
+                v = 0
+            elif new_pos > jmax:
+                new_pos = jmax
+                v = 0
+            Speed_in[i] = v
+            Position_in[i] = new_pos
+
+    elif Command_out.value == 156:
+        # Position control: move toward Position_out with capped delta per tick
+        for i in range(6):
+            err = int(Position_out[i] - Position_in[i])
+            if err == 0:
+                Speed_in[i] = 0
+                continue
+            max_step = int(PAROL6_ROBOT.Joint_max_speed[i] * dt)
+            if max_step < 1:
+                max_step = 1
+            step = max(-max_step, min(max_step, err))
+            new_pos = Position_in[i] + step
+            # Clamp to limits
+            jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+            if new_pos < jmin:
+                new_pos = jmin
+                step = 0
+            elif new_pos > jmax:
+                new_pos = jmax
+                step = 0
+            Position_in[i] = int(new_pos)
+            Speed_in[i] = int(step / dt) if dt > 0 else 0
+
+    else:
+        # Idle/other: hold position
+        for i in range(6):
+            Speed_in[i] = 0
+    
 def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
     """
     Calculate duration based on trajectory length and speed percentage.
@@ -1139,8 +1223,11 @@ logger.info("GCODE interpreter initialized")
 # --- Test 1: Homing and Initial Setup
 # --------------------------------------------------------------------------
 
-# 1. Start with the mandatory Home command.
-command_queue.append(HomeCommand())
+# 1. Optionally start with the Home command (can be bypassed via PAROL6_NOAUTOHOME)
+if not str(os.getenv("PAROL6_NOAUTOHOME", "0")).lower() in ("1", "true", "yes", "on"):
+    command_queue.append(HomeCommand())
+else:
+    logging.info("PAROL6_NOAUTOHOME is set; skipping auto-home on startup.")
 
 # --- State variable for the currently running command ---
 active_command = None
@@ -1151,7 +1238,7 @@ incoming_command_buffer = deque()
 # Timestamp of the last processed network command
 last_command_time = 0
 # Cooldown period in seconds to prevent command flooding
-COMMAND_COOLDOWN_S = 0.1 # 100ms
+COMMAND_COOLDOWN_S = 0.01 # 10ms
 
 # Set interval
 timer = Timer(interval=INTERVAL_S, warnings=False, precise=True)
@@ -1165,17 +1252,29 @@ prev_time = 0
 
 while timer.elapsed_time < 1100000:
     
-    # --- Connection Handling ---
+    # --- Connection Handling (non-blocking) ---
     if ser is None or not ser.is_open:
-        logger.info("Serial port not open. Attempting to reconnect...")
-        try:
-            ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
-            if ser.is_open:
-                logger.info(f"Successfully reconnected to {com_port_str}")
-        except serial.SerialException as e:
-            ser = None
-            time.sleep(1) 
-        continue
+        now = time.time()
+        if now - last_reconnect_attempt > 1.0:
+            logging.warning("Serial port not open. Attempting to reconnect...")
+            last_reconnect_attempt = now
+            try:
+                # Load port from com_port.txt if not already set
+                if not com_port_str:
+                    try:
+                        with open("com_port.txt", "r") as f:
+                            com_port_str = f.read().strip()
+                    except FileNotFoundError:
+                        com_port_str = None
+
+                if com_port_str:
+                    logging.info(f"Trying: {com_port_str}")
+                    ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
+                    if ser.is_open:
+                        logging.info(f"Successfully reconnected to {com_port_str}")
+            except serial.SerialException:
+                ser = None
+        # Do not block or continue; proceed to UDP handling every tick
 
     # =======================================================================
     # === NETWORK COMMAND RECEPTION WITH ID PARSING ===
@@ -1203,11 +1302,9 @@ while timer.elapsed_time < 1100000:
                     active_command_id = None
                     
                     # Clear queue and notify about cancelled commands
-                    for queued_cmd in command_id_map.keys():
+                    for queued_cmd, (qid, qaddr) in list(command_id_map.items()):
                         if queued_cmd != active_command:
-                            if queued_cmd in command_id_map:
-                                send_acknowledgment(command_id_map[queued_cmd], 
-                                                  "CANCELLED", "Queue cleared by STOP", addr)
+                            send_acknowledgment(qid, "CANCELLED", "Queue cleared by STOP", qaddr)
                     
                     command_queue.clear()
                     command_id_map.clear()
@@ -1299,8 +1396,199 @@ while timer.elapsed_time < 1100000:
                     if cmd_id:
                         send_acknowledgment(cmd_id, "COMPLETED", "GCODE program resumed", addr)
 
+                elif command_name == 'PING':
+                    # Respond with PONG and ACK if cmd_id present
+                    sock.sendto("PONG".encode('utf-8'), addr)
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "PONG", addr)
+
+                elif command_name == 'GET_STATUS':
+                    # Aggregate POSE, ANGLES, IO, GRIPPER into one frame
+                    try:
+                        q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
+                        current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
+                        pose_flat = current_pose_matrix.flatten()
+                        pose_str = ",".join(map(str, pose_flat))
+                    except Exception:
+                        pose_str = ",".join(["0"] * 16)
+
+                    angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)]
+                    angles_deg = np.rad2deg(angles_rad)
+                    angles_str = ",".join(map(str, angles_deg))
+
+                    io_status_str = ",".join(map(str, InOut_in[:5]))
+                    gripper_status_str = ",".join(map(str, Gripper_data_in))
+
+                    response_message = f"STATUS|POSE={pose_str}|ANGLES={angles_str}|IO={io_status_str}|GRIPPER={gripper_status_str}"
+                    sock.sendto(response_message.encode('utf-8'), addr)
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Status data sent", addr)
+
+                elif command_name == 'ENABLE':
+                    enabled = True
+                    disabled_reason = ""
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Controller enabled", addr)
+
+                elif command_name == 'DISABLE':
+                    enabled = False
+                    disabled_reason = "Disabled by user"
+                    # Cancel active command
+                    if active_command and active_command_id:
+                        send_acknowledgment(active_command_id, "CANCELLED", "Disabled by user", addr)
+                    active_command = None
+                    active_command_id = None
+                    # Cancel queued commands
+                    for queued_cmd, (qid, qaddr) in list(command_id_map.items()):
+                        send_acknowledgment(qid, "CANCELLED", "Controller disabled", qaddr)
+                    command_queue.clear()
+                    command_id_map.clear()
+                    # Stop robot motion
+                    Command_out.value = 255
+                    Speed_out[:] = [0] * 6
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Controller disabled", addr)
+
+                elif command_name == 'CLEAR_ERROR':
+                    soft_error = False
+                    if cmd_id:
+                        send_acknowledgment(cmd_id, "COMPLETED", "Errors cleared", addr)
+
+                elif command_name == 'SET_PORT' and len(parts) >= 2:
+                    new_port = parts[1].strip()
+                    if new_port:
+                        # Persist and trigger reconnection
+                        try:
+                            with open("com_port.txt", "w") as f:
+                                f.write(new_port)
+                        except Exception as e:
+                            if cmd_id:
+                                send_acknowledgment(cmd_id, "FAILED", f"Could not write com_port.txt: {e}", addr)
+                            # Do not fall through to queuing
+                            continue
+                        try:
+                            if ser and ser.is_open:
+                                ser.close()
+                        except Exception:
+                            pass
+                        com_port_str = new_port
+                        ser = None  # main loop will reconnect
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", f"Port set to {new_port}; reconnecting...", addr)
+                    else:
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "No port specified", addr)
+
+                elif command_name == 'STREAM' and len(parts) >= 2:
+                    arg = parts[1].strip().upper()
+                    if arg == 'ON':
+                        stream_mode = True
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", "Stream mode ON", addr)
+                    elif arg == 'OFF':
+                        stream_mode = False
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", "Stream mode OFF", addr)
+                    else:
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Expected ON or OFF", addr)
+
+                elif command_name == 'JOG' and stream_mode and len(parts) == 5:
+                    # Streaming JOG: create JogCommand instance with latest-wins semantics
+                    try:
+                        joint_index = int(parts[1])
+                        speed_percent = float(parts[2])
+                        duration = None if parts[3].upper() == 'NONE' else float(parts[3])
+                        distance = None if parts[4].upper() == 'NONE' else float(parts[4])
+                        
+                        # Use default duration if none specified
+                        if duration is None:
+                            duration = 0.2
+                        
+                        # Create command instance
+                        command_obj = JogCommand(joint=joint_index, speed_percentage=speed_percent, 
+                                               duration=duration, distance_deg=distance)
+                        command_obj.prepare_for_execution(current_position_in=Position_in)
+                        # Cancel any active jog-type command (latest-wins)
+                        if active_command and isinstance(active_command, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                            if active_command_id:
+                                send_acknowledgment(active_command_id, "CANCELLED", "Replaced by new jog command", addr)
+                            if active_command in command_id_map:
+                                del command_id_map[active_command]
+                        
+                        # Purge queued jog commands
+                        for queued_cmd in list(command_queue):
+                            if isinstance(queued_cmd, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                                command_queue.remove(queued_cmd)
+                                if queued_cmd in command_id_map:
+                                    qid, qaddr = command_id_map[queued_cmd]
+                                    send_acknowledgment(qid, "CANCELLED", "Replaced by streaming jog", qaddr)
+                                    del command_id_map[queued_cmd]
+                        
+                        # Activate command immediately
+                        active_command = command_obj
+                        active_command_id = cmd_id
+                        if cmd_id:
+                            command_id_map[command_obj] = (cmd_id, addr)
+                            send_acknowledgment(cmd_id, "EXECUTING", "Streaming jog started", addr)
+                        
+                    except Exception as e:
+                        logging.error(e)
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Malformed JOG (stream)", addr)
+
+                elif command_name == 'CARTJOG' and stream_mode and len(parts) == 5:
+                    # Streaming CARTJOG: create CartesianJogCommand instance with latest-wins semantics
+                    try:
+                        frame = parts[1].upper()
+                        axis = parts[2]
+                        speed_percent = float(parts[3])
+                        timeout_s = float(parts[4]) if parts[4].upper() != 'NONE' else 0.2
+                        
+                        # Create command instance
+                        command_obj = CartesianJogCommand(frame=frame, axis=axis, 
+                                                        speed_percentage=speed_percent, duration=timeout_s)
+                        
+                        # Cancel any active jog-type command (latest-wins)
+                        if active_command and isinstance(active_command, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                            if active_command_id:
+                                send_acknowledgment(active_command_id, "CANCELLED", "Replaced by new cartesian jog", addr)
+                            if active_command in command_id_map:
+                                del command_id_map[active_command]
+                        
+                        # Purge queued jog commands
+                        for queued_cmd in list(command_queue):
+                            if isinstance(queued_cmd, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                                command_queue.remove(queued_cmd)
+                                if queued_cmd in command_id_map:
+                                    qid, qaddr = command_id_map[queued_cmd]
+                                    send_acknowledgment(qid, "CANCELLED", "Replaced by streaming cartesian jog", qaddr)
+                                    del command_id_map[queued_cmd]
+                        
+                        # Activate command immediately
+                        active_command = command_obj
+                        active_command_id = cmd_id
+                        if cmd_id:
+                            command_id_map[command_obj] = (cmd_id, addr)
+                            send_acknowledgment(cmd_id, "EXECUTING", "Streaming cartesian jog started", addr)
+                        
+                    except Exception as e:
+                        logging.error(e)
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", "Malformed CARTJOG (stream)", addr)
+
                 else:
-                    # Queue command for processing
+                    # Queue command for processing (coalesce jog-type commands to avoid backlog)
+                    cmd_upper = parts[0].upper()
+                    if cmd_upper in {'JOG', 'CARTJOG', 'MULTIJOG'}:
+                        filtered = []
+                        for m, a in incoming_command_buffer:
+                            _, m2 = parse_command_with_id(m)
+                            c2 = m2.split('|', 1)[0].upper()
+                            if c2 not in {'JOG', 'CARTJOG', 'MULTIJOG'}:
+                                filtered.append((m, a))
+                        incoming_command_buffer.clear()
+                        incoming_command_buffer.extend(filtered)
                     incoming_command_buffer.append((raw_message, addr))
 
     except Exception as e:
@@ -1320,6 +1608,15 @@ while timer.elapsed_time < 1100000:
         
         parts = message.split('|')
         command_name = parts[0].upper()
+        
+        # Gate motion commands when controller is disabled
+        if not enabled and command_name in {'MOVEPOSE','MOVEJOINT','MOVECART','JOG','MULTIJOG','CARTJOG',
+                                            'SMOOTH_CIRCLE','SMOOTH_ARC_CENTER','SMOOTH_ARC_PARAM',
+                                            'SMOOTH_SPLINE','SMOOTH_HELIX','SMOOTH_BLEND','HOME'}:
+            if cmd_id:
+                send_acknowledgment(cmd_id, "FAILED", f"Controller disabled{(': ' + disabled_reason) if disabled_reason else ''}", addr)
+            # Skip processing this command
+            continue
         
         # Variable to track if command was successfully queued
         command_queued = False
@@ -1732,11 +2029,17 @@ while timer.elapsed_time < 1100000:
         # --- Communication with Robot ---
         s = Pack_data(Position_out, Speed_out, Command_out.value, 
                      Affected_joint_out, InOut_out, Timeout_out, Gripper_data_out)
-        for chunk in s:
-            ser.write(chunk)
-            
-        Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
-                Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
+        if ser is not None and ser.is_open:
+            for chunk in s:
+                ser.write(chunk)
+            Get_data(Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, 
+                    Position_error_in, Timeout_error, Timing_data_in, XTR_data, Gripper_data_in)
+        else:
+            # Serial not available; optionally simulate plant
+            if FAKE_SERIAL:
+                simulate_robot_step(INTERVAL_S)
+            else:
+                pass
 
     except serial.SerialException as e:
         logger.error(f"Serial communication error: {e}")

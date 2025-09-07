@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # Set interval - used for timing calculations
 INTERVAL_S = 0.01
 
+# Jogging uses a smaller IK iteration limit for more responsive performance
+JOG_IK_ILIMIT = 20
+
 class CartesianJogCommand:
     """
     A non-blocking command to jog the robot's end-effector in Cartesian space.
@@ -74,9 +77,23 @@ class CartesianJogCommand:
         delta_angular_rad = np.deg2rad(angular_speed_degs * INTERVAL_S)
 
         # Create the small incremental transformation (delta_pose)
+        # Use explicit per-axis rotations to match original GUI behavior
         trans_vec = np.array(self.axis_vectors[0]) * delta_linear
         rot_vec = np.array(self.axis_vectors[1]) * delta_angular_rad
-        delta_pose = SE3.Rt(SE3.Eul(rot_vec).R, trans_vec)
+        
+        # Build delta transformation using explicit rotation matrices
+        if np.any(rot_vec != 0):
+            # Find which axis has rotation (should be only one for single-axis jog)
+            if rot_vec[0] != 0:  # RX rotation
+                delta_pose = SE3.Rx(rot_vec[0]) * SE3(trans_vec)
+            elif rot_vec[1] != 0:  # RY rotation
+                delta_pose = SE3.Ry(rot_vec[1]) * SE3(trans_vec)
+            elif rot_vec[2] != 0:  # RZ rotation
+                delta_pose = SE3.Rz(rot_vec[2]) * SE3(trans_vec)
+            else:
+                delta_pose = SE3(trans_vec)
+        else:
+            delta_pose = SE3(trans_vec)
 
         # Apply the transformation in the correct reference frame
         if self.frame == 'WRF':
@@ -87,7 +104,7 @@ class CartesianJogCommand:
             target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
+        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, ilimit=JOG_IK_ILIMIT, jogging=True)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S

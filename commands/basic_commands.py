@@ -146,17 +146,25 @@ class JogCommand:
         speed_steps_per_sec = 0
         if self.mode == 'distance' and self.duration:
             speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
-            max_joint_speed = PAROL6_ROBOT.Joint_max_speed[self.joint_index]
-            if speed_steps_per_sec > max_joint_speed:
-                logger.warning(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max speed ({max_joint_speed} steps/s).")
+            max_joint_jog_speed = PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]
+            if speed_steps_per_sec > max_joint_jog_speed:
+                logger.warning(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({max_joint_jog_speed} steps/s).")
                 self.is_valid = False
                 return
+            # Ensure speed is at least the minimum jog speed if not zero
+            if speed_steps_per_sec > 0:
+                speed_steps_per_sec = max(speed_steps_per_sec, PAROL6_ROBOT.Joint_min_jog_speed[self.joint_index])
         else:
             if self.speed_percentage is None:
                 logger.error("Error: 'speed_percentage' must be provided if not calculating automatically.")
                 self.is_valid = False
                 return
-            speed_steps_per_sec = int(np.interp(abs(self.speed_percentage), [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[self.joint_index] * 2]))
+            speed_steps_per_sec = int(np.interp(
+                abs(self.speed_percentage),
+                [0, 100],
+                [PAROL6_ROBOT.Joint_min_jog_speed[self.joint_index],
+                 PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]]
+            ))
 
         self.speed_out = speed_steps_per_sec * self.direction
         self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
@@ -268,7 +276,12 @@ class MultiJogCommand:
                 return
 
             # Calculate speed in steps/sec
-            speed_steps_per_sec = int(np.interp(speed_percentage, [0, 100], [0, PAROL6_ROBOT.Joint_max_speed[joint_index]]))
+            speed_steps_per_sec = int(np.interp(
+                speed_percentage,
+                [0, 100],
+                [PAROL6_ROBOT.Joint_min_jog_speed[joint_index],
+                 PAROL6_ROBOT.Joint_max_jog_speed[joint_index]]
+            ))
             self.speeds_out[joint_index] = speed_steps_per_sec * direction
 
         logger.debug("  -> MultiJog command is ready.")

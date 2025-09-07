@@ -628,17 +628,30 @@ These commands request current robot state without moving the robot:
     * `timing_mode` (str, optional): Either 'duration' or 'speed'. Default: 'duration'
     * `timing_value` (float, optional): Duration in seconds or speed percentage. Default: 5.0
     * `motion_type` (str, optional): Either 'spline' or 'linear'. Default: 'spline'
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for spline motion. Default: 'WRF'
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: True
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 30.0
+* > *Note: The `frame` parameter only applies when `motion_type='spline'`. Linear motions are always in WRF.*
 * **Python API Usage**:
     ```python
     from robot_api import execute_trajectory
+    
+    # Execute trajectory in world frame
     trajectory = [[200, 0, 200, 0, 0, 0], 
                   [250, 50, 200, 0, 0, 45],
                   [200, 100, 200, 0, 0, 90]]
     execute_trajectory(trajectory, timing_mode='duration', 
                       timing_value=10.0, motion_type='spline')
+    
+    # Execute trajectory in tool frame (spline only)
+    tool_trajectory = [[20, 0, 0, 0, 0, 0],
+                      [20, 20, 0, 0, 0, 30],
+                      [0, 20, 10, 0, 0, 60]]
+    execute_trajectory(tool_trajectory, frame='TRF',
+                      timing_mode='speed', 
+                      timing_value=40, motion_type='spline')
     ```
+
 
 #### `wait_for_robot_stopped()`
 * **Purpose**: Wait for robot to stop moving.
@@ -662,18 +675,29 @@ These commands request current robot state without moving the robot:
 * **Parameters**:
     * `motions` (List[Dict]): List of motion dictionaries
     * `ensure_continuity` (bool, optional): Automatically set start_pose for continuity. Default: True
+    * `frame` (str, optional): Reference frame ('WRF' or 'TRF') for all motions. Default: 'WRF'
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: True
     * `timeout` (float, optional): Timeout per motion in seconds. Default: 30.0
 * **Returns**: List of results for each motion
 * **Python API Usage**:
     ```python
     from robot_api import chain_smooth_motions
+    
+    # Chain motions in world frame (default)
     motions = [
         {'type': 'circle', 'center': [200, 0, 200], 'radius': 50, 'duration': 5},
         {'type': 'arc', 'end_pose': [250, 50, 200, 0, 0, 90], 
          'center': [225, 25, 200], 'duration': 3}
     ]
     chain_smooth_motions(motions, ensure_continuity=True)
+    
+    # Chain motions in tool frame
+    tool_motions = [
+        {'type': 'circle', 'center': [0, 30, 0], 'radius': 25, 'duration': 4},
+        {'type': 'arc', 'end_pose': [30, 30, 0, 0, 0, 45], 
+         'center': [15, 15, 0], 'duration': 3}
+    ]
+    chain_smooth_motions(tool_motions, frame='TRF', ensure_continuity=True)
     ```
 
 #### `check_command_status()`
