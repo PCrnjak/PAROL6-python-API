@@ -7,8 +7,7 @@ work coordinates, machine coordinates, and robot coordinates.
 
 import json
 import os
-import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 class WorkCoordinateSystem:

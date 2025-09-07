@@ -127,7 +127,7 @@ class GripperCommand:
                 # Check for completion
                 current_position = Gripper_data_in[1]
                 if abs(current_position - self.target_position) <= 5:
-                    logger.info(f"  -> Gripper move complete.")
+                    logger.info("  -> Gripper move complete.")
                     self.is_finished = True
                     # Set command back to idle
                     bitfield = [1, 0, not InOut_in[4], 1, 0, 0, 0, 0]
@@ -136,12 +136,12 @@ class GripperCommand:
                     return True
             
                 if (object_detection == 1) and (self.target_position > current_position):
-                    logger.info(f"  -> Gripper move holding position due to object detection when closing.")
+                    logger.info("  -> Gripper move holding position due to object detection when closing.")
                     self.is_finished = True
                     return True
                 
                 if (object_detection == 2) and (self.target_position < current_position):
-                    logger.info(f"  -> Gripper move holding position due to object detection when opening.")
+                    logger.info("  -> Gripper move holding position due to object detection when opening.")
                     self.is_finished = True
                     return True
                 

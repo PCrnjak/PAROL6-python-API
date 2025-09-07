@@ -6,7 +6,7 @@ Implements command objects that interface with the existing robot API.
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 import sys
 import os
 

@@ -6,7 +6,6 @@ Shared functions used by multiple command classes for inverse kinematics calcula
 import numpy as np
 import logging
 from collections import namedtuple
-from typing import Optional
 from roboticstoolbox import DHRobot
 from spatialmath import SE3
 from spatialmath.base import trinterp

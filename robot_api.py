@@ -12,16 +12,43 @@ import threading
 import queue
 import uuid
 import json
+import os
 from collections import deque
 from datetime import datetime, timedelta
 
-# Global configuration
-SERVER_IP = "127.0.0.1"
-SERVER_PORT = 5001
+def _get_env_int(name: str, default: int) -> int:
+    """
+    Safe environment variable parsing for integers.
+    Returns default for unset or empty string values.
+    """
+    value = os.getenv(name)
+    if not value:  # None or empty string
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"Environment variable {name}='{value}' is not a valid integer")
+
+# Global configuration with environment variable overrides  
+SERVER_IP = os.getenv("PAROL6_SERVER_IP", "127.0.0.1")
+SERVER_PORT = _get_env_int("PAROL6_SERVER_PORT", 5001)
+ACK_PORT = _get_env_int("PAROL6_ACK_PORT", 5002)
 
 # Global tracker - starts as None (no resources)
 _command_tracker = None
 _tracker_lock = threading.Lock()
+
+def reset_tracking():
+    """
+    Reset and cleanup the command tracker.
+    Useful for tests and cleanup scenarios.
+    """
+    global _command_tracker, _tracker_lock
+    
+    with _tracker_lock:
+        if _command_tracker:
+            _command_tracker._cleanup()
+            _command_tracker = None
 
 # ============================================================================
 # ORIGINAL SEND FUNCTION - ZERO OVERHEAD
@@ -55,7 +82,10 @@ class LazyCommandTracker:
     Resources are ONLY allocated when tracking is actually used.
     """
     
-    def __init__(self, listen_port=5002, history_size=100):
+    def __init__(self, listen_port=None, history_size=100):
+        # Use ACK_PORT constant if not specified
+        if listen_port is None:
+            listen_port = ACK_PORT
         self.listen_port = listen_port
         self.history_size = history_size
         self.command_history = {}
@@ -149,7 +179,7 @@ class LazyCommandTracker:
             for cmd_id in expired:
                 del self.command_history[cmd_id]
     
-    def track_command(self, command: str) -> Tuple[str, str]:
+    def track_command(self, command: str) -> Tuple[str, Optional[str]]:
         """
         Track a command - initializes tracker if needed.
         Returns (modified_command, cmd_id)
@@ -342,7 +372,8 @@ def move_robot_pose(
     command = f"MOVEPOSE|{pose_str}|{duration_str}|{speed_str}"
     
     if wait_for_ack:
-        return send_and_wait(command, timeout, non_blocking)
+        result = send_and_wait(command, timeout, non_blocking)
+        return result if result is not None else {'status': 'ERROR', 'details': 'Send failed'}
     else:
         return send_robot_command(command)
     
@@ -389,7 +420,7 @@ def jog_multiple_joints(
     wait_for_ack: bool = False,
     timeout: float = 2.0,
     non_blocking: bool = False
-) -> str:
+) -> Union[str, Dict]:
     """
     Jogs multiple robot joints simultaneously for a specified duration.
 
@@ -454,7 +485,7 @@ def move_robot_cartesian(
     wait_for_ack: bool = False,
     timeout: float = 2.0,
     non_blocking: bool = False
-) -> str:
+) -> Union[str, Dict]:
     """
     Moves the robot's end-effector to a specific Cartesian pose in a straight line.
     

@@ -8,15 +8,12 @@ import numpy as np
 import PAROL6_ROBOT
 from spatialmath import SE3
 from smooth_motion import (
-    CircularMotion, SplineMotion, MotionBlender,
-    HelixMotion, AdvancedMotionBlender, WaypointTrajectoryPlanner
+    CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
 )
 from .ik_helpers import solve_ik_with_adaptive_tol_subdivision
+from .cartesian_commands import MovePoseCommand
 
 logger = logging.getLogger(__name__)
-
-# Import MovePoseCommand for transition commands
-from .cartesian_commands import MovePoseCommand
 
 def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
     """
@@ -313,7 +310,7 @@ class BaseSmoothMotionCommand:
             if self.transition_command:
                 self.transition_command.prepare_for_execution(current_position_in)
                 if not self.transition_command.is_valid:
-                    logger.error(f"  -> ERROR: Cannot reach specified start position")
+                    logger.error("  -> ERROR: Cannot reach specified start position")
                     self.is_valid = False
                     self.error_state = True
                     self.error_message = "Cannot reach specified start position"
@@ -342,7 +339,7 @@ class BaseSmoothMotionCommand:
             )
             
             if is_done:
-                logger.info(f"  -> Transition complete")
+                logger.info("  -> Transition complete")
                 self.transition_complete = True
             return False
         
@@ -370,7 +367,7 @@ class BaseSmoothMotionCommand:
             )
             
             if not ik_result.success:
-                logger.error(f"  -> ERROR: Cannot reach first trajectory point")
+                logger.error("  -> ERROR: Cannot reach first trajectory point")
                 self.is_finished = True
                 self.error_state = True
                 self.error_message = "Cannot reach trajectory start"
@@ -884,7 +881,7 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
     def generate_main_trajectory(self, effective_start_pose):
         """Generate helix with entry trajectory if needed and proper trajectory profile."""
         # Import here to avoid circular dependencies
-        from smooth_motion import HelixMotion, CircularMotion
+        from smooth_motion import CircularMotion
         helix_gen = HelixMotion()
         
         # Get helix axis (default Z for WRF, transformed for TRF)
@@ -1024,7 +1021,7 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         else:
             # Replace first waypoint with actual start to ensure continuity
             modified_waypoints = [effective_start_pose] + self.waypoints[1:]
-            logger.info(f"    Replaced first waypoint with actual start position")
+            logger.info("    Replaced first waypoint with actual start position")
         
         timestamps = np.linspace(0, self.duration, len(modified_waypoints))
         
@@ -1291,7 +1288,6 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate waypoint trajectory with corner cutting."""
-        from smooth_motion import WaypointTrajectoryPlanner
         
         # Ensure first waypoint matches effective start pose
         first_wp_error = np.linalg.norm(

@@ -6,7 +6,6 @@ Contains fundamental movement commands: Home, Jog, and MultiJog
 import logging
 import numpy as np
 import PAROL6_ROBOT
-from .ik_helpers import CommandValue
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +120,7 @@ class JogCommand:
 
     def prepare_for_execution(self, current_position_in):
         """Pre-computes speeds and target positions using live data."""
-        logger.debug(f"  -> Preparing for Jog command...")
+        logger.debug("  -> Preparing for Jog command...")
 
         # Joint direction and index mapping
         self.direction = 1 if 0 <= self.joint <= 5 else -1
@@ -261,7 +260,7 @@ class MultiJogCommand:
 
     def prepare_for_execution(self, current_position_in):
         """Pre-computes the speeds for each joint."""
-        logger.debug(f"  -> Preparing for MultiJog command...")
+        logger.debug("  -> Preparing for MultiJog command...")
 
         for i, joint in enumerate(self.joints):
             # Index mapping: 0-5 positive, 6-11 negative direction
