@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # Set interval - used for timing calculations
 INTERVAL_S = 0.01
 
+# Jogging uses a smaller IK iteration limit for more responsive performance
+JOG_IK_ILIMIT = 20
+
 class CartesianJogCommand:
     """
     A non-blocking command to jog the robot's end-effector in Cartesian space.
@@ -87,7 +90,7 @@ class CartesianJogCommand:
             target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
+        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, ilimit=JOG_IK_ILIMIT, jogging=True)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S

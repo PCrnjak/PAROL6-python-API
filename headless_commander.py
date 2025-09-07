@@ -21,7 +21,6 @@ import os
 import re
 import logging
 import struct
-from enum import Enum
 import keyboard
 import argparse
 import sys
@@ -63,17 +62,6 @@ FAKE_SERIAL = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower() in ("1", "true",
 
 # Streaming toggle: STREAM|ON enables zero-queue latest-wins for JOG/CARTJOG; STREAM|OFF disables
 stream_mode = False
-
-class JogFrame(str, Enum):
-    WRF = "WRF"
-    TRF = "TRF"
-
-# Jacobian damping
-JACOBIAN_DAMPING_LAMBDA = float(os.getenv("PAROL6_JAC_LAMBDA", "1e-6"))
-
-# Simplified streaming state - just track when to stop current streaming motion
-streaming_timeout_time = 0.0
-streaming_active = False
 
 # Global verbosity level - can be changed programmatically
 GLOBAL_LOG_LEVEL = logging.INFO
@@ -202,8 +190,8 @@ if my_os == "Windows":
     except (FileNotFoundError, serial.SerialException):
         # Fallback to user input for COM port
         while True:
-            com_port = input("Enter the COM port (e.g., COM9): ")
             try:
+                com_port = input("Enter the COM port (e.g., COM9): ")
                 ser = serial.Serial(port=com_port, baudrate=3000000, timeout=0)
                 logger.info(f"Successfully connected to {com_port}")
                 # Cache successful port for future runs
@@ -686,66 +674,6 @@ def simulate_robot_step(dt: float) -> None:
         # Idle/other: hold position
         for i in range(6):
             Speed_in[i] = 0
-
-# =========================
-# Jog helpers
-# =========================
-def compute_twist(frame: str, axis: str, speed_percent: float, current_T: SE3):
-    """
-    Compute tool twist (vx,vy,vz,wx,wy,wx) in BASE/WRF frame.
-    Linear units m/s, angular units rad/s.
-    """
-    # Map speed% to linear/rotational speeds using existing caps
-    linear_speed_ms = float(np.interp(speed_percent, [0, 100], [PAROL6_ROBOT.Cartesian_linear_velocity_min_JOG, PAROL6_ROBOT.Cartesian_linear_velocity_max_JOG]))
-    angular_speed_rads = np.deg2rad(float(np.interp(speed_percent, [0, 100], [PAROL6_ROBOT.Cartesian_angular_velocity_min, PAROL6_ROBOT.Cartesian_angular_velocity_max])))
-
-    lin_axis, rot_axis = AXIS_MAP.get(axis, ([0,0,0],[0,0,0]))
-
-    v_lin = np.array(lin_axis, dtype=float) * linear_speed_ms  # m/s
-    v_rot = np.array(rot_axis, dtype=float) * angular_speed_rads  # rad/s
-
-    if frame.upper() == JogFrame.TRF.value:
-        # Transform tool-frame twist directions to base
-        R = current_T.R
-        v_lin = R @ v_lin
-        v_rot = R @ v_rot
-
-    return v_lin, v_rot
-
-
-def jacobian_qdot(robot: DHRobot, q: np.ndarray, v_lin: np.ndarray, v_rot: np.ndarray, lambda_: float) -> np.ndarray:
-    """
-    Damped least-squares inverse: qdot = J^T (J J^T + λ^2 I)^{-1} v
-    v is 6x1 [vx vy vz wx wy wz]^T with units [m/s, rad/s]
-    """
-    J = robot.jacob0(q)  # 6x6
-    v = np.hstack([v_lin, v_rot]).reshape(6, )
-    JJt = J @ J.T
-    damp = (lambda_ ** 2) * np.eye(6)
-    qdot = J.T @ np.linalg.solve(JJt + damp, v)
-    return qdot
-
-
-def apply_streaming_velocities(qdot: np.ndarray, Speed_out: list) -> None:
-    """
-    Simple velocity scaling: convert qdot to steps/s and scale proportionally if any exceed limits.
-    """
-    # Convert rad/s to steps/s
-    speeds_steps = np.array([PAROL6_ROBOT.SPEED_RAD2STEP(qdot[i], i) for i in range(6)])
-    
-    # Find max ratio of speed to limit across all joints
-    max_ratios = np.array([abs(speeds_steps[i]) / PAROL6_ROBOT.Joint_max_speed[i] for i in range(6)])
-    max_ratio = np.max(max_ratios)
-    
-    # Scale all velocities proportionally if any exceed limits
-    if max_ratio > 1.0:
-        speeds_steps = speeds_steps / max_ratio
-    
-    # Convert to int and apply
-    for i in range(6):
-        Speed_out[i] = int(speeds_steps[i])
-
-
     
 def calculate_duration_from_speed(trajectory_length: float, speed_percentage: float) -> float:
     """
@@ -1340,6 +1268,7 @@ while timer.elapsed_time < 1100000:
                         com_port_str = None
 
                 if com_port_str:
+                    logging.info(f"Trying: {com_port_str}")
                     ser = serial.Serial(port=com_port_str, baudrate=3000000, timeout=0)
                     if ser.is_open:
                         logging.info(f"Successfully reconnected to {com_port_str}")
@@ -1558,8 +1487,6 @@ while timer.elapsed_time < 1100000:
                             send_acknowledgment(cmd_id, "COMPLETED", "Stream mode ON", addr)
                     elif arg == 'OFF':
                         stream_mode = False
-                        streaming_active = False
-                        streaming_timeout_time = 0.0
                         if cmd_id:
                             send_acknowledgment(cmd_id, "COMPLETED", "Stream mode OFF", addr)
                     else:
@@ -1567,61 +1494,84 @@ while timer.elapsed_time < 1100000:
                             send_acknowledgment(cmd_id, "FAILED", "Expected ON or OFF", addr)
 
                 elif command_name == 'JOG' and stream_mode and len(parts) == 5:
-                    # Direct streaming: compute velocities immediately for joint jog
+                    # Streaming JOG: create JogCommand instance with latest-wins semantics
                     try:
                         joint_index = int(parts[1])
                         speed_percent = float(parts[2])
-                        timeout_s = float(parts[3]) if parts[3].upper() != 'NONE' else 0.2
+                        duration = None if parts[3].upper() == 'NONE' else float(parts[3])
+                        distance = None if parts[4].upper() == 'NONE' else float(parts[4])
                         
-                        # Immediate joint velocity computation
-                        direction = 1 if 0 <= joint_index <= 5 else -1
-                        j = joint_index if direction == 1 else joint_index - 6
-                        if 0 <= j < 6:
-                            max_cap = int(PAROL6_ROBOT.Joint_max_jog_speed[j] * JOG_SPEED_SCALE)
-                            abs_max = int(PAROL6_ROBOT.Joint_max_speed[j])
-                            max_joint_speed = min(abs_max, max_cap)
-                            speed_steps_per_sec = int(np.interp(speed_percent, [0, 100], [0, max_joint_speed])) * direction
-                            
-                            Speed_out[:] = [0] * 6
-                            Speed_out[j] = speed_steps_per_sec
-                            Command_out.value = 123
-                            streaming_timeout_time = time.time() + timeout_s
-                            streaming_active = True
-                            
-                            if cmd_id:
-                                send_acknowledgment(cmd_id, "EXECUTING", "", addr)
-                        else:
-                            if cmd_id:
-                                send_acknowledgment(cmd_id, "FAILED", "Invalid joint index", addr)
+                        # Use default duration if none specified
+                        if duration is None:
+                            duration = 0.2
+                        
+                        # Create command instance
+                        command_obj = JogCommand(joint=joint_index, speed_percentage=speed_percent, 
+                                               duration=duration, distance_deg=distance)
+                        command_obj.prepare_for_execution(current_position_in=Position_in)
+                        # Cancel any active jog-type command (latest-wins)
+                        if active_command and isinstance(active_command, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                            if active_command_id:
+                                send_acknowledgment(active_command_id, "CANCELLED", "Replaced by new jog command", addr)
+                            if active_command in command_id_map:
+                                del command_id_map[active_command]
+                        
+                        # Purge queued jog commands
+                        for queued_cmd in list(command_queue):
+                            if isinstance(queued_cmd, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                                command_queue.remove(queued_cmd)
+                                if queued_cmd in command_id_map:
+                                    qid, qaddr = command_id_map[queued_cmd]
+                                    send_acknowledgment(qid, "CANCELLED", "Replaced by streaming jog", qaddr)
+                                    del command_id_map[queued_cmd]
+                        
+                        # Activate command immediately
+                        active_command = command_obj
+                        active_command_id = cmd_id
+                        if cmd_id:
+                            command_id_map[command_obj] = (cmd_id, addr)
+                            send_acknowledgment(cmd_id, "EXECUTING", "Streaming jog started", addr)
+                        
                     except Exception as e:
                         logging.error(e)
                         if cmd_id:
                             send_acknowledgment(cmd_id, "FAILED", "Malformed JOG (stream)", addr)
 
                 elif command_name == 'CARTJOG' and stream_mode and len(parts) == 5:
-                    # Direct streaming: compute Jacobian velocities immediately
+                    # Streaming CARTJOG: create CartesianJogCommand instance with latest-wins semantics
                     try:
                         frame = parts[1].upper()
                         axis = parts[2]
                         speed_percent = float(parts[3])
                         timeout_s = float(parts[4]) if parts[4].upper() != 'NONE' else 0.2
                         
-                        # Immediate Jacobian computation
-                        q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
-                        T_current = PAROL6_ROBOT.robot.fkine(q_current)
-                        if isinstance(T_current, SE3) and axis in AXIS_MAP:
-                            v_lin, v_rot = compute_twist(frame, axis, speed_percent, T_current)
-                            qdot = jacobian_qdot(PAROL6_ROBOT.robot, q_current, v_lin, v_rot, JACOBIAN_DAMPING_LAMBDA)
-                            apply_streaming_velocities(qdot, Speed_out)
-                            Command_out.value = 123
-                            streaming_timeout_time = time.time() + timeout_s
-                            streaming_active = True
-                            
-                            if cmd_id:
-                                send_acknowledgment(cmd_id, "EXECUTING", "", addr)
-                        else:
-                            if cmd_id:
-                                send_acknowledgment(cmd_id, "FAILED", "Invalid frame/axis or no pose", addr)
+                        # Create command instance
+                        command_obj = CartesianJogCommand(frame=frame, axis=axis, 
+                                                        speed_percentage=speed_percent, duration=timeout_s)
+                        
+                        # Cancel any active jog-type command (latest-wins)
+                        if active_command and isinstance(active_command, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                            if active_command_id:
+                                send_acknowledgment(active_command_id, "CANCELLED", "Replaced by new cartesian jog", addr)
+                            if active_command in command_id_map:
+                                del command_id_map[active_command]
+                        
+                        # Purge queued jog commands
+                        for queued_cmd in list(command_queue):
+                            if isinstance(queued_cmd, (JogCommand, CartesianJogCommand, MultiJogCommand)):
+                                command_queue.remove(queued_cmd)
+                                if queued_cmd in command_id_map:
+                                    qid, qaddr = command_id_map[queued_cmd]
+                                    send_acknowledgment(qid, "CANCELLED", "Replaced by streaming cartesian jog", qaddr)
+                                    del command_id_map[queued_cmd]
+                        
+                        # Activate command immediately
+                        active_command = command_obj
+                        active_command_id = cmd_id
+                        if cmd_id:
+                            command_id_map[command_obj] = (cmd_id, addr)
+                            send_acknowledgment(cmd_id, "EXECUTING", "Streaming cartesian jog started", addr)
+                        
                     except Exception as e:
                         logging.error(e)
                         if cmd_id:
@@ -1869,12 +1819,7 @@ while timer.elapsed_time < 1100000:
                     send_acknowledgment(cmd_id, "INVALID", 
                                        "Command failed validation", addr)
             else:
-                # Add to queue (purge existing jogs first to avoid backlog)
-                if isinstance(command_obj, (JogCommand, CartesianJogCommand, MultiJogCommand)):
-                    filtered = deque(c for c in command_queue if not isinstance(c, (JogCommand, CartesianJogCommand, MultiJogCommand)))
-                    command_queue.clear()
-                    command_queue.extend(filtered)
-
+                # Add to queue
                 command_queue.append(command_obj)
                 if cmd_id:
                     command_id_map[command_obj] = (cmd_id, addr)
@@ -2076,17 +2021,9 @@ while timer.elapsed_time < 1100000:
                     active_command_id = None
                     
             else:
-                # No active command - check streaming timeout, else idle
-                if streaming_active and time.time() > streaming_timeout_time:
-                    # Streaming timeout: stop motion
-                    streaming_active = False
-                    Speed_out[:] = [0] * 6
-                    Speed_in[:] = [0] * 6  # Also zero feedback speeds for test consistency
-                    Command_out.value = 255
-                elif not streaming_active:
-                    # No streaming, no command: idle
-                    Command_out.value = 255
-                    Speed_out[:] = [0] * 6
+                # No active command - idle
+                Command_out.value = 255
+                Speed_out[:] = [0] * 6
                 Position_out[:] = Position_in[:]
 
         # --- Communication with Robot ---
