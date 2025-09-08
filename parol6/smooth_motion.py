@@ -1373,7 +1373,6 @@ class CircularMotion(TrajectoryGenerator):
         # Arc geometry vectors
         r1 = start_pos - center_pt
         r2 = end_pos - center_pt
-        radius = np.linalg.norm(r1)
         
         # Arc plane normal computation
         if normal is None:
@@ -1463,7 +1462,6 @@ class CircularMotion(TrajectoryGenerator):
         # Arc geometry
         r1 = start_pos - center_pt
         r2 = end_pos - center_pt
-        radius = np.linalg.norm(r1)
         
         # Arc plane normal
         if normal is None:
@@ -1559,7 +1557,7 @@ class CircularMotion(TrajectoryGenerator):
             
             if dist_in_plane < 0.001:
                 # Center start point - undefined angle
-                print(f"    WARNING: Start point is at circle center, using default position")
+                print("    WARNING: Start point is at circle center, using default position")
                 start_angle = 0
                 actual_start = center_np + radius * u
             else:
@@ -1574,7 +1572,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.3:  # More than 30% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
                     # Note: We do NOT adjust the center - this ensures repeatability
                     # The same command will always produce the same geometric circle
                 
@@ -1705,7 +1703,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
         else:
             start_angle = 0 if start_angle is None else start_angle
         
@@ -1793,7 +1791,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
         else:
             start_angle = 0 if start_angle is None else start_angle
         
@@ -2558,7 +2556,6 @@ class SplineMotion(TrajectoryGenerator):
             s_curve_params.append(s)
         
         # Re-sample the trajectory according to S-curve profile
-        original_indices = np.linspace(0, len(basic_trajectory) - 1, len(basic_trajectory))
         new_indices = np.array(s_curve_params) * (len(basic_trajectory) - 1)
         
         # Interpolate each dimension
@@ -2870,7 +2867,7 @@ class AdvancedMotionBlender:
                 blend_traj.append(pose)
             
             return np.array(blend_traj)
-        except:
+        except Exception:
             # Fallback to quintic if S-curve not available
             return self._blend_quintic(traj1, traj2, blend_samples)
     
@@ -2906,7 +2903,6 @@ class AdvancedMotionBlender:
         p0, v0, a0 = self.extract_trajectory_state(traj1, -1)
         pf, vf, af = self.extract_trajectory_state(traj2, 0)
         
-        T = blend_samples * self.dt
         blend_traj = []
         
         for i in range(blend_samples):
@@ -2932,7 +2928,6 @@ class AdvancedMotionBlender:
         
         # Cubic coefficients (4 constraints: p0, pf, v0, vf)
         # p(t) = a0 + a1*t + a2*t² + a3*t³
-        num_dims = len(p0)
         blend_traj = []
         
         for i in range(blend_samples):
@@ -3515,9 +3510,6 @@ class WaypointTrajectoryPlanner:
         if total_length < 1e-6:
             return trajectory
         
-        # Normalize arc lengths to [0, 1]
-        s_values = np.array(arc_lengths) / total_length
-        
         # Generate new time mapping based on profile
         num_points = len(trajectory)
         new_trajectory = np.zeros_like(trajectory)
@@ -3672,7 +3664,7 @@ class SmoothMotionCommand:
             )
             
             if not ik_result.success:
-                print(f"Smooth motion validation failed: Cannot reach first waypoint")
+                print("Smooth motion validation failed: Cannot reach first waypoint")
                 self.is_valid = False
                 return False
                 

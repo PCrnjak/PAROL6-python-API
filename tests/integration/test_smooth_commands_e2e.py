@@ -9,12 +9,10 @@ import pytest
 import sys
 import os
 import time
-from typing import Dict, Any, List
 
 # Add the parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from parol6 import RobotClient
 
 
 def _check_if_fake_serial_xfail(result):

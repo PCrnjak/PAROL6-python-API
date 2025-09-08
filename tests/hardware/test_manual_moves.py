@@ -12,7 +12,6 @@ import pytest
 import sys
 import os
 import time
-import numpy as np
 from typing import List, Optional
 
 # Add the parent directory to Python path

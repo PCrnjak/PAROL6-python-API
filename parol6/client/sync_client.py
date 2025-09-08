@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .async_client import AsyncRobotClient
 
 if TYPE_CHECKING:
-    from ..protocol.types import Frame, Axis
+    pass
 
 
 def _get_running_loop():

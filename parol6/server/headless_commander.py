@@ -40,7 +40,7 @@ from parol6.commands import (
     # Utility commands
     DelayCommand,
     # Smooth motion commands
-    SmoothTrajectoryCommand, SmoothCircleCommand,
+    SmoothCircleCommand,
     SmoothArcCenterCommand, SmoothArcParamCommand,
     SmoothHelixCommand, SmoothSplineCommand,
     SmoothBlendCommand, SmoothWaypointsCommand
@@ -311,17 +311,17 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
     temp_error = data_buffer_list[38]
     position_error = data_buffer_list[39]
     timing_data = data_buffer_list[40:42]
-    Timeout_error_var = data_buffer_list[42]
-    xtr2 = data_buffer_list[43]
+    # Timeout_error_var = data_buffer_list[42]
+    # xtr2 = data_buffer_list[43]
     device_ID = data_buffer_list[44]
     Gripper_position = data_buffer_list[45:47]
     Gripper_speed = data_buffer_list[47:49]
     Gripper_current = data_buffer_list[49:51]
     Status = data_buffer_list[51]
     # The original object_detection byte at index 52 is ignored as it is not reliable.
-    CRC_byte = data_buffer_list[53]
-    endy_byte1 = data_buffer_list[54]
-    endy_byte2 = data_buffer_list[55]
+    # CRC_byte = data_buffer_list[53]
+    # endy_byte1 = data_buffer_list[54]
+    # endy_byte2 = data_buffer_list[55]
 
     # ... (Code for Homed, IO_var, temp_error, etc. remains the same) ...
 
@@ -343,8 +343,8 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
 
     var = b'\x00' + b'\x00' + b''.join(timing_data)
     Timing_data_in[0] = Fuse_3_bytes(var)
-    Timeout_error = int.from_bytes(Timeout_error_var,"big")
-    XTR_data = int.from_bytes(xtr2,"big")
+    # Timeout_error = int.from_bytes(Timeout_error_var,"big")
+    # XTR_data = int.from_bytes(xtr2,"big")
 
     # --- Gripper Data Unpacking ---
     Gripper_data_in[0] = int.from_bytes(device_ID,"big")
@@ -713,7 +713,7 @@ def parse_smooth_motion_commands(parts):
         else:
             try:
                 return list(map(float, start_str.split(',')))
-            except:
+            except Exception:
                 logger.error(f"Warning: Invalid start pose format: {start_str}")
                 return None
     
@@ -1040,7 +1040,6 @@ def parse_smooth_motion_commands(parts):
                     
                 elif seg_type == 'SPLINE':
                     # Format: SPLINE|num_points|waypoint1;waypoint2;...|duration
-                    num_points = int(seg_parts[1])
                     waypoints = []
                     wp_strs = seg_parts[2].split(';')
                     for wp_str in wp_strs:
@@ -1171,7 +1170,7 @@ def send_acknowledgment(cmd_id: str, status: str, details: str = "", addr=None):
     # Also broadcast to localhost in case the client is local
     try:
         ack_socket.sendto(ack_message.encode('utf-8'), ('127.0.0.1', CLIENT_ACK_PORT))
-    except:
+    except Exception:
         pass
 
 def parse_command_with_id(message: str) -> Tuple[Optional[str], str]:
@@ -1818,7 +1817,7 @@ while timer.elapsed_time < 1100000:
                             error_details = "Failed to load inline GCODE program"
                             command_queued = False
                     else:
-                        error_details = f"Invalid GCODE_PROGRAM format"
+                        error_details = "Invalid GCODE_PROGRAM format"
                         command_queued = False
                         
                 except Exception as e:

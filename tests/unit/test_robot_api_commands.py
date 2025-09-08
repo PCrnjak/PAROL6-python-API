@@ -6,7 +6,6 @@ the old robot_api interface.
 """
 
 import pytest
-import os
 from unittest.mock import patch, MagicMock
 
 # Import the parol6 modules

@@ -9,13 +9,11 @@ import pytest
 import sys
 import os
 import time
-from typing import Dict, Any
 
 # Add the parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from tests.utils.udp import UDPClient
-from parol6 import RobotClient
 
 
 @pytest.mark.integration
