@@ -14,7 +14,7 @@ from typing import Dict, Any, List
 # Add the parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-import robot_api
+from parol6 import RobotClient
 
 
 def _check_if_fake_serial_xfail(result):
@@ -29,13 +29,13 @@ def _check_if_fake_serial_xfail(result):
 class TestSmoothMotionMinimal:
     """Minimal set of smooth motion tests - one per command family."""
     
-    @pytest.fixture(scope='class')
-    def homed_robot(self, server_proc, robot_api_env):
+    @pytest.fixture
+    def homed_robot(self, client, server_proc, robot_api_env):
         """Ensure robot is homed before smooth motion tests."""
         print("Homing robot for smooth motion tests...")
         
         # Home the robot first
-        result = robot_api.home_robot(wait_for_ack=True, timeout=15.0)
+        result = client.home(wait_for_ack=True, timeout=15.0)
         if isinstance(result, dict):
             assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
         
@@ -44,14 +44,14 @@ class TestSmoothMotionMinimal:
         time.sleep(3.0)
         
         # Wait for robot to be stopped
-        assert robot_api.wait_for_robot_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=10.0)
         print("Robot homed and ready for smooth motion tests")
         
         return True
     
-    def test_smooth_circle_basic(self, server_proc, robot_api_env, homed_robot):
+    def test_smooth_circle_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic circular motion in FAKE_SERIAL mode."""
-        result = robot_api.smooth_circle(
+        result = client.smooth_circle(
             center=[0, 0, 100],
             radius=30,
             duration=2.0,
@@ -70,11 +70,11 @@ class TestSmoothMotionMinimal:
         
         # Wait for completion and verify robot stops
         time.sleep(3.0)
-        assert robot_api.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped(threshold_speed=5.0)
     
-    def test_smooth_arc_center_basic(self, server_proc, robot_api_env, homed_robot):
+    def test_smooth_arc_center_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic arc motion defined by center point."""
-        result = robot_api.smooth_arc_center(
+        result = client.smooth_arc_center(
             end_pose=[100, 100, 150, 0, 0, 90],
             center=[50, 50, 150],
             duration=2.0,
@@ -89,9 +89,9 @@ class TestSmoothMotionMinimal:
         assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
         
         time.sleep(3.0)
-        assert robot_api.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped(threshold_speed=5.0)
     
-    def test_smooth_spline_basic(self, server_proc, robot_api_env, homed_robot):
+    def test_smooth_spline_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic spline motion through waypoints."""
         waypoints = [
             [100.0, 100.0, 120.0, 0.0, 0.0, 0.0],
@@ -99,7 +99,7 @@ class TestSmoothMotionMinimal:
             [200.0, 100.0, 120.0, 0.0, 0.0, 60.0]
         ]
         
-        result = robot_api.smooth_spline(
+        result = client.smooth_spline(
             waypoints=waypoints,
             duration=3.0,
             frame='WRF',
@@ -113,11 +113,11 @@ class TestSmoothMotionMinimal:
         assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
         
         time.sleep(4.0)
-        assert robot_api.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped(threshold_speed=5.0)
     
-    def test_smooth_helix_basic(self, server_proc, robot_api_env, homed_robot):
+    def test_smooth_helix_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic helical motion."""
-        result = robot_api.smooth_helix(
+        result = client.smooth_helix(
             center=[100, 100, 80],
             radius=25,
             pitch=20,
@@ -134,9 +134,9 @@ class TestSmoothMotionMinimal:
         assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
         
         time.sleep(4.0)
-        assert robot_api.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped(threshold_speed=5.0)
     
-    def test_smooth_blend_basic(self, server_proc, robot_api_env, homed_robot):
+    def test_smooth_blend_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic blended motion through segments."""
         segments = [
             {
@@ -154,7 +154,7 @@ class TestSmoothMotionMinimal:
             }
         ]
         
-        result = robot_api.smooth_blend(
+        result = client.smooth_blend(
             segments=segments,
             blend_time=0.3,
             frame='WRF',
@@ -168,7 +168,7 @@ class TestSmoothMotionMinimal:
         assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
         
         time.sleep(4.0)
-        assert robot_api.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped(threshold_speed=5.0)
 
 
 if __name__ == "__main__":
