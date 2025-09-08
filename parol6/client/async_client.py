@@ -1015,3 +1015,109 @@ class AsyncRobotClient:
         command = f"SMOOTH_BLEND|{num_segments}|{blend_time}|{frame}|{start_str}|{timing_str}|" + "||".join(segment_strs)
         
         return await self._send_tracked(command, wait_for_ack, timeout, non_blocking)
+
+    # --------------- Work coordinate system helpers ---------------
+
+    async def set_work_coordinate_offset(
+        self, 
+        coordinate_system: str, 
+        x: float | None = None, 
+        y: float | None = None, 
+        z: float | None = None, 
+        wait_for_ack: bool = False, 
+        timeout: float = 5.0,
+        non_blocking: bool = False
+    ) -> Union[str, dict]:
+        """
+        Set work coordinate system offsets (G54-G59).
+        
+        Args:
+            coordinate_system: Work coordinate system to set ('G54' through 'G59')
+            x: X axis offset in mm (None to keep current)
+            y: Y axis offset in mm (None to keep current)
+            z: Z axis offset in mm (None to keep current)
+            wait_for_ack: If True, wait for confirmation
+            timeout: Maximum time to wait for acknowledgment
+            non_blocking: Return immediately with command ID
+        
+        Returns:
+            Success message, command ID, or dict with status details
+        
+        Example:
+            # Set G54 origin to current position
+            await client.set_work_coordinate_offset('G54', x=0, y=0, z=0)
+            
+            # Offset G55 by 100mm in X
+            await client.set_work_coordinate_offset('G55', x=100)
+        """
+        # Validate coordinate system format
+        valid_systems = ['G54', 'G55', 'G56', 'G57', 'G58', 'G59']
+        if coordinate_system not in valid_systems:
+            error_msg = f'Invalid coordinate system: {coordinate_system}. Must be one of {valid_systems}'
+            if wait_for_ack:
+                return {'status': 'INVALID', 'details': error_msg}
+            else:
+                return error_msg
+        
+        # Map coordinate system to P number (P1=G54, P2=G55, etc.)
+        coord_num = int(coordinate_system[1:]) - 53  # G54=1, G55=2, etc.
+        
+        # Build offset parameters
+        offset_params = []
+        if x is not None:
+            offset_params.append(f"X{x}")
+        if y is not None:
+            offset_params.append(f"Y{y}")
+        if z is not None:
+            offset_params.append(f"Z{z}")
+        
+        if not offset_params:
+            # Just select the coordinate system
+            return await self.execute_gcode(coordinate_system, wait_for_ack=wait_for_ack, timeout=timeout, non_blocking=non_blocking)
+        
+        # Send coordinate system selection first, then offset command
+        if wait_for_ack:
+            # Send both commands with tracking
+            select_result = await self.execute_gcode(coordinate_system, wait_for_ack=True, timeout=timeout)
+            if isinstance(select_result, dict) and select_result.get('status') not in ['COMPLETED', 'QUEUED', 'EXECUTING']:
+                return select_result
+            
+            offset_cmd = f"G10 L2 P{coord_num} {' '.join(offset_params)}"
+            return await self.execute_gcode(offset_cmd, wait_for_ack=True, timeout=timeout, non_blocking=non_blocking)
+        else:
+            # Fire and forget
+            await self.execute_gcode(coordinate_system)
+            offset_cmd = f"G10 L2 P{coord_num} {' '.join(offset_params)}"
+            return await self.execute_gcode(offset_cmd)
+
+    async def zero_work_coordinates(
+        self, 
+        coordinate_system: str = 'G54', 
+        wait_for_ack: bool = False, 
+        timeout: float = 5.0,
+        non_blocking: bool = False
+    ) -> Union[str, dict]:
+        """
+        Set the current position as zero in the specified work coordinate system.
+        
+        Args:
+            coordinate_system: Work coordinate system to zero ('G54' through 'G59')
+            wait_for_ack: If True, wait for confirmation
+            timeout: Maximum time to wait for acknowledgment
+            non_blocking: Return immediately with command ID
+        
+        Returns:
+            Success message, command ID, or dict with status details
+        
+        Example:
+            # Set current position as origin in G54
+            await client.zero_work_coordinates('G54')
+        """
+        # This sets the current position as 0,0,0 in the work coordinate system
+        return await self.set_work_coordinate_offset(
+            coordinate_system, 
+            x=0, y=0, z=0, 
+            wait_for_ack=wait_for_ack, 
+            timeout=timeout,
+            non_blocking=non_blocking
+        )
