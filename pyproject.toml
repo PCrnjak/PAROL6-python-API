@@ -1,4 +1,3 @@
-// filepath: pyproject.toml
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -6,3 +5,51 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "parol6-python-api"
 version = "0.1.0"
+
+dev = ["ruff", "mypy", "pytest", "pytest-asyncio", "pre-commit"]
+
+[tool.pytest.ini_options]
+# Limit discovery to the tests/ directory only
+testpaths = ["tests"]
+
+# Test discovery patterns
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Output configuration
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+    "-p", "no:cacheprovider"
+]
+
+# Timeout configuration (requires pytest-timeout)
+timeout = 300
+timeout_method = "thread"
+
+# Logging configuration for tests
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Pytest markers for different test types
+markers = [
+    "unit: Unit tests that test individual components in isolation",
+    "integration: Integration tests that test component interactions with FAKE_SERIAL",
+    "hardware: Hardware tests that require actual robot hardware and human confirmation",
+    "slow: Slow-running tests (typically hardware or complex integration tests)",
+    "e2e: End-to-end tests that exercise complete workflows",
+    "gcode: Tests specifically for GCODE parsing and interpretation functionality"
+]
+
+# Filter warnings
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning:roboticstoolbox.*",
+    "ignore::UserWarning:spatialmath.*"
+]

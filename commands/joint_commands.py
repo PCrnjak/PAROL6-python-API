@@ -114,7 +114,7 @@ class MoveJointCommand:
 
             except Exception as e:
                 logger.error(f"  -> VALIDATION FAILED: Could not calculate velocity-based trajectory. Error: {e}")
-                logger.info(f"  -> Please check Joint_min/max_speed and Joint_min/max_acc values in PAROL6_ROBOT.py.")
+                logger.info("  -> Please check Joint_min/max_speed and Joint_min/max_acc values in PAROL6_ROBOT.py.")
                 self.is_valid = False
                 return
         

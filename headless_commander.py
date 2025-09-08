@@ -1155,7 +1155,7 @@ def parse_smooth_motion_commands(parts):
     return None
 
 # Acknowledgment system configuration
-CLIENT_ACK_PORT = 5002  # Port where clients listen for acknowledgments
+CLIENT_ACK_PORT = int(os.getenv("PAROL6_ACK_PORT", "5002"))  # Port where clients listen for acknowledgments
 ack_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 # Command tracking
@@ -1223,11 +1223,16 @@ logger.info("GCODE interpreter initialized")
 # --- Test 1: Homing and Initial Setup
 # --------------------------------------------------------------------------
 
-# 1. Optionally start with the Home command (can be bypassed via PAROL6_NOAUTOHOME)
-if not str(os.getenv("PAROL6_NOAUTOHOME", "0")).lower() in ("1", "true", "yes", "on"):
+# 1. Optionally start with the Home command (can be bypassed via PAROL6_NOAUTOHOME or --no-auto-home)
+skip_auto_home = (
+    str(os.getenv("PAROL6_NOAUTOHOME", "0")).lower() in ("1", "true", "yes", "on") or
+    args.no_auto_home
+)
+if not skip_auto_home:
     command_queue.append(HomeCommand())
 else:
-    logging.info("PAROL6_NOAUTOHOME is set; skipping auto-home on startup.")
+    reason = "command line flag" if args.no_auto_home else "environment variable"
+    logging.info(f"Auto-home disabled via {reason}; skipping auto-home on startup.")
 
 # --- State variable for the currently running command ---
 active_command = None
