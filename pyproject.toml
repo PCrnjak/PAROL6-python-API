@@ -3,10 +3,28 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "parol6-python-api"
+name = "parol6"
 version = "0.1.0"
+description = "Python library for controlling PAROL6 robot arms"
 
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pyserial",
+    "spatialmath-python",
+    "roboticstoolbox-python",
+    "oclock",
+    "keyboard",
+]
+
+[tool.setuptools.packages.find]
+include = ["parol6*"]
+
+[project.optional-dependencies]
 dev = ["ruff", "mypy", "pytest", "pytest-asyncio", "pre-commit"]
+
+[project.scripts]
+parol6-server = "parol6.cli.server:main_entry"
 
 [tool.pytest.ini_options]
 # Limit discovery to the tests/ directory only

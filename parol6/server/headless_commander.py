@@ -28,7 +28,34 @@ import json
 from typing import Optional, Tuple
 from spatialmath.base import trinterp
 from collections import namedtuple, deque
-import PAROL6_ROBOT
+from pathlib import Path
+
+# Ensure both package dir (parol6) and project root are on sys.path to import PAROL6_ROBOT and others
+_pkg_dir = Path(__file__).parent.parent        # .../parol6
+_root_dir = Path(__file__).parents[2]          # .../PAROL6-python-API
+for _p in (str(_root_dir), str(_pkg_dir)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Robust import of robot constants/kinematics
+try:
+    import PAROL6_ROBOT  # from project root
+except ModuleNotFoundError:
+    # Fallback: load directly from file path to handle non-standard execution contexts
+    try:
+        from importlib.util import spec_from_file_location, module_from_spec
+        _robot_path = (_root_dir / "PAROL6_ROBOT.py")
+        _spec = spec_from_file_location("PAROL6_ROBOT", str(_robot_path))
+        if _spec and _spec.loader:
+            PAROL6_ROBOT = module_from_spec(_spec)
+            sys.modules["PAROL6_ROBOT"] = PAROL6_ROBOT
+            _spec.loader.exec_module(PAROL6_ROBOT)  # type: ignore[attr-defined]
+        else:
+            raise
+    except Exception as e:
+        print(f"[FATAL] Unable to import PAROL6_ROBOT from {_robot_path}: {e}", file=sys.stderr)
+        raise
+
 from smooth_motion import CircularMotion, SplineMotion, MotionBlender, SCurveProfile, QuinticPolynomial, MotionConstraints
 from gcode import GcodeInterpreter
 
@@ -292,6 +319,7 @@ port = 5001
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((ip, port))
 logger.info(f'Start listening to {ip}:{port}')
+START_TIME = time.time()
 
 def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Temperature_error_in,Position_error_in,Timeout_error,Timing_data_in,
          XTR_data,Gripper_data_in):
@@ -1258,7 +1286,7 @@ prev_time = 0
 while timer.elapsed_time < 1100000:
     
     # --- Connection Handling (non-blocking) ---
-    if ser is None or not ser.is_open:
+    if not FAKE_SERIAL and (ser is None or not ser.is_open):
         now = time.time()
         if now - last_reconnect_attempt > 1.0:
             logging.warning("Serial port not open. Attempting to reconnect...")
@@ -1280,6 +1308,10 @@ while timer.elapsed_time < 1100000:
             except serial.SerialException:
                 ser = None
         # Do not block or continue; proceed to UDP handling every tick
+    elif FAKE_SERIAL:
+        # In FAKE_SERIAL mode, pretend we always have a connection
+        # This prevents the constant "Serial port not open" warnings
+        pass
 
     # =======================================================================
     # === NETWORK COMMAND RECEPTION WITH ID PARSING ===
@@ -1406,6 +1438,26 @@ while timer.elapsed_time < 1100000:
                     sock.sendto("PONG".encode('utf-8'), addr)
                     if cmd_id:
                         send_acknowledgment(cmd_id, "COMPLETED", "PONG", addr)
+
+                elif command_name == 'GET_SERVER_STATE':
+                    # Structured server state for external managers
+                    try:
+                        state = {
+                            "listening": {"transport": "udp", "address": f"{ip}:{port}"},
+                            "serial_connected": bool(ser and getattr(ser, "is_open", False)),
+                            "homed": any(bool(h) for h in Homed_in) if isinstance(Homed_in, list) else False,
+                            "queue_depth": len(command_queue) if command_queue is not None else 0,
+                            "active_command": type(active_command).__name__ if active_command is not None else None,
+                            "stream_mode": bool(stream_mode),
+                            "uptime_s": float(time.time() - START_TIME) if 'START_TIME' in globals() else 0.0,
+                        }
+                        payload = f"SERVER_STATE|{json.dumps(state)}"
+                        sock.sendto(payload.encode('utf-8'), addr)
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "COMPLETED", "Server state sent", addr)
+                    except Exception as e:
+                        if cmd_id:
+                            send_acknowledgment(cmd_id, "FAILED", f"State error: {e}", addr)
 
                 elif command_name == 'GET_STATUS':
                     # Aggregate POSE, ANGLES, IO, GRIPPER into one frame
@@ -2060,3 +2112,17 @@ while timer.elapsed_time < 1100000:
         active_command_id = None
 
     timer.checkpt()
+
+
+def main():
+    """
+    Main entry point for the headless commander.
+    This function wraps the main execution loop for CLI usage.
+    """
+    # The main loop is already implemented above as a module-level script
+    # This function exists to provide a clean entry point for the CLI
+    pass
+
+
+if __name__ == "__main__":
+    main()

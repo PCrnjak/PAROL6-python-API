@@ -16,12 +16,32 @@ import logging
 # Add the parent directory to Python path so we can import the API modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-try:
-    from tests.utils import HeadlessCommanderProc, find_available_ports
-except ImportError:
-    # Fallback for when utils not available
-    HeadlessCommanderProc = None
-    find_available_ports = None
+# Import parol6 for server management
+from parol6.server.manager import ServerManager
+
+# Import utilities for port detection
+def find_available_ports(start_port: int = 5001, count: int = 2):
+    """Simple fallback port finder if utils import fails."""
+    import socket
+    available_ports = []
+    current_port = start_port
+    
+    while len(available_ports) < count:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.bind(('127.0.0.1', current_port))
+                available_ports.append(current_port)
+        except OSError:
+            # Port in use, reset search if we were building a consecutive sequence
+            available_ports.clear()
+        
+        current_port += 1
+        
+        # Prevent infinite loop
+        if current_port > start_port + 1000:
+            break
+            
+    return available_ports
 
 logger = logging.getLogger(__name__)
 
@@ -155,40 +175,69 @@ def robot_api_env(ports: TestPorts) -> Generator[Dict[str, str], None, None]:
 # ============================================================================
 
 @pytest.fixture(scope="session")
-def server_proc(request, ports: TestPorts, robot_api_env) -> Generator[HeadlessCommanderProc, None, None]:
+def server_proc(request, ports: TestPorts, robot_api_env):
     """
-    Launch headless_commander.py server process for integration tests.
+    Launch parol6 server for integration tests using ServerManager.
     
     Starts the server with FAKE_SERIAL mode and waits for readiness.
-    Automatically cleans up the process when tests complete.
+    Automatically cleans up the server when tests complete.
     """
+    import asyncio
+    import socket
+    
     keep_running = request.config.getoption("--keep-server-running")
     
-    # Create process manager
-    proc = HeadlessCommanderProc(
-        ip=ports.server_ip,
-        port=ports.server_port,
-        ack_port=ports.ack_port,
-        env={
-            "PAROL6_FAKE_SERIAL": "1",
-            "PAROL6_NOAUTOHOME": "1",
-        }
-    )
+    # Create server manager
+    manager = ServerManager()
     
-    # Start the server process
+    async def start_and_wait():
+        # Start the controller process
+        await manager.start_controller(
+            no_autohome=True,
+            extra_env={
+                "PAROL6_FAKE_SERIAL": "1", 
+                "PAROL6_NOAUTOHOME": "1",
+                "PAROL6_SERVER_IP": ports.server_ip,
+                "PAROL6_SERVER_PORT": str(ports.server_port),
+                "PAROL6_ACK_PORT": str(ports.ack_port),
+            }
+        )
+        
+        # Wait for server to be ready with custom ping logic
+        timeout = 10.0
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(1.0)
+                    sock.sendto(b"PING", (ports.server_ip, ports.server_port))
+                    data, _ = sock.recvfrom(256)
+                    if data.decode('utf-8').strip() == "PONG":
+                        return True
+            except (socket.timeout, Exception):
+                pass
+            await asyncio.sleep(0.5)
+        return False
+    
+    # Start server using parol6's ServerManager
     logger.info(f"Starting test server on {ports.server_ip}:{ports.server_port}")
-    if not proc.start(log_level="WARNING", timeout=15.0):
+    
+    ready = asyncio.run(start_and_wait())
+    if not ready:
         pytest.fail("Failed to start headless commander server for testing")
     
     try:
         # Wait a bit for full initialization
         time.sleep(1.0)
-        yield proc
+        yield manager
         
     finally:
         if not keep_running:
             logger.info("Stopping test server")
-            proc.stop()
+            async def stop_server():
+                await manager.stop_controller()
+            asyncio.run(stop_server())
         else:
             logger.info("Leaving test server running (--keep-server-running)")
 
@@ -378,79 +427,24 @@ def pytest_sessionstart(session):
         logger.info("Server ports: auto-detect")
 
 
-def wait_until_stopped(timeout=90.0, settle_window=1.0, poll_interval=0.2, 
-                       speed_threshold=2.0, angle_threshold=0.5, show_progress=True):
+# ============================================================================
+# CLIENT FIXTURE
+# ============================================================================
+
+@pytest.fixture
+def client(ports: TestPorts):
     """
-    Wait for robot to stop moving with responsive polling instead of blind sleeps.
+    Provide a RobotClient configured for the test ports.
     
-    Args:
-        timeout: Maximum time to wait in seconds
-        settle_window: How long robot must be stable to be considered stopped
-        poll_interval: How often to check status
-        speed_threshold: Max joint speed to be considered stopped (steps/sec)
-        angle_threshold: Max angle change to be considered stopped (degrees)
-        show_progress: Print dots to show progress
-        
-    Returns:
-        True if robot stopped, False if timeout
+    This ensures all tests use the same connection configuration
+    and connect to the auto-detected test server ports.
     """
-    import time
-    
-    start_time = time.time()
-    last_angles = None
-    settle_start = None
-    last_progress = 0
-    
-    if show_progress:
-        print("Waiting for robot to stop...", end="", flush=True)
-    
-    while time.time() - start_time < timeout:
-        # Try speed-based detection first (preferred)
-        try:
-            import robot_api
-            speeds = robot_api.get_robot_joint_speeds()
-            if speeds:
-                max_speed = max(abs(s) for s in speeds)
-                if max_speed < speed_threshold:
-                    if settle_start is None:
-                        settle_start = time.time()
-                    elif time.time() - settle_start > settle_window:
-                        if show_progress:
-                            print(" stopped via speeds!")
-                        return True
-                else:
-                    settle_start = None
-            else:
-                # Fallback to angle-based detection
-                angles = robot_api.get_robot_joint_angles()
-                if angles:
-                    if last_angles is not None:
-                        max_change = max(abs(a - b) for a, b in zip(angles, last_angles))
-                        if max_change < angle_threshold:
-                            if settle_start is None:
-                                settle_start = time.time()
-                            elif time.time() - settle_start > settle_window:
-                                if show_progress:
-                                    print(" stopped via angle delta!")
-                                return True
-                        else:
-                            settle_start = None
-                    last_angles = angles
-        except Exception as e:
-            if show_progress:
-                print(f" error: {e}")
-            pass
-            
-        # Show progress dots every few seconds
-        if show_progress and int(time.time() - start_time) > last_progress:
-            print(".", end="", flush=True)
-            last_progress = int(time.time() - start_time)
-            
-        time.sleep(poll_interval)
-    
-    if show_progress:
-        print(" timeout!")
-    return False
+    from parol6 import RobotClient
+    return RobotClient(
+        host=ports.server_ip,
+        port=ports.server_port,
+        ack_port=ports.ack_port
+    )
 
 
 def pytest_sessionfinish(session, exitstatus):
