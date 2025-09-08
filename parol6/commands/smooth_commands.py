@@ -5,7 +5,8 @@ Contains all smooth trajectory generation commands for advanced robot movements
 
 import logging
 import numpy as np
-import PAROL6_ROBOT
+from numpy.typing import NDArray
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
 from smooth_motion import (
     CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
@@ -14,6 +15,54 @@ from .ik_helpers import solve_ik_with_adaptive_tol_subdivision
 from .cartesian_commands import MovePoseCommand
 
 logger = logging.getLogger(__name__)
+
+# Constants for TRF plane normal vectors
+PLANE_NORMALS_TRF = {
+    'XY': np.array([0, 0, 1]),   # Tool's Z-axis
+    'XZ': np.array([0, 1, 0]),   # Tool's Y-axis  
+    'YZ': np.array([1, 0, 0])    # Tool's X-axis
+}
+
+def point_trf_to_wrf_mm(point_mm: list, tool_pose: SE3) -> NDArray:
+    """Convert 3D point from TRF to WRF coordinates (both in mm)."""
+    point_trf = SE3(point_mm[0]/1000, point_mm[1]/1000, point_mm[2]/1000)
+    point_wrf: SE3 = tool_pose * point_trf
+    return point_wrf.t * 1000
+
+def pose6_trf_to_wrf(pose6_mm_deg: list, tool_pose: SE3) -> NDArray:
+    """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
+    pose_trf = SE3(pose6_mm_deg[0]/1000, pose6_mm_deg[1]/1000, pose6_mm_deg[2]/1000) * \
+               SE3.RPY(pose6_mm_deg[3:], unit='deg', order='xyz')
+    pose_wrf: SE3 = tool_pose * pose_trf
+    return np.concatenate([
+        pose_wrf.t * 1000,
+        pose_wrf.rpy(unit='deg', order='xyz')
+    ])
+
+def se3_to_pose6_mm_deg(T: SE3) -> NDArray:
+    """Convert SE3 transform to 6D pose [x,y,z,rx,ry,rz] (mm, degrees)."""
+    return np.concatenate([
+        T.t * 1000,
+        T.rpy(unit='deg', order='xyz')
+    ])
+
+def transform_center_trf_to_wrf(params: dict, tool_pose: SE3, transformed: dict) -> None:
+    """Transform 'center' parameter from TRF (mm) to WRF (mm) using tool_pose."""
+    center_trf = SE3(params['center'][0]/1000, 
+                     params['center'][1]/1000, 
+                     params['center'][2]/1000)
+    center_wrf: SE3 = tool_pose * center_trf
+    transformed['center'] = center_wrf.t * 1000
+
+def transform_start_pose_if_needed(start_pose, frame: str, current_position_in):
+    """Transform start_pose from TRF to WRF if needed."""
+    if frame == 'TRF' and start_pose:
+        # Get current tool pose for transformation
+        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
+                             for i, p in enumerate(current_position_in)])
+        tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
+        return pose6_trf_to_wrf(start_pose, tool_pose)
+    return start_pose
 
 def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
     """
@@ -33,115 +82,64 @@ def transform_command_params_to_wrf(command_type: str, params: dict, frame: str,
     # SMOOTH_CIRCLE - Transform center and plane normal
     if command_type == 'SMOOTH_CIRCLE':
         if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
+            transform_center_trf_to_wrf(params, tool_pose, transformed)
         
         if 'plane' in params:
-            plane_normals_trf = {
-                'XY': [0, 0, 1],   # Tool's Z-axis
-                'XZ': [0, 1, 0],   # Tool's Y-axis  
-                'YZ': [1, 0, 0]    # Tool's X-axis
-            }
-            normal_trf = np.array(plane_normals_trf[params['plane']])
+            normal_trf = PLANE_NORMALS_TRF[params['plane']]
             normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf.tolist()
+            transformed['normal_vector'] = normal_wrf
             logger.info(f"  -> TRF circle plane {params['plane']} transformed to WRF")
     
     # SMOOTH_ARC_CENTER - Transform center, end_pose, and implied plane
     elif command_type == 'SMOOTH_ARC_CENTER':
         if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
+            transform_center_trf_to_wrf(params, tool_pose, transformed)
         
         if 'end_pose' in params:
-            end_trf = SE3(params['end_pose'][0]/1000, 
-                         params['end_pose'][1]/1000, 
-                         params['end_pose'][2]/1000) * \
-                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
-            end_wrf = tool_pose * end_trf
-            transformed['end_pose'] = np.concatenate([
-                end_wrf.t * 1000,
-                end_wrf.rpy(unit='deg', order='xyz')
-            ]).tolist()
+            transformed['end_pose'] = pose6_trf_to_wrf(params['end_pose'], tool_pose)
         
         # Arc plane is determined by start, end, and center points
         # But we should transform any specified plane normal
         if 'plane' in params:
-            # Similar to circle plane transformation
-            plane_normals_trf = {
-                'XY': [0, 0, 1],
-                'XZ': [0, 1, 0],
-                'YZ': [1, 0, 0]
-            }
-            normal_trf = np.array(plane_normals_trf[params['plane']])
+            normal_trf = PLANE_NORMALS_TRF[params['plane']]
             normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf.tolist()
+            transformed['normal_vector'] = normal_wrf
     
     # SMOOTH_ARC_PARAM - Transform end_pose and arc plane
     elif command_type == 'SMOOTH_ARC_PARAM':
         if 'end_pose' in params:
-            end_trf = SE3(params['end_pose'][0]/1000, 
-                         params['end_pose'][1]/1000, 
-                         params['end_pose'][2]/1000) * \
-                      SE3.RPY(params['end_pose'][3:], unit='deg', order='xyz')
-            end_wrf = tool_pose * end_trf
-            transformed['end_pose'] = np.concatenate([
-                end_wrf.t * 1000,
-                end_wrf.rpy(unit='deg', order='xyz')
-            ]).tolist()
+            transformed['end_pose'] = pose6_trf_to_wrf(params['end_pose'], tool_pose)
         
         # For parametric arc, the plane is usually XY of the tool
         # Transform the assumed plane normal
         if 'plane' not in params:
             params['plane'] = 'XY'  # Default to XY plane
         
-        plane_normals_trf = {
-            'XY': [0, 0, 1],
-            'XZ': [0, 1, 0],
-            'YZ': [1, 0, 0]
-        }
-        normal_trf = np.array(plane_normals_trf[params.get('plane', 'XY')])
+        normal_trf = PLANE_NORMALS_TRF[params.get('plane', 'XY')]
         normal_wrf = tool_pose.R @ normal_trf
-        transformed['normal_vector'] = normal_wrf.tolist()
+        transformed['normal_vector'] = normal_wrf
     
     # SMOOTH_HELIX - Transform center and helix axis
     elif command_type == 'SMOOTH_HELIX':
         if 'center' in params:
-            center_trf = SE3(params['center'][0]/1000, 
-                           params['center'][1]/1000, 
-                           params['center'][2]/1000)
-            center_wrf = tool_pose * center_trf
-            transformed['center'] = (center_wrf.t * 1000).tolist()
+            transform_center_trf_to_wrf(params, tool_pose, transformed)
         
         # Transform helix axis (default is Z-axis of tool)
         axis_trf = np.array([0, 0, 1])  # Tool's Z-axis
         axis_wrf = tool_pose.R @ axis_trf
-        transformed['helix_axis'] = axis_wrf.tolist()
+        transformed['helix_axis'] = axis_wrf
         
         # Transform up vector (default is Y-axis of tool)
         up_trf = np.array([0, 1, 0])  # Tool's Y-axis
         up_wrf = tool_pose.R @ up_trf
-        transformed['up_vector'] = up_wrf.tolist()
+        transformed['up_vector'] = up_wrf
     
     # SMOOTH_SPLINE - Transform waypoints
     elif command_type == 'SMOOTH_SPLINE':
         if 'waypoints' in params:
             transformed_waypoints = []
             for wp in params['waypoints']:
-                wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
-                        SE3.RPY(wp[3:], unit='deg', order='xyz')
-                wp_wrf = tool_pose * wp_trf
-                transformed_wp = np.concatenate([
-                    wp_wrf.t * 1000,
-                    wp_wrf.rpy(unit='deg', order='xyz')
-                ]).tolist()
-                transformed_waypoints.append(transformed_wp)
+                transformed_waypoints.append(pose6_trf_to_wrf(wp, tool_pose))
             transformed['waypoints'] = transformed_waypoints
     
     # SMOOTH_BLEND - Transform all segment definitions
@@ -154,86 +152,50 @@ def transform_command_params_to_wrf(command_type: str, params: dict, frame: str,
                 # Transform based on segment type
                 if seg['type'] == 'LINE':
                     if 'end' in seg:
-                        end_trf = SE3(seg['end'][0]/1000, seg['end'][1]/1000, seg['end'][2]/1000) * \
-                                 SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
-                        end_wrf = tool_pose * end_trf
-                        seg_transformed['end'] = np.concatenate([
-                            end_wrf.t * 1000,
-                            end_wrf.rpy(unit='deg', order='xyz')
-                        ]).tolist()
+                        seg_transformed['end'] = pose6_trf_to_wrf(seg['end'], tool_pose)
                 
                 elif seg['type'] == 'ARC':
                     if 'end' in seg:
-                        end_trf = SE3(seg['end'][0]/1000, seg['end'][1]/1000, seg['end'][2]/1000) * \
-                                 SE3.RPY(seg['end'][3:], unit='deg', order='xyz')
-                        end_wrf = tool_pose * end_trf
-                        seg_transformed['end'] = np.concatenate([
-                            end_wrf.t * 1000,
-                            end_wrf.rpy(unit='deg', order='xyz')
-                        ]).tolist()
+                        seg_transformed['end'] = pose6_trf_to_wrf(seg['end'], tool_pose)
                     
                     if 'center' in seg:
-                        center_trf = SE3(seg['center'][0]/1000, seg['center'][1]/1000, seg['center'][2]/1000)
-                        center_wrf = tool_pose * center_trf
-                        seg_transformed['center'] = (center_wrf.t * 1000).tolist()
+                        # Create a temporary params dict to use the helper
+                        seg_params = {'center': seg['center']}
+                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
                     
                     # Transform plane normal if specified
                     if 'plane' in seg:
-                        plane_normals_trf = {
-                            'XY': [0, 0, 1],
-                            'XZ': [0, 1, 0],
-                            'YZ': [1, 0, 0]
-                        }
-                        normal_trf = np.array(plane_normals_trf[seg['plane']])
+                        normal_trf = PLANE_NORMALS_TRF[seg['plane']]
                         normal_wrf = tool_pose.R @ normal_trf
-                        seg_transformed['normal_vector'] = normal_wrf.tolist()
+                        seg_transformed['normal_vector'] = normal_wrf
                 
                 elif seg['type'] == 'CIRCLE':
                     if 'center' in seg:
-                        center_trf = SE3(seg['center'][0]/1000, seg['center'][1]/1000, seg['center'][2]/1000)
-                        center_wrf = tool_pose * center_trf
-                        seg_transformed['center'] = (center_wrf.t * 1000).tolist()
+                        # Create a temporary params dict to use the helper
+                        seg_params = {'center': seg['center']}
+                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
                     
                     if 'plane' in seg:
-                        plane_normals_trf = {
-                            'XY': [0, 0, 1],
-                            'XZ': [0, 1, 0],
-                            'YZ': [1, 0, 0]
-                        }
-                        normal_trf = np.array(plane_normals_trf[seg['plane']])
+                        normal_trf = PLANE_NORMALS_TRF[seg['plane']]
                         normal_wrf = tool_pose.R @ normal_trf
-                        seg_transformed['normal_vector'] = normal_wrf.tolist()
+                        seg_transformed['normal_vector'] = normal_wrf
                 
                 elif seg['type'] == 'SPLINE':
                     if 'waypoints' in seg:
                         transformed_wps = []
                         for wp in seg['waypoints']:
-                            wp_trf = SE3(wp[0]/1000, wp[1]/1000, wp[2]/1000) * \
-                                    SE3.RPY(wp[3:], unit='deg', order='xyz')
-                            wp_wrf = tool_pose * wp_trf
-                            transformed_wp = np.concatenate([
-                                wp_wrf.t * 1000,
-                                wp_wrf.rpy(unit='deg', order='xyz')
-                            ]).tolist()
-                            transformed_wps.append(transformed_wp)
+                            transformed_wps.append(pose6_trf_to_wrf(wp, tool_pose))
                         seg_transformed['waypoints'] = transformed_wps
-                
+    
                 transformed_segments.append(seg_transformed)
             transformed['segments'] = transformed_segments
     
     # Generic transformations for any command with these parameters
     if 'start_pose' in params:
-        start_trf = SE3(params['start_pose'][0]/1000, 
-                       params['start_pose'][1]/1000, 
-                       params['start_pose'][2]/1000) * \
-                   SE3.RPY(params['start_pose'][3:], unit='deg', order='xyz')
-        start_wrf = tool_pose * start_trf
-        transformed['start_pose'] = np.concatenate([
-            start_wrf.t * 1000,
-            start_wrf.rpy(unit='deg', order='xyz')
-        ]).tolist()
+        transformed['start_pose'] = pose6_trf_to_wrf(params['start_pose'], tool_pose)
     
     return transformed
+
 
 
 class BaseSmoothMotionCommand:
@@ -263,10 +225,10 @@ class BaseSmoothMotionCommand:
         
         # Lower threshold to 2mm for more aggressive transition generation
         if pos_error < 2.0:  # Changed from 5.0mm to 2.0mm
-            logger.error(f"  -> Already near start position (error: {pos_error:.1f}mm)")
+            logger.info(f"  -> Already near start position (error: {pos_error:.1f}mm)")
             return None
         
-        logger.error(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
+        logger.info(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
         
         # Calculate transition speed based on distance
         # Slower for short distances, faster for long distances
@@ -294,7 +256,7 @@ class BaseSmoothMotionCommand:
         
         current_xyz = current_pose_se3.t * 1000  # Convert to mm
         current_rpy = current_pose_se3.rpy(unit='deg', order='xyz')
-        return np.concatenate([current_xyz, current_rpy]).tolist()
+        return np.concatenate([current_xyz, current_rpy])
         
     def prepare_for_execution(self, current_position_in):
         """Minimal preparation - just check if we need a transition."""
@@ -532,13 +494,10 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             
             logger.info(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
             
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_CIRCLE', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
+            # Transform start_pose if specified
+            self.specified_start_pose = transform_start_pose_if_needed(
+                self.specified_start_pose, self.frame, current_position_in
+            )
         
         # Now do normal preparation with transformed parameters
         return super().prepare_for_execution(current_position_in)
@@ -586,7 +545,7 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         
         # Check if entry trajectory might be needed
         distance_to_center = np.linalg.norm(np.array(effective_start_pose[:3]) - np.array(actual_center))
-        distance_from_perimeter = abs(distance_to_center - self.radius)
+        distance_from_perimeter = float(abs(distance_to_center - self.radius))
         
         # Automatically generate entry trajectory if needed
         entry_trajectory = None
@@ -673,12 +632,10 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
             self.center = transformed['center']
             self.normal_vector = transformed.get('normal_vector')
             
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_ARC_CENTER', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
+            # Transform start_pose if specified
+            self.specified_start_pose = transform_start_pose_if_needed(
+                self.specified_start_pose, self.frame, current_position_in
+            )
         
         return super().prepare_for_execution(current_position_in)
         
@@ -733,13 +690,10 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
             
             logger.info(f"  -> TRF Parametric Arc: end {self.end_pose[:3]} (WRF)")
             
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_ARC_PARAM', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
+            # Transform start_pose if specified
+            self.specified_start_pose = transform_start_pose_if_needed(
+                self.specified_start_pose, self.frame, current_position_in
+            )
         
         return super().prepare_for_execution(current_position_in)
         
@@ -827,12 +781,10 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
         
         # Generate arc trajectory with direct velocity profile
         motion_gen = CircularMotion()
-        # Ensure center_3d is a list (it might already be one)
-        center_list = center_3d if isinstance(center_3d, list) else center_3d.tolist()
         
         # Use new direct profile generation method
         trajectory = motion_gen.generate_arc_with_profile(
-            effective_start_pose, self.end_pose, center_list,
+            effective_start_pose, self.end_pose, center_3d,
             normal=normal if self.normal_vector is not None else None,
             clockwise=self.clockwise, 
             duration=self.duration,
@@ -880,8 +832,6 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate helix with entry trajectory if needed and proper trajectory profile."""
-        # Import here to avoid circular dependencies
-        from smooth_motion import CircularMotion
         helix_gen = HelixMotion()
         
         # Get helix axis (default Z for WRF, transformed for TRF)
@@ -995,13 +945,10 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
             
             logger.info(f"  -> TRF Spline: transformed {len(self.waypoints)} waypoints to WRF")
             
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_SPLINE', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
+            # Transform start_pose if specified
+            self.specified_start_pose = transform_start_pose_if_needed(
+                self.specified_start_pose, self.frame, current_position_in
+            )
         
         return super().prepare_for_execution(current_position_in)
         
@@ -1069,13 +1016,10 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             
             logger.info(f"  -> TRF Blend: transformed {len(self.segment_definitions)} segments to WRF")
             
-            # Also transform start_pose if specified
-            if self.specified_start_pose:
-                params = {'start_pose': self.specified_start_pose}
-                transformed = transform_command_params_to_wrf(
-                    'SMOOTH_BLEND', params, 'TRF', current_position_in
-                )
-                self.specified_start_pose = transformed.get('start_pose')
+            # Transform start_pose if specified
+            self.specified_start_pose = transform_start_pose_if_needed(
+                self.specified_start_pose, self.frame, current_position_in
+            )
         
         return super().prepare_for_execution(current_position_in)
         
@@ -1166,7 +1110,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
                     
                 trajectories.append(traj)
                 # Circle returns to start, so last pose is last point of trajectory
-                last_end_pose = traj[-1].tolist()
+                last_end_pose = traj[-1]
                 
             elif seg_type == 'SPLINE':
                 waypoints = seg_def['waypoints']

@@ -5,7 +5,7 @@ Contains fundamental movement commands: Home, Jog, and MultiJog
 
 import logging
 import numpy as np
-import PAROL6_ROBOT
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 logger = logging.getLogger(__name__)
 

@@ -1,17 +1,8 @@
 # This file acts as configuration file for robot you are using
 # It works in conjustion with configuration file from robotics toolbox
-
-from swift import Swift
-import spatialmath.base.symbolic as sym
-from roboticstoolbox import ETS as ET
-from roboticstoolbox import *
-import roboticstoolbox as rtb
-from spatialmath import *
-from spatialgeometry import *
+from roboticstoolbox import DHRobot, RevoluteDH
 from math import pi
 import numpy as np
-import time
-import random
 
 Joint_num = 6 # Number of joints
 Microstep = 32
@@ -57,7 +48,7 @@ Joints_standby_position_radian = [np.deg2rad(angle) for angle in Joints_standby_
 
 # values you get after homing robot and moving it to its most left and right sides
 # In degrees
-Joint_limits_degree =[[-123.046875,123.046875], [-145.0088,-3.375], [107.866,287.8675], [-105.46975,105.46975], [-90,90], [0,360]] 
+Joint_limits_degree: list[list[float]] =[[-123.046875,123.046875], [-145.0088,-3.375], [107.866,287.8675], [-105.46975,105.46975], [-90,90], [0,360]] 
 
 # in radians
 Joint_limits_radian = []
@@ -215,6 +206,8 @@ def check_joint_limits(q, target_q=None, allow_recovery=True):
                     # Recovery means moving towards or above the lower limit  
                     is_recovery = target_pos >= current_pos
                     recovery_direction = "move joint towards positive direction"
+                else:
+                    recovery_direction = ""
                 
                 violations[f'joint_{i+1}'] = {
                     'current_value': current_pos,
@@ -341,4 +334,3 @@ if __name__ == "__main__":
     print(test)
 
     #robot.ikine_LMS()
-

@@ -15,11 +15,13 @@ from ._version import __version__
 from .client.async_client import AsyncRobotClient
 from .client.sync_client import RobotClient
 from .server.manager import ServerManager, ensure_server
+from . import PAROL6_ROBOT
 
 __all__ = [
     "__version__",
     "AsyncRobotClient", 
     "RobotClient",
     "ServerManager",
-    "ensure_server"
+    "ensure_server",
+    "PAROL6_ROBOT"
 ]

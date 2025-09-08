@@ -71,3 +71,7 @@ filterwarnings = [
     "ignore::UserWarning:roboticstoolbox.*",
     "ignore::UserWarning:spatialmath.*"
 ]
+
+[[tool.mypy.overrides]]
+module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*"]
+ignore_missing_imports = true

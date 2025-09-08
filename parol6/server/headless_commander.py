@@ -6,57 +6,23 @@ to the PAROL6 robot, as well as E-Stop functionality and safety limitations.
 
 # * If you press estop robot will stop and you need to enable it by pressing e
 
-from roboticstoolbox import DHRobot, RevoluteDH, ERobot, ELink, ETS, trapezoidal, quintic
-import roboticstoolbox as rp
-from math import pi, sin, cos
 import numpy as np
-from oclock import Timer, loop, interactiveloop
+from oclock import Timer
 import time
 import socket
-from spatialmath import SE3
 import select
 import serial
 import platform
 import os
-import re
 import logging
 import struct
 import keyboard
 import argparse
 import sys
 import json
-from typing import Optional, Tuple
-from spatialmath.base import trinterp
-from collections import namedtuple, deque
-from pathlib import Path
-
-# Ensure both package dir (parol6) and project root are on sys.path to import PAROL6_ROBOT and others
-_pkg_dir = Path(__file__).parent.parent        # .../parol6
-_root_dir = Path(__file__).parents[2]          # .../PAROL6-python-API
-for _p in (str(_root_dir), str(_pkg_dir)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-# Robust import of robot constants/kinematics
-try:
-    import PAROL6_ROBOT  # from project root
-except ModuleNotFoundError:
-    # Fallback: load directly from file path to handle non-standard execution contexts
-    try:
-        from importlib.util import spec_from_file_location, module_from_spec
-        _robot_path = (_root_dir / "PAROL6_ROBOT.py")
-        _spec = spec_from_file_location("PAROL6_ROBOT", str(_robot_path))
-        if _spec and _spec.loader:
-            PAROL6_ROBOT = module_from_spec(_spec)
-            sys.modules["PAROL6_ROBOT"] = PAROL6_ROBOT
-            _spec.loader.exec_module(PAROL6_ROBOT)  # type: ignore[attr-defined]
-        else:
-            raise
-    except Exception as e:
-        print(f"[FATAL] Unable to import PAROL6_ROBOT from {_robot_path}: {e}", file=sys.stderr)
-        raise
-
-from smooth_motion import CircularMotion, SplineMotion, MotionBlender, SCurveProfile, QuinticPolynomial, MotionConstraints
+from typing import Optional, Tuple, Any
+from collections import deque
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from gcode import GcodeInterpreter
 
 # Import all command classes from the modular commands directory
@@ -234,11 +200,9 @@ int_to_3_bytes = struct.Struct('>I').pack # BIG endian order
 # data for output string (data that is being sent to the robot)
 #######################################################################################
 #######################################################################################
-start_bytes =  [0xff,0xff,0xff] 
-start_bytes = bytes(start_bytes)
+start_bytes = bytes([0xff,0xff,0xff])
 
-end_bytes =  [0x01,0x02] 
-end_bytes = bytes(end_bytes)
+end_bytes = bytes([0x01,0x02])
 
 
 # data for input string (Data that is being sent by the robot)
@@ -1326,7 +1290,7 @@ while timer.elapsed_time < 1100000:
                 
                 parts = message.split('|')
                 command_name = parts[0].upper()
-
+                command_obj: Any = None
                 # Immediate command dispatch
                 if command_name == 'STOP':
                     logger.info("Received STOP command. Halting all motion and clearing queue.")

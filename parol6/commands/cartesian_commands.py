@@ -6,7 +6,7 @@ Contains commands for Cartesian space movements: CartesianJog, MovePose, and Mov
 import logging
 import numpy as np
 import time
-import PAROL6_ROBOT
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
 import roboticstoolbox as rp
 from .ik_helpers import solve_ik_with_adaptive_tol_subdivision, quintic_scaling, AXIS_MAP
@@ -184,7 +184,7 @@ class MovePoseCommand:
             if self.velocity_percent is not None:
                 logger.info("  -> INFO: Both duration and velocity were provided. Using duration.")
             command_len = int(self.duration / INTERVAL_S)
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
+            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len) # type: ignore
             
             for i in range(len(traj_generator.q)):
                 pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
@@ -384,6 +384,7 @@ class MoveCartCommand:
         s = min(elapsed_time / self.duration, 1.0)
         s_scaled = quintic_scaling(s)
 
+        assert self.initial_pose is not None
         current_target_pose = self.initial_pose.interp(self.target_pose, s_scaled)
 
         current_q_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
