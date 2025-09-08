@@ -23,10 +23,10 @@ import json
 from typing import Optional, Tuple, Any
 from collections import deque
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from gcode import GcodeInterpreter
+from parol6.gcode import GcodeInterpreter
 
 # Import all command classes from the modular commands directory
-from commands import (
+from parol6.commands import (
     # Helper class
     CommandValue,
     # Basic commands
