@@ -1286,7 +1286,7 @@ prev_time = 0
 while timer.elapsed_time < 1100000:
     
     # --- Connection Handling (non-blocking) ---
-    if ser is None or not ser.is_open:
+    if not FAKE_SERIAL and (ser is None or not ser.is_open):
         now = time.time()
         if now - last_reconnect_attempt > 1.0:
             logging.warning("Serial port not open. Attempting to reconnect...")
@@ -1308,6 +1308,10 @@ while timer.elapsed_time < 1100000:
             except serial.SerialException:
                 ser = None
         # Do not block or continue; proceed to UDP handling every tick
+    elif FAKE_SERIAL:
+        # In FAKE_SERIAL mode, pretend we always have a connection
+        # This prevents the constant "Serial port not open" warnings
+        pass
 
     # =======================================================================
     # === NETWORK COMMAND RECEPTION WITH ID PARSING ===
