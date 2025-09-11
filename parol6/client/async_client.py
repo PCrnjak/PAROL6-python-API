@@ -9,10 +9,13 @@ import os
 import socket
 import time
 import math
+import asyncio
+import random
 from typing import Union, List, Optional, Literal, Dict
 
 from ..protocol.types import Frame, Axis
-from ..utils.tracking import send_and_wait
+from ..protocol import wire
+from ..utils.command_tracker import CommandTracker, get_shared_tracker
 
 
 class AsyncRobotClient:
@@ -34,13 +37,15 @@ class AsyncRobotClient:
         port: int = 5001, 
         timeout: float = 2.0, 
         retries: int = 1, 
-        ack_port: int = 5002
+        ack_port: int = 5002,
+        tracker: CommandTracker | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
         self.retries = retries
         self.ack_port = ack_port
+        self._tracker = tracker or get_shared_tracker(host=self.host, port=self.port, ack_port=self.ack_port)
 
     # --------------- Internal helpers ---------------
 
@@ -51,16 +56,19 @@ class AsyncRobotClient:
         return f"Sent: {message}"
 
     async def _request(self, message: str, bufsize: int = 2048) -> str | None:
-        """Send a request and wait for a UDP response (with retry)."""
-        for _ in range(self.retries + 1):
+        """Send a request and wait for a UDP response (with retry and jittered backoff)."""
+        for attempt in range(self.retries + 1):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.settimeout(self.timeout)
                     sock.sendto(message.encode("utf-8"), (self.host, self.port))
                     data, _ = sock.recvfrom(bufsize)
                     return data.decode("utf-8")
-            except TimeoutError:
-                continue
+            except socket.timeout:
+                if attempt < self.retries:
+                    backoff = min(0.5, 0.05 * (2 ** attempt)) + random.uniform(0, 0.05)
+                    await asyncio.sleep(backoff)
+                    continue
             except Exception:
                 break
         return None
@@ -72,8 +80,8 @@ class AsyncRobotClient:
         
         # Only use tracking if wait_for_ack or non_blocking is requested AND tracking is not disabled
         if (wait_for_ack or non_blocking) and not disable_tracking:
-            result = send_and_wait(message, timeout, non_blocking)
-            return result if result is not None else {"status": "ERROR", "details": "Send failed"}
+            result = self._tracker.send(message, wait_for_ack=wait_for_ack, timeout=timeout, non_blocking=non_blocking)
+            return result if result is not None else {"status": "ERROR", "details": "Send failed", "completed": True, "command_id": None}
         elif wait_for_ack and disable_tracking:
             # If ACK was requested but tracking is disabled, return a NO_TRACKING response
             await self._send(message)
@@ -133,12 +141,7 @@ class AsyncRobotClient:
         Expected wire format: "ANGLES|j1,j2,j3,j4,j5,j6"
         """
         resp = await self._request("GET_ANGLES", bufsize=1024)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) != 2 or parts[0] != "ANGLES":
-            return None
-        return [float(v) for v in parts[1].split(",")]
+        return wire.decode_simple(resp, "ANGLES")
 
     async def get_io(self) -> list[int] | None:
         """
@@ -146,12 +149,7 @@ class AsyncRobotClient:
         Expected wire format: "IO|in1,in2,out1,out2,estop"
         """
         resp = await self._request("GET_IO", bufsize=1024)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) != 2 or parts[0] != "IO":
-            return None
-        return [int(v) for v in parts[1].split(",")]
+        return wire.decode_simple(resp, "IO")
 
     async def get_gripper_status(self) -> list[int] | None:
         """
@@ -159,12 +157,7 @@ class AsyncRobotClient:
         Expected wire format: "GRIPPER|id,pos,spd,cur,status,obj"
         """
         resp = await self._request("GET_GRIPPER", bufsize=1024)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) != 2 or parts[0] != "GRIPPER":
-            return None
-        return [int(v) for v in parts[1].split(",")]
+        return wire.decode_simple(resp, "GRIPPER")
 
     async def get_speeds(self) -> list[float] | None:
         """
@@ -172,12 +165,7 @@ class AsyncRobotClient:
         Expected wire format: "SPEEDS|s1,s2,s3,s4,s5,s6"
         """
         resp = await self._request("GET_SPEEDS", bufsize=1024)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) != 2 or parts[0] != "SPEEDS":
-            return None
-        return [float(v) for v in parts[1].split(",")]
+        return wire.decode_simple(resp, "SPEEDS")
 
     async def get_pose(self) -> list[float] | None:
         """
@@ -185,12 +173,7 @@ class AsyncRobotClient:
         Expected wire format: "POSE|p0,p1,p2,...,p15"
         """
         resp = await self._request("GET_POSE", bufsize=2048)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) != 2 or parts[0] != "POSE":
-            return None
-        return [float(v) for v in parts[1].split(",")]
+        return wire.decode_simple(resp, "POSE")
 
     async def get_gripper(self) -> list[int] | None:
         """Alias for get_gripper_status for compatibility."""
@@ -205,30 +188,7 @@ class AsyncRobotClient:
                                 io (list[int] len=5), gripper (list[int] len>=6)
         """
         resp = await self._request("GET_STATUS", bufsize=4096)
-        if not resp or not resp.startswith("STATUS|"):
-            return None
-        # Split top-level sections after "STATUS|"
-        sections = resp.split("|")[1:]
-        result: dict[str, object] = {
-            "pose": None,
-            "angles": None,
-            "io": None,
-            "gripper": None,
-        }
-        for sec in sections:
-            if sec.startswith("POSE="):
-                vals = [float(x) for x in sec[len("POSE=") :].split(",") if x]
-                result["pose"] = vals
-            elif sec.startswith("ANGLES="):
-                vals = [float(x) for x in sec[len("ANGLES=") :].split(",") if x]
-                result["angles"] = vals
-            elif sec.startswith("IO="):
-                vals = [int(x) for x in sec[len("IO=") :].split(",") if x]
-                result["io"] = vals
-            elif sec.startswith("GRIPPER="):
-                vals = [int(x) for x in sec[len("GRIPPER=") :].split(",") if x]
-                result["gripper"] = vals
-        return result
+        return wire.decode_status(resp)
 
     # --------------- Helper methods for compatibility ---------------
 
@@ -400,10 +360,7 @@ class AsyncRobotClient:
             error = "Error: You must provide either a duration or a speed_percentage."
             return {'status': 'INVALID', 'details': error}
         
-        angles_str = "|".join(str(a) for a in joint_angles)
-        dur_str = "NONE" if duration is None else str(duration)
-        spd_str = "NONE" if speed_percentage is None else str(speed_percentage)
-        message = f"MOVEJOINT|{angles_str}|{dur_str}|{spd_str}"
+        message = wire.encode_move_joint(joint_angles, duration, speed_percentage)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -428,10 +385,7 @@ class AsyncRobotClient:
             error = "Error: You must provide either a duration or a speed_percentage."
             return {'status': 'INVALID', 'details': error}
         
-        pose_str = "|".join(str(v) for v in pose)
-        dur_str = "NONE" if duration is None else str(duration)
-        spd_str = "NONE" if speed_percentage is None else str(speed_percentage)
-        message = f"MOVEPOSE|{pose_str}|{dur_str}|{spd_str}"
+        message = wire.encode_move_pose(pose, duration, speed_percentage)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -456,10 +410,7 @@ class AsyncRobotClient:
             error = "Error: You must provide either a duration or a speed_percentage."
             return {'status': 'INVALID', 'details': error}
         
-        pose_str = "|".join(str(v) for v in pose)
-        dur_str = "NONE" if duration is None else str(duration)
-        spd_str = "NONE" if speed_percentage is None else str(speed_percentage)
-        message = f"MOVECART|{pose_str}|{dur_str}|{spd_str}"
+        message = wire.encode_move_cartesian(pose, duration, speed_percentage)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -480,13 +431,7 @@ class AsyncRobotClient:
         Provide either duration or speed_percentage (1..100).
         Optional: accel_percentage, trajectory profile, and tracking mode.
         """
-        delta_str = "|".join(str(v) for v in deltas)
-        dur_str = "NONE" if duration is None else str(duration)
-        spd_str = "NONE" if speed_percentage is None else str(speed_percentage)
-        acc_str = "NONE" if accel_percentage is None else str(int(accel_percentage))
-        prof_str = (profile or "NONE").upper()
-        track_str = (tracking or "NONE").upper()
-        message = f"MOVECARTRELTRF|{delta_str}|{dur_str}|{spd_str}|{acc_str}|{prof_str}|{track_str}"
+        message = wire.encode_move_cartesian_rel_trf(deltas, duration, speed_percentage, accel_percentage, profile, tracking)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -509,9 +454,7 @@ class AsyncRobotClient:
             error = "Error: You must provide either a duration or a distance_deg."
             return {'status': 'INVALID', 'details': error}
         
-        dur_str = "NONE" if duration is None else str(duration)
-        dist_str = "NONE" if distance_deg is None else str(distance_deg)
-        message = f"JOG|{joint_index}|{speed_percentage}|{dur_str}|{dist_str}"
+        message = wire.encode_jog_joint(joint_index, speed_percentage, duration, distance_deg)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -528,7 +471,7 @@ class AsyncRobotClient:
         """
         Send a CARTJOG command (frame 'TRF' or 'WRF', axis in {X+/X-/Y+/.../RZ-}).
         """
-        message = f"CARTJOG|{frame}|{axis}|{speed_percentage}|{duration}"
+        message = wire.encode_cart_jog(frame, axis, speed_percentage, duration)
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
     async def jog_multiple(
@@ -616,7 +559,7 @@ class AsyncRobotClient:
         """
         Execute a single GCODE line.
         """
-        message = f"GCODE|{gcode_line}"
+        message = wire.encode_gcode(gcode_line)
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
     async def execute_gcode_program(
@@ -636,8 +579,7 @@ class AsyncRobotClient:
                 return {'status': 'INVALID', 'details': error_msg}
         
         # Join lines with semicolons for inline program
-        program_str = ';'.join(program_lines)
-        message = f"GCODE_PROGRAM|INLINE|{program_str}"
+        message = wire.encode_gcode_program_inline(program_lines)
         
         return await self._send_tracked(message, wait_for_ack, timeout, non_blocking)
 
@@ -863,7 +805,7 @@ class AsyncRobotClient:
             timing_str = f"SPEED|{speed_percentage}"
         
         # Format waypoints - flatten each waypoint's 6 values
-        waypoint_strs = []
+        waypoint_strs: list[str] = []
         for wp in waypoints:
             waypoint_strs.extend(map(str, wp))
         
