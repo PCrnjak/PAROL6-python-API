@@ -4,7 +4,7 @@ Contains all command classes for robot control operations
 """
 
 # Import helper functions and constants
-from .ik_helpers import (
+from parol6.utils.ik import (
     CommandValue,
     normalize_angle,
     unwrap_angles,
@@ -43,7 +43,6 @@ from .utility_commands import (
     DelayCommand
 )
 
-# Import smooth motion commands
 from .smooth_commands import (
     transform_command_params_to_wrf,
     BaseSmoothMotionCommand,
@@ -67,27 +66,25 @@ __all__ = [
     'solve_ik_with_adaptive_tol_subdivision',
     'quintic_scaling',
     'AXIS_MAP',
-    
+
     # Basic commands
     'HomeCommand',
     'JogCommand',
     'MultiJogCommand',
-    
+
     # Cartesian commands
     'CartesianJogCommand',
     'MovePoseCommand',
     'MoveCartCommand',
-    
+
     # Joint commands
     'MoveJointCommand',
-    
+
     # Gripper commands
     'GripperCommand',
-    
+
     # Utility commands
     'DelayCommand',
-    
-    # Smooth motion commands
     'transform_command_params_to_wrf',
     'BaseSmoothMotionCommand',
     'SmoothTrajectoryCommand',
@@ -98,4 +95,4 @@ __all__ = [
     'SmoothSplineCommand',
     'SmoothBlendCommand',
     'SmoothWaypointsCommand'
-]
+    ]
