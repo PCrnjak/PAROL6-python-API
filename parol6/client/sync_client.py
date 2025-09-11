@@ -8,7 +8,7 @@ Synchronous facade for AsyncRobotClient.
 """
 
 import asyncio
-from typing import Awaitable, TypeVar, Union, Optional, List, Literal, Dict
+from typing import TypeVar, Union, Optional, List, Literal, Dict, Coroutine, Any
 
 from .async_client import AsyncRobotClient
 from ..protocol.types import Frame, Axis  # keep your existing imports
@@ -16,7 +16,7 @@ from ..protocol.types import Frame, Axis  # keep your existing imports
 T = TypeVar("T")
 
 
-def _run(coro: Awaitable[T]) -> T:
+def _run(coro: Coroutine[Any, Any, T]) -> T:
     """
     Run an async coroutine to completion when no event loop is running.
     If a loop is already running, raise to avoid deadlocks.
@@ -57,6 +57,19 @@ class RobotClient:
     def async_client(self) -> AsyncRobotClient:
         """Access the underlying async client if you need it."""
         return self._inner
+
+    # Expose common configuration attributes
+    @property
+    def host(self) -> str:
+        return self._inner.host
+
+    @property
+    def port(self) -> int:
+        return self._inner.port
+
+    @property
+    def ack_port(self) -> int:
+        return self._inner.ack_port
 
     # ---------- motion / control ----------
 
