@@ -85,6 +85,9 @@ Joint_min_speed = [100,100,100,100,100,100] # min speed in STEP/S used
 Joint_max_acc = 32000 # max acceleration in RAD/S²
 Joint_min_acc = 100 # min acceleration in RAD/S²
 
+# Maximum jerk limits (steps/s³) per joint
+Joint_max_jerk = [1600, 1000, 1100, 3000, 3000, 2000]
+
 Cart_lin_velocity_limits = [[-100,100],[-100,100],[-100,100]]
 Cart_ang_velocity_limits = [[-100,100],[-100,100],[-100,100]]
 
