@@ -6,20 +6,20 @@ Contains fundamental movement commands: Home, Jog, and MultiJog
 import logging
 import numpy as np
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from .base import CommandBase
+from parol6.config import INTERVAL_S
+from parol6.protocol.wire import CommandCode
 
 logger = logging.getLogger(__name__)
 
 # Set interval - used for timing calculations
-INTERVAL_S = 0.01
-
-class HomeCommand:
+class HomeCommand(CommandBase):
     """
     A non-blocking command that tells the robot to perform its internal homing sequence.
     This version uses a state machine to allow re-homing even if the robot is already homed.
     """
     def __init__(self):
-        self.is_valid = True
-        self.is_finished = False
+        super().__init__(is_valid=True)
         # State machine: START -> WAIT_FOR_UNHOMED -> WAIT_FOR_HOMED -> FINISHED
         self.state = "START"
         # Counter to send the home command for multiple cycles
@@ -39,7 +39,7 @@ class HomeCommand:
         # On the first few executions, continuously send the 'home' (100) command.
         if self.state == "START":
             logger.debug(f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}")
-            Command_out.value = 100
+            Command_out.value = CommandCode.HOME
             self.start_cmd_counter -= 1
             if self.start_cmd_counter <= 0:
                 # Once sent for enough cycles, move to the next state
@@ -50,7 +50,7 @@ class HomeCommand:
         # The robot's firmware should reset the homed status. We wait to see that happen.
         # During this time, we send 'idle' (255) to let the robot's controller take over.
         if self.state == "WAITING_FOR_UNHOMED":
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             # Homing sequence initiated detection
             if any(h == 0 for h in Homed_in[:6]):
                 logger.info("  -> Homing sequence initiated by robot.")
@@ -65,7 +65,7 @@ class HomeCommand:
         # --- State: WAITING_FOR_HOMED ---
         # Now we wait for all joints to report that they are homed (all flags are 1).
         if self.state == "WAITING_FOR_HOMED":
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             # Homing completion verification
             if all(h == 1 for h in Homed_in[:6]):
                 logger.info("Homing sequence complete. All joints reported home.")
@@ -74,7 +74,7 @@ class HomeCommand:
 
         return self.is_finished
 
-class JogCommand:
+class JogCommand(CommandBase):
     """
     A non-blocking command to jog a joint for a specific duration or distance.
     It performs all safety and validity checks upon initialization.
@@ -83,8 +83,7 @@ class JogCommand:
         """
         Initializes and validates the jog command. This is the SETUP phase.
         """
-        self.is_valid = False
-        self.is_finished = False
+        super().__init__(is_valid=False)
         self.mode = None
         self.command_step = 0
 
@@ -195,16 +194,16 @@ class JogCommand:
             logger.info(stop_reason)
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
         else:
             Speed_out[:] = [0] * 6
             Speed_out[self.joint_index] = self.speed_out
-            Command_out.value = 123
+            Command_out.value = CommandCode.JOG
             self.command_step += 1
             return False
         
-class MultiJogCommand:
+class MultiJogCommand(CommandBase):
     """
     A non-blocking command to jog multiple joints simultaneously for a specific duration.
     It performs all safety and validity checks upon initialization.
@@ -213,8 +212,7 @@ class MultiJogCommand:
         """
         Initializes and validates the multi-jog command.
         """
-        self.is_valid = False
-        self.is_finished = False
+        super().__init__(is_valid=False)
         self.command_step = 0
 
         # --- 1. Parameter Validation ---
@@ -229,10 +227,6 @@ class MultiJogCommand:
         if not duration or duration <= 0:
             logger.error("Error: MultiJogCommand requires a positive 'duration'.")
             return
-
-        # ==========================================================
-        # === NEW: Check for conflicting joint commands          ===
-        # ==========================================================
         base_joints = set()
         for joint in joints:
             # Normalize the joint index to its base (0-5)
@@ -296,7 +290,7 @@ class MultiJogCommand:
             logger.info("Timed multi-jog finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
         else:
             # Continuously check for joint limits during the jog
@@ -308,18 +302,18 @@ class MultiJogCommand:
                          logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
                          Speed_out[:] = [0] * 6
-                         Command_out.value = 255
+                         Command_out.value = CommandCode.IDLE
                          return True
                     # Hitting negative limit while moving negatively
                     elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
                          logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
                          Speed_out[:] = [0] * 6
-                         Command_out.value = 255
+                         Command_out.value = CommandCode.IDLE
                          return True
 
             # If no limits are hit, apply the speeds
             Speed_out[:] = self.speeds_out
-            Command_out.value = 123 # Jog command
+            Command_out.value = CommandCode.JOG
             self.command_step += 1
             return False # Command is still running

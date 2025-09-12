@@ -7,25 +7,18 @@ Implements command objects that interface with the existing robot API.
 
 import numpy as np
 from typing import Dict, Optional
-import sys
-import os
 from parol6.PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
-
-# Add parent directory to path to import robot modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .state import GcodeState
 from .coordinates import WorkCoordinateSystem
 from .utils import ijk_to_center, radius_to_center, validate_arc
+from parol6.commands.base import CommandBase
 
-
-class GcodeCommand:
+class GcodeCommand(CommandBase):
     """Base class for GCODE commands"""
     
     def __init__(self):
-        self.is_valid = True
-        self.is_finished = False
-        self.error_message = None
+        super().__init__()
         
     def prepare_for_execution(self, current_position_in):
         """

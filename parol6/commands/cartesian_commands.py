@@ -9,17 +9,14 @@ import time
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
 import roboticstoolbox as rp
-from .ik_helpers import solve_ik_with_adaptive_tol_subdivision, quintic_scaling, AXIS_MAP
+from parol6.utils.ik import solve_ik_with_adaptive_tol_subdivision, quintic_scaling, AXIS_MAP
+from .base import CommandBase
+from parol6.protocol.wire import CommandCode
+from parol6.config import JOG_IK_ILIMIT, INTERVAL_S
 
 logger = logging.getLogger(__name__)
 
-# Set interval - used for timing calculations
-INTERVAL_S = 0.01
-
-# Jogging uses a smaller IK iteration limit for more responsive performance
-JOG_IK_ILIMIT = 20
-
-class CartesianJogCommand:
+class CartesianJogCommand(CommandBase):
     """
     A non-blocking command to jog the robot's end-effector in Cartesian space.
     This is the final, refactored version using clean, standard spatial math
@@ -29,6 +26,7 @@ class CartesianJogCommand:
         """
         Initializes and validates the Cartesian jog command.
         """
+        super().__init__()
         self.is_valid = False
         self.is_finished = False
         logger.info(f"Initializing CartesianJog: Frame {frame}, Axis {axis}...")
@@ -57,11 +55,11 @@ class CartesianJogCommand:
             logger.info("Cartesian jog finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
 
         # --- B. Calculate Target Pose using clean vector math ---
-        Command_out.value = 123 # Set jog command
+        Command_out.value = CommandCode.JOG
         
         q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(Position_in)])
         T_current = PAROL6_ROBOT.robot.fkine(q_current)
@@ -114,7 +112,7 @@ class CartesianJogCommand:
             logger.warning("IK Warning: Could not find solution for jog step. Stopping.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
 
         # --- D. Speed Scaling ---
@@ -131,12 +129,13 @@ class CartesianJogCommand:
 
         return False # Command is still running
 
-class MovePoseCommand:
+class MovePoseCommand(CommandBase):
     """
     A non-blocking command to move the robot to a specific Cartesian pose.
     The movement itself is a joint-space interpolation.
     """
     def __init__(self, pose, duration=None, velocity_percent=None, accel_percent=50, trajectory_type='poly'):
+        super().__init__()
         self.is_valid = True  # Assume valid; preparation step will confirm.
         self.is_finished = False
         self.command_step = 0
@@ -276,17 +275,17 @@ class MovePoseCommand:
             self.is_finished = True
             Position_out[:] = Position_in[:]
             Speed_out[:] = [0] * 6
-            Command_out.value = 156
+            Command_out.value = CommandCode.MOVE
             return True
         else:
             pos_step, _ = self.trajectory_steps[self.command_step]
             Position_out[:] = pos_step
             Speed_out[:] = [0] * 6
-            Command_out.value = 156
+            Command_out.value = CommandCode.MOVE
             self.command_step += 1
             return False
 
-class MoveCartCommand:
+class MoveCartCommand(CommandBase):
     """
     A non-blocking command to move the robot's end-effector in a straight line
     in Cartesian space, completing the move in an exact duration.
@@ -297,6 +296,7 @@ class MoveCartCommand:
     3. Solving Inverse Kinematics for each intermediate step to ensure path validity.
     """
     def __init__(self, pose, duration=None, velocity_percent=None):
+        super().__init__()
         self.is_valid = False
         self.is_finished = False
 
@@ -398,21 +398,18 @@ class MoveCartCommand:
                  logger.warning(f"     Reason: Path violates joint limits: {ik_solution.violations}")
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
 
         current_pos_rad = ik_solution.q
 
-        # --- MODIFIED BLOCK ---
         # Send only the target position and let the firmware's P-controller handle speed.
         Position_out[:] = [int(PAROL6_ROBOT.RAD2STEPS(p, i)) for i, p in enumerate(current_pos_rad)]
         Speed_out[:] = [0] * 6 # Set feed-forward velocity to zero for smooth P-control.
-        Command_out.value = 156
-        # --- END MODIFIED BLOCK ---
+        Command_out.value = CommandCode.MOVE
 
         if s >= 1.0:
             logger.info(f"MoveCart finished in ~{elapsed_time:.2f}s.")
             self.is_finished = True
-            # The main loop will handle holding the final position.
 
         return self.is_finished

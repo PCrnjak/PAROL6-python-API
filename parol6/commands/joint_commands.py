@@ -7,18 +7,19 @@ import logging
 import numpy as np
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import roboticstoolbox as rp
+from .base import CommandBase
+from parol6.config import INTERVAL_S
+from parol6.protocol.wire import CommandCode
 
 logger = logging.getLogger(__name__)
 
-# Set interval - used for timing calculations
-INTERVAL_S = 0.01
-
-class MoveJointCommand:
+class MoveJointCommand(CommandBase):
     """
     A non-blocking command to move the robot's joints to a specific configuration.
     It pre-calculates the entire trajectory upon initialization.
     """
     def __init__(self, target_angles, duration=None, velocity_percent=None, accel_percent=50, trajectory_type='poly'):
+        super().__init__()
         self.is_valid = False  # Will be set to True after basic validation
         self.is_finished = False
         self.command_step = 0
@@ -146,12 +147,12 @@ class MoveJointCommand:
             self.is_finished = True
             Position_out[:] = Position_in[:]
             Speed_out[:] = [0] * 6
-            Command_out.value = 156
+            Command_out.value = CommandCode.MOVE
             return True
         else:
             pos_step, _ = self.trajectory_steps[self.command_step]
             Position_out[:] = pos_step
             Speed_out[:] = [0] * 6
-            Command_out.value = 156
+            Command_out.value = CommandCode.MOVE
             self.command_step += 1
             return False

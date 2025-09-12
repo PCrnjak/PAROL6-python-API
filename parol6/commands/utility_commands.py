@@ -5,10 +5,12 @@ Contains utility commands like Delay
 
 import logging
 import time
+from parol6.commands.base import CommandBase
+from parol6.protocol.wire import CommandCode
 
 logger = logging.getLogger(__name__)
 
-class DelayCommand:
+class DelayCommand(CommandBase):
     """
     A non-blocking command that pauses execution for a specified duration.
     During the delay, it ensures the robot remains idle by sending the
@@ -21,8 +23,7 @@ class DelayCommand:
         Args:
             duration (float): The delay time in seconds.
         """
-        self.is_valid = False
-        self.is_finished = False
+        super().__init__(is_valid=False)
 
         # --- 1. Parameter Validation ---
         if not isinstance(duration, (int, float)) or duration <= 0:
@@ -49,7 +50,7 @@ class DelayCommand:
             return True
 
         # --- A. Keep the robot idle during the delay ---
-        Command_out.value = 255  # Set command to idle
+        Command_out.value = CommandCode.IDLE
         Speed_out[:] = [0] * 6   # Set all speeds to zero
 
         # --- B. Check for completion ---

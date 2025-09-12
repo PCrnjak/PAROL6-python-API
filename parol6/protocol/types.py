@@ -52,3 +52,18 @@ class TrackingStatus(TypedDict):
     details: str
     completed: bool
     ack_time: datetime | None
+
+
+class SendResult(TypedDict):
+    """Standardized result for command-sending APIs."""
+    command_id: str | None
+    status: AckStatus
+    details: str
+    completed: bool
+    ack_time: datetime | None
+
+
+class WireResponse(TypedDict):
+    """Typed wrapper for parsed wire responses."""
+    type: Literal['PONG','POSE','ANGLES','IO','GRIPPER','SPEEDS','STATUS','GCODE_STATUS','SERVER_STATE']
+    payload: dict | list | str

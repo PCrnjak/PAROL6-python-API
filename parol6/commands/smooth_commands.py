@@ -8,11 +8,13 @@ import numpy as np
 from numpy.typing import NDArray
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
-from smooth_motion import (
+from parol6.smooth_motion import (
     CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
 )
-from .ik_helpers import solve_ik_with_adaptive_tol_subdivision
+from parol6.utils.ik import solve_ik_with_adaptive_tol_subdivision
 from .cartesian_commands import MovePoseCommand
+from parol6.protocol.wire import CommandCode
+from parol6.smooth_motion.advanced import AdvancedMotionBlender
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +336,7 @@ class BaseSmoothMotionCommand:
                 self.error_state = True
                 self.error_message = "Cannot reach trajectory start"
                 Speed_out[:] = [0] * 6
-                Command_out.value = 255
+                Command_out.value = CommandCode.IDLE
                 return True
                 
             self.trajectory_generated = True
@@ -398,7 +400,7 @@ class SmoothTrajectoryCommand:
             logger.info(f"Smooth {self.description} finished.")
             self.is_finished = True
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
         
         # Get target pose for this step
@@ -423,7 +425,7 @@ class SmoothTrajectoryCommand:
             self.error_state = True
             self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
             Speed_out[:] = [0] * 6
-            Command_out.value = 255
+            Command_out.value = CommandCode.IDLE
             return True
         
         # Convert to steps
@@ -448,7 +450,7 @@ class SmoothTrajectoryCommand:
         # Send position command
         Position_out[:] = target_steps
         Speed_out[:] = [0] * 6
-        Command_out.value = 156
+        Command_out.value = CommandCode.MOVE
         
         # Advance to next point
         self.trajectory_index += 1
@@ -1133,9 +1135,6 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
         
         # Blend all trajectories with advanced blending
         if len(trajectories) > 1:
-            # Use AdvancedMotionBlender for better continuity
-            from smooth_motion import AdvancedMotionBlender
-            
             # Select blend method based on trajectory type
             if self.trajectory_type == 'quintic':
                 blend_method = 'quintic'
