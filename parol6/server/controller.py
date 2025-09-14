@@ -48,7 +48,7 @@ class QueuedCommand:
 class ControllerConfig:
     """Configuration for the controller."""
     udp_host: str = '0.0.0.0'
-    udp_port: int = 5001  # Changed from 12321 to match headless_commander
+    udp_port: int = 5001  # Changed from 12321 to match controller
     serial_port: Optional[str] = None
     serial_baudrate: int = 3000000
     loop_interval: float = INTERVAL_S
@@ -61,7 +61,7 @@ class Controller:
     """
     Main controller that orchestrates all components of the PAROL6 server.
     
-    This replaces the monolithic headless_commander.py with a modular design:
+    This replaces the monolithic controller.py with a modular design:
     - State management via StateManager singleton
     - Transport abstraction for UDP and Serial
     - Command execution via CommandExecutor
@@ -83,6 +83,11 @@ class Controller:
         self.state_manager = StateManager()
         self.udp_transport = None
         self.serial_transport = None
+        
+        # Debug flags
+        self.debug_loop = os.getenv("PAROL6_DEBUG_LOOP", "0").lower() in ("1", "true", "yes", "on")
+        self.loop_counter = 0
+        self.loop_times = deque(maxlen=50)  # Track last 50 loop times for averaging
         
         # ACK management (merged from AckManager)
         self.ack_port = self._get_ack_port()
@@ -144,6 +149,9 @@ class Controller:
         """
         if not cmd_id or not self.ack_socket:
             return
+        
+        # Debug log all outgoing ACKs
+        logger.debug(f"ACK {status} cmd={cmd_id} details='{details}' addr={addr}")
         
         message = f"ACK|{cmd_id}|{status}|{details}".encode("utf-8")
         
@@ -280,6 +288,8 @@ class Controller:
                 loop_start = time.time()
                 state = self.state_manager.get_state()
                 
+                self.loop_counter += 1
+                
                 # 1. Read from firmware
                 if self.serial_transport and self.serial_transport.is_connected():
                     frames = self.serial_transport.read_frames()
@@ -405,6 +415,8 @@ class Controller:
             # Parse command name
             cmd_parts = cmd_str.split('|')
             cmd_name = cmd_parts[0].upper()
+            
+            logger.debug(f"UDP command received: {cmd_name} (id={cmd_id})")
 
             # Handle system commands immediately (no cooldown)
             if cmd_name in ["STOP", "ENABLE", "DISABLE", "CLEAR_ERROR", "SET_PORT", "STREAM"]:
@@ -490,6 +502,7 @@ class Controller:
             
             # Queue the command
             status = self._queue_command(command, cmd_id, addr)
+            logger.debug(f"Command {cmd_name} queued with status: {status.code}")
             
             # Start execution if no active command
             if not self.active_command:
@@ -648,6 +661,12 @@ class Controller:
                     # Query commands now send via command itself; ack here if needed
                     if cmd_id:
                         self._send_ack(cmd_id, "COMPLETED", "PONG", addr)
+                elif command == "GET_SERVER_STATE":
+                    # Debug query for server state
+                    active_type = type(self.active_command.command).__name__ if self.active_command else "None"
+                    state_info = f"enabled={state.enabled};estop={self.estop_active};stream={self.stream_mode};queue_size={len(self.command_queue)};active={active_type};loop_counter={self.loop_counter}"
+                    if cmd_id:
+                        self._send_ack(cmd_id, "COMPLETED", state_info, addr)
                 else:
                     logger.warning(f"Unhandled query command: {command}")
                     if cmd_id:
@@ -798,7 +817,7 @@ class Controller:
                         self.active_command.address
                     )
                 
-                logger.info(f"Started executing: {type(self.active_command.command).__name__}")
+                logger.debug(f"Activated command: {type(self.active_command.command).__name__} (id={self.active_command.command_id})")
                 
             except Exception as e:
                 logger.error(f"Command setup failed: {e}")
@@ -849,7 +868,7 @@ class Controller:
                 # Check if command is finished
                 if status.code == ExecutionStatusCode.COMPLETED:
                     # Command completed successfully
-                    logger.info(f"Command completed: {type(self.active_command.command).__name__}")
+                    logger.debug(f"Command completed: {type(self.active_command.command).__name__} (id={self.active_command.command_id}) at t={time.time():.6f}")
                     
                     # Send completion acknowledgment
                     if self.active_command.command_id and self.active_command.address:
@@ -867,7 +886,7 @@ class Controller:
                     
                 elif status.code == ExecutionStatusCode.FAILED:
                     # Command failed
-                    logger.error(f"Command failed: {type(self.active_command.command).__name__} - {status.message}")
+                    logger.debug(f"Command failed: {type(self.active_command.command).__name__} (id={self.active_command.command_id}) - {status.message} at t={time.time():.6f}")
                     
                     # Send failure acknowledgment
                     if self.active_command.command_id and self.active_command.address:
@@ -1159,7 +1178,7 @@ class Controller:
                 gripper_data_out=list(state.Gripper_data_out)
             )
             
-            # Gripper mode auto-reset logic (from headless_commander.py lines 336-341)
+            # Gripper mode auto-reset logic (from controller.py lines 336-341)
             # Reset gripper calibration/error clear modes after sending
             if state.Gripper_data_out[4] == 1 or state.Gripper_data_out[4] == 2:
                 # Mode 1 = calibration, Mode 2 = error clear
@@ -1234,7 +1253,7 @@ def main():
     parser.add_argument('--auto-home', action='store_true',
                        help='Queue HOME on startup (default: off)')
     
-    # Verbose logging options (from headless_commander.py)
+    # Verbose logging options (from controller.py)
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging (DEBUG level)')
     parser.add_argument('-q', '--quiet', action='store_true',

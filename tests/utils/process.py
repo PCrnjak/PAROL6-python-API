@@ -1,7 +1,7 @@
 """
 Process management utilities for testing.
 
-Provides classes and functions to manage the headless_commander.py subprocess
+Provides classes and functions to manage the controller.py subprocess
 during integration tests, including startup, readiness checks, and cleanup.
 """
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class HeadlessCommanderProc:
     """
-    Manages a headless_commander.py subprocess for integration testing.
+    Manages a controller.py subprocess for integration testing.
     
     Handles starting, stopping, and checking readiness of the commander process
     with configurable ports and environment variables.
@@ -78,14 +78,14 @@ class HeadlessCommanderProc:
         })
         process_env.update(self.env)
         
-        # Find the headless_commander.py script
+        # Find the controller.py script
         script_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            "headless_commander.py"
+            "controller.py"
         )
         
         if not os.path.exists(script_path):
-            logger.error(f"headless_commander.py not found at {script_path}")
+            logger.error(f"controller.py not found at {script_path}")
             return False
             
         # Prepare command

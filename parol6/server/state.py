@@ -30,7 +30,7 @@ class ControllerState:
 
     This dataclass is introduced as part of Phase 2 of the implementation plan
     to eliminate global variables and make the controller more testable. It is
-    not yet wired into headless_commander.py; integration will be done incrementally.
+    not yet wired into controller.py; integration will be done incrementally.
     """
     # Serial/transport
     ser: Any = None

@@ -116,10 +116,10 @@ Verbosity levels:
   CRITICAL : Only critical error messages
   
 Examples:
-  python headless_commander.py --verbose              # Enable DEBUG level
-  python headless_commander.py --log-level DEBUG      # Same as --verbose
-  python headless_commander.py --log-level WARNING    # Only show warnings and above
-  python headless_commander.py --quiet                # Minimal output (WARNING level)
+  python controller.py --verbose              # Enable DEBUG level
+  python controller.py --log-level DEBUG      # Same as --verbose
+  python controller.py --log-level WARNING    # Only show warnings and above
+  python controller.py --quiet                # Minimal output (WARNING level)
         '''
     )
     

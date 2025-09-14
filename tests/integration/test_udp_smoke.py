@@ -1,7 +1,5 @@
 """
 Integration smoke tests for UDP communication using parol6.
-
-Tests basic UDP communication with headless_commander.py running in FAKE_SERIAL mode.
 Covers PING/PONG, GET_* endpoints, STOP semantics, and basic functionality.
 """
 

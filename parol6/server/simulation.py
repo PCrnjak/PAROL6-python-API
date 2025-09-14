@@ -188,9 +188,14 @@ def create_simulation_state() -> SimulationState:
     """
     state = SimulationState(enabled=True)
     
-    # Set initial positions to home
+    # Set initial positions to standby position (good for IK) instead of all zeros
+    # Use PAROL6_ROBOT.Joints_standby_position_degree = [0,-90,180,0,0,180]
+    standby_positions_steps = []
     for i in range(6):
-        state.position_in[i] = 0
+        deg = PAROL6_ROBOT.Joints_standby_position_degree[i]
+        steps = int(PAROL6_ROBOT.DEG2STEPS(deg, i))
+        standby_positions_steps.append(steps)
+        state.position_in[i] = steps
         state.homed_in[i] = 1
     
     # Ensure E-stop is not pressed

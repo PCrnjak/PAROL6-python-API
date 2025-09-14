@@ -42,7 +42,7 @@ def fuse_bitfield_2_bytearray(bits: list[int]) -> bytes:
 def split_to_3_bytes(n: int) -> tuple[int, int, int]:
     """
     Convert an int to 24-bit big-endian (two's complement) and return 3 bytes.
-    This mirrors the existing Split_2_3_bytes semantics from headless_commander.
+    This mirrors the existing Split_2_3_bytes semantics from controller.
     """
     n24 = n & 0xFFFFFF  # two's complement 24-bit
     b = n24.to_bytes(4, "big", signed=False)
