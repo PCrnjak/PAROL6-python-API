@@ -1,7 +1,7 @@
 """
-Server management for PAROL6 headless controller.
+Server management for PAROL6 controller.
 
-Provides lifecycle management and automatic spawning of the headless controller process.
+Provides lifecycle management and automatic spawning of the controller process.
 """
 
 import asyncio
@@ -15,13 +15,13 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Deque
 from collections import deque
 
 
 @dataclass
 class ServerOptions:
-    """Options for launching the headless controller."""
+    """Options for launching the controller."""
 
     com_port: str | None = None
     no_autohome: bool = True  # Set PAROL6_NOAUTOHOME=1 by default
@@ -30,7 +30,7 @@ class ServerOptions:
 
 class ServerManager:
     """
-    Manages the lifecycle of the headless PAROL6 controller.
+    Manages the lifecycle of the PAROL6 controller.
 
     - Writes com_port.txt in the controller working directory to preselect the port.
     - Spawns the controller as a subprocess using sys.executable.
@@ -46,13 +46,13 @@ class ServerManager:
                     f"Controller script not found: {self.controller_path}"
                 )
         else:
-            # Use the package's bundled headless commander
-            self.controller_path = Path(__file__).parent / "headless_commander.py"
+            # Use the package's bundled commander
+            self.controller_path = Path(__file__).parent / "controller.py"
             
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
-        self._log_buffer = deque(maxlen=5000)
+        self._log_buffer: Deque[str] = deque(maxlen=5000)
 
     @property
     def pid(self) -> int | None:
@@ -63,7 +63,7 @@ class ServerManager:
 
     def _write_com_port_hint(self, com_port: str) -> None:
         """
-        The headless_commander.py reads com_port.txt at startup.
+        The controller.py reads com_port.txt at startup.
         Write it unconditionally before launch for consistent behavior across OSes.
         """
         cwd = self.controller_path.parent
@@ -83,9 +83,9 @@ class ServerManager:
         """Start the controller if not already running."""
         if self.is_running():
             return
-
-        # Working directory should be the PAROL6-python-API root to find dependencies
-        cwd = self.controller_path.parent.parent
+        # Working directory should be the PAROL6-python-API repo root to find dependencies
+        # Use a more direct approach to find the package root
+        cwd = Path(__file__).resolve().parents[2]  # parol6/server/manager.py -> repo root
 
         # Optional COM port preseed
         if com_port:
@@ -97,14 +97,16 @@ class ServerManager:
             env["PAROL6_NOAUTOHOME"] = "1"
         if extra_env:
             env.update(extra_env)
+        # Ensure the subprocess can import the local 'parol6' package
+        existing_py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing_py_path}" if existing_py_path else str(cwd)
 
-        # Launch the controller
-        args = [sys.executable, "-u", str(self.controller_path)]
+        # Launch the controller as a module to ensure package imports resolve
+        args = [sys.executable, "-u", "-m", "parol6.server.controller"]
         
-        # Add log level argument if available
-        current_level = logging.getLogger().level
-        level_name = logging.getLevelName(current_level)
-        if level_name != "Level " + str(current_level):  # Valid level name
+        # Optionally forward current logging level if explicitly enabled
+        if os.getenv("PAROL6_PASS_LOG_LEVEL", "").lower() in ("1", "true", "yes", "on"):
+            level_name = logging.getLevelName(logging.getLogger().level)
             args.append(f"--log-level={level_name}")
             
         try:
@@ -148,7 +150,7 @@ class ServerManager:
                         if ":" in timestamp_part:
                             line = line[space_pos + 1:].lstrip()
                     
-                    # Preserve severity if headless prefixes with [LEVEL]
+                    # Preserve severity if prefixes with [LEVEL]
                     level = logging.INFO
                     msg = line
 
@@ -211,6 +213,56 @@ class ServerManager:
         """Return the last N lines captured from the controller stdout."""
         return list(self._log_buffer)[-tail:]
 
+    async def await_ready(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 5001,
+        timeout: float = 10.0,
+        poll_interval: float = 0.2,
+    ) -> bool:
+        """
+        Wait until the controller responds to PING or reports ready in SERVER_STATE.
+
+        Returns:
+            True if the server becomes ready within timeout, else False.
+        """
+        import socket as _socket
+        import time as _time
+
+        deadline = _time.time() + max(0.0, float(timeout))
+        while _time.time() < deadline:
+            # Try a simple PING first
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(min(0.5, poll_interval))
+                    sock.sendto(b"PING", (host, port))
+                    data, _ = sock.recvfrom(256)
+                    if data.decode("utf-8").strip().upper() == "PONG":
+                        return True
+            except Exception:
+                pass
+
+            # Try GET_SERVER_STATE and check for {"ready": true}
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(min(0.5, poll_interval))
+                    sock.sendto(b"GET_SERVER_STATE", (host, port))
+                    data, _ = sock.recvfrom(4096)
+                    resp = data.decode("utf-8")
+                    try:
+                        from ..protocol import wire as _wire  # local import to avoid cycles
+                        parsed = _wire.parse_server_state(resp)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict) and bool(parsed.get("ready")):
+                        return True
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+
+        return False
+
     async def get_status(self, host: str = "127.0.0.1", port: int = 5001, timeout: float = 1.0) -> dict:
         """
         Query controller's server state over UDP and merge with process info.
@@ -222,15 +274,22 @@ class ServerManager:
             "server": None,
         }
         import socket
-        import json
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(timeout)
-            sock.sendto(b"GET_SERVER_STATE", (host, port))
-            data, _ = sock.recvfrom(4096)
-            resp = data.decode("utf-8")
-            if resp.startswith("SERVER_STATE|"):
-                payload = resp.split("|", 1)[1]
-                status["server"] = json.loads(payload)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(timeout)
+                sock.sendto(b"GET_SERVER_STATE", (host, port))
+                data, _ = sock.recvfrom(4096)
+                resp = data.decode("utf-8")
+                try:
+                    from ..protocol import wire as _wire  # local import avoids top-level deps
+                    parsed = _wire.parse_server_state(resp)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    status["server"] = parsed
+        except Exception as e:
+            # Keep minimal process info and include a hint for diagnostics
+            status.setdefault("error", str(e))
         return status
 
 
@@ -286,19 +345,13 @@ async def ensure_server(
         no_autohome=True,
         extra_env=extra_env
     )
-    
-    try:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(2.0)
-            sock.sendto(b"PING", (host, port))
-            data, _ = sock.recvfrom(256)
-            if data.decode('utf-8').strip().upper() == "PONG":
-                logging.info(f"Successfully started server at {host}:{port}")
-                return manager
-    except Exception as e:
-        logging.error(f"Failed to verify server startup: {e}")
-    
+
+    # Wait for readiness within a short window
+    ok = await manager.await_ready(host=host, port=port, timeout=5.0)
+    if ok:
+        logging.info(f"Successfully started server at {host}:{port}")
+        return manager
+
     logging.error("Server spawn failed or not responding after startup")
     await manager.stop_controller()
     return None

@@ -5,41 +5,117 @@ Base abstractions and helpers for command implementations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING, List
 from abc import ABC, abstractmethod
+from enum import Enum
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+if TYPE_CHECKING:
+    from parol6.server.state import ControllerState
+
+
+class ExecutionStatusCode(Enum):
+    """Enumeration for command execution status codes."""
+    QUEUED = "QUEUED"
+    EXECUTING = "EXECUTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+@dataclass
+class ExecutionStatus:
+    """
+    Status returned from command execution steps.
+    """
+    code: ExecutionStatusCode
+    message: str
+    error: Optional[Exception] = None
+    details: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def executing(cls, message: str = "Executing", details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+        """Create an EXECUTING status."""
+        return cls(ExecutionStatusCode.EXECUTING, message, details=details)
+
+    @classmethod
+    def completed(cls, message: str = "Completed", details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+        """Create a COMPLETED status."""
+        return cls(ExecutionStatusCode.COMPLETED, message, details=details)
+
+    @classmethod
+    def failed(cls, message: str, error: Optional[Exception] = None, details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+        """Create a FAILED status."""
+        return cls(ExecutionStatusCode.FAILED, message, error=error, details=details)
+
 
 @dataclass(eq=False)
 class CommandBase(ABC):
     """
-    Minimal reusable base for commands with shared lifecycle and safety helpers.
+    Reusable base for commands with shared lifecycle and safety helpers.
     """
     is_valid: bool = True
     is_finished: bool = False
     error_state: bool = False
     error_message: str = ""
- 
+    is_immediate: bool = False  # If True, execute immediately without queueing
+
+    # Optional context set by controller (commands "already have access" to these)
+    udp_transport: Any = None
+    addr: Any = None
+    gcode_interpreter: Any = None
+
     # Ensure command objects are usable as dict keys (e.g., in server command_id_map)
     def __hash__(self) -> int:
         # Identity-based hash is appropriate for ephemeral command instances
         return id(self)
 
-    # ----- contract -----
     @abstractmethod
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs) -> bool:
+    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
-        Execute one control-loop step. Return True when the command has finished.
+        Check if this command can handle the given message parts.
+
+        Args:
+            parts: Pre-split message parts (e.g., ['JOG', '0', '50', '2.0', 'None'])
+
+        Returns:
+            Tuple of (can_handle, error_message)
+            - can_handle: True if this command can process the message
+            - error_message: Optional error message if the message is invalid
         """
         raise NotImplementedError
 
-    def prepare_for_execution(self, current_position_in) -> None:
+    @abstractmethod
+    def setup(self, state: "ControllerState", *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
         """
-        Optional: prepare using current robot state (e.g., compute trajectory).
-        Default is a no-op.
+        Prepare the command for execution using current robot state.
+
+        Pass context that may change between creation and execution as keyword args.
+        Commands should also read self.udp_transport/self.addr/self.gcode_interpreter set by controller.
         """
+        # Default: bind any provided context to the instance
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
+        if gcode_interpreter is not None:
+            self.gcode_interpreter = gcode_interpreter
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+        """
+        Execute one control-loop step and return an ExecutionStatus.
+
+        Commands MUST interact with state.* arrays/buffers directly (Position_in/out, Speed_out, Command_out, etc.).
+        """
+        raise NotImplementedError
+
+    def teardown(self, state: "ControllerState") -> None:
+        """Optional cleanup hook after completion or failure."""
         return
- 
+
     # ----- lifecycle helpers -----
 
     def finish(self) -> None:

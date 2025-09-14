@@ -5,7 +5,15 @@ Defines enums, TypedDicts, and dataclasses used across the public API.
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal, TypedDict
+
+
+# Stream mode state enum
+class StreamModeState(Enum):
+    """Stream mode state for jog commands."""
+    OFF = 0  # Stream mode disabled (default FIFO queueing)
+    ON = 1   # Stream mode enabled (latest-wins for jog commands)
 
 
 # Frame literals

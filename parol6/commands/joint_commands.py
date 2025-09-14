@@ -5,50 +5,87 @@ Contains commands for direct joint angle movements
 
 import logging
 import numpy as np
+from typing import List, Tuple, Optional
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import roboticstoolbox as rp
-from .base import CommandBase
+from .base import CommandBase, ExecutionStatus, ExecutionStatusCode
 from parol6.config import INTERVAL_S
 from parol6.protocol.wire import CommandCode
+from parol6.server.command_registry import register_command
 
 logger = logging.getLogger(__name__)
 
+
+@register_command("MOVEJOINT")
 class MoveJointCommand(CommandBase):
     """
     A non-blocking command to move the robot's joints to a specific configuration.
     It pre-calculates the entire trajectory upon initialization.
     """
-    def __init__(self, target_angles, duration=None, velocity_percent=None, accel_percent=50, trajectory_type='poly'):
+    def __init__(self):
         super().__init__()
-        self.is_valid = False  # Will be set to True after basic validation
-        self.is_finished = False
         self.command_step = 0
         self.trajectory_steps = []
-
-        logger.info(f"Initializing MoveJoint to {target_angles}...")
-
-        # --- MODIFICATION: Store parameters for deferred planning ---
-        self.target_angles = target_angles
-        self.duration = duration
-        self.velocity_percent = velocity_percent
-        self.accel_percent = accel_percent
-        self.trajectory_type = trajectory_type
-
-        # --- Perform only state-independent validation ---
-        target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
-        for i in range(6):
-            min_rad, max_rad = PAROL6_ROBOT.Joint_limits_radian[i]
-            if not (min_rad <= target_pos_rad[i] <= max_rad):
-                logger.error(f"  -> VALIDATION FAILED: Target for Joint {i+1} ({self.target_angles[i]} deg) is out of range.")
-                return
         
-        self.is_valid = True
+        # Parameters (set in match())
+        self.target_angles = None
+        self.duration = None
+        self.velocity_percent = None
+        self.accel_percent = 50
+        self.trajectory_type = 'poly'
+    
+    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Parse MOVEJOINT command parameters.
+        
+        Format: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed
+        Example: MOVEJOINT|0|45|90|-45|30|0|None|50
+        
+        Args:
+            parts: Pre-split message parts
+            
+        Returns:
+            Tuple of (can_handle, error_message)
+        """
+        if len(parts) != 9:
+            return (False, "MOVEJOINT requires 8 parameters: 6 joint angles, duration, speed")
+        
+        try:
+            # Parse joint angles
+            self.target_angles = [float(parts[i]) for i in range(1, 7)]
+            
+            # Parse duration and speed
+            self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+            self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
+            
+            # Validate joint limits
+            target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
+            for i in range(6):
+                min_rad, max_rad = PAROL6_ROBOT.Joint_limits_radian[i]
+                if not (min_rad <= target_pos_rad[i] <= max_rad):
+                    return (False, f"Joint {i+1} target ({self.target_angles[i]} deg) is out of range")
+            
+            logger.info(f"Parsed MoveJoint to {self.target_angles}")
+            self.is_valid = True
+            return (True, None)
+            
+        except ValueError as e:
+            return (False, f"Invalid MOVEJOINT parameters: {str(e)}")
+        except Exception as e:
+            return (False, f"Error parsing MOVEJOINT: {str(e)}")
 
-    def prepare_for_execution(self, current_position_in):
+    def setup(self, state, *, udp_transport=None, addr=None, gcode_interpreter=None):
         """Calculates the trajectory just before execution begins."""
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
+        if gcode_interpreter is not None:
+            self.gcode_interpreter = gcode_interpreter
+
         logger.debug(f"  -> Preparing trajectory for MoveJoint to {self.target_angles}...")
         
-        initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(current_position_in)])
+        initial_pos_rad = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)])
         target_pos_rad = np.array([np.deg2rad(angle) for angle in self.target_angles])
 
         if self.duration and self.duration > 0:
@@ -64,7 +101,7 @@ class MoveJointCommand(CommandBase):
         elif self.velocity_percent is not None:
             try:
                 accel_percent = self.accel_percent if self.accel_percent is not None else 50
-                initial_pos_steps = np.array(current_position_in)
+                initial_pos_steps = np.array(state.Position_in)
                 target_pos_steps = np.array([int(PAROL6_ROBOT.RAD2STEPS(rad, i)) for i, rad in enumerate(target_pos_rad)])
                 
                 all_joint_times = []
@@ -133,26 +170,21 @@ class MoveJointCommand(CommandBase):
         else:
              logger.debug(f" -> Trajectory prepared with {len(self.trajectory_steps)} steps.")
 
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, Position_out=None, **kwargs):
-        # Get Position_out from kwargs if not provided
-        if Position_out is None:
-            Position_out = kwargs.get('Position_out', Position_in)
-        
-        # This method remains unchanged.
+    def execute_step(self, state) -> ExecutionStatus:
         if self.is_finished or not self.is_valid:
-            return True
+            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
 
         if self.command_step >= len(self.trajectory_steps):
             logger.info(f"{type(self).__name__} finished.")
             self.is_finished = True
-            Position_out[:] = Position_in[:]
-            Speed_out[:] = [0] * 6
-            Command_out.value = CommandCode.MOVE
-            return True
+            state.Position_out[:] = state.Position_in[:]
+            state.Speed_out[:] = [0] * 6
+            state.Command_out = CommandCode.MOVE
+            return ExecutionStatus.completed("MOVEJOINT complete")
         else:
             pos_step, _ = self.trajectory_steps[self.command_step]
-            Position_out[:] = pos_step
-            Speed_out[:] = [0] * 6
-            Command_out.value = CommandCode.MOVE
+            state.Position_out[:] = pos_step
+            state.Speed_out[:] = [0] * 6
+            state.Command_out = CommandCode.MOVE
             self.command_step += 1
-            return False
+            return ExecutionStatus.executing("MoveJoint")

@@ -19,25 +19,6 @@ class GcodeCommand(CommandBase):
     
     def __init__(self):
         super().__init__()
-        
-    def prepare_for_execution(self, current_position_in):
-        """
-        Prepare command for execution
-        
-        Args:
-            current_position_in: Current robot position
-        """
-        pass
-    
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """
-        Execute one step of the command
-        
-        Returns:
-            True if command is finished
-        """
-        self.is_finished = True
-        return self.is_finished
     
     def to_robot_command(self) -> str:
         """

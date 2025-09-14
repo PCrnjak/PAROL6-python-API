@@ -17,7 +17,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # Import parol6 for server management
-from parol6.server.manager import ServerManager
+from parol6.client.manager import ServerManager
 
 # Import utilities for port detection
 def find_available_ports(start_port: int = 5001, count: int = 2):
