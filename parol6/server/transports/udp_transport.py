@@ -145,8 +145,6 @@ class UDPTransport:
                 # Also add to internal queue for history
                 self.message_queue.append(msg)
                 
-                logger.debug(f"Received UDP message from {address}: {message_str}")
-                
             except socket.error as e:
                 # No more data available (EWOULDBLOCK/EAGAIN)
                 if e.errno in (11, 35):  # EWOULDBLOCK/EAGAIN
@@ -179,8 +177,6 @@ class UDPTransport:
             # Encode and send the message
             data = message.encode('utf-8')
             self.socket.sendto(data, address)
-            
-            logger.debug(f"Sent UDP response to {address}: {message}")
             return True
             
         except socket.error as e:

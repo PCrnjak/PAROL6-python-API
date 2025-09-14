@@ -21,7 +21,7 @@ from parol6.gcode import GcodeInterpreter
 from parol6.config import INTERVAL_S, get_com_port_with_fallback, save_com_port, COMMAND_COOLDOWN_MS
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("parol6.server.controller")
 
 
 @dataclass
@@ -48,7 +48,7 @@ class QueuedCommand:
 class ControllerConfig:
     """Configuration for the controller."""
     udp_host: str = '0.0.0.0'
-    udp_port: int = 5001  # Changed from 12321 to match controller
+    udp_port: int = 5001
     serial_port: Optional[str] = None
     serial_baudrate: int = 3000000
     loop_interval: float = INTERVAL_S
@@ -112,8 +112,9 @@ class Controller:
         self.total_cancelled = 0
         
         # E-stop recovery
-        self.estop_active = False
+        self.estop_active = None  # None = unknown, True = active, False = released
         self.estop_recovery_time = None
+        self.first_frame_received = False  # Track if we've received data from robot
         
         # Thread for command processing
         self.command_thread = None
@@ -181,7 +182,6 @@ class Controller:
         """
         try:
             # Discover and register all commands
-            logger.info("Discovering commands...")
             discover_commands()
             
             # Initialize UDP transport
@@ -193,9 +193,14 @@ class Controller:
             
             # Initialize Serial transport
             serial_port = self.config.serial_port
+            port_from_file = False
+            
             if not serial_port and not is_fake_serial_enabled():
                 # No port specified and not in simulation - use persistence
                 serial_port = get_com_port_with_fallback()
+                # Check if port came from file (not from environment)
+                env_port = os.getenv("PAROL6_COM_PORT") or os.getenv("PAROL6_SERIAL")
+                port_from_file = serial_port and not env_port
                 
             if serial_port:
                 logger.info(f"Connecting to serial port {serial_port}")
@@ -203,19 +208,21 @@ class Controller:
                     serial_port,
                     self.config.serial_baudrate
                 )
+                    
                 if not self.serial_transport.connect():
                     logger.error("Failed to connect to serial port")
                     return False
                     
-                # Save the successfully connected port
-                save_com_port(serial_port)
+                # Only save if port was explicitly set (not loaded from file)
+                if not port_from_file:
+                    save_com_port(serial_port)
                 
                 # Update state with port info
                 state = self.state_manager.get_state()
                 state.com_port_str = serial_port
                 state.com_port_cache = serial_port
             else:
-                logger.warning("No serial port configured - running in simulation mode")
+                logger.warning("No serial port configured. Waiting for SET_PORT via UDP or set --serial/PAROL6_COM_PORT/com_port.txt before connecting.")
             
             # Initialize robot state
             self.state_manager.reset_state()
@@ -307,31 +314,33 @@ class Controller:
                         except Exception as e:
                             logger.debug(f"Serial auto-reconnect attempt failed: {e}")
 
-                # 2. Handle E-stop
-                if state.InOut_in[4] == 0:  # E-stop pressed (0 = pressed, 1 = released)
-                    if not self.estop_active:
-                        logger.warning("E-STOP activated")
-                        self.estop_active = True
-                        # Cancel active command
-                        if self.active_command:
-                            self._cancel_active_command("E-Stop activated")
-                        # Clear queue
-                        self._clear_queue("E-Stop activated")
-                        # Stop robot
-                        state.Command_out = CommandCode.ESTOP
-                        state.Speed_out[:] = [0] * 6
-                elif self.estop_active:
-                    # E-stop was released - automatic recovery
-                    logger.info("E-STOP released - automatic recovery")
-                    self.estop_active = False
-                    # Re-enable immediately per policy (no keyboard flow)
-                    state.enabled = True
-                    state.disabled_reason = ""
-                    state.Command_out = CommandCode.IDLE
-                    state.Speed_out[:] = [0] * 6
+                # 2. Handle E-stop (only check when connected to robot and received first frame)
+                if self.serial_transport and self.serial_transport.is_connected() and self.first_frame_received:
+                    if state.InOut_in[4] == 0:  # E-stop pressed (0 = pressed, 1 = released)
+                        if self.estop_active != True:  # Not already in E-stop state
+                            logger.warning("E-STOP activated")
+                            self.estop_active = True
+                            # Cancel active command
+                            if self.active_command:
+                                self._cancel_active_command("E-Stop activated")
+                            # Clear queue
+                            self._clear_queue("E-Stop activated")
+                            # Stop robot
+                            state.Command_out = CommandCode.DISABLE
+                            state.Speed_out[:] = [0] * 6
+                    elif state.InOut_in[4] == 1:  # E-stop released (1 = released)
+                        if self.estop_active == True:  # Was in E-stop state
+                            # E-stop was released - automatic recovery
+                            logger.info("E-STOP released - automatic recovery")
+                            self.estop_active = False
+                            # Re-enable immediately per policy (no keyboard flow)
+                            state.enabled = True
+                            state.disabled_reason = ""
+                            state.Command_out = CommandCode.IDLE
+                            state.Speed_out[:] = [0] * 6
                 
-                # 3. Execute commands if not in E-stop
-                if not self.estop_active:
+                # 3. Execute commands if not in E-stop (or E-stop state unknown)
+                if self.estop_active != True:  # Execute if E-stop is False or None (unknown)
                     # Execute active command
                     if self.active_command:
                         self._execute_active_command()
@@ -415,8 +424,6 @@ class Controller:
             # Parse command name
             cmd_parts = cmd_str.split('|')
             cmd_name = cmd_parts[0].upper()
-            
-            logger.debug(f"UDP command received: {cmd_name} (id={cmd_id})")
 
             # Handle system commands immediately (no cooldown)
             if cmd_name in ["STOP", "ENABLE", "DISABLE", "CLEAR_ERROR", "SET_PORT", "STREAM"]:
@@ -576,8 +583,6 @@ class Controller:
             new_port = parts[1].strip()
             if new_port:
                 try:
-                    save_com_port(new_port)
-                    state.com_port_str = new_port
                     # Disconnect any existing connection
                     if self.serial_transport:
                         try:
@@ -590,7 +595,6 @@ class Controller:
                         self.config.serial_baudrate
                     )
                     if self.serial_transport.connect():
-                        logger.info(f"Connected to serial port {new_port}")
                         save_com_port(new_port)
                         state.com_port_str = new_port
                         state.com_port_cache = new_port
@@ -907,14 +911,12 @@ class Controller:
             except Exception as e:
                 logger.error(f"Command execution error: {e}")
                 
-                # Handle execution error
-                if self.active_command.command_id and self.active_command.address:
-                    self._send_ack(
-                        self.active_command.command_id,
-                        "FAILED",
-                        f"Execution error: {str(e)}",
-                        self.active_command.address
-                    )
+                # Handle execution error - save command info before clearing
+                cmd_id = self.active_command.command_id if self.active_command else None
+                addr = self.active_command.address if self.active_command else None
+                
+                if cmd_id and addr:
+                    self._send_ack(cmd_id, "FAILED", f"Execution error: {str(e)}", addr)
                 
                 # Record and clear
                 self._record_completion(ExecutionStatusCode.FAILED)
@@ -1098,6 +1100,11 @@ class Controller:
             state.Position_error_in[:] = frame.position_error_in
             state.Gripper_data_in[:] = frame.gripper_data_in
             # timing_data_in and xtr_data available in frame if needed later
+            
+            # Mark that we've received the first frame
+            if not self.first_frame_received:
+                self.first_frame_received = True
+                logger.debug("First frame received from robot")
         except Exception as e:
             logger.error(f"Error updating state from serial frame: {e}")
 
@@ -1275,7 +1282,8 @@ def main():
     # Set up logging with determined level
     logging.basicConfig(
         level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S"
     )
     
     # Create configuration

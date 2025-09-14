@@ -17,10 +17,12 @@ logger = logging.getLogger(__name__)
 
 class CommandCode(IntEnum):
     """Unified command codes for firmware interface."""
-    IDLE = 255
     HOME = 100
+    ENABLE = 101
+    DISABLE = 102
     JOG = 123
     MOVE = 156
+    IDLE = 255
 
 
 def split_bitfield(byte_val: int) -> list[int]:
@@ -132,9 +134,6 @@ def pack_tx_frame(
 
     # Timeout
     out += bytes([int(timeout_out) & 0xFF])
-
-    # Reserved/legacy bytes to match firmware payload length
-    out += b"\x00\x00"
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
     for idx in range(3):

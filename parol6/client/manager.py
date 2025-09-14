@@ -7,6 +7,7 @@ Provides lifecycle management and automatic spawning of the controller process.
 import asyncio
 import contextlib
 import logging
+import re
 import os
 import signal
 import subprocess
@@ -17,6 +18,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Deque
 from collections import deque
+
+# Precompiled regex patterns for server log normalization
+_SERVER_LINE_RE = re.compile(
+    r'^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3})\s*-\s*([A-Za-z0-9_.-]+)\s*-\s*(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s*-\s*(.*)$'
+)
+_SIMPLE_FORMAT_RE = re.compile(
+    r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
+)
+_BRACKET_LEVEL_RE = re.compile(
+    r'^\s*\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s+(.*)$'
+)
+_MODULE_PREFIX_RE = re.compile(
+    r'^([A-Za-z0-9_.-]+):\s+(.*)$'
+)
 
 
 @dataclass
@@ -38,7 +53,15 @@ class ServerManager:
     - Can be used with a custom controller script path or defaults to the package's bundled controller.
     """
 
-    def __init__(self, controller_path: str | None = None) -> None:
+    def __init__(self, controller_path: str | None = None, normalize_logs: bool = False) -> None:
+        """
+        Initialize the ServerManager.
+        
+        Args:
+            controller_path: Optional path to controller script. If None, uses bundled controller.
+            normalize_logs: If True, parse and normalize controller log output to avoid duplicate
+                          timestamp/level/module info. Set to True when used from web GUI.
+        """
         if controller_path:
             self.controller_path = Path(controller_path).resolve()
             if not self.controller_path.exists():
@@ -53,6 +76,7 @@ class ServerManager:
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
         self._log_buffer: Deque[str] = deque(maxlen=5000)
+        self.normalize_logs = normalize_logs
 
     @property
     def pid(self) -> int | None:
@@ -60,19 +84,6 @@ class ServerManager:
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
-
-    def _write_com_port_hint(self, com_port: str) -> None:
-        """
-        The controller.py reads com_port.txt at startup.
-        Write it unconditionally before launch for consistent behavior across OSes.
-        """
-        cwd = self.controller_path.parent
-        hint = cwd / "com_port.txt"
-        try:
-            hint.write_text(com_port.strip() + "\n", encoding="utf-8")
-        except Exception as e:
-            # Non-fatal: controller can still prompt or auto-detect depending on OS
-            logging.warning("ServerManager: failed to write %s: %s", hint, e)
 
     async def start_controller(
         self, 
@@ -87,10 +98,6 @@ class ServerManager:
         # Use a more direct approach to find the package root
         cwd = Path(__file__).resolve().parents[2]  # parol6/server/manager.py -> repo root
 
-        # Optional COM port preseed
-        if com_port:
-            self._write_com_port_hint(com_port)
-
         env = os.environ.copy()
         # Disable autohome unless explicitly overridden
         if no_autohome:
@@ -104,10 +111,8 @@ class ServerManager:
         # Launch the controller as a module to ensure package imports resolve
         args = [sys.executable, "-u", "-m", "parol6.server.controller"]
         
-        # Optionally forward current logging level if explicitly enabled
-        if os.getenv("PAROL6_PASS_LOG_LEVEL", "").lower() in ("1", "true", "yes", "on"):
-            level_name = logging.getLevelName(logging.getLogger().level)
-            args.append(f"--log-level={level_name}")
+        level_name = logging.getLevelName(logging.getLogger().level)
+        args.append(f"--log-level={level_name}")
             
         try:
             self._proc = subprocess.Popen(
@@ -137,36 +142,71 @@ class ServerManager:
         """Read controller stdout and forward to logging."""
         try:
             assert proc.stdout is not None
+            # Maintain last logger/level for multi-line tracebacks
+            last_logger = "parol6.server"
+            last_level = logging.INFO
+
             for raw_line in iter(proc.stdout.readline, ""):
                 if self._stop_reader.is_set():
                     break
                 line = raw_line.rstrip("\r\n")
                 if line:
-                    # Skip timestamp prefix if present (format: HH:MM:SS.mmm [LEVEL] message)
-                    space_pos = line.find(" ")
-                    if space_pos > 0 and space_pos < 15:  # Reasonable timestamp length
-                        # Check if it looks like a timestamp
-                        timestamp_part = line[:space_pos]
-                        if ":" in timestamp_part:
-                            line = line[space_pos + 1:].lstrip()
-                    
-                    # Preserve severity if prefixes with [LEVEL]
-                    level = logging.INFO
-                    msg = line
+                    if self.normalize_logs:
+                        # Normalize child log line and route to embedded module logger
+                        level = logging.INFO
+                        logger_name: str | None = None
+                        msg = line
 
-                    if line.startswith("[DEBUG]"):
-                        level, msg = logging.DEBUG, line[7:].lstrip()
-                    elif line.startswith("[INFO]"):
-                        level, msg = logging.INFO, line[6:].lstrip()
-                    elif line.startswith("[WARNING]"):
-                        level, msg = logging.WARNING, line[9:].lstrip()
-                    elif line.startswith("[ERROR]"):
-                        level, msg = logging.ERROR, line[7:].lstrip()
-                    elif line.startswith("[CRITICAL]"):
-                        level, msg = logging.CRITICAL, line[10:].lstrip()
+                        # Try full Python logging pattern: "YYYY-MM-DD HH:MM:SS,mmm - module - LEVEL - message"
+                        m = _SERVER_LINE_RE.match(line)
+                        if m:
+                            _, logger_name, level_name, actual_message = m.groups()
+                            logger_name = (logger_name or "").strip()
+                            msg = actual_message
+                            level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                        else:
+                            # Try simple format: "HH:MM:SS LEVEL module: message"
+                            s = _SIMPLE_FORMAT_RE.match(line)
+                            if s:
+                                _, level_name, logger_name, actual_message = s.groups()
+                                logger_name = (logger_name or "").strip()
+                                msg = actual_message
+                                level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                            else:
+                                # Try bracketed level: "[LEVEL] rest"
+                                b = _BRACKET_LEVEL_RE.match(line)
+                                if b:
+                                    level_name, rest = b.groups()
+                                    level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                                    # Optional "module: message" inside rest
+                                    p = _MODULE_PREFIX_RE.match(rest or "")
+                                    if p:
+                                        logger_name, msg = p.groups()
+                                        logger_name = (logger_name or "").strip()
+                                    else:
+                                        msg = rest
+                                else:
+                                    # Traceback and continuation lines -> keep last context, escalate on Traceback
+                                    if line.startswith("Traceback"):
+                                        level = logging.ERROR
+                                    msg = line
 
-                    self._log_buffer.append(raw_line.rstrip("\r\n"))
-                    logging.log(level, "[SERVER] %s", msg)
+                        # Choose target logger
+                        target_logger_name = logger_name or last_logger or "parol6.server"
+                        target_logger = logging.getLogger(target_logger_name)
+                        target_logger.log(level, msg)
+
+                        # Update last context if we identified a module
+                        if logger_name:
+                            last_logger = logger_name
+                        last_level = level
+
+                        # Store cleaned line in buffer (what we emitted)
+                        self._log_buffer.append(f"{target_logger_name}: {msg}")
+                    else:
+                        # No normalization - forward line as-is to root logger
+                        logging.info("[SERVER] %s", line)
+                        self._log_buffer.append(raw_line.rstrip("\r\n"))
         except Exception as e:
             logging.warning("ServerManager: output reader stopped: %s", e)
 

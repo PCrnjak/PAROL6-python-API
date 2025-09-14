@@ -117,8 +117,6 @@ class SerialTransport:
             
             if self.serial.is_open:
                 logger.info(f"Connected to serial port: {self.port}")
-                # Save successful port for future use
-                self._save_port(self.port)
                 return True
             else:
                 logger.error(f"Failed to open serial port: {self.port}")
@@ -170,10 +168,6 @@ class SerialTransport:
             return False
             
         self.last_reconnect_attempt = now
-        
-        # Try to load port from file if not set
-        if not self.port:
-            self.port = self._load_port()
             
         if self.port:
             logger.info(f"Attempting to reconnect to {self.port}...")
@@ -345,40 +339,6 @@ class SerialTransport:
         ps.start_cond3 = 0
         ps.data_len = 0
         ps.data_counter = 0
-    
-    def _save_port(self, port: str) -> None:
-        """
-        Save the serial port to a file for persistence.
-        
-        Args:
-            port: Port name to save
-        """
-        try:
-            with open("com_port.txt", "w") as f:
-                f.write(port)
-            logger.debug(f"Saved serial port to file: {port}")
-        except Exception as e:
-            logger.warning(f"Could not save port to file: {e}")
-    
-    def _load_port(self) -> Optional[str]:
-        """
-        Load the serial port from a file.
-        
-        Returns:
-            Port name if found, None otherwise
-        """
-        try:
-            with open("com_port.txt", "r") as f:
-                port = f.read().strip()
-                if port:
-                    logger.debug(f"Loaded serial port from file: {port}")
-                    return port
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            logger.warning(f"Could not load port from file: {e}")
-        
-        return None
     
     def get_info(self) -> dict:
         """

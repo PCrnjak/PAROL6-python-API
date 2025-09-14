@@ -37,7 +37,7 @@ LOG_LEVEL_DEFAULT: str = "INFO"
 COMMAND_COOLDOWN_MS: int = 10
 
 # COM port persistence file
-COM_PORT_FILE: str = "com_port.txt"
+COM_PORT_FILE: str = "serial_port.txt"
 
 
 def save_com_port(port: str) -> bool:
@@ -81,43 +81,25 @@ def load_com_port() -> Optional[str]:
 
 def get_com_port_with_fallback() -> str:
     """
-    Load COM port from file or prompt user for input.
-    
+    Resolve COM port from environment or file.
+
+    Priority:
+      1) Environment variables: PAROL6_COM_PORT or PAROL6_SERIAL
+      2) com_port.txt (if present and non-empty)
+
     Returns:
-        COM port string
+      Port string if available, otherwise an empty string "".
     """
-    # First try to load from file
+    # 1) Environment variables
+    env_port = os.getenv("PAROL6_COM_PORT") or os.getenv("PAROL6_SERIAL")
+    if env_port and env_port.strip():
+        port = env_port.strip()
+        logger.info(f"Using COM port from environment: {port}")
+        return port
+
+    # 2) Persistence file
     saved_port = load_com_port()
     if saved_port:
-        # Prompt user to confirm or change
-        print(f"Found saved COM port: {saved_port}")
-        response = input("Press Enter to use this port, or type a new port: ").strip()
-        if response:
-            # User entered a new port
-            port = response
-            save_com_port(port)
-        else:
-            # User accepted saved port
-            port = saved_port
-    else:
-        # No saved port, prompt for input
-        import platform
-        
-        if platform.system() == "Windows":
-            default_prompt = "Enter COM port (e.g., COM3): "
-        else:
-            default_prompt = "Enter COM port (e.g., /dev/ttyUSB0): "
-        
-        port = input(default_prompt).strip()
-        if not port:
-            # Use a default based on platform
-            if platform.system() == "Windows":
-                port = "COM3"
-            else:
-                port = "/dev/ttyUSB0"
-            print(f"Using default port: {port}")
-        
-        # Save the port for next time
-        save_com_port(port)
-    
-    return port
+        return saved_port
+
+    return ""

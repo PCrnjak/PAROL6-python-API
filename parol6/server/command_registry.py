@@ -176,7 +176,6 @@ class CommandRegistry:
             can_handle, error = command.match(parts)  # Pass pre-split parts
             
             if can_handle:
-                logger.debug(f"Created {command_name} command from message")
                 return command
             elif error:
                 logger.debug(f"Command '{command_name}' rejected: {error}")
