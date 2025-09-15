@@ -7,16 +7,17 @@ import os
 import socket
 import time
 import threading
-from typing import Optional, Dict, Any, List, Tuple, Deque
+from typing import Optional, Dict, Any, List, Tuple, Deque, Union
 from dataclasses import dataclass, field
 from collections import deque
 
 from parol6.server.state import StateManager, ControllerState
 from parol6.server.transports.udp_transport import UDPTransport
 from parol6.server.transports.serial_transport import SerialTransport
+from parol6.server.transports.mock_serial_transport import MockSerialTransport
+from parol6.server.transports import create_and_connect_transport, create_transport, is_simulation_mode
 from parol6.server.command_registry import discover_commands, create_command
-from parol6.protocol.wire import pack_tx_frame, unpack_rx_frame, CommandCode
-from parol6.server.simulation import SimulationState, create_simulation_state, is_fake_serial_enabled, simulate_motion
+from parol6.protocol.wire import CommandCode, pack_tx_frame
 from parol6.gcode import GcodeInterpreter
 from parol6.config import INTERVAL_S, get_com_port_with_fallback, save_com_port, COMMAND_COOLDOWN_MS
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
@@ -28,7 +29,7 @@ logger = logging.getLogger("parol6.server.controller")
 class ExecutionContext:
     """Context passed to commands during execution."""
     udp_transport: Optional[UDPTransport]
-    serial_transport: Optional[SerialTransport]
+    serial_transport: Optional[Union[SerialTransport, MockSerialTransport]]
     gcode_interpreter: Optional[GcodeInterpreter]
     addr: Optional[Tuple[str, int]]
     state: ControllerState
@@ -124,19 +125,10 @@ class Controller:
         
         # Stream mode
         self.stream_mode = False
-        
-        # Simulation mode
-        self.simulation = None
-        if is_fake_serial_enabled():
-            self.simulation = create_simulation_state()
-            logger.info("FAKE_SERIAL mode enabled - running in simulation")
     
     def _get_ack_port(self) -> int:
         """Get the acknowledgment port from environment or use default."""
-        try:
-            return int(os.getenv("PAROL6_ACK_PORT", "5002"))
-        except Exception:
-            return 5002
+        return int(os.getenv("PAROL6_ACK_PORT", "5002"))
     
     def _send_ack(self, cmd_id: str, status: str, details: str = "", addr: Optional[Tuple[str, int]] = None) -> None:
         """
@@ -191,36 +183,21 @@ class Controller:
                 logger.error("Failed to create UDP socket")
                 return False
             
-            # Initialize Serial transport
-            serial_port = self.config.serial_port
-            port_from_file = False
-            
-            if not serial_port and not is_fake_serial_enabled():
-                # No port specified and not in simulation - use persistence
-                serial_port = get_com_port_with_fallback()
-                # Check if port came from file (not from environment)
-                env_port = os.getenv("PAROL6_COM_PORT") or os.getenv("PAROL6_SERIAL")
-                port_from_file = serial_port and not env_port
-                
-            if serial_port:
-                logger.info(f"Connecting to serial port {serial_port}")
-                self.serial_transport = SerialTransport(
-                    serial_port,
-                    self.config.serial_baudrate
+            # Initialize Serial transport using factory
+            if self.config.serial_port or is_simulation_mode():
+                self.serial_transport = create_and_connect_transport(
+                    port=self.config.serial_port,
+                    baudrate=self.config.serial_baudrate,
+                    auto_find_port=True
                 )
-                    
-                if not self.serial_transport.connect():
-                    logger.error("Failed to connect to serial port")
-                    return False
-                    
-                # Only save if port was explicitly set (not loaded from file)
-                if not port_from_file:
-                    save_com_port(serial_port)
                 
-                # Update state with port info
-                state = self.state_manager.get_state()
-                state.com_port_str = serial_port
-                state.com_port_cache = serial_port
+                if self.serial_transport:
+                    # Update state with port info
+                    state = self.state_manager.get_state()
+                    if hasattr(self.serial_transport, 'port'):
+                        state.com_port_str = self.serial_transport.port
+                        state.com_port_cache = self.serial_transport.port
+                        logger.info(f"Connected to transport: {self.serial_transport.port}")
             else:
                 logger.warning("No serial port configured. Waiting for SET_PORT via UDP or set --serial/PAROL6_COM_PORT/com_port.txt before connecting.")
             
@@ -302,9 +279,6 @@ class Controller:
                     frames = self.serial_transport.read_frames()
                     for frame in frames:
                         self._update_state_from_serial_frame(frame)
-                elif self.simulation:
-                    # Update simulation
-                    self._process_firmware_data(None)
                 
                 # Serial auto-reconnect when a port is known
                 if self.serial_transport and not self.serial_transport.is_connected():
@@ -1071,11 +1045,6 @@ class Controller:
             
             # Handle error
             state = self.state_manager.get_state()
-            if hasattr(self.current_command, 'handle_error'):
-                self.current_command.handle_error(e, state)
-            if hasattr(self.current_command, 'teardown'):
-                self.current_command.teardown(state)
-            
             # Send error notification if tracked
             for cmd_id, (cmd, addr) in list(self.command_id_map.items()):
                 if cmd == self.current_command:
@@ -1107,62 +1076,6 @@ class Controller:
                 logger.debug("First frame received from robot")
         except Exception as e:
             logger.error(f"Error updating state from serial frame: {e}")
-
-    def _process_firmware_data(self, data: bytes):
-        """
-        Process data received from firmware.
-        
-        Args:
-            data: Raw bytes from firmware
-        """
-        try:
-            # Use simulation if no serial
-            if self.simulation and not self.serial_transport:
-                state = self.state_manager.get_state()
-                # Simulate motion
-                simulate_motion(
-                    self.simulation,
-                    state.Command_out.value if hasattr(state.Command_out, 'value') else state.Command_out,
-                    state.Position_out,
-                    state.Speed_out
-                )
-                # Update state from simulation
-                state.Position_in[:] = self.simulation.position_in
-                state.Speed_in[:] = self.simulation.speed_in
-                state.Homed_in[:] = self.simulation.homed_in
-                state.InOut_in[:] = self.simulation.io_in
-                return
-            
-            # Unpack firmware data
-            unpacked = unpack_rx_frame(data)
-            
-            # Update state with firmware data
-            state = self.state_manager.get_state()
-            
-            # Update input arrays
-            state.Position_in[:] = unpacked.get('Position_in', [0] * 6)
-            state.Speed_in[:] = unpacked.get('Speed_in', [0] * 6)
-            state.Homed_in[:] = unpacked.get('Homed_in', [0] * 8)
-            state.Temperature_error_in[:] = unpacked.get('Temperature_error_in', [0] * 8)
-            state.Position_error_in[:] = unpacked.get('Position_error_in', [0] * 8)
-            state.InOut_in[:] = unpacked.get('InOut_in', [0] * 8)
-            state.Gripper_data_in[:] = unpacked.get('Gripper_data_in', [0] * 6)
-            
-            # Check for E-stop
-            if unpacked.get('estop', False):
-                if not self.estop_active:
-                    logger.warning("E-STOP activated")
-                    self.estop_active = True
-                    self.estop_recovery_time = None
-            else:
-                if self.estop_active:
-                    logger.info("E-STOP released")
-                    self.estop_active = False
-                    if self.config.auto_estop_recovery:
-                        self.estop_recovery_time = time.time() + self.config.estop_recovery_delay
-            
-        except Exception as e:
-            logger.error(f"Error processing firmware data: {e}")
     
     def _prepare_output_data(self) -> Optional[bytes]:
         """

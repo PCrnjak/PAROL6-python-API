@@ -1,16 +1,25 @@
 """
-Transport modules for PAROL6 controller communication.
+Transport modules for PAROL6 server.
 
-This package contains transport implementations for different communication
-protocols used by the controller (UDP, Serial, etc.).
+This package provides different transport implementations for
+communicating with the robot hardware or simulation.
 """
 
-from .udp_transport import UDPTransport, UDPMessage
 from .serial_transport import SerialTransport, SerialFrame
+from .mock_serial_transport import MockSerialTransport
+from .udp_transport import UDPTransport
+from .transport_factory import (
+    create_transport,
+    create_and_connect_transport,
+    is_simulation_mode
+)
 
 __all__ = [
-    'UDPTransport',
-    'UDPMessage',
-    'SerialTransport', 
+    'SerialTransport',
     'SerialFrame',
+    'MockSerialTransport',
+    'UDPTransport',
+    'create_transport',
+    'create_and_connect_transport',
+    'is_simulation_mode',
 ]
