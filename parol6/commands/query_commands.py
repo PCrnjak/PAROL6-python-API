@@ -328,42 +328,46 @@ class GetServerStateCommand(CommandBase):
             return True, None
         return False, None
     
-    def setup(self, state: 'ControllerState') -> None:
-        """No setup needed for query commands."""
-        pass
+    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
+        """Bind context if provided"""
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
     
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs) -> bool:
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute immediately and return server state."""
-        udp_transport = kwargs.get('udp_transport')
-        addr = kwargs.get('addr')
-        state = kwargs.get('state')
-        
-        if not udp_transport or not addr:
+        if not hasattr(self, "udp_transport") or not hasattr(self, "addr") or not self.udp_transport or not self.addr:
             self.fail("Missing UDP transport or address")
-            return True
+            return ExecutionStatus.failed("Missing UDP transport or address")
         
         try:
-            # Build state information
+            homed = False
+            if hasattr(state, "Homed_in") and isinstance(state.Homed_in, list):
+                homed = any(bool(h) for h in state.Homed_in)
+
             server_state = {
                 "listening": {
                     "transport": "udp",
                     "address": f"{state.ip}:{state.port}" if state else "127.0.0.1:5001"
                 },
-                "serial_connected": bool(state and state.ser and getattr(state.ser, "is_open", False)),
-                "homed": any(bool(h) for h in Homed_in) if isinstance(Homed_in, list) else False,
-                "queue_depth": len(state.command_queue) if state and hasattr(state, 'command_queue') else 0,
-                "active_command": type(state.active_command).__name__ if state and state.active_command else None,
-                "stream_mode": bool(state.stream_mode) if state else False,
-                "uptime_s": float(time.time() - state.start_time) if state and state.start_time > 0 else 0.0,
+                "serial_connected": bool(state and getattr(state, "ser", None) and getattr(getattr(state, "ser", None), "is_open", False)),
+                "homed": homed,
+                "queue_depth": len(getattr(state, "command_queue", [])) if hasattr(state, "command_queue") else 0,
+                "active_command": type(getattr(state, "active_command", None)).__name__ if getattr(state, "active_command", None) else None,
+                "stream_mode": bool(getattr(state, "stream_mode", False)),
+                "uptime_s": float(time.time() - getattr(state, "start_time", 0.0)) if getattr(state, "start_time", 0.0) > 0 else 0.0,
             }
             
             payload = f"SERVER_STATE|{json.dumps(server_state)}"
-            udp_transport.send(payload, addr)
+            # Use the same API as other query commands
+            self.udp_transport.send_response(payload, self.addr)
         except Exception as e:
             self.fail(f"Failed to get server state: {e}")
+            return ExecutionStatus.failed(f"Failed to get server state: {e}")
         
         self.finish()
-        return True
+        return ExecutionStatus.completed("Server state sent")
 
 
 @dataclass

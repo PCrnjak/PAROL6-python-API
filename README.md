@@ -45,7 +45,7 @@ pip3 install keyboard
 ### Client-Server Design
 The system uses a UDP-based client-server architecture that separates robot control from command generation:
 
-* **The Robot Controller (`headless_commander.py`)**: 
+* **The Robot Controller (`controller.py`)**: 
   - Runs on the computer physically connected to the robot via USB/Serial
   - Maintains a high-frequency control loop (100Hz) for real-time robot control
   - Handles all complex calculations (inverse kinematics, trajectory planning)
@@ -733,7 +733,7 @@ These commands request current robot state without moving the robot:
 
 The system is designed with a client-server architecture where most dependencies are only needed on the server (robot controller) side. The client API (`robot_api.py`) uses only standard Python libraries for UDP communication, making it lightweight and portable.
 
-#### Server Dependencies (for `headless_commander.py`)
+#### Server Dependencies (for `controller.py`)
 Install Python 3 and the following packages on the computer connected to the robot:
 
 ```bash
@@ -769,7 +769,7 @@ pip3 install spatialmath
 
 #### Server Side (Robot Controller Computer)
 Required files in the same folder:
-* `headless_commander.py` - Main server/controller
+* `controller.py` - Main server/controller
 * `PAROL6_ROBOT.py` - Robot configuration and kinematic model  
 * `parol6/smooth_motion/` - Advanced trajectory generation package (split modules)
 * `commands/` - Modular command classes directory
@@ -807,7 +807,7 @@ The client can run on any computer on the same network as the server, or on the 
 
 2. **Start Controller**: On the robot controller computer, navigate to the folder containing the server files and run:
     ```bash
-    python headless_commander.py
+    python controller.py
     ```
     The controller will:
     - Connect to the robot via serial port (prompts if `com_port.txt` not found)
