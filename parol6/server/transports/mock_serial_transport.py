@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import time
 import logging
+import threading
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Sequence, Union
+import array
 
-from parol6.protocol.wire import pack_tx_frame, unpack_rx_frame, CommandCode
+from parol6.protocol.wire import pack_tx_frame, CommandCode, split_to_3_bytes
+from parol6 import config as cfg
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 logger = logging.getLogger(__name__)
@@ -40,7 +43,7 @@ class MockRobotState:
     timing_data_in: List[int] = field(default_factory=lambda: [0])
     
     # Simulation parameters
-    update_rate: float = 0.01  # 100Hz update rate
+    update_rate: float = cfg.INTERVAL_S  # match control loop cadence
     last_update: float = field(default_factory=time.time)
     homing_countdown: int = 0
     
@@ -90,7 +93,7 @@ class MockSerialTransport:
         # Frame generation tracking
         self._frames_to_send: List[bytes] = []
         self._last_frame_time = time.time()
-        self._frame_interval = 0.01  # 100Hz frame rate
+        self._frame_interval = cfg.INTERVAL_S  # match control loop cadence
         
         # Connection state
         self._connected = False
@@ -98,6 +101,14 @@ class MockSerialTransport:
         # Statistics
         self._frames_sent = 0
         self._frames_received = 0
+
+        # Latest-frame infrastructure (simulation publishes into this buffer)
+        self._frame_buf = bytearray(64)  # payload 52B + headroom
+        self._frame_mv = memoryview(self._frame_buf)[:52]
+        self._frame_version = 0
+        self._frame_ts = 0.0
+        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_running = False
         
         logger.info("MockSerialTransport initialized - simulation mode active")
     
@@ -145,13 +156,13 @@ class MockSerialTransport:
         return False
     
     def write_frame(self,
-                   position_out: List[int],
-                   speed_out: List[int],
+                   position_out: Union[List[int], array.array, Sequence[int]],
+                   speed_out: Union[List[int], array.array, Sequence[int]],
                    command_out: int,
-                   affected_joint_out: List[int],
-                   inout_out: List[int],
+                   affected_joint_out: Union[List[int], array.array, Sequence[int]],
+                   inout_out: Union[List[int], array.array, Sequence[int]],
                    timeout_out: int,
-                   gripper_data_out: List[int]) -> bool:
+                   gripper_data_out: Union[List[int], array.array, Sequence[int]]) -> bool:
         """
         Process a command frame from the controller.
         
@@ -198,40 +209,6 @@ class MockSerialTransport:
         
         return True
     
-    def read_frames(self) -> List[Any]:
-        """
-        Generate simulated response frames.
-        
-        This method simulates the robot's response by:
-        1. Running the motion simulation
-        2. Generating a response frame with current state
-        3. Returning it as if received from serial
-        
-        Returns:
-            List of frame objects (may be empty)
-        """
-        frames = []
-        
-        if not self._connected:
-            return frames
-        
-        # Check if it's time to generate a frame
-        now = time.time()
-        if now - self._last_frame_time >= self._frame_interval:
-            # Run simulation step
-            dt = now - self._state.last_update
-            self._simulate_motion(dt)
-            self._state.last_update = now
-            
-            # Generate response frame
-            frame = self._create_response_frame()
-            if frame:
-                frames.append(frame)
-                self._frames_sent += 1
-            
-            self._last_frame_time = now
-        
-        return frames
     
     def _simulate_motion(self, dt: float) -> None:
         """
@@ -251,6 +228,8 @@ class MockSerialTransport:
                     state.homed_in[i] = 1
                     state.position_in[i] = 0
                     state.speed_in[i] = 0
+                # Clear HOME command to avoid immediately restarting homing
+                state.command_out = CommandCode.IDLE
         
         # Ensure E-stop stays released in simulation
         state.io_in[4] = 1
@@ -261,8 +240,8 @@ class MockSerialTransport:
             if state.homing_countdown == 0:
                 for i in range(6):
                     state.homed_in[i] = 0  # Mark as not homed
-                # Schedule homing completion after ~0.2s
-                state.homing_countdown = max(1, int(0.2 / dt))
+                # Schedule homing completion after ~0.2s (use fixed frame interval for determinism)
+                state.homing_countdown = max(1, int(0.2 / self._frame_interval + 0.5))
             # Zero speeds during homing
             for i in range(6):
                 state.speed_in[i] = 0
@@ -327,30 +306,112 @@ class MockSerialTransport:
             for i in range(6):
                 state.speed_in[i] = 0
     
-    def _create_response_frame(self) -> Optional[Any]:
-        """
-        Create a response frame from current simulation state.
-        
-        Returns:
-            Frame object compatible with SerialTransport
-        """
-        # Create a frame-like object that matches SerialFrame structure
-        from parol6.server.transports.serial_transport import SerialFrame
-        
-        frame = SerialFrame(
-            position_in=list(self._state.position_in),
-            speed_in=list(self._state.speed_in),
-            homed_in=list(self._state.homed_in),
-            inout_in=list(self._state.io_in),
-            temperature_error_in=list(self._state.temperature_error_in),
-            position_error_in=list(self._state.position_error_in),
-            timing_data_in=list(self._state.timing_data_in),
-            gripper_data_in=list(self._state.gripper_data_in),
-            timestamp=time.time()
-        )
-        
-        return frame
     
+    # ================================
+    # Latest-frame API (reduced-copy)
+    # ================================
+    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
+        """
+        Start simulated latest-frame publisher thread.
+        """
+        if self._reader_thread and self._reader_thread.is_alive():
+            return self._reader_thread
+
+        def _run():
+            self._reader_running = True
+            try:
+                while not shutdown_event.is_set():
+                    if not self._connected:
+                        time.sleep(0.05)
+                        continue
+                    now = time.time()
+                    if now - self._last_frame_time >= self._frame_interval:
+                        # Advance simulation before publishing a new frame
+                        try:
+                            dt = now - self._state.last_update
+                            if dt > 0:
+                                self._simulate_motion(dt)
+                                self._state.last_update = now
+                        except Exception:
+                            logger.exception("MockSerialTransport: simulation step failed")
+
+                        payload = self._encode_payload_from_state()
+                        self._frame_buf[:52] = payload
+                        self._frame_version += 1
+                        self._frame_ts = now
+                        self._last_frame_time = now
+                    time.sleep(min(self._frame_interval, 0.01))
+            finally:
+                self._reader_running = False
+
+        t = threading.Thread(target=_run, name="MockSerialReader", daemon=True)
+        self._reader_thread = t
+        t.start()
+        return t
+
+    def _encode_payload_from_state(self) -> bytes:
+        """
+        Build a 52-byte payload per firmware layout from the simulated state.
+        """
+        st = self._state
+        out = bytearray(52)
+        # Positions (6 * 3 bytes)
+        off = 0
+        for i in range(6):
+            b0, b1, b2 = split_to_3_bytes(int(st.position_in[i]))
+            out[off] = b0; out[off + 1] = b1; out[off + 2] = b2
+            off += 3
+        # Speeds (6 * 3 bytes)
+        off = 18
+        for i in range(6):
+            b0, b1, b2 = split_to_3_bytes(int(st.speed_in[i]))
+            out[off] = b0; out[off + 1] = b1; out[off + 2] = b2
+            off += 3
+
+        def bits_to_byte(bits: List[int]) -> int:
+            val = 0
+            for b in bits[:8]:
+                val = (val << 1) | (1 if b else 0)
+            return val & 0xFF
+
+        # Bitfields
+        out[36] = bits_to_byte(st.homed_in)
+        out[37] = bits_to_byte(st.io_in)
+        out[38] = bits_to_byte(st.temperature_error_in)
+        out[39] = bits_to_byte(st.position_error_in)
+
+        # Timing (two bytes)
+        t = int(st.timing_data_in[0]) if st.timing_data_in else 0
+        out[40] = (t >> 8) & 0xFF
+        out[41] = t & 0xFF
+
+        # Reserved
+        out[42] = 0
+        out[43] = 0
+
+        # Gripper
+        gd = st.gripper_data_in
+        dev_id = int(gd[0]) if gd else 0
+        pos = int(gd[1]) & 0xFFFF
+        spd = int(gd[2]) & 0xFFFF
+        cur = int(gd[3]) & 0xFFFF
+        status = int(gd[4]) & 0xFF if gd else 0
+
+        out[44] = dev_id & 0xFF
+        out[45] = (pos >> 8) & 0xFF; out[46] = pos & 0xFF
+        out[47] = (spd >> 8) & 0xFF; out[48] = spd & 0xFF
+        out[49] = (cur >> 8) & 0xFF; out[50] = cur & 0xFF
+        out[51] = status & 0xFF
+
+        return bytes(out)
+
+    def get_latest_frame_view(self) -> tuple[Optional[memoryview], int, float]:
+        """
+        Return latest 52-byte payload memoryview, version, timestamp.
+        """
+        mv = self._frame_mv if self._frame_version > 0 else None
+        return (mv, self._frame_version, self._frame_ts)
+
     def get_info(self) -> dict:
         """
         Get information about the mock transport.

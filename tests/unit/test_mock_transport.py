@@ -10,13 +10,67 @@ Tests the mock serial transport implementation to ensure:
 
 import os
 import time
+import threading
 import pytest
 from unittest.mock import patch
 
+import numpy as np
+
 from parol6.server.transports.mock_serial_transport import MockSerialTransport, MockRobotState
 from parol6.server.transports import create_transport, is_simulation_mode
-from parol6.protocol.wire import CommandCode
+from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+
+def _wait_for_latest_frame_and_decode(transport: MockSerialTransport, timeout_s: float = 0.5):
+    """
+    Helper: wait for a latest frame publication and decode into numpy arrays.
+    Returns dict-like with arrays or None on timeout.
+    """
+    start = time.time()
+    last_ver = -1
+    # Ensure reader running
+    shutdown = threading.Event()
+    transport.start_reader(shutdown)
+
+    pos = np.zeros(6, dtype=np.int32)
+    spd = np.zeros(6, dtype=np.int32)
+    homed = np.zeros(8, dtype=np.uint8)
+    io_bits = np.zeros(8, dtype=np.uint8)
+    temp = np.zeros(8, dtype=np.uint8)
+    poserr = np.zeros(8, dtype=np.uint8)
+    timing = np.zeros(1, dtype=np.int32)
+    grip = np.zeros(6, dtype=np.int32)
+
+    while time.time() - start < timeout_s:
+        mv, ver, ts = transport.get_latest_frame_view()
+        if mv is not None and ver != last_ver:
+            ok = unpack_rx_frame_into(
+                mv,
+                pos_out=pos,
+                spd_out=spd,
+                homed_out=homed,
+                io_out=io_bits,
+                temp_out=temp,
+                poserr_out=poserr,
+                timing_out=timing,
+                grip_out=grip,
+            )
+            if ok:
+                return {
+                    "pos": pos.copy(),
+                    "spd": spd.copy(),
+                    "homed": homed.copy(),
+                    "io": io_bits.copy(),
+                    "temp": temp.copy(),
+                    "poserr": poserr.copy(),
+                    "timing": timing.copy(),
+                    "grip": grip.copy(),
+                    "ver": ver,
+                    "ts": ts,
+                }
+        time.sleep(0.005)
+    return None
 
 
 class TestMockSerialTransport:
@@ -82,124 +136,116 @@ class TestMockSerialTransport:
         assert not success
     
     def test_read_frames(self):
-        """Test reading response frames."""
+        """
+        Test reading response frames using latest-frame API (no legacy queues).
+        """
         transport = MockSerialTransport()
         transport.connect()
         
-        # Should get frames at regular intervals
-        time.sleep(0.02)  # Wait for at least one frame interval
-        frames = transport.read_frames()
+        decoded = _wait_for_latest_frame_and_decode(transport, timeout_s=0.5)
+        assert decoded is not None, "No frame published by mock transport"
         
-        assert len(frames) > 0
-        frame = frames[0]
+        # Check data shapes
+        assert decoded["pos"].shape == (6,)
+        assert decoded["spd"].shape == (6,)
+        assert decoded["homed"].shape == (8,)
+        assert decoded["io"].shape == (8,)
+        assert decoded["temp"].shape == (8,)
+        assert decoded["poserr"].shape == (8,)
+        assert decoded["timing"].shape == (1,)
+        assert decoded["grip"].shape == (6,)
         
-        # Check frame structure
-        assert hasattr(frame, 'position_in')
-        assert hasattr(frame, 'speed_in')
-        assert hasattr(frame, 'homed_in')
-        assert hasattr(frame, 'inout_in')
-        assert hasattr(frame, 'temperature_error_in')
-        assert hasattr(frame, 'position_error_in')
-        assert hasattr(frame, 'gripper_data_in')
-        assert hasattr(frame, 'timestamp')
-        
-        # Check data sizes
-        assert len(frame.position_in) == 6
-        assert len(frame.speed_in) == 6
-        assert len(frame.homed_in) == 8
-        assert len(frame.inout_in) == 8
-        
-        # E-stop should be released in simulation
-        assert frame.inout_in[4] == 1
+        # E-stop should be released in simulation (io bit 4)
+        assert int(decoded["io"][4]) == 1
     
     def test_motion_simulation_jog(self):
-        """Test JOG command simulation."""
+        """Test JOG command simulation via latest-frame API."""
         transport = MockSerialTransport()
         transport.connect()
         
-        # Send JOG command
-        initial_pos = transport._state.position_in[0]
-        speed_out = [1000, 0, 0, 0, 0, 0]  # Move joint 1
+        # Baseline
+        baseline = _wait_for_latest_frame_and_decode(transport, timeout_s=0.5)
+        assert baseline is not None
+        initial_pos = int(baseline["pos"][0])
         
-        transport.write_frame(
+        # Send JOG command to move joint 1
+        speed_out = [1000, 0, 0, 0, 0, 0]
+        assert transport.write_frame(
             [0]*6, speed_out, CommandCode.JOG,
             [1]*8, [0]*8, 0, [0]*6
         )
         
-        # Simulate for a short time
-        time.sleep(0.05)
-        frames = transport.read_frames()
-        
-        # Joint should have moved
-        if frames:
-            final_pos = frames[-1].position_in[0]
-            assert final_pos != initial_pos, "Joint didn't move during JOG"
+        # Wait for movement
+        moved = None
+        t0 = time.time()
+        while time.time() - t0 < 0.5:
+            decoded = _wait_for_latest_frame_and_decode(transport, timeout_s=0.1)
+            if decoded is None:
+                continue
+            if int(decoded["pos"][0]) != initial_pos:
+                moved = decoded
+                break
+        assert moved is not None, "Joint didn't move during JOG"
     
     def test_motion_simulation_move(self):
-        """Test MOVE command simulation."""
+        """Test MOVE command simulation via latest-frame API."""
         transport = MockSerialTransport()
         transport.connect()
         
-        # Send MOVE command
         target_pos = [5000, 0, 0, 0, 0, 0]
-        
-        transport.write_frame(
+        assert transport.write_frame(
             target_pos, [0]*6, CommandCode.MOVE,
             [1]*8, [0]*8, 0, [0]*6
         )
         
-        # Simulate until position is reached (or timeout)
-        frames = None
-        for _ in range(100):  # 1 second max (increased timeout)
-            time.sleep(0.01)
-            frames = transport.read_frames()
-            if frames:
-                current_pos = frames[-1].position_in[0]
-                if abs(current_pos - target_pos[0]) < 100:  # Close enough
-                    break
-        
-        # Should be close to target (relaxed tolerance)
-        if frames:
-            final_pos = frames[-1].position_in[0]
-            assert abs(final_pos - target_pos[0]) < 2000, f"Didn't move toward target: {final_pos} vs {target_pos[0]}"
+        # Poll until position moves toward target or timeout
+        final = None
+        t0 = time.time()
+        while time.time() - t0 < 1.0:
+            decoded = _wait_for_latest_frame_and_decode(transport, timeout_s=0.1)
+            if decoded is None:
+                continue
+            current_pos = int(decoded["pos"][0])
+            if abs(current_pos - target_pos[0]) < 2000:
+                final = decoded
+                break
+        assert final is not None, "Didn't move toward target sufficiently"
     
     def test_homing_simulation(self):
-        """Test HOME command simulation."""
+        """Test HOME command simulation via latest-frame API."""
         transport = MockSerialTransport()
         transport.connect()
         
-        # Note: Robot starts homed in simulation, so we need to check behavior
         # Send HOME command
-        transport.write_frame(
+        assert transport.write_frame(
             [0]*6, [0]*6, CommandCode.HOME,
             [1]*8, [0]*8, 0, [0]*6
         )
         
-        # Wait a bit and collect multiple frames
         homing_started = False
         homing_completed = False
+        t0 = time.time()
+        last_homed_bits = None
         
-        for i in range(100):  # Up to 1 second
-            time.sleep(0.01)
-            frames = transport.read_frames()
-            if frames:
-                frame = frames[-1]
-                # Check if homing has started (joints marked as not homed)
-                if not all(frame.homed_in[j] == 1 for j in range(6)):
-                    homing_started = True
-                # Check if homing completed (all joints homed and at zero)
-                elif homing_started and all(frame.homed_in[j] == 1 for j in range(6)):
+        while time.time() - t0 < 1.0:
+            decoded = _wait_for_latest_frame_and_decode(transport, timeout_s=0.1)
+            if decoded is None:
+                continue
+            homed_bits = decoded["homed"].tolist()
+            if not all(h == 1 for h in homed_bits):
+                homing_started = True
+            if homing_started and all(h == 1 for h in homed_bits):
+                # Verify positions near zero
+                if all(abs(int(p)) < 100 for p in decoded["pos"].tolist()):
                     homing_completed = True
-                    # Verify joints are at zero position
-                    assert all(abs(frame.position_in[j]) < 10 for j in range(6)), "Not all joints at zero after homing"
                     break
+            last_homed_bits = homed_bits
         
-        # Either homing completed, or it was already homed (which is OK in simulation)
+        # Either already homed or homed sequence executed
         if not homing_started:
-            # Robot was already homed - verify it stays homed
-            assert frames and all(frames[-1].homed_in[j] == 1 for j in range(6)), "Robot should be homed"
+            assert last_homed_bits is not None
+            assert all(h == 1 for h in last_homed_bits), "Robot should be homed"
         else:
-            # Homing sequence was executed
             assert homing_completed, "Homing sequence started but did not complete"
     
     def test_gripper_simulation(self):

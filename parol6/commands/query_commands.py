@@ -10,23 +10,20 @@ from __future__ import annotations
 import json
 import time
 import numpy as np
-from dataclasses import dataclass
 from typing import Tuple, Optional, List, TYPE_CHECKING
 
-from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
+from parol6.commands.base import QueryCommand, ExecutionStatus, ExecutionStatusCode
 from parol6.server.command_registry import register_command
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.server.status_cache import get_cache
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 
-@dataclass
 @register_command("GET_POSE")
-class GetPoseCommand(CommandBase):
+class GetPoseCommand(QueryCommand):
     """Get current robot pose matrix."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_POSE command."""
@@ -63,12 +60,9 @@ class GetPoseCommand(CommandBase):
         return ExecutionStatus.completed("Pose sent")
 
 
-@dataclass
 @register_command("GET_ANGLES")
-class GetAnglesCommand(CommandBase):
+class GetAnglesCommand(QueryCommand):
     """Get current joint angles in degrees."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_ANGLES command."""
@@ -102,12 +96,9 @@ class GetAnglesCommand(CommandBase):
         return ExecutionStatus.completed("Angles sent")
 
 
-@dataclass
 @register_command("GET_IO")
-class GetIOCommand(CommandBase):
+class GetIOCommand(QueryCommand):
     """Get current I/O status."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_IO command."""
@@ -139,12 +130,9 @@ class GetIOCommand(CommandBase):
         return ExecutionStatus.completed("I/O sent")
 
 
-@dataclass
 @register_command("GET_GRIPPER")
-class GetGripperCommand(CommandBase):
+class GetGripperCommand(QueryCommand):
     """Get current gripper status."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_GRIPPER command."""
@@ -176,12 +164,9 @@ class GetGripperCommand(CommandBase):
         return ExecutionStatus.completed("Gripper sent")
 
 
-@dataclass
 @register_command("GET_SPEEDS")
-class GetSpeedsCommand(CommandBase):
+class GetSpeedsCommand(QueryCommand):
     """Get current joint speeds."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_SPEEDS command."""
@@ -213,12 +198,9 @@ class GetSpeedsCommand(CommandBase):
         return ExecutionStatus.completed("Speeds sent")
 
 
-@dataclass
 @register_command("GET_STATUS")
-class GetStatusCommand(CommandBase):
-    """Get aggregated robot status (pose, angles, I/O, gripper)."""
-    
-    is_immediate: bool = True
+class GetStatusCommand(QueryCommand):
+    """Get aggregated robot status (pose, angles, I/O, gripper) from cache."""
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_STATUS command."""
@@ -233,30 +215,14 @@ class GetStatusCommand(CommandBase):
             self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return aggregated status."""
+        """Execute immediately and return cached aggregated status (ASCII)."""
         if not self.udp_transport or not self.addr:
             self.fail("Missing UDP transport or address")
             return ExecutionStatus.failed("Missing UDP transport or address")
         
         try:
-            # Get pose
-            try:
-                q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)])
-                current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
-                pose_flat = current_pose_matrix.flatten()
-                pose_str = ",".join(map(str, pose_flat))
-            except Exception:
-                pose_str = ",".join(["0"] * 16)
-            
-            angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)]
-            angles_deg = np.rad2deg(angles_rad)
-            angles_str = ",".join(map(str, angles_deg))
-            
-            io_status_str = ",".join(map(str, state.InOut_in[:5]))
-            gripper_status_str = ",".join(map(str, state.Gripper_data_in))
-            
-            response_message = f"STATUS|POSE={pose_str}|ANGLES={angles_str}|IO={io_status_str}|GRIPPER={gripper_status_str}"
-            self.udp_transport.send_response(response_message, self.addr)
+            payload = get_cache().to_ascii()
+            self.udp_transport.send_response(payload, self.addr)
         except Exception as e:
             self.fail(f"Failed to get status: {e}")
             return ExecutionStatus.failed(f"Failed to get status: {e}")
@@ -265,12 +231,9 @@ class GetStatusCommand(CommandBase):
         return ExecutionStatus.completed("Status sent")
 
 
-@dataclass
 @register_command("GET_GCODE_STATUS")
-class GetGcodeStatusCommand(CommandBase):
+class GetGcodeStatusCommand(QueryCommand):
     """Get GCODE interpreter status."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_GCODE_STATUS command."""
@@ -315,67 +278,11 @@ class GetGcodeStatusCommand(CommandBase):
         return ExecutionStatus.completed("GCODE status sent")
 
 
-@dataclass
-@register_command("GET_SERVER_STATE")
-class GetServerStateCommand(CommandBase):
-    """Get server state information."""
-    
-    is_immediate: bool = True
-    
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
-        """Check if this is a GET_SERVER_STATE command."""
-        if parts[0].upper() == "GET_SERVER_STATE":
-            return True, None
-        return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided"""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-    
-    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return server state."""
-        if not hasattr(self, "udp_transport") or not hasattr(self, "addr") or not self.udp_transport or not self.addr:
-            self.fail("Missing UDP transport or address")
-            return ExecutionStatus.failed("Missing UDP transport or address")
-        
-        try:
-            homed = False
-            if hasattr(state, "Homed_in") and isinstance(state.Homed_in, list):
-                homed = any(bool(h) for h in state.Homed_in)
-
-            server_state = {
-                "listening": {
-                    "transport": "udp",
-                    "address": f"{state.ip}:{state.port}" if state else "127.0.0.1:5001"
-                },
-                "serial_connected": bool(state and getattr(state, "ser", None) and getattr(getattr(state, "ser", None), "is_open", False)),
-                "homed": homed,
-                "queue_depth": len(getattr(state, "command_queue", [])) if hasattr(state, "command_queue") else 0,
-                "active_command": type(getattr(state, "active_command", None)).__name__ if getattr(state, "active_command", None) else None,
-                "stream_mode": bool(getattr(state, "stream_mode", False)),
-                "uptime_s": float(time.time() - getattr(state, "start_time", 0.0)) if getattr(state, "start_time", 0.0) > 0 else 0.0,
-            }
-            
-            payload = f"SERVER_STATE|{json.dumps(server_state)}"
-            # Use the same API as other query commands
-            self.udp_transport.send_response(payload, self.addr)
-        except Exception as e:
-            self.fail(f"Failed to get server state: {e}")
-            return ExecutionStatus.failed(f"Failed to get server state: {e}")
-        
-        self.finish()
-        return ExecutionStatus.completed("Server state sent")
 
 
-@dataclass
 @register_command("PING")
-class PingCommand(CommandBase):
+class PingCommand(QueryCommand):
     """Respond to ping requests."""
-    
-    is_immediate: bool = True
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a PING command."""

@@ -8,6 +8,8 @@ Synchronous facade for AsyncRobotClient.
 """
 
 import asyncio
+import threading
+import atexit
 from typing import TypeVar, Union, Optional, List, Literal, Dict, Coroutine, Any
 
 from .async_client import AsyncRobotClient
@@ -16,17 +18,56 @@ from ..protocol.types import Frame, Axis  # keep your existing imports
 T = TypeVar("T")
 
 
+# Persistent background event loop for sync wrapper
+_SYNC_LOOP: asyncio.AbstractEventLoop | None = None
+_SYNC_THREAD: threading.Thread | None = None
+_SYNC_LOOP_READY = threading.Event()
+
+
+def _loop_worker(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+    _SYNC_LOOP_READY.set()
+    loop.run_forever()
+
+
+def _stop_sync_loop() -> None:
+    global _SYNC_LOOP, _SYNC_THREAD
+    if _SYNC_LOOP is not None:
+        try:
+            _SYNC_LOOP.call_soon_threadsafe(_SYNC_LOOP.stop)
+        except Exception:
+            pass
+        _SYNC_LOOP = None
+        _SYNC_THREAD = None
+
+
+def _ensure_sync_loop() -> None:
+    """Start a persistent background event loop if not started yet."""
+    global _SYNC_LOOP, _SYNC_THREAD
+    if _SYNC_LOOP is None:
+        _SYNC_LOOP = asyncio.new_event_loop()
+        _SYNC_THREAD = threading.Thread(
+            target=_loop_worker, args=(_SYNC_LOOP,), name="parol6-sync-loop", daemon=True
+        )
+        _SYNC_THREAD.start()
+        _SYNC_LOOP_READY.wait(timeout=1.0)
+        atexit.register(_stop_sync_loop)
+
+
 def _run(coro: Coroutine[Any, Any, T]) -> T:
     """
-    Run an async coroutine to completion when no event loop is running.
-    If a loop is already running, raise to avoid deadlocks.
+    Run an async coroutine to completion using a persistent background event loop.
+    If a loop is already running in this thread, raise to avoid deadlocks.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop -> safe to run
-        return asyncio.run(coro)
-    # A loop is running; blocking would be unsafe.
+        # No running loop in this thread -> submit to persistent loop
+        _ensure_sync_loop()
+        assert _SYNC_LOOP is not None
+        fut = asyncio.run_coroutine_threadsafe(coro, _SYNC_LOOP)
+        return fut.result()
+    # A loop is running in this thread; blocking would be unsafe.
     raise RuntimeError(
         "RobotClient was used while an event loop is running.\n"
         "Use AsyncRobotClient and `await` the method instead."

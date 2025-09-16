@@ -7,7 +7,7 @@ import logging
 import numpy as np
 from typing import List, Tuple, Optional
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from .base import CommandBase, ExecutionStatus, ExecutionStatusCode
+from .base import MotionCommand, ExecutionStatus, ExecutionStatusCode
 from parol6.config import INTERVAL_S
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 @register_command("HOME")
-class HomeCommand(CommandBase):
+class HomeCommand(MotionCommand):
     """
     A non-blocking command that tells the robot to perform its internal homing sequence.
     This version uses a state machine to allow re-homing even if the robot is already homed.
     """
     def __init__(self):
-        super().__init__(is_valid=True)
+        super().__init__()
         # State machine: START -> WAIT_FOR_UNHOMED -> WAIT_FOR_HOMED -> FINISHED
         self.state = "START"
         # Counter to send the home command for multiple cycles
@@ -94,7 +94,7 @@ class HomeCommand(CommandBase):
             if all(h == 1 for h in state.Homed_in[:6]):
                 logger.info("Homing sequence complete. All joints reported home.")
                 self.is_finished = True
-                state.Speed_out[:] = [0] * 6  # Ensure robot is stopped
+                state.Speed_out.fill(0)  # Ensure robot is stopped
                 return ExecutionStatus.completed("Homing complete")
 
             return ExecutionStatus.executing("Homing: waiting for homed")
@@ -103,11 +103,13 @@ class HomeCommand(CommandBase):
 
 
 @register_command("JOG")
-class JogCommand(CommandBase):
+class JogCommand(MotionCommand):
     """
     A non-blocking command to jog a joint for a specific duration or distance.
     It performs all safety and validity checks upon initialization.
     """
+    streamable = True  # Can be replaced in stream mode
+    
     def __init__(self):
         """
         Initializes the jog command.
@@ -186,6 +188,12 @@ class JogCommand(CommandBase):
 
         logger.debug("  -> Preparing for Jog command...")
 
+        # Validate joint is set
+        if self.joint is None:
+            logger.error("Joint index not set")
+            self.is_valid = False
+            return
+
         # Joint direction and index mapping
         self.direction = 1 if 0 <= self.joint <= 5 else -1
         self.joint_index = self.joint if self.direction == 1 else self.joint - 6
@@ -238,6 +246,12 @@ class JogCommand(CommandBase):
         if self.is_finished or not self.is_valid:
             return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
 
+        # Type guard to ensure joint_index is valid
+        if self.joint_index is None or not isinstance(self.joint_index, int):
+            logger.error("Invalid joint index in execute_step")
+            self.is_finished = True
+            return ExecutionStatus.failed("Invalid joint index")
+
         stop_reason = None
         current_pos = state.Position_in[self.joint_index]
 
@@ -257,11 +271,11 @@ class JogCommand(CommandBase):
         if stop_reason:
             logger.info(stop_reason)
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.completed(stop_reason)
         else:
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Speed_out[self.joint_index] = self.speed_out
             state.Command_out = CommandCode.JOG
             self.command_step += 1
@@ -269,11 +283,13 @@ class JogCommand(CommandBase):
 
 
 @register_command("MULTIJOG")  
-class MultiJogCommand(CommandBase):
+class MultiJogCommand(MotionCommand):
     """
     A non-blocking command to jog multiple joints simultaneously for a specific duration.
     It performs all safety and validity checks upon initialization.
     """
+    streamable = True  # Can be replaced in stream mode
+    
     def __init__(self):
         """
         Initializes the multi-jog command.
@@ -353,6 +369,12 @@ class MultiJogCommand(CommandBase):
 
         logger.debug("  -> Preparing for MultiJog command...")
 
+        # Validate joints and speed_percentages are set
+        if self.joints is None or self.speed_percentages is None:
+            logger.error("Joints or speed percentages not set")
+            self.is_valid = False
+            return
+
         for i, joint in enumerate(self.joints):
             # Index mapping: 0-5 positive, 6-11 negative direction
             direction = 1 if 0 <= joint <= 5 else -1
@@ -385,7 +407,7 @@ class MultiJogCommand(CommandBase):
         if self.command_step >= self.command_len:
             logger.info("Timed multi-jog finished.")
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.completed("MultiJog complete")
         else:
@@ -397,19 +419,20 @@ class MultiJogCommand(CommandBase):
                     if self.speeds_out[i] > 0 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[i][1]:
                          logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
-                         state.Speed_out[:] = [0] * 6
+                         state.Speed_out.fill(0)
                          state.Command_out = CommandCode.IDLE
                          return ExecutionStatus.completed(f"Limit reached on J{i+1}")
                     # Hitting negative limit while moving negatively
                     elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
                          logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
                          self.is_finished = True
-                         state.Speed_out[:] = [0] * 6
+                         state.Speed_out.fill(0)
                          state.Command_out = CommandCode.IDLE
                          return ExecutionStatus.completed(f"Limit reached on J{i+1}")
 
             # If no limits are hit, apply the speeds
-            state.Speed_out[:] = self.speeds_out
+            for i in range(6):
+                state.Speed_out[i] = self.speeds_out[i]
             state.Command_out = CommandCode.JOG
             self.command_step += 1
             return ExecutionStatus.executing("MultiJogging")

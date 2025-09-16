@@ -5,7 +5,7 @@ This package provides different transport implementations for
 communicating with the robot hardware or simulation.
 """
 
-from .serial_transport import SerialTransport, SerialFrame
+from .serial_transport import SerialTransport
 from .mock_serial_transport import MockSerialTransport
 from .udp_transport import UDPTransport
 from .transport_factory import (
@@ -16,7 +16,6 @@ from .transport_factory import (
 
 __all__ = [
     'SerialTransport',
-    'SerialFrame',
     'MockSerialTransport',
     'UDPTransport',
     'create_transport',

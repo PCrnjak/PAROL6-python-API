@@ -50,21 +50,19 @@ class ExecutionStatus:
         return cls(ExecutionStatusCode.FAILED, message, error=error, details=details)
 
 
-@dataclass(eq=False)
 class CommandBase(ABC):
     """
     Reusable base for commands with shared lifecycle and safety helpers.
     """
-    is_valid: bool = True
-    is_finished: bool = False
-    error_state: bool = False
-    error_message: str = ""
-    is_immediate: bool = False  # If True, execute immediately without queueing
-
-    # Optional context set by controller (commands "already have access" to these)
-    udp_transport: Any = None
-    addr: Any = None
-    gcode_interpreter: Any = None
+    def __init__(self) -> None:
+        self.is_valid: bool = True
+        self.is_finished: bool = False
+        self.error_state: bool = False
+        self.error_message: str = ""
+        # Optional context set by controller (commands "already have access" to these)
+        self.udp_transport: Any = None
+        self.addr: Any = None
+        self.gcode_interpreter: Any = None
 
     # Ensure command objects are usable as dict keys (e.g., in server command_id_map)
     def __hash__(self) -> int:
@@ -156,3 +154,33 @@ class CommandBase(ABC):
         direction = 1 if 0 <= joint_selector <= 5 else -1
         joint_index = joint_selector if direction == 1 else joint_selector - 6
         return direction, joint_index
+
+
+class QueryCommand(CommandBase):
+    """
+    Base class for query commands that execute immediately and bypass the queue.
+    
+    Query commands are read-only operations that return information about the robot state.
+    They execute immediately without waiting in the command queue.
+    """
+    
+
+
+class MotionCommand(CommandBase):
+    """
+    Base class for motion commands that require the controller to be enabled.
+    
+    Motion commands involve robot movement and require the controller to be in an enabled state.
+    Some motion commands (like jog commands) can be replaced in stream mode.
+    """
+    streamable: bool = False  # Can be replaced in stream mode (only for jog commands)
+    
+
+
+class SystemCommand(CommandBase):
+    """
+    Base class for system control commands that can execute regardless of enable state.
+    
+    System commands control the overall state of the robot controller (enable/disable, stop, etc.)
+    and can execute even when the controller is disabled.
+    """

@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 
 from parol6.protocol import wire
 from parol6.protocol.wire import CommandCode
@@ -76,24 +77,43 @@ def test_unpack_rx_frame_happy_path_and_signs():
     # Status byte: bits[2]=1, bits[3]=1 => obj = (1<<1)|1 = 3
     payload[51] = 0b00001100
 
-    parsed = wire.unpack_rx_frame(bytes(payload))
-    assert parsed is not None
+    # Decode via zero-allocation into-variant
+    pos = np.zeros(6, dtype=np.int32)
+    spd = np.zeros(6, dtype=np.int32)
+    homed = np.zeros(8, dtype=np.uint8)
+    io_bits = np.zeros(8, dtype=np.uint8)
+    temp = np.zeros(8, dtype=np.uint8)
+    poserr = np.zeros(8, dtype=np.uint8)
+    timing = np.zeros(1, dtype=np.int32)
+    grip = np.zeros(6, dtype=np.int32)
+
+    ok = wire.unpack_rx_frame_into(
+        memoryview(payload),
+        pos_out=pos,
+        spd_out=spd,
+        homed_out=homed,
+        io_out=io_bits,
+        temp_out=temp,
+        poserr_out=poserr,
+        timing_out=timing,
+        grip_out=grip,
+    )
+    assert ok
 
     # Validate positions and speeds round trip
-    assert parsed["Position_in"] == positions
-    assert parsed["Speed_in"] == speeds
+    assert pos.tolist() == positions
+    assert spd.tolist() == speeds
 
     # Validate bitfields
-    assert parsed["Homed_in"] == [1] * 8
-    assert parsed["InOut_in"] == [1, 0, 1, 0, 1, 0, 1, 0]  # MSB..LSB of 0xAA
+    assert homed.tolist() == [1] * 8
+    assert io_bits.tolist() == [1, 0, 1, 0, 1, 0, 1, 0]  # MSB..LSB of 0xAA
 
     # Errors empty
-    assert parsed["Temperature_error_in"] == [0] * 8
-    assert parsed["Position_error_in"] == [0] * 8
+    assert temp.tolist() == [0] * 8
+    assert poserr.tolist() == [0] * 8
 
-    # Timing
-    # fuse_3_bytes(0, 0x12, 0x34) == 0x00001234 == 4660
-    assert parsed["Timing_data_in"] == [0x1234]
+    # Timing (0x1234 == 4660)
+    assert int(timing[0]) == 0x1234
 
     # Gripper data
-    assert parsed["Gripper_data_in"] == [7, 258, 100, 10, 0b00001100, 3]
+    assert grip.tolist() == [7, 258, 100, 10, 0b00001100, 3]

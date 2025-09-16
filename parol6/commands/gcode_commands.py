@@ -6,7 +6,6 @@ These commands integrate the GCODE interpreter with the robot command system.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Tuple, Optional, List, TYPE_CHECKING, Any
 
 from parol6.commands.base import CommandBase, ExecutionStatus
@@ -18,14 +17,13 @@ if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 
-@dataclass
 @register_command("GCODE")
 class GcodeCommand(CommandBase):
     """Execute a single GCODE line."""
     
     gcode_line: str = ""
     interpreter: Optional[GcodeInterpreter] = None
-    generated_commands: List[str] = None
+    generated_commands: Optional[List[str]] = None
     current_command_index: int = 0
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
@@ -41,6 +39,7 @@ class GcodeCommand(CommandBase):
         # Prefer injected, controller-owned interpreter
         self.interpreter = gcode_interpreter or self.interpreter or GcodeInterpreter()
         try:
+            assert self.interpreter is not None
             # Update interpreter position with current robot position
             current_angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)]
             current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
@@ -65,7 +64,6 @@ class GcodeCommand(CommandBase):
         return ExecutionStatus.completed("GCODE parsed", details=details)
 
 
-@dataclass
 @register_command("GCODE_PROGRAM")
 class GcodeProgramCommand(CommandBase):
     """Load and execute a GCODE program."""
@@ -95,6 +93,7 @@ class GcodeProgramCommand(CommandBase):
         # Prefer injected, controller-owned interpreter
         self.interpreter = gcode_interpreter or self.interpreter or GcodeInterpreter()
         try:
+            assert self.interpreter is not None
             if self.program_type == "FILE":
                 if not self.interpreter.load_file(self.program_data):
                     self.fail(f"Failed to load GCODE file: {self.program_data}")
@@ -115,7 +114,6 @@ class GcodeProgramCommand(CommandBase):
         return ExecutionStatus.completed("GCODE program loaded")
 
 
-@dataclass
 @register_command("GCODE_STOP")
 class GcodeStopCommand(CommandBase):
     """Stop GCODE program execution."""
@@ -141,7 +139,6 @@ class GcodeStopCommand(CommandBase):
         return ExecutionStatus.completed("GCODE stopped")
 
 
-@dataclass
 @register_command("GCODE_PAUSE")
 class GcodePauseCommand(CommandBase):
     """Pause GCODE program execution."""
@@ -166,7 +163,6 @@ class GcodePauseCommand(CommandBase):
         return ExecutionStatus.completed("GCODE paused")
 
 
-@dataclass
 @register_command("GCODE_RESUME")
 class GcodeResumeCommand(CommandBase):
     """Resume GCODE program execution."""

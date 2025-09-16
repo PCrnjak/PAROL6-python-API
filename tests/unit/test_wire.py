@@ -122,16 +122,3 @@ def test_decode_status_invalid_returns_none():
     assert wire.decode_status("STATUS|") is None
     assert wire.decode_status("") is None
     assert wire.decode_status("NOTSTATUS|whatever") is None
-
-
-def test_parse_server_state_success():
-    data = {"ready": True, "uptime": 12.3}
-    resp = "SERVER_STATE|" + json.dumps(data)
-    parsed = wire.parse_server_state(resp)
-    assert parsed == data
-
-
-def test_parse_server_state_invalid():
-    assert wire.parse_server_state("SERVER_STATE|not_json") is None
-    assert wire.parse_server_state("WRONG|{}") is None
-    assert wire.parse_server_state("") is None

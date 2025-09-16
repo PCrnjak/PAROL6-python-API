@@ -6,7 +6,7 @@ Contains commands for electric and pneumatic gripper control
 import logging
 from typing import List, Tuple, Optional
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
+from parol6.commands.base import MotionCommand, ExecutionStatus
 from parol6.server.command_registry import register_command
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @register_command("PNEUMATICGRIPPER")
 @register_command("ELECTRICGRIPPER")
-class GripperCommand(CommandBase):
+class GripperCommand(MotionCommand):
     """
     A single, unified, non-blocking command to control all gripper functions.
     It internally selects the correct logic (position-based waiting, timed delay,

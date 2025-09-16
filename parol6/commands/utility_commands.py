@@ -6,7 +6,7 @@ Contains utility commands like Delay
 import logging
 import time
 from typing import List, Tuple, Optional
-from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
+from parol6.commands.base import MotionCommand, ExecutionStatus, ExecutionStatusCode
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_command("DELAY")
-class DelayCommand(CommandBase):
+class DelayCommand(MotionCommand):
     """
     A non-blocking command that pauses execution for a specified duration.
     During the delay, it ensures the robot remains idle by sending the
@@ -74,7 +74,7 @@ class DelayCommand(CommandBase):
 
         # Keep the robot idle during the delay
         state.Command_out = CommandCode.IDLE
-        state.Speed_out[:] = [0] * 6
+        state.Speed_out.fill(0)
 
         # Check for completion
         if self.end_time and time.time() >= self.end_time:

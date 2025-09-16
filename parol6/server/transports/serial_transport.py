@@ -8,50 +8,18 @@ data exchange with the robot hardware.
 from __future__ import annotations
 
 import serial
-import struct
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Optional, List
+import threading
+from typing import Optional, List, Union, Sequence
+import array
 
-from parol6.protocol.wire import pack_tx_frame, unpack_rx_frame
+from parol6.protocol.wire import pack_tx_frame
+from parol6.config import get_com_port_with_fallback
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class SerialFrame:
-    """
-    Represents a parsed serial frame from the robot.
-    
-    This contains all telemetry data received from the robot hardware.
-    """
-    position_in: List[int] = field(default_factory=lambda: [0] * 6)
-    speed_in: List[int] = field(default_factory=lambda: [0] * 6)
-    homed_in: List[int] = field(default_factory=lambda: [0] * 8)
-    inout_in: List[int] = field(default_factory=lambda: [0] * 8)
-    temperature_error_in: List[int] = field(default_factory=lambda: [0] * 8)
-    position_error_in: List[int] = field(default_factory=lambda: [0] * 8)
-    timing_data_in: List[int] = field(default_factory=lambda: [0])
-    gripper_data_in: List[int] = field(default_factory=lambda: [0] * 6)
-    xtr_data: int = 0
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass
-class SerialParseState:
-    """
-    Internal state for parsing serial frames.
-    
-    This tracks the parsing state machine for incoming serial data.
-    """
-    start_cond1: int = 0
-    start_cond2: int = 0
-    start_cond3: int = 0
-    good_start: int = 0
-    data_len: int = 0
-    data_buffer: List[bytes] = field(default_factory=lambda: [b""] * 255)
-    data_counter: int = 0
 
 
 class SerialTransport:
@@ -82,9 +50,19 @@ class SerialTransport:
         self.baudrate = baudrate
         self.timeout = timeout
         self.serial: Optional[serial.Serial] = None
-        self.parse_state = SerialParseState()
         self.last_reconnect_attempt = 0.0
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
+
+        # Reduced-copy latest-frame infrastructure (reader thread will publish here)
+        self._scratch = bytearray(1024)
+        self._scratch_mv = memoryview(self._scratch)
+        self._stream = bytearray()
+        self._frame_buf = bytearray(64)  # 52-byte payload + headroom
+        self._frame_mv = memoryview(self._frame_buf)[:52]
+        self._frame_version = 0
+        self._frame_ts = 0.0
+        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_running = False
         
     def connect(self, port: Optional[str] = None) -> bool:
         """
@@ -176,15 +154,18 @@ class SerialTransport:
         return False
     
     def write_frame(self, 
-                   position_out: List[int],
-                   speed_out: List[int],
+                   position_out: Union[List[int], array.array, Sequence[int]],
+                   speed_out: Union[List[int], array.array, Sequence[int]],
                    command_out: int,
-                   affected_joint_out: List[int],
-                   inout_out: List[int],
+                   affected_joint_out: Union[List[int], array.array, Sequence[int]],
+                   inout_out: Union[List[int], array.array, Sequence[int]],
                    timeout_out: int,
-                   gripper_data_out: List[int]) -> bool:
+                   gripper_data_out: Union[List[int], array.array, Sequence[int]]) -> bool:
         """
         Write a command frame to the robot.
+        
+        Optimized to accept array-like objects directly without conversion.
+        Supports lists, array.array, and other sequence types.
         
         Args:
             position_out: Target positions for joints
@@ -214,7 +195,10 @@ class SerialTransport:
             )
             
             # Write to serial
-            self.serial.write(frame)
+            ser = self.serial
+            if ser is None:
+                return False
+            ser.write(frame)
             return True
             
         except serial.SerialException as e:
@@ -226,119 +210,128 @@ class SerialTransport:
             logger.error(f"Unexpected error writing frame: {e}")
             return False
     
-    def read_frames(self) -> List[SerialFrame]:
+    
+    
+
+    # ================================
+    # Latest-frame API (reduced-copy)
+    # ================================
+    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
         """
-        Read and parse all available frames from the serial port.
-        
-        Returns:
-            List of parsed SerialFrame objects (may be empty)
+        Start a dedicated reader thread that parses incoming frames from the serial port
+        and publishes the latest 52-byte payload into an internal stable buffer.
+
+        Returns the started Thread object. If already running, returns the existing one.
         """
-        frames = []
-        
         if not self.is_connected():
-            return frames
-            
+            raise RuntimeError("SerialTransport.start_reader: serial port not connected")
+
+        if self._reader_thread and self._reader_thread.is_alive():
+            return self._reader_thread
+
+        # Ensure a short timeout for responsive shutdown
         try:
-            # Process all available bytes
-            while self.serial.in_waiting > 0:
-                input_byte = self.serial.read(1)
-                
-                frame = self._process_byte(input_byte)
-                if frame:
-                    frames.append(frame)
-                    
-        except serial.SerialException as e:
-            logger.error(f"Serial read error: {e}")
-            # Mark connection as lost
-            self.disconnect()
-        except Exception as e:
-            logger.error(f"Unexpected error reading frames: {e}")
-            
-        return frames
-    
-    def _process_byte(self, input_byte: bytes) -> Optional[SerialFrame]:
+            if self.serial:
+                # Use a small blocking timeout to periodically check shutdown_event
+                self.serial.timeout = 0.25
+        except Exception:
+            pass
+
+        def _run() -> None:
+            self._reader_running = True
+            try:
+                while not shutdown_event.is_set():
+                    if not self.is_connected():
+                        # Backoff a bit to avoid busy loop if disconnected
+                        time.sleep(0.1)
+                        continue
+                    try:
+                        # Read into preallocated scratch buffer
+                        n = self.serial.readinto(self._scratch_mv) if self.serial else 0
+                    except serial.SerialException as e:
+                        logger.error(f"Serial reader error: {e}")
+                        self.disconnect()
+                        break
+                    except Exception:
+                        logger.exception("Serial reader unexpected exception")
+                        break
+
+                    if not n:
+                        # Timeout or no data; loop to check shutdown_event
+                        continue
+
+                    # Append to rolling stream buffer and parse
+                    self._stream.extend(self._scratch[:n])
+                    self._parse_stream_for_frames()
+            finally:
+                self._reader_running = False
+
+        t = threading.Thread(target=_run, name="SerialReader", daemon=True)
+        self._reader_thread = t
+        t.start()
+        return t
+
+    def _parse_stream_for_frames(self) -> None:
         """
-        Process a single byte through the frame parsing state machine.
-        
-        Args:
-            input_byte: Single byte from serial stream
-            
-        Returns:
-            Parsed SerialFrame if a complete frame was received, None otherwise
+        Parse as many complete frames as possible from the rolling stream buffer.
+
+        Frame format:
+          [0xFF,0xFF,0xFF] [LEN] [LEN bytes data ...]
+        We expect the last two bytes of the LEN segment to be end markers (0x01,0x02)
+        on real firmware. For robustness, we only copy the first 52 bytes of the LEN
+        segment (if present) into the stable latest-frame buffer.
         """
-        ps = self.parse_state  # Shorthand
-        
-        if ps.good_start != 1:
-            # Looking for start sequence
-            if ps.start_cond1 == 1 and ps.start_cond2 == 1 and ps.start_cond3 == 1:
-                ps.good_start = 1
-                ps.data_len = struct.unpack('B', input_byte)[0]
-                
-            elif input_byte == self.START_BYTES[2:3] and ps.start_cond2 == 1 and ps.start_cond1 == 1:
-                ps.start_cond3 = 1
-                
-            elif ps.start_cond2 == 1 and ps.start_cond1 == 1:
-                ps.start_cond1 = 0
-                ps.start_cond2 = 0
-                
-            elif input_byte == self.START_BYTES[1:2] and ps.start_cond1 == 1:
-                ps.start_cond2 = 1
-                
-            elif ps.start_cond1 == 1:
-                ps.start_cond1 = 0
-                
-            elif input_byte == self.START_BYTES[0:1]:
-                ps.start_cond1 = 1
-                
-        else:
-            # Collecting frame data
-            ps.data_buffer[ps.data_counter] = input_byte
-            
-            if ps.data_counter == ps.data_len - 1:
-                # Frame complete - validate end sequence and parse
-                if (ps.data_buffer[ps.data_len - 1] == self.END_BYTES[1:2] and 
-                    ps.data_buffer[ps.data_len - 2] == self.END_BYTES[0:1]):
-                    
-                    # Extract payload (first 52 bytes)
-                    payload = b"".join(ps.data_buffer[:52])
-                    parsed = unpack_rx_frame(payload)
-                    
-                    if parsed is not None:
-                        # Create SerialFrame from parsed data
-                        frame = SerialFrame(
-                            position_in=parsed["Position_in"],
-                            speed_in=parsed["Speed_in"],
-                            homed_in=parsed["Homed_in"],
-                            inout_in=parsed["InOut_in"],
-                            temperature_error_in=parsed["Temperature_error_in"],
-                            position_error_in=parsed["Position_error_in"],
-                            timing_data_in=parsed["Timing_data_in"],
-                            gripper_data_in=parsed["Gripper_data_in"],
-                            timestamp=time.time()
-                        )
-                        
-                        # Reset parsing state
-                        self._reset_parse_state()
-                        return frame
-                    else:
-                        logger.warning("Failed to unpack RX frame")
-                        
-                # Reset parsing state (whether valid or not)
-                self._reset_parse_state()
-            else:
-                ps.data_counter += 1
-                
-        return None
-    
-    def _reset_parse_state(self) -> None:
-        """Reset the frame parsing state machine."""
-        ps = self.parse_state
-        ps.good_start = 0
-        ps.start_cond1 = 0
-        ps.start_cond2 = 0
-        ps.start_cond3 = 0
-        ps.data_len = 0
-        ps.data_counter = 0
+        buf = self._stream
+        START = self.START_BYTES
+        END0, END1 = self.END_BYTES[0], self.END_BYTES[1]
+
+        while True:
+            # Find start sequence
+            i = buf.find(START)
+            if i == -1:
+                # Keep up to last two bytes in case they begin a start sequence
+                if len(buf) > 2:
+                    del buf[:-2]
+                break
+
+            # Discard any leading noise before start
+            if i > 0:
+                del buf[:i]
+
+            # Need at least header + length
+            if len(buf) < 4:
+                break
+
+            length = buf[3]
+            total_needed = 4 + length
+            if len(buf) < total_needed:
+                # Wait for more data
+                break
+
+            frame_seg = buf[4:4 + length]
+
+            # Validate end markers if possible
+            if length >= 2 and not (frame_seg[-2] == END0 and frame_seg[-1] == END1):
+                # Bad frame; skip one byte to search for next start to be resilient
+                del buf[:1]
+                continue
+
+            # Publish first 52 bytes if available
+            if len(frame_seg) >= 52:
+                self._frame_buf[:52] = frame_seg[:52]
+                self._frame_version += 1
+                self._frame_ts = time.time()
+
+            # Consume this frame
+            del buf[:total_needed]
+
+    def get_latest_frame_view(self) -> tuple[Optional[memoryview], int, float]:
+        """
+        Return a tuple of (memoryview|None, version:int, timestamp:float).
+        The memoryview points to a stable 52-byte buffer which is updated by the reader.
+        """
+        mv = self._frame_mv if self._frame_version > 0 else None
+        return (mv, self._frame_version, self._frame_ts)
     
     def get_info(self) -> dict:
         """
@@ -383,7 +376,7 @@ def create_serial_transport(port: Optional[str] = None,
         transport.connect(port)
     else:
         # Try to load and connect to saved port
-        saved_port = transport._load_port()
+        saved_port = get_com_port_with_fallback()
         if saved_port:
             transport.connect(saved_port)
             

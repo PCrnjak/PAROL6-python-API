@@ -177,14 +177,15 @@ class MoveJointCommand(CommandBase):
         if self.command_step >= len(self.trajectory_steps):
             logger.info(f"{type(self).__name__} finished.")
             self.is_finished = True
-            state.Position_out[:] = state.Position_in[:]
-            state.Speed_out[:] = [0] * 6
+            for i in range(6):
+                state.Position_out[i] = state.Position_in[i]
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.MOVE
             return ExecutionStatus.completed("MOVEJOINT complete")
         else:
             pos_step, _ = self.trajectory_steps[self.command_step]
-            state.Position_out[:] = pos_step
-            state.Speed_out[:] = [0] * 6
+            np.copyto(state.Position_out, np.asarray(pos_step, dtype=state.Position_out.dtype))
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.MOVE
             self.command_step += 1
             return ExecutionStatus.executing("MoveJoint")

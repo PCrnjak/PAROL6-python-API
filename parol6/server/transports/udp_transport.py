@@ -10,26 +10,11 @@ from __future__ import annotations
 import socket
 import logging
 import time
-from dataclasses import dataclass
 from typing import Optional, List, Tuple
-from collections import deque
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class UDPMessage:
-    """
-    Represents a UDP message received from a client.
-    
-    Attributes:
-        data: The message content as a string
-        address: Tuple of (ip, port) of the sender
-        timestamp: Unix timestamp when the message was received
-    """
-    data: str
-    address: Tuple[str, int]
-    timestamp: float
 
 
 class UDPTransport:
@@ -56,8 +41,9 @@ class UDPTransport:
         self.port = port
         self.buffer_size = buffer_size
         self.socket: Optional[socket.socket] = None
-        self.message_queue: deque[UDPMessage] = deque(maxlen=100)
         self._running = False
+        self._rx = bytearray(self.buffer_size)
+        self._rxv = memoryview(self._rx)
         
     def create_socket(self) -> bool:
         """
@@ -70,8 +56,9 @@ class UDPTransport:
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             
-            # Set socket to non-blocking mode
-            self.socket.setblocking(False)
+            # Use blocking mode with short timeout for responsive shutdown
+            self.socket.setblocking(True)
+            self.socket.settimeout(0.25)
             
             # Allow address reuse
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -105,59 +92,34 @@ class UDPTransport:
             finally:
                 self.socket = None
         
-        # Clear message queue
-        self.message_queue.clear()
     
-    def receive_messages(self) -> List[UDPMessage]:
+    
+    def receive_one(self) -> Optional[Tuple[str, Tuple[str, int]]]:
         """
-        Receive all available messages from the socket (non-blocking).
-        
-        Returns:
-            List of received UDPMessage objects (may be empty)
+        Blocking receive of a single datagram using recvfrom_into with a short timeout.
+        Returns (message_str, address) on success, or None on timeout/error.
         """
-        messages = []
-        
         if not self.socket or not self._running:
-            return messages
-        
-        # Try to receive all available messages
-        while True:
+            return None
+        try:
+            nbytes, address = self.socket.recvfrom_into(self._rx)
+            if nbytes <= 0:
+                return None
             try:
-                # Non-blocking receive
-                data, address = self.socket.recvfrom(self.buffer_size)
-                
-                # Decode the message
-                try:
-                    message_str = data.decode('utf-8').strip()
-                except UnicodeDecodeError:
-                    logger.warning(f"Failed to decode message from {address}")
-                    continue
-                
-                # Create message object
-                msg = UDPMessage(
-                    data=message_str,
-                    address=address,
-                    timestamp=time.time()
-                )
-                
-                messages.append(msg)
-                
-                # Also add to internal queue for history
-                self.message_queue.append(msg)
-                
-            except socket.error as e:
-                # No more data available (EWOULDBLOCK/EAGAIN)
-                if e.errno in (11, 35):  # EWOULDBLOCK/EAGAIN
-                    break
-                else:
-                    logger.error(f"Socket error receiving UDP message: {e}")
-                    break
-            except Exception as e:
-                logger.error(f"Unexpected error receiving UDP message: {e}")
-                break
-        
-        return messages
-    
+                message_str = self._rx[:nbytes].decode('ascii').strip()
+            except UnicodeDecodeError:
+                logger.warning(f"Failed to decode UDP datagram from {address}")
+                return None
+            return (message_str, address)
+        except socket.timeout:
+            return None
+        except socket.error as e:
+            logger.error(f"Socket error receiving UDP message: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in receive_one: {e}")
+            return None
+
     def send_response(self, message: str, address: Tuple[str, int]) -> bool:
         """
         Send a response message to a specific address.
@@ -175,7 +137,7 @@ class UDPTransport:
         
         try:
             # Encode and send the message
-            data = message.encode('utf-8')
+            data = message.encode('ascii')
             self.socket.sendto(data, address)
             return True
             
@@ -214,21 +176,7 @@ class UDPTransport:
         """
         return self._running and self.socket is not None
     
-    def get_recent_messages(self, count: int = 10) -> List[UDPMessage]:
-        """
-        Get the most recent messages from the internal queue.
-        
-        Args:
-            count: Number of messages to retrieve
-            
-        Returns:
-            List of recent messages (newest first)
-        """
-        return list(reversed(list(self.message_queue)[-count:]))
     
-    def clear_message_queue(self) -> None:
-        """Clear the internal message queue."""
-        self.message_queue.clear()
     
     def get_socket_info(self) -> dict:
         """
@@ -243,7 +191,6 @@ class UDPTransport:
             'buffer_size': self.buffer_size,
             'running': self._running,
             'socket_open': self.socket is not None,
-            'queue_size': len(self.message_queue)
         }
         
         if self.socket:

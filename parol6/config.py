@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 JOG_IK_ILIMIT: int = 20
 
 # Default control/sample rates (Hz)
-CONTROL_RATE_HZ: float = 100.0
+CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "100"))
 
 # Velocity/acceleration safety margins
 VELOCITY_SAFETY_SCALE: float = 1.2  # e.g., clamp at 1.2x of budget
 
 # Centralized loop interval (seconds).
-INTERVAL_S: float = 0.01
+INTERVAL_S: float = max(1e-6, 1.0 / max(CONTROL_RATE_HZ, 1.0))
 
 # Server/runtime defaults (overridable by env/CLI in headless commander)
 SERVER_IP: str = "127.0.0.1"
@@ -33,11 +33,33 @@ SERIAL_BAUD: int = 3_000_000
 AUTO_HOME_DEFAULT: bool = True
 LOG_LEVEL_DEFAULT: str = "INFO"
 
-# Command processing cooldown (milliseconds)
-COMMAND_COOLDOWN_MS: int = 10
-
 # COM port persistence file
 COM_PORT_FILE: str = "serial_port.txt"
+
+# Multicast/broadcast status configuration (all overridable via env)
+# These defaults implement local-only multicast on loopback by default.
+MCAST_GROUP: str = os.getenv("PAROL6_MCAST_GROUP", "239.255.0.101")
+MCAST_PORT: int = int(os.getenv("PAROL6_MCAST_PORT", "50510"))
+MCAST_TTL: int = int(os.getenv("PAROL6_MCAST_TTL", "1"))
+MCAST_IF: str = os.getenv("PAROL6_MCAST_IF", "127.0.0.1")
+
+# Status update/broadcast rates
+STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
+STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
+
+# Ack/Tracking policy toggles
+def _env_bool_optional(name: str) -> Optional[bool]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+FORCE_ACK: Optional[bool] = _env_bool_optional("PAROL6_FORCE_ACK")
 
 
 def save_com_port(port: str) -> bool:

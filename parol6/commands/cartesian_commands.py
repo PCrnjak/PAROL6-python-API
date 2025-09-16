@@ -107,7 +107,7 @@ class CartesianJogCommand(CommandBase):
         if time.time() >= self.end_time:
             logger.info("Cartesian jog finished.")
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.completed("CARTJOG complete")
 
@@ -164,7 +164,7 @@ class CartesianJogCommand(CommandBase):
         else:
             logger.warning("IK Warning: Could not find solution for jog step. Stopping.")
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.failed("IK failed for jog step")
 
@@ -189,14 +189,14 @@ class MovePoseCommand(CommandBase):
     A non-blocking command to move the robot to a specific Cartesian pose.
     The movement itself is a joint-space interpolation.
     """
-    def __init__(self):
+    def __init__(self, pose=None, duration=None):
         super().__init__()
         self.command_step = 0
         self.trajectory_steps = []
         
         # Parameters (set in match())
-        self.pose = None
-        self.duration = None
+        self.pose = pose
+        self.duration = duration
         self.velocity_percent = None
         self.accel_percent = 50
         self.trajectory_type = 'poly'
@@ -347,14 +347,15 @@ class MovePoseCommand(CommandBase):
         if self.command_step >= len(self.trajectory_steps):
             logger.info(f"{type(self).__name__} finished.")
             self.is_finished = True
-            state.Position_out[:] = state.Position_in[:]
-            state.Speed_out[:] = [0] * 6
+            for i in range(6):
+                state.Position_out[i] = state.Position_in[i]
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.MOVE
             return ExecutionStatus.completed("MOVEPOSE complete")
         else:
             pos_step, _ = self.trajectory_steps[self.command_step]
-            state.Position_out[:] = pos_step
-            state.Speed_out[:] = [0] * 6
+            np.copyto(state.Position_out, np.asarray(pos_step, dtype=state.Position_out.dtype))
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.MOVE
             self.command_step += 1
             return ExecutionStatus.executing("MovePose")
@@ -507,15 +508,16 @@ class MoveCartCommand(CommandBase):
             if ik_solution.violations:
                  logger.warning(f"     Reason: Path violates joint limits: {ik_solution.violations}")
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.failed("MoveCart IK failure")
 
         current_pos_rad = ik_solution.q
 
         # Send only the target position and let the firmware's P-controller handle speed.
-        state.Position_out[:] = [int(PAROL6_ROBOT.RAD2STEPS(p, i)) for i, p in enumerate(current_pos_rad)]
-        state.Speed_out[:] = [0] * 6 # Set feed-forward velocity to zero for smooth P-control.
+        pos_list = [int(PAROL6_ROBOT.RAD2STEPS(p, i)) for i, p in enumerate(current_pos_rad)]
+        np.copyto(state.Position_out, np.asarray(pos_list, dtype=state.Position_out.dtype))
+        state.Speed_out.fill(0)  # Set feed-forward velocity to zero for smooth P-control.
         state.Command_out = CommandCode.MOVE
 
         if s >= 1.0:

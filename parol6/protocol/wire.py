@@ -4,9 +4,10 @@ Wire protocol helpers for UDP encoding/decoding.
 This module centralizes encoding of command strings and decoding of common
 response payloads used by the headless controller.
 """
-import json
 import logging
-from typing import List, Literal, Sequence
+from typing import List, Literal, Sequence, cast, Union
+import array
+import numpy as np
 
 from .types import Frame, Axis, StatusAggregate
 # Centralized binary wire protocol helpers (pack/unpack + codes)
@@ -30,7 +31,7 @@ def split_bitfield(byte_val: int) -> list[int]:
     return [(byte_val >> i) & 1 for i in range(7, -1, -1)]
 
 
-def fuse_bitfield_2_bytearray(bits: list[int]) -> bytes:
+def fuse_bitfield_2_bytearray(bits: Union[list[int], Sequence[int]]) -> bytes:
     """
     Fuse a big-endian list of 8 bits (MSB..LSB) into a single byte.
     Any truthy value is treated as 1.
@@ -73,17 +74,33 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
     return val
 
 
+def _get_array_value(arr: Union[Sequence[int], array.array, memoryview], index: int, default: int = 0) -> int:
+    """
+    Safely get value from array-like object with bounds checking.
+    Optimized for zero-copy access when possible.
+    """
+    try:
+        if index < len(arr):
+            return int(arr[index])
+        return default
+    except (IndexError, TypeError):
+        return default
+
+
 def pack_tx_frame(
-    position_out: list[int],
-    speed_out: list[int],
-    command_code: int | CommandCode,
-    affected_joint_out: list[int],
-    inout_out: list[int],
+    position_out: Union[List[int], array.array, Sequence[int]],
+    speed_out: Union[List[int], array.array, Sequence[int]],
+    command_code: Union[int, CommandCode],
+    affected_joint_out: Union[List[int], array.array, Sequence[int]],
+    inout_out: Union[List[int], array.array, Sequence[int]],
     timeout_out: int,
-    gripper_data_out: list[int],
+    gripper_data_out: Union[List[int], array.array, Sequence[int]],
 ) -> bytes:
     """
     Pack a full TX frame to firmware.
+    
+    Optimized to accept array-like objects directly without conversion to lists.
+    Supports lists, array.array, memoryview, and other sequence types.
 
     Layout (excluding 3 start bytes and 1 length byte, total payload len = 52):
       - 6x position (3 bytes each) = 18
@@ -108,123 +125,183 @@ def pack_tx_frame(
 
     # Safety clamps and conversions
     cmd = int(command_code)
-    # Build payload
-    out = bytearray()
-    out += START
-    out += bytes([PAYLOAD_LEN])
-
-    # Positions: 6 * 3 bytes
+    
+    # Pre-allocate output buffer for better performance
+    # Total size: 3 start + 1 len + 52 payload = 56 bytes
+    out = bytearray(58)  # Adding 2 extra bytes for safety (end markers might go beyond 52)
+    
+    # Write header
+    out[0:3] = START
+    out[3] = PAYLOAD_LEN
+    
+    offset = 4
+    
+    # Positions: 6 * 3 bytes - optimized array access
     for i in range(6):
-        b0, b1, b2 = split_to_3_bytes(int(position_out[i]))
-        out += bytes([b0, b1, b2])
+        val = _get_array_value(position_out, i, 0)
+        b0, b1, b2 = split_to_3_bytes(val)
+        out[offset] = b0
+        out[offset + 1] = b1
+        out[offset + 2] = b2
+        offset += 3
 
-    # Speeds: 6 * 3 bytes
+    # Speeds: 6 * 3 bytes - optimized array access
     for i in range(6):
-        b0, b1, b2 = split_to_3_bytes(int(speed_out[i]))
-        out += bytes([b0, b1, b2])
+        val = _get_array_value(speed_out, i, 0)
+        b0, b1, b2 = split_to_3_bytes(val)
+        out[offset] = b0
+        out[offset + 1] = b1
+        out[offset + 2] = b2
+        offset += 3
 
     # Command
-    out += bytes([cmd])
+    out[offset] = cmd
+    offset += 1
 
-    # Affected joints as bitfield byte
-    out += fuse_bitfield_2_bytearray(list(affected_joint_out[:8]) + [0] * (8 - len(affected_joint_out[:8])))
+    # Affected joints as bitfield byte - build bitfield without creating intermediate list
+    bitfield_val = 0
+    for i in range(8):
+        if _get_array_value(affected_joint_out, i, 0):
+            bitfield_val |= (1 << (7 - i))
+    out[offset] = bitfield_val
+    offset += 1
 
-    # In/Out as bitfield byte
-    out += fuse_bitfield_2_bytearray(list(inout_out[:8]) + [0] * (8 - len(inout_out[:8])))
+    # In/Out as bitfield byte - build bitfield without creating intermediate list
+    bitfield_val = 0
+    for i in range(8):
+        if _get_array_value(inout_out, i, 0):
+            bitfield_val |= (1 << (7 - i))
+    out[offset] = bitfield_val
+    offset += 1
 
     # Timeout
-    out += bytes([int(timeout_out) & 0xFF])
+    out[offset] = int(timeout_out) & 0xFF
+    offset += 1
+
+    # Reserved bytes (legacy)
+    out[offset] = 0
+    out[offset + 1] = 0
+    offset += 2
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
     for idx in range(3):
-        v = int(gripper_data_out[idx]) & 0xFFFF
-        out += bytes([(v >> 8) & 0xFF, v & 0xFF])
+        v = _get_array_value(gripper_data_out, idx, 0) & 0xFFFF
+        out[offset] = (v >> 8) & 0xFF
+        out[offset + 1] = v & 0xFF
+        offset += 2
 
     # Gripper command, mode, id
-    out += bytes([
-        int(gripper_data_out[3]) & 0xFF,
-        int(gripper_data_out[4]) & 0xFF,
-        int(gripper_data_out[5]) & 0xFF,
-    ])
+    out[offset] = _get_array_value(gripper_data_out, 3, 0) & 0xFF
+    out[offset + 1] = _get_array_value(gripper_data_out, 4, 0) & 0xFF
+    out[offset + 2] = _get_array_value(gripper_data_out, 5, 0) & 0xFF
+    offset += 3
 
     # CRC (placeholder - unchanged from legacy)
-    out += bytes([228])
+    out[offset] = 228
+    offset += 1
 
     # End bytes
-    out += END
+    out[offset] = 0x01
+    out[offset + 1] = 0x02
+    
     return bytes(out)
 
 
-def unpack_rx_frame(data: bytes) -> dict | None:
+
+
+def unpack_rx_frame_into(
+    data: memoryview,
+    *,
+    pos_out,
+    spd_out,
+    homed_out,
+    io_out,
+    temp_out,
+    poserr_out,
+    timing_out,
+    grip_out,
+) -> bool:
     """
-    Unpack a full RX frame payload (expected 52 bytes: data buffer after len).
-    Mirrors the existing Unpack_data logic to produce the same structures.
-    Returns dict with keys:
-      Position_in, Speed_in, Homed_in, InOut_in, Temperature_error_in, Position_error_in,
-      Timeout_error, Timing_data_in, Gripper_data_in
+    Zero-allocation decode of a 52-byte RX frame payload (memoryview) directly into numpy arrays.
+    Expects:
+      - pos_out, spd_out: shape (6,), dtype=int32
+      - homed_out, io_out, temp_out, poserr_out: shape (8,), dtype=uint8
+      - timing_out: shape (1,), dtype=int32
+      - grip_out: shape (6,), dtype=int32 [device_id, pos, spd, cur, status, obj]
     """
     try:
-        # Basic validation (minimum structure)
         if len(data) < 52:
-            logger.warning(f"unpack_rx_frame: payload too short ({len(data)} bytes)")
-            return None
+            logger.warning(f"unpack_rx_frame_into: payload too short ({len(data)} bytes)")
+            return False
 
-        # Positions (0..17) and speeds (18..35)
-        pos_in = [0] * 6
-        spd_in = [0] * 6
-        for i in range(6):
-            off = i * 3
-            pos_in[i] = fuse_3_bytes(data[off + 0], data[off + 1], data[off + 2])
-        for i in range(6):
-            off = 18 + i * 3
-            spd_in[i] = fuse_3_bytes(data[off + 0], data[off + 1], data[off + 2])
+        mv = memoryview(data)
 
-        homed_byte = data[36]
-        io_byte = data[37]
-        temp_err_byte = data[38]
-        pos_err_byte = data[39]
-        timing_b0 = data[40]
-        timing_b1 = data[41]
+        # Positions (0..17) and speeds (18..35), 3 bytes per value, big-endian signed 24-bit
+        b = np.frombuffer(mv[:36], dtype=np.uint8).reshape(12, 3)
+        pos3 = b[:6]
+        spd3 = b[6:]
+
+        pos = (pos3[:, 0].astype(np.int32) << 16) | (pos3[:, 1].astype(np.int32) << 8) | pos3[:, 2].astype(np.int32)
+        spd = (spd3[:, 0].astype(np.int32) << 16) | (spd3[:, 1].astype(np.int32) << 8) | spd3[:, 2].astype(np.int32)
+
+        # Sign-correct 24-bit to int32
+        pos[pos >= (1 << 23)] -= (1 << 24)
+        spd[spd >= (1 << 23)] -= (1 << 24)
+
+        np.copyto(pos_out, pos, casting="no")
+        np.copyto(spd_out, spd, casting="no")
+
+        homed_byte = mv[36]
+        io_byte = mv[37]
+        temp_err_byte = mv[38]
+        pos_err_byte = mv[39]
+        timing_b0 = mv[40]
+        timing_b1 = mv[41]
         # indices 42..43 exist in some variants (timeout/xtr), legacy code ignores
-        device_id = data[44]
-        grip_pos_b0, grip_pos_b1 = data[45], data[46]
-        grip_spd_b0, grip_spd_b1 = data[47], data[48]
-        grip_cur_b0, grip_cur_b1 = data[49], data[50]
-        status_byte = data[51]
-        # Optional: data[52] object detection (legacy ignored here)
-        # data[53] CRC, data[54..55] end markers
 
-        homed = split_bitfield(homed_byte)
-        io_bits = split_bitfield(io_byte)
-        temp_bits = split_bitfield(temp_err_byte)
-        pos_bits = split_bitfield(pos_err_byte)
-        timing_val = fuse_3_bytes(0, timing_b0, timing_b1)
+        device_id = mv[44]
+        grip_pos_b0, grip_pos_b1 = mv[45], mv[46]
+        grip_spd_b0, grip_spd_b1 = mv[47], mv[48]
+        grip_cur_b0, grip_cur_b1 = mv[49], mv[50]
+        status_byte = mv[51]
+
+        # Bitfields (MSB..LSB)
+        homed_bits = split_bitfield(int(homed_byte))
+        io_bits = split_bitfield(int(io_byte))
+        temp_bits = split_bitfield(int(temp_err_byte))
+        pos_bits = split_bitfield(int(pos_err_byte))
+
+        homed_out[:] = np.fromiter(homed_bits, dtype=homed_out.dtype, count=8)
+        io_out[:] = np.fromiter(io_bits, dtype=io_out.dtype, count=8)
+        temp_out[:] = np.fromiter(temp_bits, dtype=temp_out.dtype, count=8)
+        poserr_out[:] = np.fromiter(pos_bits, dtype=poserr_out.dtype, count=8)
+
+        # Timing (legacy semantics: fuse_3_bytes(0, b0, b1))
+        timing_val = fuse_3_bytes(0, int(timing_b0), int(timing_b1))
+        timing_out[0] = int(timing_val)
 
         # Gripper values
-        grip_pos = fuse_2_bytes(grip_pos_b0, grip_pos_b1)
-        grip_spd = fuse_2_bytes(grip_spd_b0, grip_spd_b1)
-        grip_cur = fuse_2_bytes(grip_cur_b0, grip_cur_b1)
+        grip_pos = fuse_2_bytes(int(grip_pos_b0), int(grip_pos_b1))
+        grip_spd = fuse_2_bytes(int(grip_spd_b0), int(grip_spd_b1))
+        grip_cur = fuse_2_bytes(int(grip_cur_b0), int(grip_cur_b1))
 
-        status_bits = split_bitfield(status_byte)
-        # Combine bits 3 and 2 (big-endian list indices 4 and 5)
+        status_bits = split_bitfield(int(status_byte))
         obj_detection = ((status_bits[4] << 1) | status_bits[5]) if len(status_bits) >= 6 else 0
 
-        gripper_data_in = [int(device_id), int(grip_pos), int(grip_spd), int(grip_cur), int(status_byte), int(obj_detection)]
+        grip_out[0] = int(device_id)
+        grip_out[1] = int(grip_pos)
+        grip_out[2] = int(grip_spd)
+        grip_out[3] = int(grip_cur)
+        grip_out[4] = int(status_byte)
+        grip_out[5] = int(obj_detection)
 
-        return {
-            "Position_in": pos_in,
-            "Speed_in": spd_in,
-            "Homed_in": homed,
-            "InOut_in": io_bits,
-            "Temperature_error_in": temp_bits,
-            "Position_error_in": pos_bits,
-            "Timeout_error": 0,  # legacy not provided here
-            "Timing_data_in": [timing_val],
-            "Gripper_data_in": gripper_data_in,
-        }
+        return True
     except Exception as e:
-        logger.error(f"unpack_rx_frame: exception {e}")
-        return None
+        logger.error(f"unpack_rx_frame_into: exception {e}")
+        return False
+
+
+
 
 
 # =========================
@@ -414,20 +491,4 @@ def decode_status(resp: str) -> StatusAggregate | None:
     if result["pose"] is None and result["angles"] is None and result["io"] is None and result["gripper"] is None:
         return None
 
-    return result
-
-def parse_server_state(resp: str) -> dict | None:
-    """
-    Parse server state JSON from:
-      SERVER_STATE|{"ready": true, ...}
-    Returns dict or None.
-    """
-    if not resp or not resp.startswith("SERVER_STATE|"):
-        logger.debug(f"parse_server_state: Invalid response format. Expected 'SERVER_STATE|...' but got '{resp}'")
-        return None
-    _, json_part = resp.split("|", 1)
-    try:
-        return json.loads(json_part)
-    except json.JSONDecodeError as e:
-        logger.error(f"parse_server_state: Failed to parse JSON. JSON part: '{json_part}', Error: {e}")
-        return None
+    return cast(StatusAggregate, result)

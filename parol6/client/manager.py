@@ -261,7 +261,7 @@ class ServerManager:
         poll_interval: float = 0.2,
     ) -> bool:
         """
-        Wait until the controller responds to PING or reports ready in SERVER_STATE.
+        Wait until the controller responds to PING.
 
         Returns:
             True if the server becomes ready within timeout, else False.
@@ -271,7 +271,7 @@ class ServerManager:
 
         deadline = _time.time() + max(0.0, float(timeout))
         while _time.time() < deadline:
-            # Try a simple PING first
+            # Try a simple PING
             try:
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
                     sock.settimeout(min(0.5, poll_interval))
@@ -282,33 +282,16 @@ class ServerManager:
             except Exception:
                 pass
 
-            # Try GET_SERVER_STATE and check for {"ready": true}
-            try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(min(0.5, poll_interval))
-                    sock.sendto(b"GET_SERVER_STATE", (host, port))
-                    data, _ = sock.recvfrom(4096)
-                    resp = data.decode("utf-8")
-                    try:
-                        from ..protocol import wire as _wire  # local import to avoid cycles
-                        parsed = _wire.parse_server_state(resp)
-                    except Exception:
-                        parsed = None
-                    if isinstance(parsed, dict) and bool(parsed.get("ready")):
-                        return True
-            except Exception:
-                pass
-
             await asyncio.sleep(poll_interval)
 
         return False
 
     async def get_status(self, host: str = "127.0.0.1", port: int = 5001, timeout: float = 1.0) -> dict:
         """
-        Query controller's server state over UDP and merge with process info.
+        Query controller readiness over UDP (PING) and merge with process info.
         Returns a dict; if unreachable, returns minimal info.
         """
-        status = {
+        status: dict[str, object] = {
             "running": self.is_running(),
             "pid": self.pid,
             "server": None,
@@ -317,19 +300,13 @@ class ServerManager:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(timeout)
-                sock.sendto(b"GET_SERVER_STATE", (host, port))
-                data, _ = sock.recvfrom(4096)
-                resp = data.decode("utf-8")
-                try:
-                    from ..protocol import wire as _wire  # local import avoids top-level deps
-                    parsed = _wire.parse_server_state(resp)
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    status["server"] = parsed
+                sock.sendto(b"PING", (host, port))
+                data, _ = sock.recvfrom(256)
+                if data.decode("utf-8").strip().upper() == "PONG":
+                    status["server"] = {"ready": True}
         except Exception as e:
             # Keep minimal process info and include a hint for diagnostics
-            status.setdefault("error", str(e))
+            status["error"] = str(e)
         return status
 
 

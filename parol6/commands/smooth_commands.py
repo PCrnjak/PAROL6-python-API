@@ -6,10 +6,10 @@ Contains all smooth trajectory generation commands for advanced robot movements
 import logging
 import numpy as np
 from numpy.typing import NDArray
-from dataclasses import dataclass
-from typing import Tuple, Optional, List, Any, TYPE_CHECKING
+from typing import Tuple, Optional, List, Any, TYPE_CHECKING, Sequence
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+import json
 from spatialmath import SE3
 from parol6.smooth_motion import (
     CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
@@ -349,10 +349,9 @@ class BaseSmoothMotionCommand(CommandBase):
         
         transition_duration = max(pos_error / transition_speed, 0.5)  # Minimum 0.5s
         
-        transition_cmd = MovePoseCommand(
-            pose=target_pose,
-            duration=transition_duration
-        )
+        transition_cmd = MovePoseCommand()
+        transition_cmd.pose = target_pose
+        transition_cmd.duration = transition_duration
         
         return transition_cmd
     
@@ -419,7 +418,7 @@ class BaseSmoothMotionCommand(CommandBase):
             elif status.code == ExecutionStatusCode.FAILED:
                 self.fail(getattr(self.transition_command, 'error_message', 'Transition failed'))
                 self.finish()
-                state.Speed_out[:] = [0] * 6
+                state.Speed_out.fill(0)
                 state.Command_out = CommandCode.IDLE
                 return ExecutionStatus.failed("Transition failed")
             else:
@@ -448,7 +447,7 @@ class BaseSmoothMotionCommand(CommandBase):
                 logger.error("  -> ERROR: Cannot reach first trajectory point")
                 self.finish()
                 self.fail("Cannot reach trajectory start")
-                state.Speed_out[:] = [0] * 6
+                state.Speed_out.fill(0)
                 state.Command_out = CommandCode.IDLE
                 return ExecutionStatus.failed("Cannot reach trajectory start")
 
@@ -485,31 +484,25 @@ class BaseSmoothMotionCommand(CommandBase):
         Generate a simple radial entry trajectory from the current pose to the circle/helix perimeter.
         Produces a straight-line interpolation in Cartesian space.
         """
-        try:
-            import numpy as _np
-        except Exception:
-            # Fallback to module-level numpy
-            _np = np  # type: ignore[name-defined]
-
-        start_pose = _np.array(start_pose, dtype=float)
-        center = _np.array(center, dtype=float)
-        normal = _np.array(normal, dtype=float)
-        if _np.linalg.norm(normal) > 0:
-            normal = normal / _np.linalg.norm(normal)
+        start_pose = np.array(start_pose, dtype=float)
+        center = np.array(center, dtype=float)
+        normal = np.array(normal, dtype=float)
+        if np.linalg.norm(normal) > 0:
+            normal = normal / np.linalg.norm(normal)
 
         start_pos = start_pose[:3]
         to_start = start_pos - center
         # Project onto plane
-        to_plane = to_start - _np.dot(to_start, normal) * normal
-        dist = float(_np.linalg.norm(to_plane))
+        to_plane = to_start - np.dot(to_start, normal) * normal
+        dist = float(np.linalg.norm(to_plane))
 
         if dist < 1e-6:
             # Choose arbitrary direction perpendicular to normal
-            axis = _np.array([1.0, 0.0, 0.0])
-            if abs(_np.dot(axis, normal)) > 0.9:
-                axis = _np.array([0.0, 1.0, 0.0])
-            direction = _np.cross(normal, axis)
-            direction = direction / _np.linalg.norm(direction)
+            axis = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(axis, normal)) > 0.9:
+                axis = np.array([0.0, 1.0, 0.0])
+            direction = np.cross(normal, axis)
+            direction = direction / np.linalg.norm(direction)
         else:
             direction = to_plane / dist
 
@@ -519,12 +512,12 @@ class BaseSmoothMotionCommand(CommandBase):
 
         # Number of samples
         n = max(2, int(max(0.05, float(duration)) * float(sample_rate)))
-        ts = _np.linspace(0.0, 1.0, n)
+        ts = np.linspace(0.0, 1.0, n)
         traj = []
         for s in ts:
             pos = (1.0 - s) * start_pos + s * target_pos
-            traj.append(_np.concatenate([pos, target_orient]))
-        return _np.array(traj)
+            traj.append(np.concatenate([pos, target_orient]))
+        return np.array(traj)
 
 class SmoothTrajectoryCommand:
     """Command class for executing pre-generated smooth trajectories."""
@@ -554,7 +547,7 @@ class SmoothTrajectoryCommand:
         if self.trajectory_index >= len(self.trajectory):
             logger.info(f"Smooth {self.description} finished.")
             self.is_finished = True
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.completed(f"Smooth {self.description} complete")
         
@@ -577,7 +570,7 @@ class SmoothTrajectoryCommand:
             self.is_finished = True
             self.error_state = True
             self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
-            state.Speed_out[:] = [0] * 6
+            state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
             return ExecutionStatus.failed(self.error_message)
         
@@ -597,8 +590,8 @@ class SmoothTrajectoryCommand:
                     target_steps[i] = state.Position_in[i] + sign * int(max_step_diff)
         
         # Send position command
-        state.Position_out[:] = target_steps
-        state.Speed_out[:] = [0] * 6
+        np.copyto(state.Position_out, np.asarray(target_steps, dtype=state.Position_out.dtype))
+        state.Speed_out.fill(0)
         state.Command_out = CommandCode.MOVE
         
         # Advance to next point
@@ -607,7 +600,6 @@ class SmoothTrajectoryCommand:
         return ExecutionStatus.executing(f"Smooth {self.description}")
 
 
-@dataclass
 @register_command("SMOOTH_CIRCLE")
 class SmoothCircleCommand(BaseSmoothMotionCommand):
     """Execute smooth circular motion."""
@@ -623,7 +615,7 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
     center_mode: str = 'ABSOLUTE'
     entry_mode: str = 'NONE'
     normal_vector: Optional[NDArray] = None
-    current_position_in: Optional[List[int]] = None
+    current_position_in: Optional[Sequence[int]] = None
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -818,7 +810,6 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             return trajectory
 
 
-@dataclass
 @register_command("SMOOTH_ARC_CENTER")
 class SmoothArcCenterCommand(BaseSmoothMotionCommand):
     """Execute smooth arc motion defined by center point."""
@@ -932,7 +923,6 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
         return trajectory
 
 
-@dataclass
 @register_command("SMOOTH_ARC_PARAM")
 class SmoothArcParamCommand(BaseSmoothMotionCommand):
     """Execute smooth arc motion defined by radius and angle."""
@@ -946,7 +936,7 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
     trajectory_type: str = 'cubic'
     jerk_limit: Optional[float] = None
     normal_vector: Optional[NDArray] = None
-    current_position_in: Optional[List[int]] = None
+    current_position_in: Optional[Sequence[int]] = None
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -1130,7 +1120,6 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
         return trajectory
 
 
-@dataclass
 @register_command("SMOOTH_HELIX")
 class SmoothHelixCommand(BaseSmoothMotionCommand):
     """Execute smooth helical motion."""
@@ -1310,7 +1299,6 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
             return np.array(trajectory)
 
 
-@dataclass
 @register_command("SMOOTH_SPLINE")
 class SmoothSplineCommand(BaseSmoothMotionCommand):
     """Execute smooth spline motion through waypoints."""
@@ -1320,7 +1308,7 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
     frame: str = 'WRF'
     trajectory_type: str = 'cubic'
     jerk_limit: Optional[float] = None
-    current_position_in: Optional[List[int]] = None
+    current_position_in: Optional[Sequence[int]] = None
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -1483,7 +1471,6 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         return trajectory
 
 
-@dataclass
 @register_command("SMOOTH_BLEND")
 class SmoothBlendCommand(BaseSmoothMotionCommand):
     """Execute smooth blended trajectory through multiple segments."""
@@ -1493,7 +1480,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
     frame: str = 'WRF'
     trajectory_type: str = 'cubic'
     jerk_limit: Optional[float] = None
-    current_position_in: Optional[List[int]] = None
+    current_position_in: Optional[Sequence[int]] = None
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -1568,7 +1555,6 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
         
         try:
             # Parse segment definitions (JSON format)
-            import json
             self.segment_definitions = json.loads(parts[1])
             
             # Validate segment definitions
@@ -1784,7 +1770,6 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
             raise ValueError("No trajectories generated in blend")
 
 
-@dataclass
 @register_command("SMOOTH_WAYPOINTS")
 class SmoothWaypointsCommand(BaseSmoothMotionCommand):
     """Execute waypoint trajectory with corner cutting."""

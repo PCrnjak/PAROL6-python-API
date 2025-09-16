@@ -138,15 +138,12 @@ class CommandRegistry:
         self._discovered = True
         logger.info(f"Command discovery complete. {len(self._commands)} commands registered.")
     
-    def create_command(self, message: str) -> Optional[CommandBase]:
+    def create_command_from_parts(self, parts: List[str]) -> Optional[CommandBase]:
         """
-        Create a command instance from a message string.
-        
-        This method parses the message once, looks up the command class
-        by name, and calls its match() method with the pre-split parts.
+        Create a command instance from pre-split message parts.
         
         Args:
-            message: The command message string
+            parts: Pre-split message parts
             
         Returns:
             A command instance if a match is found, None otherwise
@@ -155,10 +152,8 @@ class CommandRegistry:
         if not self._discovered:
             self.discover_commands()
         
-        # Parse message once to extract command name
-        parts = message.split('|')
         if not parts:
-            logger.debug("Empty message")
+            logger.debug("Empty message parts")
             return None
         
         command_name = parts[0].upper()
@@ -230,54 +225,9 @@ def register_command(name: str) -> Callable[[Type[CommandBase]], Type[CommandBas
     
     return decorator
 
-
-def get_command_class(name: str) -> Optional[Type[CommandBase]]:
-    """
-    Get a command class by name from the global registry.
-    
-    Args:
-        name: The command name to look up
-        
-    Returns:
-        The command class if found, None otherwise
-    """
-    return _registry.get_command_class(name)
-
-
-def list_registered_commands() -> List[str]:
-    """
-    Get a list of all registered command names.
-    
-    Returns:
-        List of command names (sorted)
-    """
-    return _registry.list_registered_commands()
-
-
-def discover_commands() -> None:
-    """
-    Trigger auto-discovery of all decorated commands.
-    
-    This imports all modules in parol6.commands to trigger decorators.
-    """
-    _registry.discover_commands()
-
-
-def create_command(message: str) -> Optional[CommandBase]:
-    """
-    Create a command instance from a message string.
-    
-    Args:
-        message: The command message string
-        
-    Returns:
-        A command instance if a match is found, None otherwise
-    """
-    return _registry.create_command(message)
-
-
-def clear_registry() -> None:
-    """
-    Clear all registered commands (mainly for testing).
-    """
-    _registry.clear()
+# Module-level convenience functions that delegate to the registry singleton
+get_command_class = _registry.get_command_class
+list_registered_commands = _registry.list_registered_commands
+discover_commands = _registry.discover_commands
+clear_registry = _registry.clear
+create_command_from_parts = _registry.create_command_from_parts
