@@ -16,6 +16,7 @@ from parol6.commands.base import QueryCommand, ExecutionStatus, ExecutionStatusC
 from parol6.server.command_registry import register_command
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.status_cache import get_cache
+from parol6 import config as cfg
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -280,6 +281,44 @@ class GetGcodeStatusCommand(QueryCommand):
 
 
 
+@register_command("GET_LOOP_STATS")
+class GetLoopStatsCommand(QueryCommand):
+    """Return control-loop metrics (no ACK dependency)."""
+
+    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        if parts[0].upper() == "GET_LOOP_STATS":
+            return True, None
+        return False, None
+
+    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
+
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        if not self.udp_transport or not self.addr:
+            self.fail("Missing UDP transport or address")
+            return ExecutionStatus.failed("Missing UDP transport or address")
+        try:
+            target_hz = 1.0 / max(cfg.INTERVAL_S, 1e-9)
+            ema_hz = (1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0
+            payload = {
+                "target_hz": float(target_hz),
+                "loop_count": int(state.loop_count),
+                "overrun_count": int(state.overrun_count),
+                "last_period_s": float(state.last_period_s),
+                "ema_period_s": float(state.ema_period_s),
+                "ema_hz": float(ema_hz),
+            }
+            self.udp_transport.send_response(f"LOOP_STATS|{json.dumps(payload)}", self.addr)
+        except Exception as e:
+            self.fail(f"Failed to get loop stats: {e}")
+            return ExecutionStatus.failed(f"Failed to get loop stats: {e}")
+        self.finish()
+        return ExecutionStatus.completed("Loop stats sent")
+
+
 @register_command("PING")
 class PingCommand(QueryCommand):
     """Respond to ping requests."""
@@ -297,13 +336,15 @@ class PingCommand(QueryCommand):
             self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return PONG."""
+        """Execute immediately and return PONG with serial connectivity bit."""
         if not self.udp_transport or not self.addr:
             self.fail("Missing UDP transport or address")
             return ExecutionStatus.failed("Missing UDP transport or address")
         
         try:
-            self.udp_transport.send_response("PONG", self.addr)
+            # Consider serial "connected" if we've observed a fresh serial frame recently
+            serial_connected = 1 if get_cache().age_s() <= cfg.STATUS_STALE_S else 0
+            self.udp_transport.send_response(f"PONG|SERIAL={serial_connected}", self.addr)
         except Exception as e:
             self.fail(f"Failed to send PONG: {e}")
             return ExecutionStatus.failed(f"Failed to send PONG: {e}")

@@ -11,11 +11,12 @@ import time
 import math
 import asyncio
 import random
-from typing import Union, List, Optional, Literal, Dict
+from typing import Union, List, Optional, Literal, Dict, cast, Any
+from dataclasses import asdict, is_dataclass
 
 from ..protocol.types import Frame, Axis
 from ..protocol import wire
-from ..utils.command_tracker import CommandTracker, get_shared_tracker
+from .. import config as cfg
 
 
 class AsyncRobotClient:
@@ -38,33 +39,50 @@ class AsyncRobotClient:
         timeout: float = 2.0, 
         retries: int = 1, 
         ack_port: int = 5002,
-        tracker: CommandTracker | None = None,
+        tracker: Any | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
         self.retries = retries
         self.ack_port = ack_port
-        self._tracker = tracker or get_shared_tracker(host=self.host, port=self.port, ack_port=self.ack_port)
+        self._tracker = None  # tracker removed
+
+        # Persistent asyncio socket + policy (initialized lazily)
+        self._sock = None  # type: ignore[attr-defined]
+        self._loop = None  # type: ignore[attr-defined]
+        self._req_lock = asyncio.Lock()
+        self._stream_mode = False
+        self._ack_policy = None  # ACK policy not used
 
     # --------------- Internal helpers ---------------
 
+    def _ensure_socket(self) -> None:
+        """Lazily create a persistent non-blocking UDP socket and cache the running loop."""
+        if self._sock is None:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock.setblocking(False)
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
     async def _send(self, message: str) -> str:
-        """Fire-and-forget UDP send."""
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto(message.encode("utf-8"), (self.host, self.port))
+        """Fire-and-forget UDP send using a persistent asyncio socket."""
+        self._ensure_socket()
+        assert self._loop is not None and self._sock is not None  # type narrowing for linters
+        await self._loop.sock_sendto(self._sock, message.encode("utf-8"), (self.host, self.port))
         return f"Sent: {message}"
 
     async def _request(self, message: str, bufsize: int = 2048) -> str | None:
-        """Send a request and wait for a UDP response (with retry and jittered backoff)."""
+        """Send a request and wait for a UDP response using a persistent asyncio socket."""
+        self._ensure_socket()
+        assert self._loop is not None and self._sock is not None  # type narrowing for linters
         for attempt in range(self.retries + 1):
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(self.timeout)
-                    sock.sendto(message.encode("utf-8"), (self.host, self.port))
-                    data, _ = sock.recvfrom(bufsize)
-                    return data.decode("utf-8")
-            except socket.timeout:
+                async with self._req_lock:
+                    await self._loop.sock_sendto(self._sock, message.encode("ascii"), (self.host, self.port))
+                    data, _ = await asyncio.wait_for(self._loop.sock_recvfrom(self._sock, bufsize), timeout=self.timeout)
+                    return data.decode("ascii")
+            except asyncio.TimeoutError:
                 if attempt < self.retries:
                     backoff = min(0.5, 0.05 * (2 ** attempt)) + random.uniform(0, 0.05)
                     await asyncio.sleep(backoff)
@@ -74,21 +92,8 @@ class AsyncRobotClient:
         return None
 
     async def _send_tracked(self, message: str, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        """Send with optional tracking support."""
-        # Check if tracking is explicitly disabled
-        disable_tracking = os.getenv("PAROL6_DISABLE_TRACKING", "").lower() in ("1", "true", "yes", "on")
-        
-        # Only use tracking if wait_for_ack or non_blocking is requested AND tracking is not disabled
-        if (wait_for_ack or non_blocking) and not disable_tracking:
-            result = self._tracker.send(message, wait_for_ack=wait_for_ack, timeout=timeout, non_blocking=non_blocking)
-            return result if result is not None else {"status": "ERROR", "details": "Send failed", "completed": True, "command_id": None}
-        elif wait_for_ack and disable_tracking:
-            # If ACK was requested but tracking is disabled, return a NO_TRACKING response
-            await self._send(message)
-            return {"status": "NO_TRACKING", "details": "Tracking disabled by environment", "completed": True, "command_id": None}
-        else:
-            # Fire-and-forget send without initializing tracker
-            return await self._send(message)
+        """Send command (fire-and-forget)."""
+        return await self._send(message)
 
     # --------------- Motion / Control ---------------
 
@@ -119,10 +124,12 @@ class AsyncRobotClient:
 
     async def stream_on(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
         """Enable zero-queue streaming mode on the server."""
+        self._stream_mode = True
         return await self._send_tracked("STREAM|ON", wait_for_ack, timeout, non_blocking)
 
     async def stream_off(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
         """Disable zero-queue streaming mode on the server."""
+        self._stream_mode = False
         return await self._send_tracked("STREAM|OFF", wait_for_ack, timeout, non_blocking)
 
     async def set_com_port(self, port_str: str, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
@@ -141,7 +148,10 @@ class AsyncRobotClient:
         Expected wire format: "ANGLES|j1,j2,j3,j4,j5,j6"
         """
         resp = await self._request("GET_ANGLES", bufsize=1024)
-        return wire.decode_simple(resp, "ANGLES")
+        if not resp:
+            return None
+        vals = wire.decode_simple(resp, "ANGLES")
+        return cast(List[float] | None, vals)
 
     async def get_io(self) -> list[int] | None:
         """
@@ -149,7 +159,10 @@ class AsyncRobotClient:
         Expected wire format: "IO|in1,in2,out1,out2,estop"
         """
         resp = await self._request("GET_IO", bufsize=1024)
-        return wire.decode_simple(resp, "IO")
+        if not resp:
+            return None
+        vals = wire.decode_simple(resp, "IO")
+        return cast(List[int] | None, vals)
 
     async def get_gripper_status(self) -> list[int] | None:
         """
@@ -157,7 +170,10 @@ class AsyncRobotClient:
         Expected wire format: "GRIPPER|id,pos,spd,cur,status,obj"
         """
         resp = await self._request("GET_GRIPPER", bufsize=1024)
-        return wire.decode_simple(resp, "GRIPPER")
+        if not resp:
+            return None
+        vals = wire.decode_simple(resp, "GRIPPER")
+        return cast(List[int] | None, vals)
 
     async def get_speeds(self) -> list[float] | None:
         """
@@ -165,7 +181,10 @@ class AsyncRobotClient:
         Expected wire format: "SPEEDS|s1,s2,s3,s4,s5,s6"
         """
         resp = await self._request("GET_SPEEDS", bufsize=1024)
-        return wire.decode_simple(resp, "SPEEDS")
+        if not resp:
+            return None
+        vals = wire.decode_simple(resp, "SPEEDS")
+        return cast(List[float] | None, vals)
 
     async def get_pose(self) -> list[float] | None:
         """
@@ -173,7 +192,10 @@ class AsyncRobotClient:
         Expected wire format: "POSE|p0,p1,p2,...,p15"
         """
         resp = await self._request("GET_POSE", bufsize=2048)
-        return wire.decode_simple(resp, "POSE")
+        if not resp:
+            return None
+        vals = wire.decode_simple(resp, "POSE")
+        return cast(List[float] | None, vals)
 
     async def get_gripper(self) -> list[int] | None:
         """Alias for get_gripper_status for compatibility."""
@@ -188,7 +210,20 @@ class AsyncRobotClient:
                                 io (list[int] len=5), gripper (list[int] len>=6)
         """
         resp = await self._request("GET_STATUS", bufsize=4096)
-        return wire.decode_status(resp)
+        if not resp:
+            return None
+        # Keep return type as dict | None for compatibility
+        return cast(dict | None, wire.decode_status(resp))
+
+    async def get_loop_stats(self) -> dict | None:
+        """
+        Fetch control-loop runtime metrics from the server.
+        Expected wire format: "LOOP_STATS|{json}"
+        """
+        resp = await self._request("GET_LOOP_STATS", bufsize=1024)
+        if not resp or not resp.startswith("LOOP_STATS|"):
+            return None
+        return cast(Dict, json.loads(resp.split("|", 1)[1]))
 
     # --------------- Helper methods for compatibility ---------------
 

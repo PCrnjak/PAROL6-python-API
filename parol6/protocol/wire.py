@@ -15,6 +15,29 @@ from enum import IntEnum
 
 logger = logging.getLogger(__name__)
 
+# Precomputed bit-unpack lookup table for 0..255 (MSB..LSB)
+# Using NumPy ensures fast vectorized selection without per-call allocations.
+_BIT_UNPACK = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big")
+
+__all__ = [
+    "CommandCode",
+    "pack_tx_frame",
+    "unpack_rx_frame_into",
+    "encode_move_joint",
+    "encode_move_pose",
+    "encode_move_cartesian",
+    "encode_move_cartesian_rel_trf",
+    "encode_jog_joint",
+    "encode_cart_jog",
+    "encode_gcode",
+    "encode_gcode_program_inline",
+    "decode_simple",
+    "decode_status",
+    "split_to_3_bytes",
+    "fuse_3_bytes",
+    "fuse_2_bytes",
+]
+
 
 class CommandCode(IntEnum):
     """Unified command codes for firmware interface."""
@@ -44,34 +67,26 @@ def fuse_bitfield_2_bytearray(bits: Union[list[int], Sequence[int]]) -> bytes:
 
 def split_to_3_bytes(n: int) -> tuple[int, int, int]:
     """
-    Convert an int to 24-bit big-endian (two's complement) and return 3 bytes.
-    This mirrors the existing Split_2_3_bytes semantics from controller.
+    Convert int to signed 24-bit big-endian (two's complement) encoded bytes (b0,b1,b2).
     """
-    n24 = n & 0xFFFFFF  # two's complement 24-bit
-    b = n24.to_bytes(4, "big", signed=False)
-    return (b[1], b[2], b[3])
+    n24 = n & 0xFFFFFF
+    return ((n24 >> 16) & 0xFF, (n24 >> 8) & 0xFF, n24 & 0xFF)
 
 
 def fuse_3_bytes(b0: int, b1: int, b2: int) -> int:
     """
     Convert 3 bytes (big-endian) into a signed 24-bit integer.
-    Matches the existing Fuse_3_bytes semantics.
     """
-    val = int.from_bytes(bytes([0, b0, b1, b2]), "big", signed=False)
-    if val >= (1 << 23):
-        val -= (1 << 24)
-    return val
+    val = (b0 << 16) | (b1 << 8) | b2
+    return val - 0x1000000 if (val & 0x800000) else val
 
 
 def fuse_2_bytes(b0: int, b1: int) -> int:
     """
     Convert 2 bytes (big-endian) into a signed 16-bit integer.
-    Matches the existing Fuse_2_bytes semantics.
     """
-    val = int.from_bytes(bytes([0, 0, b0, b1]), "big", signed=False)
-    if val >= (1 << 15):
-        val -= (1 << 16)
-    return val
+    val = (b0 << 8) | b1
+    return val - 0x10000 if (val & 0x8000) else val
 
 
 def _get_array_value(arr: Union[Sequence[int], array.array, memoryview], index: int, default: int = 0) -> int:
@@ -265,16 +280,11 @@ def unpack_rx_frame_into(
         grip_cur_b0, grip_cur_b1 = mv[49], mv[50]
         status_byte = mv[51]
 
-        # Bitfields (MSB..LSB)
-        homed_bits = split_bitfield(int(homed_byte))
-        io_bits = split_bitfield(int(io_byte))
-        temp_bits = split_bitfield(int(temp_err_byte))
-        pos_bits = split_bitfield(int(pos_err_byte))
-
-        homed_out[:] = np.fromiter(homed_bits, dtype=homed_out.dtype, count=8)
-        io_out[:] = np.fromiter(io_bits, dtype=io_out.dtype, count=8)
-        temp_out[:] = np.fromiter(temp_bits, dtype=temp_out.dtype, count=8)
-        poserr_out[:] = np.fromiter(pos_bits, dtype=poserr_out.dtype, count=8)
+        # Bitfields (MSB..LSB) via LUT (no per-call Python loops)
+        homed_out[:] = _BIT_UNPACK[int(homed_byte)]
+        io_out[:] = _BIT_UNPACK[int(io_byte)]
+        temp_out[:] = _BIT_UNPACK[int(temp_err_byte)]
+        poserr_out[:] = _BIT_UNPACK[int(pos_err_byte)]
 
         # Timing (legacy semantics: fuse_3_bytes(0, b0, b1))
         timing_val = fuse_3_bytes(0, int(timing_b0), int(timing_b1))
@@ -285,8 +295,8 @@ def unpack_rx_frame_into(
         grip_spd = fuse_2_bytes(int(grip_spd_b0), int(grip_spd_b1))
         grip_cur = fuse_2_bytes(int(grip_cur_b0), int(grip_cur_b1))
 
-        status_bits = split_bitfield(int(status_byte))
-        obj_detection = ((status_bits[4] << 1) | status_bits[5]) if len(status_bits) >= 6 else 0
+        sbits = _BIT_UNPACK[int(status_byte)]
+        obj_detection = (int(sbits[4]) << 1) | int(sbits[5])
 
         grip_out[0] = int(device_id)
         grip_out[1] = int(grip_pos)

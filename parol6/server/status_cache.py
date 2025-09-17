@@ -36,44 +36,58 @@ class StatusCache:
         self._gripper_ascii: str = "0,0,0,0,0,0"
         self._pose_ascii: str = ",".join("0" for _ in range(16))
         self._ascii_full: str = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
+        # Change-detection caches to avoid expensive recomputation when inputs unchanged
+        self._last_pos_in: np.ndarray | None = None
+        self._last_io5: np.ndarray | None = None
+        self._last_grip6: np.ndarray | None = None
 
     def update_from_state(self, state: ControllerState) -> None:
         """
-        Update cache from current controller state. Computes:
-          - angles in degrees from Position_in (steps -> rad -> deg)
-          - IO: state.InOut_in[:5]
-          - gripper: state.Gripper_data_in (first 6 values if longer)
-          - pose: via forward kinematics using current joint angles (rad)
+        Update cache from current controller state with change gating:
+          - Only recompute angles/pose when Position_in changes
+          - Always refresh IO/gripper (cheap)
         """
         with self._lock:
-            # Angles (deg)
-            angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)]
-            self.angles_deg = list(np.rad2deg(angles_rad))
-            self._angles_ascii = ",".join(str(a) for a in self.angles_deg)
+            # Detect position changes (gate expensive FK/angle math)
+            pos_in = np.asarray(state.Position_in, dtype=np.int32)
+            pos_changed = False
+            if self._last_pos_in is None or self._last_pos_in.shape != (6,):
+                self._last_pos_in = pos_in.copy()
+                pos_changed = True
+            else:
+                # np.array_equal is fast for small arrays
+                if not np.array_equal(pos_in, self._last_pos_in):
+                    self._last_pos_in[:] = pos_in
+                    pos_changed = True
+
+            if pos_changed:
+                # Angles (deg) from steps
+                angles_rad = [PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(pos_in)]
+                self.angles_deg = list(np.rad2deg(angles_rad))
+                self._angles_ascii = ",".join(str(a) for a in self.angles_deg)
+
+                # Pose via FK
+                q_current = np.array([PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(pos_in)])
+                current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
+                pose_flat = current_pose_matrix.flatten().tolist()
+                if len(pose_flat) == 16:
+                    self.pose = [float(x) for x in pose_flat]
+                    self._pose_ascii = ",".join(str(x) for x in self.pose)
 
             # IO (first 5)
-            self.io = list(state.InOut_in[:5])
-            self._io_ascii = ",".join(str(x) for x in self.io)
+            io5 = np.asarray(state.InOut_in[:5], dtype=np.uint8)
+            self.io = io5.tolist()
+            self._io_ascii = ",".join(str(int(x)) for x in io5)
 
             # Gripper (first 6)
-            # Ensure at least 6 elements
-            g = state.Gripper_data_in
-            if len(g) < 6:
-                g = (g + [0] * 6)[:6]
-            else:
-                g = g[:6]
-            self.gripper = list(g)
-            self._gripper_ascii = ",".join(str(x) for x in self.gripper)
+            grip6 = np.asarray(state.Gripper_data_in[:6], dtype=np.int32)
+            if grip6.shape[0] < 6:
+                # Pad to 6 if shorter
+                grip6 = np.pad(grip6, (0, 6 - grip6.shape[0]), mode="constant")
+            self.gripper = grip6.tolist()
+            self._gripper_ascii = ",".join(str(int(x)) for x in grip6)
 
-            # Pose via FK
-            q_current = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)])
-            current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
-            pose_flat = current_pose_matrix.flatten().tolist()
-            # Ensure 16 elements
-            if len(pose_flat) == 16:
-                self.pose = [float(x) for x in pose_flat]
-                self._pose_ascii = ",".join(str(x) for x in self.pose)
-
+            # Assemble full ASCII (cheap string concatenation)
             self._ascii_full = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
             self.last_update_s = time.time()
 

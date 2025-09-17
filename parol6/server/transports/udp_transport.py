@@ -102,12 +102,13 @@ class UDPTransport:
         if not self.socket or not self._running:
             return None
         try:
-            nbytes, address = self.socket.recvfrom_into(self._rx)
+            nbytes, address = self.socket.recvfrom_into(self._rxv)
             if nbytes <= 0:
                 return None
             try:
-                message_str = self._rx[:nbytes].decode('ascii').strip()
-            except UnicodeDecodeError:
+                # Decode ASCII payload and trim only CR/LF to avoid extra copies
+                message_str = self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore").rstrip("\r\n")
+            except Exception:
                 logger.warning(f"Failed to decode UDP datagram from {address}")
                 return None
             return (message_str, address)

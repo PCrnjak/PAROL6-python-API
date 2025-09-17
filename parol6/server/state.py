@@ -84,6 +84,12 @@ class ControllerState:
 
     gripper_mode_tracker: GripperModeResetTracker = field(default_factory=GripperModeResetTracker)
 
+    # Control loop runtime metrics (used by benchmarks/monitoring)
+    loop_count: int = 0
+    overrun_count: int = 0
+    last_period_s: float = 0.0
+    ema_period_s: float = 0.0
+
 
 logger = logging.getLogger(__name__)
 

@@ -275,6 +275,10 @@ class Controller:
         5. Maintains timing
         """
         
+        tick = self.config.loop_interval
+        next_t = time.perf_counter()
+        prev_t = next_t  # for period measurement
+
         while self.running:
             try:
                 loop_start = time.time()
@@ -347,8 +351,7 @@ class Controller:
                         # No commands - idle
                         state.Command_out = CommandCode.IDLE
                         state.Speed_out.fill(0)
-                        for i in range(6):
-                            state.Position_out[i] = state.Position_in[i]
+                        np.copyto(state.Position_out, state.Position_in)
                 
                 # 4. Write to firmware
                 if self.serial_transport and self.serial_transport.is_connected():
@@ -367,12 +370,29 @@ class Controller:
                         if state.Gripper_data_out[4] in (1, 2):
                             state.Gripper_data_out[4] = 0
 
-                # 5. Maintain loop timing
-                elapsed = time.time() - loop_start
-                if elapsed < self.config.loop_interval:
-                    time.sleep(self.config.loop_interval - elapsed)
-                elif elapsed > self.config.loop_interval * 1.5:
-                    logger.warning(f"Control loop took {elapsed:.3f}s (target: {self.config.loop_interval:.3f}s)")
+                # 5. Maintain loop timing using deadline scheduling + update loop metrics
+                now = time.perf_counter()
+                # Update period metrics
+                period = now - prev_t
+                prev_t = now
+                state.loop_count += 1
+                state.last_period_s = float(period)
+                if state.ema_period_s <= 0.0:
+                    state.ema_period_s = float(period)
+                else:
+                    # EMA with alpha=0.1
+                    state.ema_period_s = 0.1 * float(period) + 0.9 * float(state.ema_period_s)
+
+                next_t += tick
+                sleep = next_t - time.perf_counter()
+                if sleep > 0:
+                    time.sleep(sleep)
+                else:
+                    # Overrun; catch up and log if severe
+                    state.overrun_count += 1
+                    next_t = time.perf_counter()
+                    if -sleep > tick * 0.5:
+                        logger.warning(f"Control loop overrun by {-sleep:.4f}s (target: {tick:.4f}s)")
                 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
@@ -450,29 +470,18 @@ class Controller:
 
                 # Apply stream mode logic for streamable motion commands
                 if self.stream_mode and isinstance(command, MotionCommand) and getattr(command, 'streamable', False):
-                    # Cancel any active streamable command and replace it
+                    # Cancel any active streamable command and replace it (suppress per-command ACK to reduce UDP chatter)
                     if self.active_command and isinstance(self.active_command.command, MotionCommand) and getattr(self.active_command.command, 'streamable', False):
-                        # Send cancellation for active command
-                        if self.active_command.command_id:
-                            self._send_ack(
-                                self.active_command.command_id,
-                                "CANCELLED",
-                                "Replaced by new stream command",
-                                self.active_command.address,
-                            )
                         self.active_command = None
 
-                    # Clear any queued streamable commands
-                    for queued_cmd in list(self.command_queue):
-                        if isinstance(queued_cmd.command, MotionCommand) and getattr(queued_cmd.command, 'streamable', False):
-                            self.command_queue.remove(queued_cmd)
-                            if queued_cmd.command_id:
-                                self._send_ack(
-                                    queued_cmd.command_id,
-                                    "CANCELLED",
-                                    "Replaced by streaming jog",
-                                    queued_cmd.address,
-                                )
+                # Clear any queued streamable commands without per-command ACKs to reduce UDP chatter
+                removed = 0
+                for queued_cmd in list(self.command_queue):
+                    if isinstance(queued_cmd.command, MotionCommand) and getattr(queued_cmd.command, 'streamable', False):
+                        self.command_queue.remove(queued_cmd)
+                        removed += 1
+                if removed:
+                    logger.debug(f"Stream mode: removed {removed} queued streamable command(s)")
 
                 # Queue the command
                 status = self._queue_command(addr, command, cmd_id)
