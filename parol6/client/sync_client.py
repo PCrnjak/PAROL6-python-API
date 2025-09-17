@@ -2,8 +2,7 @@
 Synchronous facade for AsyncRobotClient.
 
 - In sync code: use RobotClient and call methods directly.
-- In async code (event loop running): this class raises to prevent blocking;
-  use AsyncRobotClient instead and `await` the methods.
+- In async code (event loop running): use AsyncRobotClient and `await` the methods.
 
 """
 
@@ -13,7 +12,7 @@ import atexit
 from typing import TypeVar, Union, Optional, List, Literal, Dict, Coroutine, Any
 
 from .async_client import AsyncRobotClient
-from ..protocol.types import Frame, Axis  # keep your existing imports
+from ..protocol.types import Frame, Axis
 
 T = TypeVar("T")
 
@@ -88,10 +87,9 @@ class RobotClient:
         port: int = 5001,
         timeout: float = 2.0,
         retries: int = 1,
-        ack_port: int = 5002,
     ) -> None:
         self._inner = AsyncRobotClient(
-            host=host, port=port, timeout=timeout, retries=retries, ack_port=ack_port
+            host=host, port=port, timeout=timeout, retries=retries
         )
 
     @property
@@ -108,38 +106,34 @@ class RobotClient:
     def port(self) -> int:
         return self._inner.port
 
-    @property
-    def ack_port(self) -> int:
-        return self._inner.ack_port
-
     # ---------- motion / control ----------
 
     def ping(self) -> bool:
         return _run(self._inner.ping())
 
-    def home(self, wait_for_ack: bool = False, timeout: float = 30.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.home(wait_for_ack, timeout, non_blocking))
+    def home(self) -> str:
+        return _run(self._inner.home())
 
-    def stop(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stop(wait_for_ack, timeout, non_blocking))
+    def stop(self) -> str:
+        return _run(self._inner.stop())
 
-    def enable(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.enable(wait_for_ack, timeout, non_blocking))
+    def enable(self) -> str:
+        return _run(self._inner.enable())
 
-    def disable(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.disable(wait_for_ack, timeout, non_blocking))
+    def disable(self) -> str:
+        return _run(self._inner.disable())
 
-    def clear_error(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.clear_error(wait_for_ack, timeout, non_blocking))
+    def clear_error(self) -> str:
+        return _run(self._inner.clear_error())
 
-    def stream_on(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stream_on(wait_for_ack, timeout, non_blocking))
+    def stream_on(self) -> str:
+        return _run(self._inner.stream_on())
 
-    def stream_off(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stream_off(wait_for_ack, timeout, non_blocking))
+    def stream_off(self) -> str:
+        return _run(self._inner.stream_off())
 
-    def set_com_port(self, port_str: str, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.set_com_port(port_str, wait_for_ack, timeout, non_blocking))
+    def set_com_port(self, port_str: str) -> str:
+        return _run(self._inner.set_com_port(port_str))
 
     # ---------- status / queries ----------
 
@@ -163,6 +157,9 @@ class RobotClient:
 
     def get_status(self) -> dict | None:
         return _run(self._inner.get_status())
+
+    def get_loop_stats(self) -> dict | None:
+        return _run(self._inner.get_loop_stats())
 
     # ---------- helper methods ----------
 
@@ -208,10 +205,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.move_joints(
                 joint_angles,
@@ -220,9 +214,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -234,10 +225,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.move_pose(
                 pose,
@@ -246,9 +234,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -260,10 +245,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.move_cartesian(
                 pose,
@@ -272,9 +254,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -286,10 +265,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.move_cartesian_rel_trf(
                 deltas,
@@ -298,9 +274,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -310,19 +283,13 @@ class RobotClient:
         speed_percentage: int,
         duration: float | None = None,
         distance_deg: float | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.jog_joint(
                 joint_index,
                 speed_percentage,
                 duration,
                 distance_deg,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -332,13 +299,10 @@ class RobotClient:
         axis: Axis,
         speed_percentage: int,
         duration: float,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.jog_cartesian(
-                frame, axis, speed_percentage, duration, wait_for_ack, timeout, non_blocking
+                frame, axis, speed_percentage, duration
             )
         )
 
@@ -347,11 +311,8 @@ class RobotClient:
         joints: List[int],
         speeds: List[float],
         duration: float,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.jog_multiple(joints, speeds, duration, wait_for_ack, timeout, non_blocking))
+    ) -> str:
+        return _run(self._inner.jog_multiple(joints, speeds, duration))
 
     # ---------- IO / gripper ----------
 
@@ -359,11 +320,8 @@ class RobotClient:
         self,
         action: str,
         port: int,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.control_pneumatic_gripper(action, port, wait_for_ack, timeout, non_blocking))
+    ) -> str:
+        return _run(self._inner.control_pneumatic_gripper(action, port))
 
     def control_electric_gripper(
         self,
@@ -371,13 +329,10 @@ class RobotClient:
         position: int | None = 255,
         speed: int | None = 150,
         current: int | None = 500,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.control_electric_gripper(
-                action, position, speed, current, wait_for_ack, timeout, non_blocking
+                action, position, speed, current
             )
         )
 
@@ -386,56 +341,32 @@ class RobotClient:
     def execute_gcode(
         self,
         gcode_line: str,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.execute_gcode(gcode_line, wait_for_ack, timeout, non_blocking))
+    ) -> str:
+        return _run(self._inner.execute_gcode(gcode_line))
 
     def execute_gcode_program(
         self,
         program_lines: List[str],
-        wait_for_ack: bool = False,
-        timeout: float = 30.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.execute_gcode_program(program_lines, wait_for_ack, timeout, non_blocking))
+    ) -> str:
+        return _run(self._inner.execute_gcode_program(program_lines))
 
     def load_gcode_file(
         self,
         filepath: str,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.load_gcode_file(filepath, wait_for_ack, timeout, non_blocking))
+    ) -> str:
+        return _run(self._inner.load_gcode_file(filepath))
 
     def get_gcode_status(self) -> dict | None:
         return _run(self._inner.get_gcode_status())
 
-    def pause_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.pause_gcode_program(wait_for_ack, timeout, non_blocking))
+    def pause_gcode_program(self) -> str:
+        return _run(self._inner.pause_gcode_program())
 
-    def resume_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.resume_gcode_program(wait_for_ack, timeout, non_blocking))
+    def resume_gcode_program(self) -> str:
+        return _run(self._inner.resume_gcode_program())
 
-    def stop_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.stop_gcode_program(wait_for_ack, timeout, non_blocking))
+    def stop_gcode_program(self) -> str:
+        return _run(self._inner.stop_gcode_program())
 
     # ---------- smooth motion ----------
 
@@ -453,10 +384,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.smooth_circle(
                 center=center,
@@ -471,9 +399,6 @@ class RobotClient:
                 clockwise=clockwise,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -488,10 +413,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.smooth_arc_center(
                 end_pose=end_pose,
@@ -503,9 +425,6 @@ class RobotClient:
                 clockwise=clockwise,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -518,10 +437,7 @@ class RobotClient:
         speed_percentage: Optional[float] = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.smooth_spline(
                 waypoints=waypoints,
@@ -531,9 +447,6 @@ class RobotClient:
                 speed_percentage=speed_percentage,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -550,10 +463,7 @@ class RobotClient:
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
         clockwise: bool = False,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.smooth_helix(
                 center=center,
@@ -567,9 +477,6 @@ class RobotClient:
                 duration=duration,
                 speed_percentage=speed_percentage,
                 clockwise=clockwise,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -581,10 +488,7 @@ class RobotClient:
         start_pose: Optional[List[float]] = None,
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 15.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.smooth_blend(
                 segments=segments,
@@ -593,9 +497,6 @@ class RobotClient:
                 start_pose=start_pose,
                 duration=duration,
                 speed_percentage=speed_percentage,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -607,34 +508,22 @@ class RobotClient:
         x: float | None = None,
         y: float | None = None,
         z: float | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.set_work_coordinate_offset(
                 coordinate_system=coordinate_system,
                 x=x,
                 y=y,
                 z=z,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
     def zero_work_coordinates(
         self,
         coordinate_system: str = "G54",
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> str:
         return _run(
             self._inner.zero_work_coordinates(
                 coordinate_system=coordinate_system,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )

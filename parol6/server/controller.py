@@ -45,7 +45,7 @@ class QueuedCommand:
     """Represents a command in the queue with metadata."""
     command: CommandBase
     command_id: Optional[str] = None
-    address: Tuple[str, int] = ("", -1)
+    address: Optional[Tuple[str, int]] = None
     queued_time: float = field(default_factory=time.time)
     activated: bool = False
     initialized: bool = False
@@ -495,7 +495,7 @@ class Controller:
     
     
     def _queue_command(self, 
-                      address: Tuple[str, int],
+                      address: Optional[Tuple[str, int]],
                       command: CommandBase, 
                       command_id: Optional[str] = None
                       ) -> ExecutionStatus:
