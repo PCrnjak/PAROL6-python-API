@@ -13,6 +13,7 @@ from typing import Tuple, Optional, List, TYPE_CHECKING
 from parol6.commands.base import SystemCommand, ExecutionStatus
 from parol6.server.command_registry import register_command
 from parol6.protocol.wire import CommandCode
+from parol6.config import save_com_port
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -145,8 +146,8 @@ class ClearErrorCommand(SystemCommand):
         return ExecutionStatus.completed("Errors cleared")
 
 
-@register_command("SET_PORT")
-class SetPortCommand(SystemCommand):
+@register_command("SET_IO")
+class SetIOCommand(SystemCommand):
     """Set a digital I/O port state."""
     
     port_index: Optional[int] = None
@@ -154,16 +155,16 @@ class SetPortCommand(SystemCommand):
     
     def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
-        Parse SET_PORT command.
+        Parse SET_IO command.
         
-        Format: SET_PORT|port_index|value
-        Example: SET_PORT|0|1
+        Format: SET_IO|port_index|value
+        Example: SET_IO|0|1
         """
-        if parts[0].upper() != "SET_PORT":
+        if parts[0].upper() != "SET_IO":
             return False, None
             
         if len(parts) != 3:
-            return False, "SET_PORT requires 2 parameters: port_index, value"
+            return False, "SET_IO requires 2 parameters: port_index, value"
         
         try:
             self.port_index = int(parts[1])
@@ -177,11 +178,11 @@ class SetPortCommand(SystemCommand):
             if self.port_value not in (0, 1):
                 return False, f"Port value must be 0 or 1, got {self.port_value}"
             
-            logger.info(f"Parsed SET_PORT: port {self.port_index} = {self.port_value}")
+            logger.info(f"Parsed SET_IO: port {self.port_index} = {self.port_value}")
             return True, None
             
         except ValueError as e:
-            return False, f"Invalid SET_PORT parameters: {str(e)}"
+            return False, f"Invalid SET_IO parameters: {str(e)}"
     
     def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
         """Bind context if provided."""
@@ -196,13 +197,62 @@ class SetPortCommand(SystemCommand):
             self.fail("Port index or value not set")
             return ExecutionStatus.failed("Port parameters not set")
         
-        logger.info(f"SET_PORT: Setting port {self.port_index} to {self.port_value}")
+        logger.info(f"SET_IO: Setting port {self.port_index} to {self.port_value}")
         
         # Update the output port state
         state.InOut_out[self.port_index] = self.port_value
         
         self.finish()
         return ExecutionStatus.completed(f"Port {self.port_index} set to {self.port_value}")
+
+
+@register_command("SET_PORT")
+class SetSerialPortCommand(SystemCommand):
+    """Set the serial COM port used by the controller."""
+    port_str: Optional[str] = None
+
+    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Parse SET_PORT command.
+
+        Format: SET_PORT|serial_port
+        Example: SET_PORT|/dev/ttyACM0
+        """
+        if parts[0].upper() != "SET_PORT":
+            return False, None
+
+        if len(parts) != 2:
+            return False, "SET_PORT requires 1 parameter: serial_port"
+
+        port = (parts[1] or "").strip()
+        if not port:
+            return False, "Serial port cannot be empty"
+
+        self.port_str = port
+        logger.info(f"Parsed SET_PORT: serial_port={self.port_str}")
+        return True, None
+
+    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
+        """Bind context if provided."""
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
+
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        """Persist the serial port selection; controller may reconnect based on this."""
+        if not self.port_str:
+            self.fail("No serial port provided")
+            return ExecutionStatus.failed("No serial port provided")
+
+        ok = save_com_port(self.port_str)
+        if not ok:
+            self.fail("Failed to save COM port")
+            return ExecutionStatus.failed("Failed to save COM port")
+
+        self.finish()
+        # Include details so the controller can reconnect immediately
+        return ExecutionStatus.completed("Serial port saved", details={"serial_port": self.port_str})
 
 
 @register_command("STREAM")

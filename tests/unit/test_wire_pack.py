@@ -25,7 +25,7 @@ def test_pack_tx_frame_structure_and_command_byte():
 
     # Structure: 3 start + 1 len + 52 payload + 2 end = 58 bytes
     assert isinstance(frame, (bytes, bytearray))
-    assert len(frame) == 58
+    assert len(frame) == 56
     assert frame[:3] == b"\xff\xff\xff"
     assert frame[3] == 52
     assert frame[-2:] == b"\x01\x02"

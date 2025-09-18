@@ -5,8 +5,6 @@ This module handles serial port communication, frame parsing, and
 data exchange with the robot hardware.
 """
 
-from __future__ import annotations
-
 import serial
 import logging
 import time
@@ -18,9 +16,6 @@ from parol6.protocol.wire import pack_tx_frame
 from parol6.config import get_com_port_with_fallback
 
 logger = logging.getLogger(__name__)
-
-
-
 
 class SerialTransport:
     """

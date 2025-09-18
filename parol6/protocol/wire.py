@@ -141,9 +141,8 @@ def pack_tx_frame(
     # Safety clamps and conversions
     cmd = int(command_code)
     
-    # Pre-allocate output buffer for better performance
-    # Total size: 3 start + 1 len + 52 payload = 56 bytes
-    out = bytearray(58)  # Adding 2 extra bytes for safety (end markers might go beyond 52)
+    # Pre-allocate output buffer for exact size: 3 start + 1 len + 52 payload = 56 bytes
+    out = bytearray(4 + PAYLOAD_LEN)
     
     # Write header
     out[0:3] = START
@@ -193,10 +192,6 @@ def pack_tx_frame(
     out[offset] = int(timeout_out) & 0xFF
     offset += 1
 
-    # Reserved bytes (legacy)
-    out[offset] = 0
-    out[offset + 1] = 0
-    offset += 2
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
     for idx in range(3):
@@ -468,7 +463,7 @@ def decode_simple(resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER",
 def decode_status(resp: str) -> StatusAggregate | None:
     """
     Decode aggregate status:
-      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
+      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
 
     Returns a dict matching StatusAggregate or None on parse failure.
     """
@@ -480,6 +475,7 @@ def decode_status(resp: str) -> StatusAggregate | None:
     result: dict[str, object] = {
         "pose": None,
         "angles": None,
+        "speeds": None,
         "io": None,
         "gripper": None,
     }
@@ -490,6 +486,9 @@ def decode_status(resp: str) -> StatusAggregate | None:
         elif sec.startswith("ANGLES="):
             vals = [float(x) for x in sec[len("ANGLES="):].split(",") if x]
             result["angles"] = vals
+        elif sec.startswith("SPEEDS="):
+            vals = [float(x) for x in sec[len("SPEEDS="):].split(",") if x]
+            result["speeds"] = vals
         elif sec.startswith("IO="):
             vals = [int(x) for x in sec[len("IO="):].split(",") if x]
             result["io"] = vals

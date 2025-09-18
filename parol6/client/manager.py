@@ -20,19 +20,9 @@ from typing import Optional, Deque
 from collections import deque
 
 # Precompiled regex patterns for server log normalization
-_SERVER_LINE_RE = re.compile(
-    r'^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3})\s*-\s*([A-Za-z0-9_.-]+)\s*-\s*(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s*-\s*(.*)$'
-)
 _SIMPLE_FORMAT_RE = re.compile(
     r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
 )
-_BRACKET_LEVEL_RE = re.compile(
-    r'^\s*\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s+(.*)$'
-)
-_MODULE_PREFIX_RE = re.compile(
-    r'^([A-Za-z0-9_.-]+):\s+(.*)$'
-)
-
 
 @dataclass
 class ServerOptions:
@@ -75,7 +65,6 @@ class ServerManager:
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
-        self._log_buffer: Deque[str] = deque(maxlen=5000)
         self.normalize_logs = normalize_logs
 
     @property
@@ -86,10 +75,12 @@ class ServerManager:
         return self._proc is not None and self._proc.poll() is None
 
     async def start_controller(
-        self, 
-        com_port: str | None = None, 
+        self,
+        com_port: str | None = None,
         no_autohome: bool = True,
-        extra_env: dict | None = None
+        extra_env: dict | None = None,
+        server_host: str | None = None,
+        server_port: int | None = None,
     ) -> None:
         """Start the controller if not already running."""
         if self.is_running():
@@ -104,6 +95,11 @@ class ServerManager:
             env["PAROL6_NOAUTOHOME"] = "1"
         if extra_env:
             env.update(extra_env)
+        # Explicitly bind controller (if provided)
+        if server_host:
+            env["PAROL6_CONTROLLER_IP"] = server_host
+        if server_port is not None:
+            env["PAROL6_CONTROLLER_PORT"] = str(server_port)
         # Ensure the subprocess can import the local 'parol6' package
         existing_py_path = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing_py_path}" if existing_py_path else str(cwd)
@@ -113,6 +109,8 @@ class ServerManager:
         
         level_name = logging.getLevelName(logging.getLogger().level)
         args.append(f"--log-level={level_name}")
+        if com_port:
+            args.append(f"--serial-port={com_port}")
             
         try:
             self._proc = subprocess.Popen(
@@ -144,7 +142,6 @@ class ServerManager:
             assert proc.stdout is not None
             # Maintain last logger/level for multi-line tracebacks
             last_logger = "parol6.server"
-            last_level = logging.INFO
 
             for raw_line in iter(proc.stdout.readline, ""):
                 if self._stop_reader.is_set():
@@ -157,39 +154,16 @@ class ServerManager:
                         logger_name: str | None = None
                         msg = line
 
-                        # Try full Python logging pattern: "YYYY-MM-DD HH:MM:SS,mmm - module - LEVEL - message"
-                        m = _SERVER_LINE_RE.match(line)
-                        if m:
-                            _, logger_name, level_name, actual_message = m.groups()
+                        s = _SIMPLE_FORMAT_RE.match(line)
+                        if s:
+                            _, level_name, logger_name, actual_message = s.groups()
                             logger_name = (logger_name or "").strip()
                             msg = actual_message
                             level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
-                        else:
-                            # Try simple format: "HH:MM:SS LEVEL module: message"
-                            s = _SIMPLE_FORMAT_RE.match(line)
-                            if s:
-                                _, level_name, logger_name, actual_message = s.groups()
-                                logger_name = (logger_name or "").strip()
-                                msg = actual_message
-                                level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
-                            else:
-                                # Try bracketed level: "[LEVEL] rest"
-                                b = _BRACKET_LEVEL_RE.match(line)
-                                if b:
-                                    level_name, rest = b.groups()
-                                    level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
-                                    # Optional "module: message" inside rest
-                                    p = _MODULE_PREFIX_RE.match(rest or "")
-                                    if p:
-                                        logger_name, msg = p.groups()
-                                        logger_name = (logger_name or "").strip()
-                                    else:
-                                        msg = rest
-                                else:
-                                    # Traceback and continuation lines -> keep last context, escalate on Traceback
-                                    if line.startswith("Traceback"):
-                                        level = logging.ERROR
-                                    msg = line
+                        elif line.startswith("Traceback"):
+                            # Traceback and continuation lines -> keep last context, escalate on Traceback
+                            level = logging.ERROR
+                        msg = line
 
                         # Choose target logger
                         target_logger_name = logger_name or last_logger or "parol6.server"
@@ -199,14 +173,9 @@ class ServerManager:
                         # Update last context if we identified a module
                         if logger_name:
                             last_logger = logger_name
-                        last_level = level
-
-                        # Store cleaned line in buffer (what we emitted)
-                        self._log_buffer.append(f"{target_logger_name}: {msg}")
                     else:
                         # No normalization - forward line as-is to root logger
-                        logging.info("[SERVER] %s", line)
-                        self._log_buffer.append(raw_line.rstrip("\r\n"))
+                        print(line)
         except Exception as e:
             logging.warning("ServerManager: output reader stopped: %s", e)
 
@@ -249,10 +218,6 @@ class ServerManager:
 
         self._proc = None
 
-    def get_logs(self, tail: int = 200) -> list[str]:
-        """Return the last N lines captured from the controller stdout."""
-        return list(self._log_buffer)[-tail:]
-
     async def await_ready(
         self,
         host: str = "127.0.0.1",
@@ -277,7 +242,7 @@ class ServerManager:
                     sock.settimeout(min(0.5, poll_interval))
                     sock.sendto(b"PING", (host, port))
                     data, _ = sock.recvfrom(256)
-                    if data.decode("utf-8").strip().upper() == "PONG":
+                    if data.decode("ascii").startswith("PONG"):
                         return True
             except Exception:
                 pass
@@ -285,29 +250,6 @@ class ServerManager:
             await asyncio.sleep(poll_interval)
 
         return False
-
-    async def get_status(self, host: str = "127.0.0.1", port: int = 5001, timeout: float = 1.0) -> dict:
-        """
-        Query controller readiness over UDP (PING) and merge with process info.
-        Returns a dict; if unreachable, returns minimal info.
-        """
-        status: dict[str, object] = {
-            "running": self.is_running(),
-            "pid": self.pid,
-            "server": None,
-        }
-        import socket
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(timeout)
-                sock.sendto(b"PING", (host, port))
-                data, _ = sock.recvfrom(256)
-                if data.decode("utf-8").strip().upper() == "PONG":
-                    status["server"] = {"ready": True}
-        except Exception as e:
-            # Keep minimal process info and include a hint for diagnostics
-            status["error"] = str(e)
-        return status
 
 
 async def ensure_server(
@@ -344,7 +286,7 @@ async def ensure_server(
             sock.settimeout(1.0)
             sock.sendto(b"PING", (host, port))
             data, _ = sock.recvfrom(256)
-            if data.decode('utf-8').strip().upper() == "PONG":
+            if data.decode('ascii').startswith("PONG"):
                 logging.info(f"Server already running at {host}:{port}")
                 return None
     except Exception:
@@ -356,11 +298,17 @@ async def ensure_server(
     
     # Spawn controller
     logging.info(f"Server not responding at {host}:{port}, starting controller...")
+    # Prepare environment for child controller bind tuple
+    env_to_pass = dict(extra_env) if extra_env else {}
+    env_to_pass["PAROL6_CONTROLLER_IP"] = host
+    env_to_pass["PAROL6_CONTROLLER_PORT"] = str(port)
     manager = ServerManager()
     await manager.start_controller(
-        com_port=com_port, 
+        com_port=com_port,
         no_autohome=True,
-        extra_env=extra_env
+        extra_env=env_to_pass,
+        server_host=host,
+        server_port=port,
     )
 
     # Wait for readiness within a short window

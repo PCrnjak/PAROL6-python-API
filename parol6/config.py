@@ -33,8 +33,9 @@ SERIAL_BAUD: int = 3_000_000
 AUTO_HOME_DEFAULT: bool = True
 LOG_LEVEL_DEFAULT: str = "INFO"
 
-# COM port persistence file
-COM_PORT_FILE: str = "serial_port.txt"
+# COM port persistence file (absolute path at repository root)
+# This ensures persistence works regardless of current working directory.
+COM_PORT_FILE: str = str((Path(__file__).resolve().parents[3] / "serial_port.txt"))
 
 # Multicast/broadcast status configuration (all overridable via env)
 # These defaults implement local-only multicast on loopback by default.

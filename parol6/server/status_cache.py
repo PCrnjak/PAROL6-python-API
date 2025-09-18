@@ -16,6 +16,7 @@ class StatusCache:
 
     Fields:
       - angles_deg: 6 floats
+      - speeds: 6 floats (steps/sec)
       - io: 5 ints [in1,in2,out1,out2,estop]
       - gripper: >=6 ints [id,pos,spd,cur,status,obj]
       - pose: 16 floats (flattened transform)
@@ -25,6 +26,7 @@ class StatusCache:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self.angles_deg: List[float] = [0.0] * 6
+        self.speeds: List[float] = [0.0] * 6
         self.io: List[int] = [0, 0, 0, 0, 0]
         self.gripper: List[int] = [0, 0, 0, 0, 0, 0]
         self.pose: List[float] = [0.0] * 16
@@ -32,12 +34,14 @@ class StatusCache:
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
         # Cached ASCII fragments to reduce allocations
         self._angles_ascii: str = "0,0,0,0,0,0"
+        self._speeds_ascii: str = "0,0,0,0,0,0"
         self._io_ascii: str = "0,0,0,0,0"
         self._gripper_ascii: str = "0,0,0,0,0,0"
         self._pose_ascii: str = ",".join("0" for _ in range(16))
-        self._ascii_full: str = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
+        self._ascii_full: str = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|SPEEDS={self._speeds_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
         self._last_pos_in: np.ndarray | None = None
+        self._last_speed_in: np.ndarray | None = None
         self._last_io5: np.ndarray | None = None
         self._last_grip6: np.ndarray | None = None
 
@@ -79,6 +83,11 @@ class StatusCache:
             self.io = io5.tolist()
             self._io_ascii = ",".join(str(int(x)) for x in io5)
 
+            # Speeds (steps/sec from Speed_in)
+            speed_in = np.asarray(state.Speed_in[:6], dtype=np.int32)
+            self.speeds = speed_in.tolist()
+            self._speeds_ascii = ",".join(str(int(s)) for s in speed_in)
+
             # Gripper (first 6)
             grip6 = np.asarray(state.Gripper_data_in[:6], dtype=np.int32)
             if grip6.shape[0] < 6:
@@ -88,7 +97,7 @@ class StatusCache:
             self._gripper_ascii = ",".join(str(int(x)) for x in grip6)
 
             # Assemble full ASCII (cheap string concatenation)
-            self._ascii_full = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
+            self._ascii_full = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|SPEEDS={self._speeds_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
             self.last_update_s = time.time()
 
     def to_ascii(self) -> str:

@@ -1,16 +1,26 @@
-from __future__ import annotations
-
 import os
 from typing import Callable, Optional
 
 
-SAFETY_COMMANDS: set[str] = {
+SYSTEM_COMMANDS: set[str] = {
     "STOP",
     "ENABLE",
     "DISABLE",
     "CLEAR_ERROR",
-    "HOME",
     "SET_PORT",
+    "STREAM",
+}
+
+QUERY_COMMANDS: set[str] = {
+    "GET_POSE",
+    "GET_ANGLES",
+    "GET_IO",
+    "GET_GRIPPER",
+    "GET_SPEEDS",
+    "GET_STATUS",
+    "GET_GCODE_STATUS",
+    "GET_LOOP_STATS",
+    "PING",
 }
 
 
@@ -59,17 +69,14 @@ class AckPolicy:
 
         name = (message or "").split("|", 1)[0].strip().upper()
 
-        # Always ack for safety-critical commands
-        if name in SAFETY_COMMANDS:
+        # System commands always require ACKs
+        if name in SYSTEM_COMMANDS:
             return True
 
-        # Localhost defaults to no-ack
-        if is_localhost(self._host):
+        # Query commands use request/response, not ACKs
+        if name in QUERY_COMMANDS:
             return False
 
-        # Streaming mode defaults to no-ack
-        if self._get_stream_mode():
-            return False
-
-        # Default: no-ack
+        # Motion and other commands: ACKs only when forced
+        # Localhost and stream mode both favor no-ack by default
         return False

@@ -3,7 +3,6 @@ Synchronous facade for AsyncRobotClient.
 
 - In sync code: use RobotClient and call methods directly.
 - In async code (event loop running): use AsyncRobotClient and `await` the methods.
-
 """
 
 import asyncio
@@ -111,28 +110,28 @@ class RobotClient:
     def ping(self) -> bool:
         return _run(self._inner.ping())
 
-    def home(self) -> str:
+    def home(self) -> bool:
         return _run(self._inner.home())
 
-    def stop(self) -> str:
+    def stop(self) -> bool:
         return _run(self._inner.stop())
 
-    def enable(self) -> str:
+    def enable(self) -> bool:
         return _run(self._inner.enable())
 
-    def disable(self) -> str:
+    def disable(self) -> bool:
         return _run(self._inner.disable())
 
-    def clear_error(self) -> str:
+    def clear_error(self) -> bool:
         return _run(self._inner.clear_error())
 
-    def stream_on(self) -> str:
+    def stream_on(self) -> bool:
         return _run(self._inner.stream_on())
 
-    def stream_off(self) -> str:
+    def stream_off(self) -> bool:
         return _run(self._inner.stream_off())
 
-    def set_com_port(self, port_str: str) -> str:
+    def set_com_port(self, port_str: str) -> bool:
         return _run(self._inner.set_com_port(port_str))
 
     # ---------- status / queries ----------
@@ -179,21 +178,37 @@ class RobotClient:
         self,
         timeout: float = 90.0,
         settle_window: float = 1.0,
-        poll_interval: float = 0.2,
         speed_threshold: float = 2.0,
-        angle_threshold: float = 0.5,
-        show_progress: bool = False,
+        angle_threshold: float = 0.5
     ) -> bool:
         return _run(
             self._inner.wait_until_stopped(
                 timeout=timeout,
                 settle_window=settle_window,
-                poll_interval=poll_interval,
                 speed_threshold=speed_threshold,
                 angle_threshold=angle_threshold,
-                show_progress=show_progress,
             )
         )
+
+    # ---------- responsive waits / raw send ----------
+
+    def wait_for_server_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
+        """Poll ping() until server responds or timeout."""
+        return _run(self._inner.wait_for_server_ready(timeout=timeout, interval=interval))
+
+    def wait_for_status(self, predicate, timeout: float = 5.0) -> bool:
+        """
+        Wait until a multicast status satisfies predicate(status) within timeout.
+        Note: predicate is executed in the client's event loop thread.
+        """
+        return _run(self._inner.wait_for_status(predicate, timeout=timeout))
+
+    def send_raw(self, message: str, await_reply: bool = False, timeout: float = 2.0) -> bool | str | None:
+        """
+        Send a raw UDP message; optionally await a single reply and return its text.
+        Returns True on fire-and-forget send, str on reply, or None on timeout/error when awaiting.
+        """
+        return _run(self._inner.send_raw(message, await_reply=await_reply, timeout=timeout))
 
     # ---------- extended controls / motion ----------
 
@@ -205,7 +220,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.move_joints(
                 joint_angles,
@@ -225,7 +240,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.move_pose(
                 pose,
@@ -245,7 +260,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.move_cartesian(
                 pose,
@@ -265,7 +280,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.move_cartesian_rel_trf(
                 deltas,
@@ -283,7 +298,7 @@ class RobotClient:
         speed_percentage: int,
         duration: float | None = None,
         distance_deg: float | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.jog_joint(
                 joint_index,
@@ -299,7 +314,7 @@ class RobotClient:
         axis: Axis,
         speed_percentage: int,
         duration: float,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.jog_cartesian(
                 frame, axis, speed_percentage, duration
@@ -311,8 +326,16 @@ class RobotClient:
         joints: List[int],
         speeds: List[float],
         duration: float,
-    ) -> str:
+    ) -> bool:
         return _run(self._inner.jog_multiple(joints, speeds, duration))
+
+    def set_io(self, index: int, value: int) -> bool:
+        """Set digital I/O bit (0..7) to 0 or 1."""
+        return _run(self._inner.set_io(index, value))
+
+    def delay(self, seconds: float) -> bool:
+        """Insert a non-blocking delay in the motion queue."""
+        return _run(self._inner.delay(seconds))
 
     # ---------- IO / gripper ----------
 
@@ -320,7 +343,7 @@ class RobotClient:
         self,
         action: str,
         port: int,
-    ) -> str:
+    ) -> bool:
         return _run(self._inner.control_pneumatic_gripper(action, port))
 
     def control_electric_gripper(
@@ -329,7 +352,7 @@ class RobotClient:
         position: int | None = 255,
         speed: int | None = 150,
         current: int | None = 500,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.control_electric_gripper(
                 action, position, speed, current
@@ -341,31 +364,31 @@ class RobotClient:
     def execute_gcode(
         self,
         gcode_line: str,
-    ) -> str:
+    ) -> bool:
         return _run(self._inner.execute_gcode(gcode_line))
 
     def execute_gcode_program(
         self,
         program_lines: List[str],
-    ) -> str:
+    ) -> bool:
         return _run(self._inner.execute_gcode_program(program_lines))
 
     def load_gcode_file(
         self,
         filepath: str,
-    ) -> str:
+    ) -> bool:
         return _run(self._inner.load_gcode_file(filepath))
 
     def get_gcode_status(self) -> dict | None:
         return _run(self._inner.get_gcode_status())
 
-    def pause_gcode_program(self) -> str:
+    def pause_gcode_program(self) -> bool:
         return _run(self._inner.pause_gcode_program())
 
-    def resume_gcode_program(self) -> str:
+    def resume_gcode_program(self) -> bool:
         return _run(self._inner.resume_gcode_program())
 
-    def stop_gcode_program(self) -> str:
+    def stop_gcode_program(self) -> bool:
         return _run(self._inner.stop_gcode_program())
 
     # ---------- smooth motion ----------
@@ -384,7 +407,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.smooth_circle(
                 center=center,
@@ -413,7 +436,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.smooth_arc_center(
                 end_pose=end_pose,
@@ -428,6 +451,34 @@ class RobotClient:
             )
         )
 
+    def smooth_arc_param(
+        self,
+        end_pose: List[float],
+        radius: float,
+        arc_angle: float,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        start_pose: Optional[List[float]] = None,
+        duration: Optional[float] = None,
+        speed_percentage: Optional[float] = None,
+        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
+        jerk_limit: Optional[float] = None,
+        clockwise: bool = False,
+    ) -> bool:
+        return _run(
+            self._inner.smooth_arc_param(
+                end_pose=end_pose,
+                radius=radius,
+                arc_angle=arc_angle,
+                frame=frame,
+                start_pose=start_pose,
+                duration=duration,
+                speed_percentage=speed_percentage,
+                trajectory_type=trajectory_type,
+                jerk_limit=jerk_limit,
+                clockwise=clockwise,
+            )
+        )
+
     def smooth_spline(
         self,
         waypoints: List[List[float]],
@@ -437,7 +488,7 @@ class RobotClient:
         speed_percentage: Optional[float] = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.smooth_spline(
                 waypoints=waypoints,
@@ -463,7 +514,7 @@ class RobotClient:
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
         clockwise: bool = False,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.smooth_helix(
                 center=center,
@@ -488,7 +539,7 @@ class RobotClient:
         start_pose: Optional[List[float]] = None,
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.smooth_blend(
                 segments=segments,
@@ -500,6 +551,32 @@ class RobotClient:
             )
         )
 
+    def smooth_waypoints(
+        self,
+        waypoints: List[List[float]],
+        blend_radii: Literal["AUTO"] | List[float] = "AUTO",
+        blend_mode: Literal["parabolic", "circular", "none"] = "parabolic",
+        via_modes: Optional[List[str]] = None,
+        max_velocity: float = 100.0,
+        max_acceleration: float = 500.0,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "quintic",
+        duration: Optional[float] = None,
+    ) -> bool:
+        return _run(
+            self._inner.smooth_waypoints(
+                waypoints=waypoints,
+                blend_radii=blend_radii,
+                blend_mode=blend_mode,
+                via_modes=via_modes,
+                max_velocity=max_velocity,
+                max_acceleration=max_acceleration,
+                frame=frame,
+                trajectory_type=trajectory_type,
+                duration=duration,
+            )
+        )
+
     # ---------- work coordinate helpers ----------
 
     def set_work_coordinate_offset(
@@ -508,7 +585,7 @@ class RobotClient:
         x: float | None = None,
         y: float | None = None,
         z: float | None = None,
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.set_work_coordinate_offset(
                 coordinate_system=coordinate_system,
@@ -521,7 +598,7 @@ class RobotClient:
     def zero_work_coordinates(
         self,
         coordinate_system: str = "G54",
-    ) -> str:
+    ) -> bool:
         return _run(
             self._inner.zero_work_coordinates(
                 coordinate_system=coordinate_system,

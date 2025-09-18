@@ -9,7 +9,7 @@ need for manual command factory maintenance.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Type, Optional, List, Callable, Any
+from typing import Dict, Type, Optional, List, Callable, Any, Tuple
 from importlib import import_module
 import pkgutil
 
@@ -138,7 +138,7 @@ class CommandRegistry:
         self._discovered = True
         logger.info(f"Command discovery complete. {len(self._commands)} commands registered.")
     
-    def create_command_from_parts(self, parts: List[str]) -> Optional[CommandBase]:
+    def create_command_from_parts(self, parts: List[str]) -> Tuple[Optional[CommandBase], Optional[str]]:
         """
         Create a command instance from pre-split message parts.
         
@@ -146,7 +146,10 @@ class CommandRegistry:
             parts: Pre-split message parts
             
         Returns:
-            A command instance if a match is found, None otherwise
+            A tuple of (command, error_message):
+            - (command, None) if successful
+            - (None, None) if command name not registered
+            - (None, error_message) if command is recognized but has invalid parameters
         """
         # Ensure commands are discovered
         if not self._discovered:
@@ -154,7 +157,7 @@ class CommandRegistry:
         
         if not parts:
             logger.debug("Empty message parts")
-            return None
+            return None, None
         
         command_name = parts[0].upper()
         
@@ -163,7 +166,7 @@ class CommandRegistry:
         
         if command_class is None:
             logger.debug(f"No command registered for: {command_name}")
-            return None
+            return None, None
         
         try:
             # Create instance and let it parse parameters
@@ -171,14 +174,16 @@ class CommandRegistry:
             can_handle, error = command.match(parts)  # Pass pre-split parts
             
             if can_handle:
-                return command
+                return command, None
             elif error:
                 logger.debug(f"Command '{command_name}' rejected: {error}")
+                return None, error
                 
         except Exception as e:
             logger.error(f"Error creating command '{command_name}': {e}")
+            return None, str(e)
         
-        return None
+        return None, "Command validation failed"
     
     def clear(self) -> None:
         """

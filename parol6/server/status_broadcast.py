@@ -5,11 +5,14 @@ import socket
 import struct
 import threading
 import time
+import logging
 from typing import Optional
 
 from parol6.server.state import StateManager
 from parol6.server.status_cache import get_cache
 from parol6 import config as cfg
+
+logger = logging.getLogger(__name__)
 
 
 class StatusUpdater(threading.Thread):
@@ -84,12 +87,17 @@ class StatusBroadcaster(threading.Thread):
         self._setup_socket()
         cache = get_cache()
         dest = (self.group, self.port)
+        sock = self._sock
+        if sock is None:
+            logger.error("StatusBroadcaster socket not initialized")
+            return
+
         while self._running.is_set():
             # Skip broadcast if cache is stale (e.g., serial disconnected)
             if cache.age_s() <= self._stale_s:
                 payload = cache.to_ascii().encode("ascii", errors="ignore")
                 # memoryview avoids an extra copy in some implementations
-                self._sock.sendto(memoryview(payload), dest)
+                sock.sendto(memoryview(payload), dest)
             time.sleep(self._period)
 
     def stop(self) -> None:
@@ -114,6 +122,7 @@ def start_status_services(state_mgr: StateManager) -> tuple[StatusUpdater, Statu
     iface = cfg.MCAST_IF
     stale_s = cfg.STATUS_STALE_S
 
+    logger.info(f"StatusBroadcaster config: group={group} port={port} ttl={ttl} iface={iface} rate_hz={rate_hz} stale_s={stale_s}")
     broadcaster = StatusBroadcaster(group=group, port=port, ttl=ttl, iface_ip=iface, rate_hz=rate_hz, stale_s=stale_s)
 
     updater.start()

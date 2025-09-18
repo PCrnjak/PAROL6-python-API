@@ -12,6 +12,7 @@ import time
 from typing import Generator, Dict, Optional
 from dataclasses import dataclass
 import logging
+import signal
 
 # Add the parent directory to Python path so we can import the API modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -20,10 +21,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from parol6.client.manager import ServerManager
 
 # Import utilities for port detection
-def find_available_ports(start_port: int = 5001, count: int = 2):
+def find_available_ports(start_port: int = 5001, count: int = 2) -> list[int]:
     """Simple fallback port finder if utils import fails."""
     import socket
-    available_ports = []
+    available_ports: list[int] = []
     current_port = start_port
     
     while len(available_ports) < count:
@@ -149,7 +150,6 @@ def robot_api_env(ports: TestPorts) -> Generator[Dict[str, str], None, None]:
     env_vars = {
         "PAROL6_SERVER_IP": ports.server_ip,
         "PAROL6_SERVER_PORT": str(ports.server_port),
-        "PAROL6_ACK_PORT": str(ports.ack_port),
     }
     
     for key, value in env_vars.items():
@@ -199,7 +199,6 @@ def server_proc(request, ports: TestPorts, robot_api_env):
                 "PAROL6_NOAUTOHOME": "1",
                 "PAROL6_SERVER_IP": ports.server_ip,
                 "PAROL6_SERVER_PORT": str(ports.server_port),
-                "PAROL6_ACK_PORT": str(ports.ack_port),
             }
         )
         
@@ -213,7 +212,7 @@ def server_proc(request, ports: TestPorts, robot_api_env):
                     sock.settimeout(1.0)
                     sock.sendto(b"PING", (ports.server_ip, ports.server_port))
                     data, _ = sock.recvfrom(256)
-                    if data.decode('utf-8').strip() == "PONG":
+                    if data.decode('utf-8').strip().startswith("PONG"):
                         return True
             except (socket.timeout, Exception):
                 pass
@@ -228,8 +227,6 @@ def server_proc(request, ports: TestPorts, robot_api_env):
         pytest.fail("Failed to start headless commander server for testing")
     
     try:
-        # Wait a bit for full initialization
-        time.sleep(1.0)
         yield manager
         
     finally:
@@ -284,7 +281,6 @@ def human_prompt(request):
         
         try:
             if timeout:
-                import signal
                 def timeout_handler(signum, frame):
                     raise TimeoutError("User confirmation timeout")
                 signal.signal(signal.SIGALRM, timeout_handler)
@@ -443,7 +439,6 @@ def client(ports: TestPorts):
     return RobotClient(
         host=ports.server_ip,
         port=ports.server_port,
-        ack_port=ports.ack_port
     )
 
 

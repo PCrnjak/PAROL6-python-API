@@ -8,6 +8,7 @@ import time
 import threading
 import argparse
 import re
+import os
 from typing import Optional, Dict, Any, List, Tuple, Deque, Union, Sequence, cast
 from dataclasses import dataclass, field
 from collections import deque
@@ -24,8 +25,10 @@ from parol6.server.status_broadcast import start_status_services
 from parol6.server.status_cache import get_cache
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.gcode import GcodeInterpreter
-from parol6.config import INTERVAL_S, save_com_port
+from parol6.config import INTERVAL_S
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, QueryCommand, MotionCommand, SystemCommand
+from parol6.ack_policy import AckPolicy
+from parol6.config import get_com_port_with_fallback
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -167,6 +170,16 @@ class Controller:
             if not self.udp_transport.create_socket():
                 raise RuntimeError("Failed to create UDP socket")
             
+            # Load persisted COM port if not provided
+            try:
+                if not self.config.serial_port:
+                    persisted = get_com_port_with_fallback()
+                    if persisted:
+                        self.config.serial_port = persisted
+                        logger.info(f"Using persisted serial port: {persisted}")
+            except Exception as e:
+                logger.debug(f"Failed to load persisted COM port: {e}")
+
             # Initialize Serial transport using factory
             if self.config.serial_port or is_simulation_mode():
                 self.serial_transport = create_and_connect_transport(
@@ -194,7 +207,7 @@ class Controller:
             # Optionally queue auto-home per policy (default OFF)
             if self.config.auto_home:
                 try:
-                    home_cmd = create_command_from_parts(["HOME"])
+                    home_cmd, _ = create_command_from_parts(["HOME"])
                     if home_cmd:
                         # Queue without address/id for auto-home
                         self._queue_command(("127.0.0.1", 0), home_cmd, None)
@@ -406,9 +419,6 @@ class Controller:
         """
         Separate thread for processing incoming commands from UDP.
         """
-        # Compile regex for command ID validation (8 hex chars)
-        cmd_id_pattern = re.compile(r'^[0-9a-fA-F]{8}$')
-        
         while self.running and self.udp_transport:
             try:
                 # Check for new commands from UDP (blocking with short timeout)
@@ -416,20 +426,26 @@ class Controller:
                 if tup is None:
                     continue
                 message_str, addr = tup
-                # Parse command ID and payload
                 state = self.state_manager.get_state()
-                parts = message_str.split('|', 1)
-                cmd_id = parts[0] if (len(parts) > 1 and cmd_id_pattern.match(parts[0])) else None
-                cmd_str = parts[1] if cmd_id else message_str
-                # Parse command name
+                # No command IDs on wire; treat entire datagram as the command
+                cmd_str = message_str
                 cmd_parts = cmd_str.split('|')
                 cmd_name = cmd_parts[0].upper()
+                # Build server-side ack/wait policy
+                policy = AckPolicy.from_env(addr[0], lambda: self.stream_mode)
                 # Create command instance from message
-                command = create_command_from_parts(cmd_parts)
+                command, error = create_command_from_parts(cmd_parts)
                 if not command:
-                    logger.warning(f"Unknown command: {cmd_str}")
-                    if cmd_id:
-                        self._send_ack(cmd_id, "FAILED", "Unknown command", addr)
+                    if error:
+                        # Known command but invalid parameters
+                        logger.warning(f"Command validation failed: {cmd_str} - {error}")
+                        if self.udp_transport:
+                            self.udp_transport.send_response(f"ERROR|{error}", addr)
+                    else:
+                        # Unknown command
+                        logger.warning(f"Unknown command: {cmd_str}")
+                        if self.udp_transport:
+                            self.udp_transport.send_response("ERROR|Unknown command", addr)
                     continue
 
                 # Handle system commands (they can execute regardless of enable state)
@@ -437,19 +453,45 @@ class Controller:
                     # System commands execute immediately without queueing
                     command.setup(state, udp_transport=self.udp_transport, addr=addr)
                     status = command.execute_step(state)
-                    # Send ACK based on status
-                    if cmd_id:
+
+                    # Handle side-effects for certain system commands (e.g., SET_PORT)
+                    try:
+                        if status.details and isinstance(status.details, dict) and 'serial_port' in status.details:
+                            port = status.details.get('serial_port')
+                            if port:
+                                # Remember configured port
+                                self.config.serial_port = port
+                                try:
+                                    # (Re)connect transport immediately using provided port
+                                    self.serial_transport = create_and_connect_transport(
+                                        port=port,
+                                        baudrate=self.config.serial_baudrate,
+                                        auto_find_port=False
+                                    )
+                                    if self.serial_transport and hasattr(self.serial_transport, "start_reader"):
+                                        self.serial_transport.start_reader(self.shutdown_event)
+                                        self.first_frame_received = False
+                                        logger.info("Serial reader thread started (after SET_PORT)")
+                                except Exception as e:
+                                    logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
+                    except Exception as e:
+                        logger.debug(f"System command side-effect handling failed: {e}")
+
+                    # Always respond for system commands
+                    if self.udp_transport:
                         if status.code == ExecutionStatusCode.COMPLETED:
-                            self._send_ack(cmd_id, "COMPLETED", status.message, addr)
-                        elif status.code == ExecutionStatusCode.FAILED:
-                            self._send_ack(cmd_id, "FAILED", status.message, addr)
+                            self.udp_transport.send_response("OK", addr)
+                        else:
+                            msg = status.message or "Failed"
+                            self.udp_transport.send_response(f"ERROR|{msg}", addr)
                     continue
 
                 # Check if controller is enabled for motion commands
                 if isinstance(command, MotionCommand) and not state.enabled:
-                    if cmd_id:
+                    # Inform client only if policy requires ACK for motion
+                    if self.udp_transport and policy.requires_ack(cmd_str):
                         reason = state.disabled_reason or "Controller disabled"
-                        self._send_ack(cmd_id, "FAILED", reason, addr)
+                        self.udp_transport.send_response(f"ERROR|{reason}", addr)
                     logger.warning(f"Motion command rejected - controller disabled: {cmd_name}")
                     continue
 
@@ -462,10 +504,8 @@ class Controller:
                         addr=addr,
                         gcode_interpreter=self.gcode_interpreter,
                     )
-                    status = command.execute_step(state)
-                    # Query commands typically send their own responses
-                    if cmd_id and status.code == ExecutionStatusCode.FAILED:
-                        self._send_ack(cmd_id, "FAILED", status.message, addr)
+                    _ = command.execute_step(state)
+                    # Query commands send their own responses
                     continue
 
                 # Apply stream mode logic for streamable motion commands
@@ -484,8 +524,17 @@ class Controller:
                     logger.debug(f"Stream mode: removed {removed} queued streamable command(s)")
 
                 # Queue the command
-                status = self._queue_command(addr, command, cmd_id)
+                status = self._queue_command(addr, command, None)
                 logger.debug(f"Command {cmd_name} queued with status: {status.code}")
+
+                # For motion commands: ACK acceptance only if policy requires ACK
+                if isinstance(command, MotionCommand) and self.udp_transport:
+                    if policy.requires_ack(cmd_str):
+                        if status.code == ExecutionStatusCode.QUEUED:
+                            self.udp_transport.send_response("OK", addr)
+                        else:
+                            msg = status.message or "Queue error"
+                            self.udp_transport.send_response(f"ERROR|{msg}", addr)
 
                 # Start execution if no active command
                 if not self.active_command:
@@ -595,8 +644,7 @@ class Controller:
                 if status.details and isinstance(status.details, dict) and 'enqueue' in status.details:
                     try:
                         for robot_cmd_str in status.details['enqueue']:
-
-                            cmd_obj = create_command_from_parts(robot_cmd_str.split("|"))
+                            cmd_obj, _ = create_command_from_parts(robot_cmd_str.split("|"))
                             if cmd_obj:
                                 # Queue without address/id for generated commands
                                 self._queue_command(("127.0.0.1", 0), cmd_obj, None)
@@ -733,7 +781,7 @@ class Controller:
                 return
             
             # Use command registry to create command object
-            command_obj = create_command_from_parts(next_gcode_cmd.split("|"))
+            command_obj, _ = create_command_from_parts(next_gcode_cmd.split("|"))
             
             if command_obj:
                 # Queue without address/id for GCODE commands
@@ -784,10 +832,20 @@ def main():
         datefmt="%H:%M:%S"
     )
     
-    # Create configuration
+    # Create configuration (env vars may override defaults)
+    env_host = os.getenv("PAROL6_CONTROLLER_IP")
+    env_port = os.getenv("PAROL6_CONTROLLER_PORT")
+    udp_host = env_host.strip() if env_host else args.host
+    try:
+        udp_port = int(env_port) if env_port else args.port
+    except (TypeError, ValueError):
+        udp_port = args.port
+
+    logger.info(f"Controller bind: host={udp_host} port={udp_port}")
+
     config = ControllerConfig(
-        udp_host=args.host,
-        udp_port=args.port,
+        udp_host=udp_host,
+        udp_port=udp_port,
         serial_port=args.serial,
         serial_baudrate=args.baudrate,
         auto_home=bool(args.auto_home)
