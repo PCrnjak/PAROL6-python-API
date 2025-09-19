@@ -70,7 +70,7 @@ class AsyncRobotClient:
         # Stream flag for UI convenience
         self._stream_mode = False
         # ACK policy
-        self._ack_policy = AckPolicy.from_env(self.host, lambda: self._stream_mode)
+        self._ack_policy = AckPolicy.from_env(lambda: self._stream_mode)
         
         # Multicast listener using subscribe_status
         self._multicast_task: asyncio.Task | None = None

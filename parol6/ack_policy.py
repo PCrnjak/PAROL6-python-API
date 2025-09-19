@@ -43,16 +43,14 @@ class AckPolicy:
 
     def __init__(
         self,
-        host: str,
         get_stream_mode: Callable[[], bool],
         force_ack: Optional[bool] = None,
     ) -> None:
-        self._host = host
         self._get_stream_mode = get_stream_mode
         self._force_ack = force_ack
 
     @staticmethod
-    def from_env(host: str, get_stream_mode: Callable[[], bool]) -> "AckPolicy":
+    def from_env(get_stream_mode: Callable[[], bool]) -> "AckPolicy":
         raw = os.getenv("PAROL6_FORCE_ACK", "").strip().lower()
         if raw in {"1", "true", "yes", "on"}:
             force = True
@@ -60,7 +58,7 @@ class AckPolicy:
             force = False
         else:
             force = None
-        return AckPolicy(host=host, get_stream_mode=get_stream_mode, force_ack=force)
+        return AckPolicy(get_stream_mode=get_stream_mode, force_ack=force)
 
     def requires_ack(self, message: str) -> bool:
         # Forced override (e.g., diagnostics)
