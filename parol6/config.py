@@ -2,12 +2,22 @@
 Central configuration for PAROL6 tunables and shared constants.
 """
 
-from __future__ import annotations
-
 import os
 import logging
 from pathlib import Path
 from typing import Optional
+
+TRACE: int = 5
+logging.addLevelName(TRACE, "TRACE")
+# Add Logger.trace if missing
+if not hasattr(logging.Logger, "trace"):
+    def _trace(self, msg, *args, **kwargs):
+        if self.isEnabledFor(TRACE):
+            self._log(TRACE, msg, args, **kwargs)
+    logging.Logger.trace = _trace  # type: ignore[attr-defined]
+    logging.TRACE = TRACE # type: ignore[attr-defined]
+
+TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes", "on")
 
 logger = logging.getLogger(__name__)
 

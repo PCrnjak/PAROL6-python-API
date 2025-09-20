@@ -6,7 +6,6 @@ response payloads used by the headless controller.
 """
 import logging
 from typing import List, Literal, Sequence, cast, Union
-import array
 import numpy as np
 
 from .types import Frame, Axis, StatusAggregate
@@ -89,7 +88,7 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
     return val - 0x10000 if (val & 0x8000) else val
 
 
-def _get_array_value(arr: Union[Sequence[int], array.array, memoryview], index: int, default: int = 0) -> int:
+def _get_array_value(arr: Union[np.ndarray, memoryview], index: int, default: int = 0) -> int:
     """
     Safely get value from array-like object with bounds checking.
     Optimized for zero-copy access when possible.
@@ -103,13 +102,13 @@ def _get_array_value(arr: Union[Sequence[int], array.array, memoryview], index: 
 
 
 def pack_tx_frame(
-    position_out: Union[List[int], array.array, Sequence[int]],
-    speed_out: Union[List[int], array.array, Sequence[int]],
+    position_out: np.ndarray,
+    speed_out: np.ndarray,
     command_code: Union[int, CommandCode],
-    affected_joint_out: Union[List[int], array.array, Sequence[int]],
-    inout_out: Union[List[int], array.array, Sequence[int]],
+    affected_joint_out: np.ndarray,
+    inout_out: np.ndarray,
     timeout_out: int,
-    gripper_data_out: Union[List[int], array.array, Sequence[int]],
+    gripper_data_out: np.ndarray,
 ) -> bytes:
     """
     Pack a full TX frame to firmware.

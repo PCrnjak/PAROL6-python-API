@@ -9,6 +9,7 @@ SYSTEM_COMMANDS: set[str] = {
     "CLEAR_ERROR",
     "SET_PORT",
     "STREAM",
+    "SIMULATOR",
 }
 
 QUERY_COMMANDS: set[str] = {

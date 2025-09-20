@@ -8,6 +8,7 @@ and can execute even when the controller is disabled.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Tuple, Optional, List, TYPE_CHECKING
 
 from parol6.commands.base import SystemCommand, ExecutionStatus
@@ -307,3 +308,57 @@ class StreamCommand(SystemCommand):
         
         self.finish()
         return ExecutionStatus.completed(f"Stream mode {'enabled' if self.stream_mode else 'disabled'}")
+
+
+@register_command("SIMULATOR")
+class SimulatorCommand(SystemCommand):
+    """Toggle simulator (fake serial) mode on/off."""
+
+    mode_on: Optional[bool] = None
+
+    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Parse SIMULATOR command.
+
+        Format: SIMULATOR|on/off
+        Example: SIMULATOR|on
+        """
+        if parts[0].upper() != "SIMULATOR":
+            return False, None
+
+        if len(parts) != 2:
+            return False, "SIMULATOR requires 1 parameter: on/off"
+
+        m = (parts[1] or "").strip().lower()
+        if m in ("on", "1", "true", "yes"):
+            self.mode_on = True
+        elif m in ("off", "0", "false", "no"):
+            self.mode_on = False
+        else:
+            return False, "SIMULATOR parameter must be 'on' or 'off'"
+
+        logger.info(f"Parsed SIMULATOR: mode_on={self.mode_on}")
+        return True, None
+
+    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
+        """Bind context if provided."""
+        if udp_transport is not None:
+            self.udp_transport = udp_transport
+        if addr is not None:
+            self.addr = addr
+
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        """Execute simulator toggle by setting env var and returning details to trigger reconfiguration."""
+        if self.mode_on is None:
+            self.fail("Simulator mode not set")
+            return ExecutionStatus.failed("Simulator mode not set")
+
+        # Set environment variable used by transport factory
+        os.environ["PAROL6_FAKE_SERIAL"] = "1" if self.mode_on else "0"
+        logger.info(f"SIMULATOR command executed: {'ON' if self.mode_on else 'OFF'}")
+
+        self.finish()
+        return ExecutionStatus.completed(
+            f"Simulator {'ON' if self.mode_on else 'OFF'}",
+            details={"simulator_mode": "on" if self.mode_on else "off"},
+        )

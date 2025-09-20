@@ -7,7 +7,6 @@ import socket
 import time
 import threading
 import argparse
-import re
 import os
 from typing import Optional, Dict, Any, List, Tuple, Deque, Union, Sequence, cast
 from dataclasses import dataclass, field
@@ -25,7 +24,7 @@ from parol6.server.status_broadcast import start_status_services
 from parol6.server.status_cache import get_cache
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.gcode import GcodeInterpreter
-from parol6.config import INTERVAL_S
+from parol6.config import INTERVAL_S, TRACE_ENABLED, TRACE
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, QueryCommand, MotionCommand, SystemCommand
 from parol6.ack_policy import AckPolicy
 from parol6.config import get_com_port_with_fallback
@@ -189,15 +188,16 @@ class Controller:
                 )
                 
                 if self.serial_transport:
-                    if hasattr(self.serial_transport, 'port'):
-                        logger.info(f"Connected to transport: {self.serial_transport.port}")
-                    # Start reduced-copy serial reader thread if available
-                    if hasattr(self.serial_transport, "start_reader"):
+                    # Only announce connected and start reader if actually connected
+                    if self.serial_transport.is_connected():
+                        logger.info("Connected to transport: %s", self.serial_transport.port)
                         try:
                             self.serial_transport.start_reader(self.shutdown_event)
                             logger.info("Serial reader thread started")
                         except Exception as e:
-                            logger.warning(f"Failed to start serial reader: {e}")
+                            logger.warning("Failed to start serial reader: %s", e)
+                    else:
+                        logger.warning("Serial transport not connected at startup (port=%s)", self.config.serial_port)
             else:
                 logger.warning("No serial port configured. Waiting for SET_PORT via UDP or set --serial/PAROL6_COM_PORT/com_port.txt before connecting.")
             
@@ -291,10 +291,10 @@ class Controller:
         tick = self.config.loop_interval
         next_t = time.perf_counter()
         prev_t = next_t  # for period measurement
+        prev_print = next_t
 
         while self.running:
             try:
-                loop_start = time.time()
                 state = self.state_manager.get_state()
                 
                 # 1. Read from firmware
@@ -317,15 +317,20 @@ class Controller:
                                 get_cache().mark_serial_observed()
                                 if not self.first_frame_received:
                                     self.first_frame_received = True
-                                    logger.debug("First frame received from robot")
+                                    logger.info("First frame received from robot")
                                 self._serial_last_version = ver
                     except Exception as e:
                         logger.warning(f"Error decoding latest serial frame: {e}")
                 
                 # Serial auto-reconnect when a port is known
                 if self.serial_transport and not self.serial_transport.is_connected():
-                    if getattr(self.serial_transport, 'port', None):
-                        self.serial_transport.auto_reconnect()
+                    if self.serial_transport.auto_reconnect():
+                        try:
+                            self.serial_transport.start_reader(self.shutdown_event)
+                            self.first_frame_received = False
+                            logger.info("Serial reader thread started (after reconnect)")
+                        except Exception as e:
+                            logger.warning("Failed to start serial reader after reconnect: %s", e)
 
                 # 2. Handle E-stop (only check when connected to robot and received first frame)
                 if self.serial_transport and self.serial_transport.is_connected() and self.first_frame_received:
@@ -370,13 +375,13 @@ class Controller:
                 if self.serial_transport and self.serial_transport.is_connected():
                     # Optimized to pass arrays directly without creating lists
                     ok = self.serial_transport.write_frame(
-                        cast(List[int], state.Position_out),
-                        cast(List[int], state.Speed_out),
+                        state.Position_out,
+                        state.Speed_out,
                         state.Command_out.value,
-                        cast(List[int], state.Affected_joint_out),
-                        cast(List[int], state.InOut_out),
+                        state.Affected_joint_out,
+                        state.InOut_out,
                         state.Timeout_out,
-                        cast(List[int], state.Gripper_data_out),
+                        state.Gripper_data_out,
                     )
                     if ok:
                         # Auto-reset one-shot gripper modes after successful send
@@ -407,6 +412,14 @@ class Controller:
                     if -sleep > tick * 0.5:
                         logger.warning(f"Control loop overrun by {-sleep:.4f}s (target: {tick:.4f}s)")
                 
+                if now - prev_print > 5:
+                    prev_print = now
+                    logger.debug(
+                        f"loop_count: {state.loop_count}, "
+                        f"overrun_count: {state.overrun_count}, "
+                        f"ema_hz: {((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0):4f}"
+                        )
+                
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
                 self.stop()
@@ -425,14 +438,13 @@ class Controller:
                 tup = self.udp_transport.receive_one()
                 if tup is None:
                     continue
-                message_str, addr = tup
+                cmd_str, addr = tup
                 state = self.state_manager.get_state()
                 # No command IDs on wire; treat entire datagram as the command
-                cmd_str = message_str
                 cmd_parts = cmd_str.split('|')
                 cmd_name = cmd_parts[0].upper()
                 # Build server-side ack/wait policy
-                policy = AckPolicy.from_env(addr[0], lambda: self.stream_mode)
+                policy = AckPolicy.from_env(lambda: self.stream_mode)
                 # Create command instance from message
                 command, error = create_command_from_parts(cmd_parts)
                 if not command:
@@ -474,6 +486,51 @@ class Controller:
                                         logger.info("Serial reader thread started (after SET_PORT)")
                                 except Exception as e:
                                     logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
+
+                        # Handle SIMULATOR toggle
+                        if status.details and isinstance(status.details, dict) and 'simulator_mode' in status.details:
+                            mode = str(status.details.get('simulator_mode', '')).lower()
+                            try:
+                                # Update env to drive transport_factory.is_simulation_mode()
+                                os.environ["PAROL6_FAKE_SERIAL"] = "1" if mode in ("on", "1", "true", "yes") else "0"
+
+                                # Pre-switch safety: stop and clear motion before transport switch
+                                try:
+                                    state = self.state_manager.get_state()
+                                    # Immediately stop motion
+                                    state.Command_out = CommandCode.IDLE
+                                    state.Speed_out.fill(0)
+                                    # Cancel active and clear queued streamable/non-streamable commands
+                                    self._cancel_active_command("Simulator mode toggle")
+                                    self._clear_queue("Simulator mode toggle")
+                                except Exception as _e:
+                                    logger.debug("Simulator toggle pre-switch safety failed: %s", _e)
+
+                                # Disconnect any existing transport
+                                if self.serial_transport:
+                                    try:
+                                        self.serial_transport.disconnect()
+                                    except Exception:
+                                        pass
+                                # Recreate transport according to new mode; auto_find_port for real serial
+                                self.serial_transport = create_and_connect_transport(
+                                    port=self.config.serial_port,
+                                    baudrate=self.config.serial_baudrate,
+                                    auto_find_port=True
+                                )
+                                # If enabled, sync simulator to last known controller state so pose continuity is preserved
+                                try:
+                                    if mode in ("on", "1", "true", "yes") and isinstance(self.serial_transport, MockSerialTransport):
+                                        self.serial_transport.sync_from_controller_state(state)
+                                except Exception as _e:
+                                    logger.warning("Failed to sync simulator from controller state: %s", _e)
+
+                                if self.serial_transport:
+                                    self.serial_transport.start_reader(self.shutdown_event)
+                                    self.first_frame_received = False
+                                    logger.info("Serial reader thread started (after SIMULATOR toggle)")
+                            except Exception as e:
+                                logger.warning(f"Failed to (re)configure transport on SIMULATOR: {e}")
                     except Exception as e:
                         logger.debug(f"System command side-effect handling failed: {e}")
 
@@ -521,11 +578,13 @@ class Controller:
                         self.command_queue.remove(queued_cmd)
                         removed += 1
                 if removed:
-                    logger.debug(f"Stream mode: removed {removed} queued streamable command(s)")
+                    if TRACE_ENABLED:
+                        logger.log(TRACE, "Stream mode: removed %d queued streamable command(s)", removed)
 
                 # Queue the command
                 status = self._queue_command(addr, command, None)
-                logger.debug(f"Command {cmd_name} queued with status: {status.code}")
+                if TRACE_ENABLED:
+                    logger.log(TRACE, "Command %s queued with status: %s", cmd_name, status.code)
 
                 # For motion commands: ACK acceptance only if policy requires ACK
                 if isinstance(command, MotionCommand) and self.udp_transport:
@@ -581,7 +640,8 @@ class Controller:
             queue_pos = len(self.command_queue)
             self._send_ack(command_id, "QUEUED", f"Position {queue_pos} in queue", address)
         
-        logger.debug(f"Queued command: {type(command).__name__} (ID: {command_id})")
+        if TRACE_ENABLED:
+            logger.log(TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id)
         
         return ExecutionStatus(
             code=ExecutionStatusCode.QUEUED,
@@ -627,7 +687,8 @@ class Controller:
                             )
                         
                         ac.activated = True
-                        logger.debug(f"Activated command: {type(ac.command).__name__} (id={ac.command_id})")
+                        if TRACE_ENABLED:
+                            logger.log(TRACE, "Activated command: %s (id=%s)", type(ac.command).__name__, ac.command_id)
 
                 else:
                     # Cancel command due to disabled controller
@@ -656,7 +717,8 @@ class Controller:
                     # Command completed successfully
                     name = type(ac.command).__name__
                     cid, addr = ac.command_id, ac.address
-                    logger.debug(f"Command completed: {name} (id={cid}) at t={time.time():.6f}")
+                    if TRACE_ENABLED:
+                        logger.log(TRACE, "Command completed: %s (id=%s) at t=%f", name, cid, time.time())
                     
                     # Send completion acknowledgment
                     if cid and addr:
@@ -796,6 +858,7 @@ class Controller:
 
 
 def main():
+    global TRACE_ENABLED
     """Main entry point for the controller."""    
     # Parse arguments first to get logging level
     parser = argparse.ArgumentParser(description='PAROL6 Robot Controller')
@@ -807,25 +870,33 @@ def main():
                        help='Queue HOME on startup (default: off)')
     
     # Verbose logging options (from controller.py)
-    parser.add_argument('-v', '--verbose', action='store_true',
-                       help='Enable verbose logging (DEBUG level)')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                       help='Increase verbosity; -v=INFO, -vv=DEBUG, -vvv=TRACE')
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Enable quiet logging (WARNING level)')
-    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+    parser.add_argument('--log-level', choices=['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                        help='Set specific log level')
     args = parser.parse_args()
     
     # Determine log level
     if args.log_level:
-        log_level = getattr(logging, args.log_level)
-    elif args.verbose:
+        if args.log_level == 'TRACE':
+            log_level = TRACE
+            TRACE_ENABLED=True
+        else:
+            log_level = getattr(logging, args.log_level)
+    elif args.verbose >= 3:
+        log_level = TRACE
+        TRACE_ENABLED=True
+    elif args.verbose >= 2:
         log_level = logging.DEBUG
+    elif args.verbose == 1:
+        log_level = logging.INFO
     elif args.quiet:
         log_level = logging.WARNING
     else:
         log_level = logging.INFO
-    
-    # Set up logging with determined level
+
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

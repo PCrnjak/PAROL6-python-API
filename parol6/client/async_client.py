@@ -7,6 +7,7 @@ import math
 import random
 import time
 from typing import List, Dict, Optional, Literal, cast, AsyncIterator
+from collections.abc import Iterable
 
 from ..protocol.types import Frame, Axis, StatusAggregate
 from ..protocol import wire
@@ -220,10 +221,9 @@ class AsyncRobotClient:
 
     # --------------- Motion / Control ---------------
 
-    async def ping(self) -> bool:
-        """True if the controller responds with 'PONG'."""
-        resp = await self._request("PING", bufsize=256)
-        return bool(resp and resp.strip().upper().startswith("PONG"))
+    async def ping(self) -> str | None:
+        """Return raw 'PONG|...' text (e.g., 'PONG|SERIAL=1') or None on timeout."""
+        return await self._request("PING", bufsize=256)
 
     async def home(self) -> bool:
         return await self._send("HOME")
@@ -247,8 +247,14 @@ class AsyncRobotClient:
     async def stream_off(self) -> bool:
         self._stream_mode = False
         return await self._send("STREAM|OFF")
+    
+    async def simulator_on(self) -> bool:
+        return await self._send("SIMULATOR|ON")
 
-    async def set_com_port(self, port_str: str) -> bool:
+    async def simulator_off(self) -> bool:
+        return await self._send("SIMULATOR|OFF")
+
+    async def set_serial_port(self, port_str: str) -> bool:
         if not port_str:
             raise ValueError("No port provided")
         return await self._send(f"SET_PORT|{port_str}")
@@ -423,7 +429,7 @@ class AsyncRobotClient:
                     
                 # Check speeds from status
                 speeds = status.get('speeds')
-                if speeds:
+                if speeds and isinstance(speeds, Iterable):
                     if max(abs(s) for s in speeds) < speed_threshold:
                         if settle_start is None:
                             settle_start = time.time()
@@ -1025,7 +1031,7 @@ class AsyncRobotClient:
         if via_modes is None:
             via_modes_list: List[str] = ["via"] * len(waypoints)
         else:
-            via_modes_list: List[str] = list(via_modes)
+            via_modes_list = list(via_modes)
         if len(via_modes_list) != len(waypoints):
             raise ValueError("via_modes length must match waypoints length")
         if any(vm not in ("via", "stop") for vm in via_modes_list):

@@ -53,25 +53,24 @@ class StatusCache:
         """
         with self._lock:
             # Detect position changes (gate expensive FK/angle math)
-            pos_in = np.asarray(state.Position_in, dtype=np.int32)
             pos_changed = False
             if self._last_pos_in is None or self._last_pos_in.shape != (6,):
-                self._last_pos_in = pos_in.copy()
+                self._last_pos_in = state.Position_in.copy()
                 pos_changed = True
             else:
                 # np.array_equal is fast for small arrays
-                if not np.array_equal(pos_in, self._last_pos_in):
-                    self._last_pos_in[:] = pos_in
+                if not np.array_equal(state.Position_in, self._last_pos_in):
+                    self._last_pos_in[:] = state.Position_in
                     pos_changed = True
 
             if pos_changed:
                 # Angles (deg) from steps
-                angles_rad = [PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(pos_in)]
+                angles_rad = [PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(state.Position_in)]
                 self.angles_deg = list(np.rad2deg(angles_rad))
                 self._angles_ascii = ",".join(str(a) for a in self.angles_deg)
 
                 # Pose via FK
-                q_current = np.array([PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(pos_in)])
+                q_current = np.array(angles_rad)
                 current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
                 pose_flat = current_pose_matrix.flatten().tolist()
                 if len(pose_flat) == 16:

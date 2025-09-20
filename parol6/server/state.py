@@ -162,6 +162,7 @@ class StateManager:
         Update telemetry data from serial frame using zero-copy ndarray operations when possible.
         """
         with self._state_lock:
+            assert self._state
             if Position_in is not None:
                 np.copyto(self._state.Position_in, np.asarray(Position_in, dtype=self._state.Position_in.dtype))
             if Speed_in is not None:
@@ -189,6 +190,7 @@ class StateManager:
         Update telemetry directly from unpacked frame data (dict).
         """
         with self._state_lock:
+            assert self._state
             if "Position_in" in frame_data:
                 np.copyto(self._state.Position_in, np.asarray(frame_data["Position_in"], dtype=self._state.Position_in.dtype))
             if "Speed_in" in frame_data:
@@ -219,6 +221,7 @@ class StateManager:
         Update command output buffers using ndarray operations.
         """
         with self._state_lock:
+            assert self._state
             if Position_out is not None:
                 np.copyto(self._state.Position_out, np.asarray(Position_out, dtype=self._state.Position_out.dtype))
             if Speed_out is not None:
@@ -237,12 +240,14 @@ class StateManager:
         Set the serial connection object.
         """
         with self._state_lock:
+            assert self._state
             self._state.ser = ser
             logger.info(f"Serial connection set: {port}")
 
     def clear_serial_connection(self) -> None:
         """Clear the serial connection."""
         with self._state_lock:
+            assert self._state
             self._state.ser = None
             logger.info("Serial connection cleared")
 
@@ -251,6 +256,7 @@ class StateManager:
         Check if serial connection is active.
         """
         with self._state_lock:
+            assert self._state
             return self._state.ser is not None and self._state.ser.is_open if hasattr(self._state.ser, 'is_open') else False
 
     def set_enabled(self, enabled: bool, reason: str = "") -> None:
@@ -258,6 +264,7 @@ class StateManager:
         Set the enabled state of the controller.
         """
         with self._state_lock:
+            assert self._state
             self._state.enabled = enabled
             if not enabled:
                 self._state.disabled_reason = reason
@@ -271,6 +278,7 @@ class StateManager:
         Check if the controller is enabled.
         """
         with self._state_lock:
+            assert self._state
             return self._state.enabled
 
     def set_estop(self, active: bool) -> None:
@@ -278,6 +286,7 @@ class StateManager:
         Set the E-stop state.
         """
         with self._state_lock:
+            assert self._state
             self._state.e_stop_active = active
             if active:
                 logger.warning("E-stop activated")
@@ -289,6 +298,7 @@ class StateManager:
         Check if E-stop is active.
         """
         with self._state_lock:
+            assert self._state
             return self._state.e_stop_active
 
     def reset_estop(self) -> None:
@@ -296,6 +306,7 @@ class StateManager:
         Reset E-stop condition and clear any error states.
         """
         with self._state_lock:
+            assert self._state
             if self._state.e_stop_active:
                 # Clear E-stop flag
                 self._state.e_stop_active = False
@@ -319,6 +330,7 @@ class StateManager:
         Check if the system is ready for motion commands.
         """
         with self._state_lock:
+            assert self._state
             return (
                 self._state.enabled
                 and not self._state.e_stop_active
@@ -331,6 +343,7 @@ class StateManager:
         Get the currently active command.
         """
         with self._state_lock:
+            assert self._state
             return self._state.active_command
 
     def set_active_command(self, command: Any, command_id: Optional[str] = None) -> None:
@@ -338,6 +351,7 @@ class StateManager:
         Set the active command.
         """
         with self._state_lock:
+            assert self._state
             self._state.active_command = command
             self._state.active_command_id = command_id
             self._state.last_command_time = time.time()
@@ -345,6 +359,7 @@ class StateManager:
     def clear_active_command(self) -> None:
         """Clear the active command."""
         with self._state_lock:
+            assert self._state
             self._state.active_command = None
             self._state.active_command_id = None
 
@@ -353,6 +368,7 @@ class StateManager:
         Get the size of the command queue.
         """
         with self._state_lock:
+            assert self._state
             return len(self._state.command_queue)
 
     def is_command_queue_empty(self) -> bool:
@@ -360,6 +376,7 @@ class StateManager:
         Check if the command queue is empty.
         """
         with self._state_lock:
+            assert self._state
             return len(self._state.command_queue) == 0
 
     def set_network_config(self, ip: str, port: int) -> None:
@@ -367,6 +384,7 @@ class StateManager:
         Set network configuration.
         """
         with self._state_lock:
+            assert self._state
             self._state.ip = ip
             self._state.port = port
             logger.info(f"Network config set: {ip}:{port}")
@@ -374,6 +392,7 @@ class StateManager:
     def record_start_time(self) -> None:
         """Record the system start time."""
         with self._state_lock:
+            assert self._state
             self._state.start_time = time.time()
 
     def get_uptime(self) -> float:
@@ -381,6 +400,7 @@ class StateManager:
         Get system uptime in seconds.
         """
         with self._state_lock:
+            assert self._state
             if self._state.start_time > 0:
                 return time.time() - self._state.start_time
             return 0.0

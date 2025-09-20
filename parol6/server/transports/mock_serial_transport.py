@@ -18,7 +18,9 @@ import array
 
 from parol6.protocol.wire import pack_tx_frame, CommandCode, split_to_3_bytes
 from parol6 import config as cfg
+from parol6.server.state import ControllerState
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -27,20 +29,20 @@ logger = logging.getLogger(__name__)
 class MockRobotState:
     """Internal state of the simulated robot."""
     # Joint positions (in steps)
-    position_in: List[int] = field(default_factory=lambda: [0] * 6)
+    position_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Joint speeds (in steps/sec)
-    speed_in: List[int] = field(default_factory=lambda: [0] * 6)
+    speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Homed status per joint
-    homed_in: List[int] = field(default_factory=lambda: [1] * 8)
+    homed_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
     # I/O states
-    io_in: List[int] = field(default_factory=lambda: [0, 0, 0, 0, 1, 0, 0, 0])  # E-stop released
+    io_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))  # E-stop released
     # Error states
-    temperature_error_in: List[int] = field(default_factory=lambda: [0] * 8)
-    position_error_in: List[int] = field(default_factory=lambda: [0] * 8)
+    temperature_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
+    position_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
     # Gripper state
-    gripper_data_in: List[int] = field(default_factory=lambda: [0] * 6)
+    gripper_data_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Timing data
-    timing_data_in: List[int] = field(default_factory=lambda: [0])
+    timing_data_in: np.ndarray = field(default_factory=lambda: np.zeros((1,), dtype=np.int32))
     
     # Simulation parameters
     update_rate: float = cfg.INTERVAL_S  # match control loop cadence
@@ -49,8 +51,8 @@ class MockRobotState:
     
     # Command state from controller
     command_out: int = CommandCode.IDLE
-    position_out: List[int] = field(default_factory=lambda: [0] * 6)
-    speed_out: List[int] = field(default_factory=lambda: [0] * 6)
+    position_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    speed_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     
     def __post_init__(self):
         """Initialize robot to standby position."""
@@ -129,6 +131,26 @@ class MockSerialTransport:
         self._state = MockRobotState()  # Reset state on connect
         logger.info(f"MockSerialTransport connected to simulated port: {self.port}")
         return True
+
+    # Allow controller to sync the simulator pose/homing from live controller state
+    def sync_from_controller_state(self, state: ControllerState) -> None:
+        """
+        Synchronize the mock robot internal state from a controller state snapshot.
+        Expects arrays compatible with ControllerState (Position_in, Homed_in).
+        """
+        try:
+            self._state.position_in = state.Position_in.copy()
+            self._state.homed_in = state.Homed_in.copy()
+            self._state.position_out = self._state.position_in.copy()
+            self._state.last_update = time.time()
+            self._state.homing_countdown = 0
+
+            # Clear speeds and hold position
+            self._state.speed_in = state.Speed_in.copy()
+            self._state.command_out = CommandCode.IDLE
+            logger.info("MockSerialTransport: state synchronized from controller")
+        except Exception as e:
+            logger.warning("MockSerialTransport: failed to sync from controller state: %s", e)
     
     def disconnect(self) -> None:
         """Simulate serial port disconnection."""
@@ -156,13 +178,13 @@ class MockSerialTransport:
         return False
     
     def write_frame(self,
-                   position_out: Union[List[int], array.array, Sequence[int]],
-                   speed_out: Union[List[int], array.array, Sequence[int]],
+                   position_out: np.ndarray,
+                   speed_out: np.ndarray,
                    command_out: int,
-                   affected_joint_out: Union[List[int], array.array, Sequence[int]],
-                   inout_out: Union[List[int], array.array, Sequence[int]],
+                   affected_joint_out: np.ndarray,
+                   inout_out: np.ndarray,
                    timeout_out: int,
-                   gripper_data_out: Union[List[int], array.array, Sequence[int]]) -> bool:
+                   gripper_data_out: np.ndarray) -> bool:
         """
         Process a command frame from the controller.
         
@@ -186,8 +208,8 @@ class MockSerialTransport:
         
         # Update simulation state with command
         self._state.command_out = command_out
-        self._state.position_out = list(position_out)
-        self._state.speed_out = list(speed_out)
+        self._state.position_out = position_out
+        self._state.speed_out = speed_out
         
         # Track frame reception
         self._frames_received += 1
@@ -223,10 +245,13 @@ class MockSerialTransport:
         if state.homing_countdown > 0:
             state.homing_countdown -= 1
             if state.homing_countdown == 0:
-                # Homing complete - mark all joints as homed and move to zero
+                # Homing complete - mark all joints as homed and move to target posture
+                # Target angles: 90, -90, 180, 0, 0, 180 (degrees)
+                target_deg = [90, -90, 180, 0, 0, 180]
                 for i in range(6):
                     state.homed_in[i] = 1
-                    state.position_in[i] = 0
+                    steps = int(PAROL6_ROBOT.DEG2STEPS(target_deg[i], i))
+                    state.position_in[i] = steps
                     state.speed_in[i] = 0
                 # Clear HOME command to avoid immediately restarting homing
                 state.command_out = CommandCode.IDLE
@@ -368,7 +393,7 @@ class MockSerialTransport:
             out[off] = b0; out[off + 1] = b1; out[off + 2] = b2
             off += 3
 
-        def bits_to_byte(bits: List[int]) -> int:
+        def bits_to_byte(bits: np.ndarray) -> int:
             val = 0
             for b in bits[:8]:
                 val = (val << 1) | (1 if b else 0)
@@ -391,11 +416,11 @@ class MockSerialTransport:
 
         # Gripper
         gd = st.gripper_data_in
-        dev_id = int(gd[0]) if gd else 0
+        dev_id = int(gd[0]) if gd.all() else 0
         pos = int(gd[1]) & 0xFFFF
         spd = int(gd[2]) & 0xFFFF
         cur = int(gd[3]) & 0xFFFF
-        status = int(gd[4]) & 0xFF if gd else 0
+        status = int(gd[4]) & 0xFF if gd.all() else 0
 
         out[44] = dev_id & 0xFF
         out[45] = (pos >> 8) & 0xFF; out[46] = pos & 0xFF

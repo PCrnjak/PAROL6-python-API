@@ -130,9 +130,15 @@ class RobotClient:
 
     def stream_off(self) -> bool:
         return _run(self._inner.stream_off())
+    
+    def simulator_on(self) -> bool:
+        return _run(self._inner.simulator_on())
 
-    def set_com_port(self, port_str: str) -> bool:
-        return _run(self._inner.set_com_port(port_str))
+    def simulator_off(self) -> bool:
+        return _run(self._inner.simulator_off())
+
+    def set_serial_port(self, port_str: str) -> bool:
+        return _run(self._inner.set_serial_port(port_str))
 
     # ---------- status / queries ----------
 

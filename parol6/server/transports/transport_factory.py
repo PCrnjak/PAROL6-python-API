@@ -12,6 +12,7 @@ from typing import Optional, Union
 
 from parol6.server.transports.serial_transport import SerialTransport
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
+from parol6.config import get_com_port_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,6 @@ def create_and_connect_transport(
     # For real serial, handle port finding
     if not port and auto_find_port:
         # Try to load saved port
-        from parol6.config import get_com_port_with_fallback
         port = get_com_port_with_fallback()
         if port:
             logger.info(f"Using saved serial port: {port}")

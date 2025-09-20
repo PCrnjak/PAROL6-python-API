@@ -9,8 +9,8 @@ import serial
 import logging
 import time
 import threading
-from typing import Optional, List, Union, Sequence
-import array
+from typing import Optional
+import numpy as np
 
 from parol6.protocol.wire import pack_tx_frame
 from parol6.config import get_com_port_with_fallback
@@ -149,13 +149,13 @@ class SerialTransport:
         return False
     
     def write_frame(self, 
-                   position_out: Union[List[int], array.array, Sequence[int]],
-                   speed_out: Union[List[int], array.array, Sequence[int]],
+                   position_out: np.ndarray,
+                   speed_out: np.ndarray,
                    command_out: int,
-                   affected_joint_out: Union[List[int], array.array, Sequence[int]],
-                   inout_out: Union[List[int], array.array, Sequence[int]],
+                   affected_joint_out: np.ndarray,
+                   inout_out: np.ndarray,
                    timeout_out: int,
-                   gripper_data_out: Union[List[int], array.array, Sequence[int]]) -> bool:
+                   gripper_data_out: np.ndarray) -> bool:
         """
         Write a command frame to the robot.
         
@@ -240,12 +240,26 @@ class SerialTransport:
                         # Backoff a bit to avoid busy loop if disconnected
                         time.sleep(0.1)
                         continue
+                    # Race-safe read: hold local ref and check is_open
+                    ser = self.serial
+                    if not ser or not getattr(ser, "is_open", False):
+                        # Disconnected between iterations; back off briefly
+                        time.sleep(0.1)
+                        continue
                     try:
                         # Read into preallocated scratch buffer
-                        n = self.serial.readinto(self._scratch_mv) if self.serial else 0
+                        n = ser.readinto(self._scratch_mv)
                     except serial.SerialException as e:
                         logger.error(f"Serial reader error: {e}")
                         self.disconnect()
+                        break
+                    except (OSError, TypeError, ValueError, AttributeError):
+                        # fd likely closed during disconnect; stop quietly
+                        logger.info("Serial reader stopping due to disconnect/closed FD", exc_info=False)
+                        try:
+                            self.disconnect()
+                        except Exception:
+                            pass
                         break
                     except Exception:
                         logger.exception("Serial reader unexpected exception")

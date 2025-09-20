@@ -16,12 +16,11 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Deque
-from collections import deque
+from typing import Optional
 
 # Precompiled regex patterns for server log normalization
 _SIMPLE_FORMAT_RE = re.compile(
-    r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
+    r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|TRACE)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
 )
 
 @dataclass
@@ -110,7 +109,7 @@ class ServerManager:
         level_name = logging.getLevelName(logging.getLogger().level)
         args.append(f"--log-level={level_name}")
         if com_port:
-            args.append(f"--serial-port={com_port}")
+            args.append(f"--serial={com_port}")
             
         try:
             self._proc = subprocess.Popen(
@@ -147,35 +146,36 @@ class ServerManager:
                 if self._stop_reader.is_set():
                     break
                 line = raw_line.rstrip("\r\n")
-                if line:
-                    if self.normalize_logs:
-                        # Normalize child log line and route to embedded module logger
-                        level = logging.INFO
-                        logger_name: str | None = None
-                        msg = line
+                if not line:
+                    continue
 
-                        s = _SIMPLE_FORMAT_RE.match(line)
-                        if s:
-                            _, level_name, logger_name, actual_message = s.groups()
-                            logger_name = (logger_name or "").strip()
-                            msg = actual_message
-                            level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
-                        elif line.startswith("Traceback"):
-                            # Traceback and continuation lines -> keep last context, escalate on Traceback
-                            level = logging.ERROR
-                        msg = line
+                if self.normalize_logs:
+                    # Normalize child log line and route to embedded module logger
+                    level = logging.INFO
+                    logger_name: str | None = None
+                    msg = line
 
-                        # Choose target logger
-                        target_logger_name = logger_name or last_logger or "parol6.server"
-                        target_logger = logging.getLogger(target_logger_name)
-                        target_logger.log(level, msg)
+                    s = _SIMPLE_FORMAT_RE.match(line)
+                    if s:
+                        _, level_name, logger_name, actual_message = s.groups()
+                        logger_name = (logger_name or "").strip()
+                        msg = actual_message
+                        level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                    elif line.startswith("Traceback"):
+                        # Traceback and continuation lines -> keep last context, escalate on Traceback
+                        level = logging.ERROR
 
-                        # Update last context if we identified a module
-                        if logger_name:
-                            last_logger = logger_name
-                    else:
-                        # No normalization - forward line as-is to root logger
-                        print(line)
+                    # Choose target logger
+                    target_logger_name = logger_name or last_logger or "parol6.server"
+                    target_logger = logging.getLogger(target_logger_name)
+                    target_logger.log(level, msg)
+
+                    # Update last context if we identified a module
+                    if logger_name:
+                        last_logger = logger_name
+                else:
+                    # No normalization - forward line as-is to root logger
+                    print(line)
         except Exception as e:
             logging.warning("ServerManager: output reader stopped: %s", e)
 
@@ -257,7 +257,8 @@ async def ensure_server(
     port: int = 5001, 
     manage: bool = False, 
     com_port: str | None = None, 
-    extra_env: dict | None = None
+    extra_env: dict | None = None,
+    normalize_logs: bool = False
 ) -> Optional[ServerManager]:
     """
     Ensure a PAROL6 server is running and accessible.
@@ -268,7 +269,9 @@ async def ensure_server(
         manage: If True, automatically spawn controller if ping fails
         com_port: COM port for spawned controller
         extra_env: Additional environment variables for spawned controller
-        
+        normalize_logs: If True, parse and normalize controller log output to avoid duplicate
+                          timestamp/level/module info. Set to True when used from web GUI.
+
     Returns:
         ServerManager instance if manage=True and server was spawned, None otherwise
         
@@ -302,7 +305,7 @@ async def ensure_server(
     env_to_pass = dict(extra_env) if extra_env else {}
     env_to_pass["PAROL6_CONTROLLER_IP"] = host
     env_to_pass["PAROL6_CONTROLLER_PORT"] = str(port)
-    manager = ServerManager()
+    manager = ServerManager(normalize_logs=normalize_logs)
     await manager.start_controller(
         com_port=com_port,
         no_autohome=True,

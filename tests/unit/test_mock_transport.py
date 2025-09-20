@@ -363,9 +363,10 @@ class TestMockRobotState:
         state = MockRobotState()
         
         # Should start at standby position
+        target_degrees = [90, -90, 180, 0, 0, 180]
         for i in range(6):
             expected_steps = int(PAROL6_ROBOT.DEG2STEPS(
-                PAROL6_ROBOT.Joints_standby_position_degree[i], i
+                target_degrees[i], i
             ))
             assert state.position_in[i] == expected_steps
         

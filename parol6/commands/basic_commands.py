@@ -8,7 +8,7 @@ import numpy as np
 from typing import List, Tuple, Optional
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from .base import MotionCommand, ExecutionStatus, ExecutionStatusCode
-from parol6.config import INTERVAL_S
+from parol6.config import INTERVAL_S, TRACE_ENABLED, TRACE
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 
@@ -158,13 +158,16 @@ class JogCommand(MotionCommand):
             # Determine mode
             if self.duration and self.distance_deg:
                 self.mode = 'distance'
-                logger.info(f"Parsed Jog: Joint {self.joint}, Distance {self.distance_deg} deg, Duration {self.duration}s.")
+                if TRACE_ENABLED:
+                    logger.log(TRACE, "Parsed Jog: Joint %s, Distance %s deg, Duration %ss.", self.joint, self.distance_deg, self.duration)
             elif self.duration:
                 self.mode = 'time'
-                logger.info(f"Parsed Jog: Joint {self.joint}, Speed {self.speed_percentage}%, Duration {self.duration}s.")
+                if TRACE_ENABLED:
+                    logger.log(TRACE, "Parsed Jog: Joint %s, Speed %s%%, Duration %ss.", self.joint, self.speed_percentage, self.duration)
             elif self.distance_deg:
                 self.mode = 'distance'
-                logger.info(f"Parsed Jog: Joint {self.joint}, Speed {self.speed_percentage}%, Distance {self.distance_deg} deg.")
+                if TRACE_ENABLED:
+                    logger.log(TRACE, "Parsed Jog: Joint %s, Speed %s%%, Distance %s deg.", self.joint, self.speed_percentage, self.distance_deg)
             else:
                 return (False, "JOG requires either duration or distance")
             
@@ -186,7 +189,8 @@ class JogCommand(MotionCommand):
         if gcode_interpreter is not None:
             self.gcode_interpreter = gcode_interpreter
 
-        logger.debug("  -> Preparing for Jog command...")
+        if TRACE_ENABLED:
+            logger.log(TRACE, "  -> Preparing for Jog command...")
 
         # Validate joint is set
         if self.joint is None:
@@ -239,7 +243,8 @@ class JogCommand(MotionCommand):
 
         self.speed_out = speed_steps_per_sec * self.direction
         self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
-        logger.debug("  -> Jog command is ready.")
+        if TRACE_ENABLED:
+            logger.log(TRACE, "  -> Jog command is ready.")
 
     def execute_step(self, state) -> ExecutionStatus:
         """This is the EXECUTION phase. It runs on every loop cycle."""
@@ -269,7 +274,11 @@ class JogCommand(MotionCommand):
                 stop_reason = f"Limit reached on joint {self.joint_index + 1}."
 
         if stop_reason:
-            logger.info(stop_reason)
+            if stop_reason == "Timed jog finished.":
+                if TRACE_ENABLED:
+                    logger.log(TRACE, stop_reason)
+            else:
+                logger.info(stop_reason)
             self.is_finished = True
             state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
@@ -346,7 +355,8 @@ class MultiJogCommand(MotionCommand):
                     return (False, f"Conflicting commands for Joint {base_joint + 1}")
                 base_joints.add(base_joint)
             
-            logger.info(f"Parsed MultiJog for joints {self.joints} with speeds {self.speed_percentages}% for {self.duration}s.")
+            if TRACE_ENABLED:
+                logger.log(TRACE, "Parsed MultiJog for joints %s with speeds %s%% for %ss.", self.joints, self.speed_percentages, self.duration)
             
             self.command_len = int(self.duration / INTERVAL_S)
             self.is_valid = True
@@ -367,7 +377,8 @@ class MultiJogCommand(MotionCommand):
         if gcode_interpreter is not None:
             self.gcode_interpreter = gcode_interpreter
 
-        logger.debug("  -> Preparing for MultiJog command...")
+        if TRACE_ENABLED:
+            logger.log(TRACE, "  -> Preparing for MultiJog command...")
 
         # Validate joints and speed_percentages are set
         if self.joints is None or self.speed_percentages is None:
@@ -396,7 +407,8 @@ class MultiJogCommand(MotionCommand):
             ))
             self.speeds_out[joint_index] = speed_steps_per_sec * direction
 
-        logger.debug("  -> MultiJog command is ready.")
+        if TRACE_ENABLED:
+            logger.log(TRACE, "  -> MultiJog command is ready.")
 
     def execute_step(self, state) -> ExecutionStatus:
         """This is the EXECUTION phase. It runs on every loop cycle."""
@@ -405,7 +417,8 @@ class MultiJogCommand(MotionCommand):
 
         # Stop if the duration has elapsed
         if self.command_step >= self.command_len:
-            logger.info("Timed multi-jog finished.")
+            if TRACE_ENABLED:
+                logger.log(TRACE, "Timed multi-jog finished.")
             self.is_finished = True
             state.Speed_out.fill(0)
             state.Command_out = CommandCode.IDLE
