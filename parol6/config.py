@@ -26,10 +26,16 @@ logger = logging.getLogger(__name__)
 JOG_IK_ILIMIT: int = 20
 
 # Default control/sample rates (Hz)
-CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "100"))
+CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "250"))
 
 # Velocity/acceleration safety margins
 VELOCITY_SAFETY_SCALE: float = 1.2  # e.g., clamp at 1.2x of budget
+
+DEFAULT_ACCEL_PERCENT: float = 50.0
+
+# Motion thresholds (mm)
+NEAR_MM_TOL_MM: float = 2.0  # Proximity threshold for considering positions "near" (mm)
+ENTRY_MM_TOL_MM: float = 5.0  # Entry trajectory threshold for smooth motion (mm)
 
 # Centralized loop interval (seconds).
 INTERVAL_S: float = max(1e-6, 1.0 / max(CONTROL_RATE_HZ, 1.0))
@@ -55,7 +61,7 @@ MCAST_TTL: int = int(os.getenv("PAROL6_MCAST_TTL", "1"))
 MCAST_IF: str = os.getenv("PAROL6_MCAST_IF", "127.0.0.1")
 
 # Status update/broadcast rates
-STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
+STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "20"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
 
 # Ack/Tracking policy toggles

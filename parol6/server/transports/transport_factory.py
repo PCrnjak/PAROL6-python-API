@@ -61,12 +61,10 @@ def create_transport(
     # Create appropriate transport
     if transport_type == 'mock':
         logger.info("Creating MockSerialTransport for simulation")
-        from parol6.server.transports.mock_serial_transport import MockSerialTransport
-        transport = MockSerialTransport(port=port, baudrate=baudrate, **kwargs)
+        transport: Union[MockSerialTransport, SerialTransport] = MockSerialTransport(port=port, baudrate=baudrate, **kwargs)
         
     elif transport_type == 'serial':
         logger.info(f"Creating SerialTransport for port: {port}")
-        from parol6.server.transports.serial_transport import SerialTransport
         transport = SerialTransport(port=port, baudrate=baudrate, **kwargs)
         
     else:

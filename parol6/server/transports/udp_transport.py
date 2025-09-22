@@ -62,6 +62,7 @@ class UDPTransport:
             
             # Allow address reuse
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             
             # Bind to address
             self.socket.bind((self.ip, self.port))

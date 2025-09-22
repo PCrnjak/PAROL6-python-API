@@ -107,9 +107,6 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def ping(self) -> bool:
-        return _run(self._inner.ping())
-
     def home(self) -> bool:
         return _run(self._inner.home())
 
@@ -141,6 +138,8 @@ class RobotClient:
         return _run(self._inner.set_serial_port(port_str))
 
     # ---------- status / queries ----------
+    def ping(self) -> str | None:
+        return _run(self._inner.ping())
 
     def get_angles(self) -> List[float] | None:
         return _run(self._inner.get_angles())

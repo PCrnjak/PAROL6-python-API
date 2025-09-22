@@ -917,7 +917,7 @@ from parol6 import RobotClient
 client = RobotClient(host="127.0.0.1", port=5001, ack_port=5002)
 
 # Ping server
-assert client.ping() is True
+assert client.ping() is not None
 
 # Tracked home
 result = client.home(wait_for_ack=True, timeout=15.0)

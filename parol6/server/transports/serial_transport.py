@@ -11,9 +11,10 @@ import time
 import threading
 from typing import Optional
 import numpy as np
+import os
 
-from parol6.protocol.wire import pack_tx_frame
-from parol6.config import get_com_port_with_fallback
+from parol6.protocol.wire import pack_tx_frame_into
+from parol6.config import get_com_port_with_fallback, INTERVAL_S
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +50,30 @@ class SerialTransport:
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
 
         # Reduced-copy latest-frame infrastructure (reader thread will publish here)
-        self._scratch = bytearray(1024)
+        self._scratch = bytearray(4096)
         self._scratch_mv = memoryview(self._scratch)
-        self._stream = bytearray()
+        # Fixed-size ring buffer for RX stream (drop-oldest on overflow)
+        _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", "262144"))
+        self._ring = bytearray(_cap)
+        self._r_cap = _cap
+        self._r_head = 0
+        self._r_tail = 0
         self._frame_buf = bytearray(64)  # 52-byte payload + headroom
         self._frame_mv = memoryview(self._frame_buf)[:52]
         self._frame_version = 0
         self._frame_ts = 0.0
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_running = False
+
+        # Preallocated TX buffer (3 start + 1 len + 52 payload = 56 bytes)
+        self._tx_buf = bytearray(56)
+        self._tx_mv = memoryview(self._tx_buf)
+        
+        # Hz tracking for debug prints
+        self._last_print_time = 0.0
+        self._print_interval = 3.0  # seconds
+        self._rx_msg_count = 0
+        self._interval_msg_count = 0
         
     def connect(self, port: Optional[str] = None) -> bool:
         """
@@ -178,8 +194,13 @@ class SerialTransport:
             return False
             
         try:
-            # Pack the frame using the wire protocol
-            frame = pack_tx_frame(
+            # Write to serial using preallocated buffer and zero-alloc pack
+            ser = self.serial
+            if ser is None:
+                return False
+
+            pack_tx_frame_into(
+                self._tx_mv,
                 position_out,
                 speed_out,
                 command_out,
@@ -188,12 +209,7 @@ class SerialTransport:
                 timeout_out,
                 gripper_data_out
             )
-            
-            # Write to serial
-            ser = self.serial
-            if ser is None:
-                return False
-            ser.write(frame)
+            ser.write(self._tx_mv)
             return True
             
         except serial.SerialException as e:
@@ -225,12 +241,10 @@ class SerialTransport:
             return self._reader_thread
 
         # Ensure a short timeout for responsive shutdown
-        try:
-            if self.serial:
-                # Use a small blocking timeout to periodically check shutdown_event
-                self.serial.timeout = 0.25
-        except Exception:
-            pass
+        if self.serial:
+            # Small block so as not to busy loop, but can't use a larger timout
+            # because serial will read until buffer is full or timeout.
+            self.serial.timeout = INTERVAL_S / 2
 
         def _run() -> None:
             self._reader_running = True
@@ -269,9 +283,24 @@ class SerialTransport:
                         # Timeout or no data; loop to check shutdown_event
                         continue
 
-                    # Append to rolling stream buffer and parse
-                    self._stream.extend(self._scratch[:n])
-                    self._parse_stream_for_frames()
+                    # Append into ring buffer and parse
+                    cap = self._r_cap
+                    head = self._r_head
+                    tail = self._r_tail
+                    rb = self._ring
+                    src = self._scratch
+                    for i in range(n):
+                        rb[head] = src[i]
+                        head += 1
+                        if head == cap:
+                            head = 0
+                        if head == tail:
+                            tail += 1
+                            if tail == cap:
+                                tail = 0
+                    self._r_head = head
+                    self._r_tail = tail
+                    self._parse_ring_for_frames()
             finally:
                 self._reader_running = False
 
@@ -280,59 +309,74 @@ class SerialTransport:
         t.start()
         return t
 
-    def _parse_stream_for_frames(self) -> None:
+    def _parse_ring_for_frames(self) -> None:
         """
-        Parse as many complete frames as possible from the rolling stream buffer.
+        Parse as many complete frames as possible from the RX ring buffer in-place.
 
         Frame format:
           [0xFF,0xFF,0xFF] [LEN] [LEN bytes data ...]
-        We expect the last two bytes of the LEN segment to be end markers (0x01,0x02)
-        on real firmware. For robustness, we only copy the first 52 bytes of the LEN
-        segment (if present) into the stable latest-frame buffer.
         """
-        buf = self._stream
-        START = self.START_BYTES
+        START0, START1, START2 = 0xFF, 0xFF, 0xFF
         END0, END1 = self.END_BYTES[0], self.END_BYTES[1]
+        cap = self._r_cap
+        head = self._r_head
+        tail = self._r_tail
+        rb = self._ring
 
-        while True:
-            # Find start sequence
-            i = buf.find(START)
-            if i == -1:
-                # Keep up to last two bytes in case they begin a start sequence
-                if len(buf) > 2:
-                    del buf[:-2]
+        def available(h: int, t: int) -> int:
+            return (h - t + cap) % cap
+
+        while available(head, tail) >= 4:
+            # Find start sequence 0xFF 0xFF 0xFF by advancing tail
+            found = False
+            while available(head, tail) >= 3:
+                b0 = rb[tail]
+                b1 = rb[(tail + 1) % cap]
+                b2 = rb[(tail + 2) % cap]
+                if b0 == START0 and b1 == START1 and b2 == START2:
+                    found = True
+                    break
+                tail = (tail + 1) % cap
+            if not found or available(head, tail) < 4:
                 break
 
-            # Discard any leading noise before start
-            if i > 0:
-                del buf[:i]
-
-            # Need at least header + length
-            if len(buf) < 4:
-                break
-
-            length = buf[3]
+            length = rb[(tail + 3) % cap]
             total_needed = 4 + length
-            if len(buf) < total_needed:
+            if available(head, tail) < total_needed:
                 # Wait for more data
                 break
 
-            frame_seg = buf[4:4 + length]
-
             # Validate end markers if possible
-            if length >= 2 and not (frame_seg[-2] == END0 and frame_seg[-1] == END1):
-                # Bad frame; skip one byte to search for next start to be resilient
-                del buf[:1]
-                continue
+            if length >= 2:
+                e0 = rb[(tail + 4 + length - 2) % cap]
+                e1 = rb[(tail + 4 + length - 1) % cap]
+                if not (e0 == END0 and e1 == END1):
+                    # Bad frame; skip one byte to resync
+                    tail = (tail + 1) % cap
+                    continue
 
             # Publish first 52 bytes if available
-            if len(frame_seg) >= 52:
-                self._frame_buf[:52] = frame_seg[:52]
+            payload_len = 52 if length >= 52 else length
+            start = (tail + 4) % cap
+            if start + payload_len <= cap:
+                self._frame_buf[:payload_len] = rb[start:start + payload_len]
+            else:
+                first = cap - start
+                self._frame_buf[:first] = rb[start:cap]
+                self._frame_buf[first:payload_len] = rb[0:payload_len - first]
+
+            if payload_len >= 52:
                 self._frame_version += 1
                 self._frame_ts = time.time()
+                
+                # Update Hz tracking if enabled
+                self._update_hz_tracking()
 
             # Consume this frame
-            del buf[:total_needed]
+            tail = (tail + total_needed) % cap
+
+        # Publish updated tail
+        self._r_tail = tail
 
     def get_latest_frame_view(self) -> tuple[Optional[memoryview], int, float]:
         """
@@ -364,6 +408,36 @@ class SerialTransport:
                 pass
                 
         return info
+    
+    def _update_hz_tracking(self) -> None:
+        """
+        Update EMA Hz tracking and print debug info periodically.
+        
+        This method calculates the instantaneous Hz based on time between messages,
+        updates the EMA (Exponential Moving Average), tracks min/max values,
+        and prints debug info every few seconds.
+        """
+        current_time = time.perf_counter()
+        
+        # Increment message counters
+        self._rx_msg_count += 1
+        self._interval_msg_count += 1
+        
+        # Check if it's time to print debug info
+        if self._last_print_time == 0.0:
+            self._last_print_time = current_time
+        elif current_time - self._last_print_time >= self._print_interval:
+            # Print debug information
+            if self._interval_msg_count > 0:
+                avg_hz = self._interval_msg_count / (current_time - self._last_print_time)
+                logger.debug(f"Serial RX Stats - Avg Hz: {avg_hz:.2f} (Total: {self._rx_msg_count})"
+                )
+            else:
+                logger.debug(f"Serial RX Stats - No messages received in last {self._print_interval:.1f}s")
+            
+            # Reset interval statistics
+            self._last_print_time = current_time
+            self._interval_msg_count = 0
 
 
 def create_serial_transport(port: Optional[str] = None, 

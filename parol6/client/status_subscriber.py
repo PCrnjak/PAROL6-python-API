@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import socket
 import struct
@@ -23,10 +21,32 @@ class MulticastProtocol(asyncio.DatagramProtocol):
         self.receive_count = 0
         self.last_log_time = time.time()
         
+        # EMA rate tracking for multicast RX
+        self._rx_count = 0
+        self._rx_last_time = time.monotonic()
+        self._rx_ema_period = 0.05  # Initialize with 20 Hz expected
+        self._rx_last_log_time = time.monotonic()
+        
     def connection_made(self, transport):
         self.transport = transport
         
     def datagram_received(self, data, addr):
+        # Track multicast RX rate with EMA
+        now = time.monotonic()
+        if self._rx_count > 0:  # Skip first sample for period calculation
+            period = now - self._rx_last_time
+            if period > 0:
+                # EMA update: 0.1 * new + 0.9 * old
+                self._rx_ema_period = 0.1 * period + 0.9 * self._rx_ema_period
+        self._rx_last_time = now
+        self._rx_count += 1
+        
+        # Log rate every 3 seconds
+        if now - self._rx_last_log_time >= 3.0 and self._rx_ema_period > 0:
+            rx_hz = 1.0 / self._rx_ema_period
+            logger.debug(f"Multicast RX: {rx_hz:.1f} Hz (count={self._rx_count})")
+            self._rx_last_log_time = now
+        
         try:
             self.queue.put_nowait((data, addr))
         except asyncio.QueueFull:
@@ -50,6 +70,7 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
     
     # Allow multiple listeners on same port
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
     
     # Bind to port
     try:
@@ -93,7 +114,7 @@ async def subscribe_status(
     logger.info(f"subscribe_status starting: group={group}, port={port}, iface_ip={iface_ip}")
 
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue(maxsize=100)
+    queue = asyncio.Queue(maxsize=100) # type: ignore
     
     # Create the socket with multicast configuration
     sock = _create_multicast_socket(group, port, iface_ip)

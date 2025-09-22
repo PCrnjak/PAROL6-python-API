@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import threading
 import time
 from typing import List, Optional
-
-import numpy as np  # type: ignore
+from numpy.typing import ArrayLike
+import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.state import ControllerState
@@ -16,88 +14,102 @@ class StatusCache:
 
     Fields:
       - angles_deg: 6 floats
-      - speeds: 6 floats (steps/sec)
+      - speeds: 6 ints (steps/sec)
       - io: 5 ints [in1,in2,out1,out2,estop]
       - gripper: >=6 ints [id,pos,spd,cur,status,obj]
       - pose: 16 floats (flattened transform)
-      - last_update_s: monotonic time of last successful update
+      - last_update_s: wall clock time of last cache update
     """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self.angles_deg: List[float] = [0.0] * 6
-        self.speeds: List[float] = [0.0] * 6
-        self.io: List[int] = [0, 0, 0, 0, 0]
-        self.gripper: List[int] = [0, 0, 0, 0, 0, 0]
-        self.pose: List[float] = [0.0] * 16
-        self.last_update_s: float = 0.0  # last cache build (any update)
+
+        # Public snapshots (materialized only when they change)
+        self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
+        self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self.io: np.ndarray = np.zeros((5,), dtype=np.uint8)
+        self.gripper: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self.pose: np.ndarray = np.zeros((16,), dtype=np.float64)
+
+        self.last_update_s: float = 0.0  # last cache build (any section)
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
+
         # Cached ASCII fragments to reduce allocations
         self._angles_ascii: str = "0,0,0,0,0,0"
         self._speeds_ascii: str = "0,0,0,0,0,0"
         self._io_ascii: str = "0,0,0,0,0"
         self._gripper_ascii: str = "0,0,0,0,0,0"
         self._pose_ascii: str = ",".join("0" for _ in range(16))
-        self._ascii_full: str = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|SPEEDS={self._speeds_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
+        self._ascii_full: str = (
+            f"STATUS|POSE={self._pose_ascii}"
+            f"|ANGLES={self._angles_ascii}"
+            f"|SPEEDS={self._speeds_ascii}"
+            f"|IO={self._io_ascii}"
+            f"|GRIPPER={self._gripper_ascii}"
+        )
+
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
-        self._last_pos_in: np.ndarray | None = None
-        self._last_speed_in: np.ndarray | None = None
-        self._last_io5: np.ndarray | None = None
-        self._last_grip6: np.ndarray | None = None
+        self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
+
+    def _format_csv_from_list(self, vals: ArrayLike) -> str:
+        # Using str() on each value preserves prior formatting semantics
+        return ",".join(str(v) for v in vals) # type: ignore
 
     def update_from_state(self, state: ControllerState) -> None:
         """
         Update cache from current controller state with change gating:
-          - Only recompute angles/pose when Position_in changes
-          - Always refresh IO/gripper (cheap)
+          - Only recompute angles/pose when Position_in changes (and beyond optional deadband)
+          - Only refresh IO/speeds/gripper when their inputs actually change
         """
+        now = time.time()
+        changed_any = False
+
         with self._lock:
-            # Detect position changes (gate expensive FK/angle math)
-            pos_changed = False
-            if self._last_pos_in is None or self._last_pos_in.shape != (6,):
-                self._last_pos_in = state.Position_in.copy()
-                pos_changed = True
-            else:
-                # np.array_equal is fast for small arrays
-                if not np.array_equal(state.Position_in, self._last_pos_in):
-                    self._last_pos_in[:] = state.Position_in
-                    pos_changed = True
+            if self._last_pos_in is None or not np.array_equal(state.Position_in, self._last_pos_in): # Position changed
+                np.copyto(self._last_pos_in, state.Position_in)
+                # Vectorized steps->deg
+                self.angles_deg = np.asarray(PAROL6_ROBOT.ops.steps_to_deg(state.Position_in))  # float64, shape (6,)
+                # Publish angles list and ASCII
+                self._angles_ascii = self._format_csv_from_list(self.angles_deg)
+                changed_any = True
 
-            if pos_changed:
-                # Angles (deg) from steps
-                angles_rad = [PAROL6_ROBOT.STEPS2RADS(int(p), i) for i, p in enumerate(state.Position_in)]
-                self.angles_deg = list(np.rad2deg(angles_rad))
-                self._angles_ascii = ",".join(str(a) for a in self.angles_deg)
+                # Vectorized steps->rad for FK
+                q_current = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)  # float64, shape (6,)
+                # robot.fkine expects joint vector in radians
+                current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A  # 4x4
+                pose_flat = current_pose_matrix.reshape(-1)  # 16
+                self.pose = np.asarray(pose_flat, dtype=np.float64)
+                self._pose_ascii = self._format_csv_from_list(self.pose)
+                changed_any = True
 
-                # Pose via FK
-                q_current = np.array(angles_rad)
-                current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
-                pose_flat = current_pose_matrix.flatten().tolist()
-                if len(pose_flat) == 16:
-                    self.pose = [float(x) for x in pose_flat]
-                    self._pose_ascii = ",".join(str(x) for x in self.pose)
+            # 2) IO (first 5)
+            if not np.array_equal(self.io, state.InOut_in[:5]):
+                np.copyto(self.io, state.InOut_in[:5])
+                self._io_ascii = self._format_csv_from_list(self.io)
+                changed_any = True
 
-            # IO (first 5)
-            io5 = np.asarray(state.InOut_in[:5], dtype=np.uint8)
-            self.io = io5.tolist()
-            self._io_ascii = ",".join(str(int(x)) for x in io5)
+            # 3) Speeds (steps/sec from Speed_in)
+            if not np.array_equal(self.speeds, state.Speed_in):
+                np.copyto(self.speeds, state.Speed_in)
+                self._speeds_ascii = self._format_csv_from_list(self.speeds)
+                changed_any = True
 
-            # Speeds (steps/sec from Speed_in)
-            speed_in = np.asarray(state.Speed_in[:6], dtype=np.int32)
-            self.speeds = speed_in.tolist()
-            self._speeds_ascii = ",".join(str(int(s)) for s in speed_in)
+            # 4) Gripper
+            if not np.array_equal(self.gripper, state.Gripper_data_in):
+                np.copyto(self.gripper, state.Gripper_data_in)
+                self._gripper_ascii = self._format_csv_from_list(self.gripper)
+                changed_any = True
 
-            # Gripper (first 6)
-            grip6 = np.asarray(state.Gripper_data_in[:6], dtype=np.int32)
-            if grip6.shape[0] < 6:
-                # Pad to 6 if shorter
-                grip6 = np.pad(grip6, (0, 6 - grip6.shape[0]), mode="constant")
-            self.gripper = grip6.tolist()
-            self._gripper_ascii = ",".join(str(int(x)) for x in grip6)
-
-            # Assemble full ASCII (cheap string concatenation)
-            self._ascii_full = f"STATUS|POSE={self._pose_ascii}|ANGLES={self._angles_ascii}|SPEEDS={self._speeds_ascii}|IO={self._io_ascii}|GRIPPER={self._gripper_ascii}"
-            self.last_update_s = time.time()
+            # 5) Assemble full ASCII only if any section changed
+            if changed_any:
+                self._ascii_full = (
+                    f"STATUS|POSE={self._pose_ascii}"
+                    f"|ANGLES={self._angles_ascii}"
+                    f"|SPEEDS={self._speeds_ascii}"
+                    f"|IO={self._io_ascii}"
+                    f"|GRIPPER={self._gripper_ascii}"
+                )
+                self.last_update_s = now
 
     def to_ascii(self) -> str:
         """Return the full ASCII STATUS payload."""

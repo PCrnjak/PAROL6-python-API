@@ -4,9 +4,8 @@ Contains utility commands like Delay
 """
 
 import logging
-import time
 from typing import List, Tuple, Optional
-from parol6.commands.base import MotionCommand, ExecutionStatus, ExecutionStatusCode
+from parol6.commands.base import CommandBase, ExecutionStatus, parse_float
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_command("DELAY")
-class DelayCommand(MotionCommand):
+class DelayCommand(CommandBase):
     """
     A non-blocking command that pauses execution for a specified duration.
     During the delay, it ensures the robot remains idle by sending the
@@ -23,13 +22,12 @@ class DelayCommand(MotionCommand):
     def __init__(self):
         """
         Initializes the Delay command.
-        Parameters are parsed in match() method.
+        Parameters are parsed in do_match() method.
         """
         super().__init__()
         self.duration = None
-        self.end_time = None
 
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse DELAY command parameters.
 
@@ -40,29 +38,19 @@ class DelayCommand(MotionCommand):
             return (False, "DELAY requires 1 parameter: duration")
 
         try:
-            self.duration = float(parts[1])
-            if self.duration <= 0:
-                return (False, f"Delay duration must be positive, got {self.duration}")
+            self.duration = parse_float(parts[1])
+            if self.duration is None or self.duration <= 0:
+                return (False, f"Delay duration must be positive, got {parts[1]}")
             logger.info(f"Parsed Delay command for {self.duration} seconds")
             self.is_valid = True
             return (True, None)
-        except ValueError:
-            return (False, f"Invalid duration: {parts[1]}")
         except Exception as e:
             return (False, f"Error parsing DELAY: {str(e)}")
 
-    def setup(self, state, *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Set the end time when the command actually starts."""
-        # Bind dynamic context if provided (per policy); no-op otherwise
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
-
+    def setup(self, state):
+        """Start the delay timer."""
         if self.duration:
-            self.end_time = time.time() + self.duration
+            self.start_timer(self.duration)
             logger.info(f"  -> Delay starting for {self.duration} seconds...")
 
     def execute_step(self, state) -> ExecutionStatus:
@@ -77,7 +65,7 @@ class DelayCommand(MotionCommand):
         state.Speed_out.fill(0)
 
         # Check for completion
-        if self.end_time and time.time() >= self.end_time:
+        if self.timer_expired():
             logger.info(f"Delay finished after {self.duration} seconds.")
             self.is_finished = True
             return ExecutionStatus.completed("Delay complete")

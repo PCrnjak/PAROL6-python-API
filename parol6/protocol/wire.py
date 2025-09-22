@@ -17,10 +17,13 @@ logger = logging.getLogger(__name__)
 # Precomputed bit-unpack lookup table for 0..255 (MSB..LSB)
 # Using NumPy ensures fast vectorized selection without per-call allocations.
 _BIT_UNPACK = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big")
+START = b"\xff\xff\xff"
+END = b"\x01\x02"
+PAYLOAD_LEN = 52  # matches existing firmware expectation
 
 __all__ = [
     "CommandCode",
-    "pack_tx_frame",
+    "pack_tx_frame_into",
     "unpack_rx_frame_into",
     "encode_move_joint",
     "encode_move_pose",
@@ -101,7 +104,8 @@ def _get_array_value(arr: Union[np.ndarray, memoryview], index: int, default: in
         return default
 
 
-def pack_tx_frame(
+def pack_tx_frame_into(
+    out: memoryview,
     position_out: np.ndarray,
     speed_out: np.ndarray,
     command_code: Union[int, CommandCode],
@@ -109,14 +113,14 @@ def pack_tx_frame(
     inout_out: np.ndarray,
     timeout_out: int,
     gripper_data_out: np.ndarray,
-) -> bytes:
+) -> None:
     """
-    Pack a full TX frame to firmware.
-    
-    Optimized to accept array-like objects directly without conversion to lists.
-    Supports lists, array.array, memoryview, and other sequence types.
+    Pack a full TX frame into the provided memoryview without allocations.
 
-    Layout (excluding 3 start bytes and 1 length byte, total payload len = 52):
+    Expects 'out' to be a writable buffer of length >= 56 bytes:
+      - 3 start bytes + 1 length byte + 52-byte payload
+
+    Layout of the 52-byte payload:
       - 6x position (3 bytes each) = 18
       - 6x speed (3 bytes each)    = 18
       - 1 byte command
@@ -133,23 +137,12 @@ def pack_tx_frame(
       - 1 byte CRC (placeholder 228)
       - 2 bytes end markers (0x01, 0x02)
     """
-    START = b"\xff\xff\xff"
-    END = b"\x01\x02"
-    PAYLOAD_LEN = 52  # matches existing firmware expectation
-
-    # Safety clamps and conversions
-    cmd = int(command_code)
-    
-    # Pre-allocate output buffer for exact size: 3 start + 1 len + 52 payload = 56 bytes
-    out = bytearray(4 + PAYLOAD_LEN)
-    
-    # Write header
+    # Header
     out[0:3] = START
     out[3] = PAYLOAD_LEN
-    
     offset = 4
-    
-    # Positions: 6 * 3 bytes - optimized array access
+
+    # Positions: 6 * 3 bytes
     for i in range(6):
         val = _get_array_value(position_out, i, 0)
         b0, b1, b2 = split_to_3_bytes(val)
@@ -158,7 +151,7 @@ def pack_tx_frame(
         out[offset + 2] = b2
         offset += 3
 
-    # Speeds: 6 * 3 bytes - optimized array access
+    # Speeds: 6 * 3 bytes
     for i in range(6):
         val = _get_array_value(speed_out, i, 0)
         b0, b1, b2 = split_to_3_bytes(val)
@@ -168,10 +161,10 @@ def pack_tx_frame(
         offset += 3
 
     # Command
-    out[offset] = cmd
+    out[offset] = int(command_code)
     offset += 1
 
-    # Affected joints as bitfield byte - build bitfield without creating intermediate list
+    # Affected joints as bitfield byte
     bitfield_val = 0
     for i in range(8):
         if _get_array_value(affected_joint_out, i, 0):
@@ -179,7 +172,7 @@ def pack_tx_frame(
     out[offset] = bitfield_val
     offset += 1
 
-    # In/Out as bitfield byte - build bitfield without creating intermediate list
+    # In/Out as bitfield byte
     bitfield_val = 0
     for i in range(8):
         if _get_array_value(inout_out, i, 0):
@@ -212,10 +205,6 @@ def pack_tx_frame(
     # End bytes
     out[offset] = 0x01
     out[offset + 1] = 0x02
-    
-    return bytes(out)
-
-
 
 
 def unpack_rx_frame_into(
@@ -303,9 +292,6 @@ def unpack_rx_frame_into(
     except Exception as e:
         logger.error(f"unpack_rx_frame_into: exception {e}")
         return False
-
-
-
 
 
 # =========================

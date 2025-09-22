@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Tuple, Optional, List, TYPE_CHECKING
 
-from parol6.commands.base import SystemCommand, ExecutionStatus
+from parol6.commands.base import SystemCommand, ExecutionStatus, parse_int, parse_bool
 from parol6.server.command_registry import register_command
 from parol6.protocol.wire import CommandCode
 from parol6.config import save_com_port
@@ -26,20 +26,13 @@ logger = logging.getLogger(__name__)
 class StopCommand(SystemCommand):
     """Emergency stop command - immediately stops all motion."""
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a STOP command."""
         if parts[0].upper() == "STOP":
             if len(parts) != 1:
                 return False, "STOP command takes no parameters"
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute stop - set all speeds to zero and command to IDLE."""
@@ -58,20 +51,13 @@ class StopCommand(SystemCommand):
 class EnableCommand(SystemCommand):
     """Enable the robot controller."""
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is an ENABLE command."""
         if parts[0].upper() == "ENABLE":
             if len(parts) != 1:
                 return False, "ENABLE command takes no parameters"
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute enable - set controller to enabled state."""
@@ -88,20 +74,13 @@ class EnableCommand(SystemCommand):
 class DisableCommand(SystemCommand):
     """Disable the robot controller."""
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a DISABLE command."""
         if parts[0].upper() == "DISABLE":
             if len(parts) != 1:
                 return False, "DISABLE command takes no parameters"
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute disable - set controller to disabled state."""
@@ -119,20 +98,13 @@ class DisableCommand(SystemCommand):
 class ClearErrorCommand(SystemCommand):
     """Clear any error states in the controller."""
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a CLEAR_ERROR command."""
         if parts[0].upper() == "CLEAR_ERROR":
             if len(parts) != 1:
                 return False, "CLEAR_ERROR command takes no parameters"
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute clear error - reset error states."""
@@ -154,7 +126,7 @@ class SetIOCommand(SystemCommand):
     port_index: Optional[int] = None
     port_value: Optional[int] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SET_IO command.
         
@@ -168,8 +140,11 @@ class SetIOCommand(SystemCommand):
             return False, "SET_IO requires 2 parameters: port_index, value"
         
         try:
-            self.port_index = int(parts[1])
-            self.port_value = int(parts[2])
+            self.port_index = parse_int(parts[1])
+            self.port_value = parse_int(parts[2])
+            
+            if self.port_index is None or self.port_value is None:
+                return False, "Port index and value must be integers"
             
             # Validate port index (0-7 for 8 I/O ports)
             if not 0 <= self.port_index <= 7:
@@ -184,13 +159,6 @@ class SetIOCommand(SystemCommand):
             
         except ValueError as e:
             return False, f"Invalid SET_IO parameters: {str(e)}"
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute set port - update I/O port state."""
@@ -212,7 +180,7 @@ class SetSerialPortCommand(SystemCommand):
     """Set the serial COM port used by the controller."""
     port_str: Optional[str] = None
 
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SET_PORT command.
 
@@ -232,13 +200,6 @@ class SetSerialPortCommand(SystemCommand):
         self.port_str = port
         logger.info(f"Parsed SET_PORT: serial_port={self.port_str}")
         return True, None
-
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
 
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Persist the serial port selection; controller may reconnect based on this."""
@@ -262,7 +223,7 @@ class StreamCommand(SystemCommand):
     
     stream_mode: Optional[bool] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse STREAM command.
         
@@ -275,23 +236,12 @@ class StreamCommand(SystemCommand):
         if len(parts) != 2:
             return False, "STREAM requires 1 parameter: on/off"
         
-        mode_str = parts[1].lower()
-        if mode_str == 'on':
-            self.stream_mode = True
-        elif mode_str == 'off':
-            self.stream_mode = False
-        else:
+        self.stream_mode = parse_bool(parts[1])
+        if parts[1].lower() not in ('on', 'off', '1', '0', 'true', 'false'):
             return False, f"STREAM mode must be 'on' or 'off', got '{parts[1]}'"
         
         logger.info(f"Parsed STREAM: mode = {self.stream_mode}")
         return True, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute stream mode toggle."""
@@ -303,8 +253,7 @@ class StreamCommand(SystemCommand):
         # This is just a placeholder that sets a flag
         logger.info(f"STREAM: Setting stream mode to {self.stream_mode}")
         
-        # Note: The actual stream_mode flag is maintained by the controller
-        # This command just triggers the change
+        state.stream_mode = self.stream_mode
         
         self.finish()
         return ExecutionStatus.completed(f"Stream mode {'enabled' if self.stream_mode else 'disabled'}")
@@ -316,7 +265,7 @@ class SimulatorCommand(SystemCommand):
 
     mode_on: Optional[bool] = None
 
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SIMULATOR command.
 
@@ -329,23 +278,12 @@ class SimulatorCommand(SystemCommand):
         if len(parts) != 2:
             return False, "SIMULATOR requires 1 parameter: on/off"
 
-        m = (parts[1] or "").strip().lower()
-        if m in ("on", "1", "true", "yes"):
-            self.mode_on = True
-        elif m in ("off", "0", "false", "no"):
-            self.mode_on = False
-        else:
+        self.mode_on = parse_bool(parts[1])
+        if parts[1].lower() not in ('on', 'off', '1', '0', 'true', 'false', 'yes', 'no'):
             return False, "SIMULATOR parameter must be 'on' or 'off'"
 
         logger.info(f"Parsed SIMULATOR: mode_on={self.mode_on}")
         return True, None
-
-    def setup(self, state: 'ControllerState', *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """Bind context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
 
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute simulator toggle by setting env var and returning details to trigger reconfiguration."""

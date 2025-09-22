@@ -26,7 +26,7 @@ class GcodeCommand(CommandBase):
     generated_commands: Optional[List[str]] = None
     current_command_index: int = 0
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE command."""
         if parts[0].upper() == "GCODE" and len(parts) >= 2:
             # Rejoin the GCODE line (it might contain | characters)
@@ -34,14 +34,15 @@ class GcodeCommand(CommandBase):
             return True, None
         return False, None
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
-        """Set up GCODE interpreter (injected) and parse the line."""
-        # Prefer injected, controller-owned interpreter
-        self.interpreter = gcode_interpreter or self.interpreter or GcodeInterpreter()
+    def setup(self, state: 'ControllerState') -> None:
+        """Set up GCODE interpreter and parse the line."""
+        # Use injected interpreter or create one
+        self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
         try:
             assert self.interpreter is not None
             # Update interpreter position with current robot position
-            current_angles_rad = [PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)]
+            # Vectorized: convert all joints at once
+            current_angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
             current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
             current_xyz = current_pose_matrix[:3, 3]
             self.interpreter.state.update_position({
@@ -72,7 +73,7 @@ class GcodeProgramCommand(CommandBase):
     program_data: str = ""
     interpreter: Optional[GcodeInterpreter] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE_PROGRAM command."""
         if parts[0].upper() == "GCODE_PROGRAM" and len(parts) >= 3:
             self.program_type = parts[1].upper()
@@ -88,10 +89,10 @@ class GcodeProgramCommand(CommandBase):
             return True, None
         return False, None
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
-        """Load the GCODE program using the injected controller interpreter."""
-        # Prefer injected, controller-owned interpreter
-        self.interpreter = gcode_interpreter or self.interpreter or GcodeInterpreter()
+    def setup(self, state: 'ControllerState') -> None:
+        """Load the GCODE program using the interpreter."""
+        # Use injected interpreter or create one
+        self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
         try:
             assert self.interpreter is not None
             if self.program_type == "FILE":
@@ -120,16 +121,11 @@ class GcodeStopCommand(CommandBase):
     
     is_immediate: bool = True
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE_STOP command."""
         if parts[0].upper() == "GCODE_STOP":
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
-        """Bind interpreter if provided."""
-        if gcode_interpreter:
-            self.gcode_interpreter = gcode_interpreter
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Stop the GCODE program."""
@@ -145,15 +141,11 @@ class GcodePauseCommand(CommandBase):
     
     is_immediate: bool = True
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE_PAUSE command."""
         if parts[0].upper() == "GCODE_PAUSE":
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
-        if gcode_interpreter:
-            self.gcode_interpreter = gcode_interpreter
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Pause the GCODE program."""
@@ -169,15 +161,11 @@ class GcodeResumeCommand(CommandBase):
     
     is_immediate: bool = True
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE_RESUME command."""
         if parts[0].upper() == "GCODE_RESUME":
             return True, None
         return False, None
-    
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
-        if gcode_interpreter:
-            self.gcode_interpreter = gcode_interpreter
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Resume the GCODE program."""

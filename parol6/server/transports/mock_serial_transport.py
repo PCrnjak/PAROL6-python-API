@@ -6,17 +6,13 @@ realistic robot responses without requiring hardware. The simulation
 operates at the wire protocol level, making it transparent to the
 controller code.
 """
-
-from __future__ import annotations
-
 import time
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Sequence, Union
-import array
+from typing import Optional, List
 
-from parol6.protocol.wire import pack_tx_frame, CommandCode, split_to_3_bytes
+from parol6.protocol.wire import CommandCode, split_to_3_bytes, pack_tx_frame_into
 from parol6 import config as cfg
 from parol6.server.state import ControllerState
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
@@ -58,8 +54,8 @@ class MockRobotState:
         """Initialize robot to standby position."""
         # Set initial positions to standby position for better IK
         for i in range(6):
-            deg = PAROL6_ROBOT.Joints_standby_position_degree[i]
-            steps = int(PAROL6_ROBOT.DEG2STEPS(deg, i))
+            deg = float(PAROL6_ROBOT.joint.standby.deg[i])
+            steps = int(PAROL6_ROBOT.ops.deg_to_steps(deg, i))
             self.position_in[i] = steps
         
         # Ensure E-stop is not pressed (bit 4 = 1 means released)
@@ -250,7 +246,7 @@ class MockSerialTransport:
                 target_deg = [90, -90, 180, 0, 0, 180]
                 for i in range(6):
                     state.homed_in[i] = 1
-                    steps = int(PAROL6_ROBOT.DEG2STEPS(target_deg[i], i))
+                    steps = int(PAROL6_ROBOT.ops.deg_to_steps(target_deg[i], i))
                     state.position_in[i] = steps
                     state.speed_in[i] = 0
                 # Clear HOME command to avoid immediately restarting homing
@@ -276,14 +272,14 @@ class MockSerialTransport:
             for i in range(6):
                 v = int(state.speed_out[i])
                 # Apply speed limits
-                max_v = int(PAROL6_ROBOT.Joint_max_speed[i])
+                max_v = int(PAROL6_ROBOT.joint.speed.max[i])
                 v = max(-max_v, min(max_v, v))
                 
                 # Integrate position
                 new_pos = int(state.position_in[i] + v * dt)
                 
                 # Apply joint limits
-                jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+                jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
                 if new_pos < jmin:
                     new_pos = jmin
                     v = 0
@@ -306,7 +302,7 @@ class MockSerialTransport:
                     continue
                 
                 # Calculate step size based on max speed
-                max_step = int(PAROL6_ROBOT.Joint_max_speed[i] * dt)
+                max_step = int(PAROL6_ROBOT.joint.speed.max[i] * dt)
                 if max_step < 1:
                     max_step = 1
                 
@@ -315,7 +311,7 @@ class MockSerialTransport:
                 new_pos = current + step
                 
                 # Apply joint limits
-                jmin, jmax = PAROL6_ROBOT.Joint_limits_steps[i]
+                jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
                 if new_pos < jmin:
                     new_pos = jmin
                     step = 0

@@ -14,33 +14,6 @@ from parol6 import config as cfg
 
 logger = logging.getLogger(__name__)
 
-
-class StatusUpdater(threading.Thread):
-    """
-    Periodically updates the status cache from the controller state.
-
-    Rate controlled by config.STATUS_RATE_HZ (default 50).
-    """
-
-    def __init__(self, state_mgr: StateManager, rate_hz: float = 50.0) -> None:
-        super().__init__(daemon=True)
-        self._state_mgr = state_mgr
-        self._rate_hz = rate_hz
-        self._running = threading.Event()
-        self._running.set()
-
-    def run(self) -> None:
-        cache = get_cache()
-        period = 1.0 / max(self._rate_hz, 1.0)
-        while self._running.is_set():
-            state = self._state_mgr.get_state()
-            cache.update_from_state(state)
-            time.sleep(period)
-
-    def stop(self) -> None:
-        self._running.clear()
-
-
 class StatusBroadcaster(threading.Thread):
     """
     Broadcasts ASCII STATUS frames via UDP multicast.
@@ -56,14 +29,16 @@ class StatusBroadcaster(threading.Thread):
 
     def __init__(
         self,
+        state_mgr: StateManager,
         group: str = "239.255.0.101",
         port: int = 50510,
         ttl: int = 1,
         iface_ip: str = "127.0.0.1",
-        rate_hz: float = 50.0,
+        rate_hz: float = 20.0,
         stale_s: float = 0.2,
     ) -> None:
         super().__init__(daemon=True)
+        self._state_mgr = state_mgr
         self.group = group
         self.port = port
         self.ttl = ttl
@@ -74,6 +49,12 @@ class StatusBroadcaster(threading.Thread):
         self._sock: Optional[socket.socket] = None
         self._running = threading.Event()
         self._running.set()
+        
+        # EMA rate tracking for multicast TX
+        self._tx_count = 0
+        self._tx_last_time = time.monotonic()
+        self._tx_ema_period = 1.0 / rate_hz  # Initialize with expected period
+        self._tx_last_log_time = time.monotonic()  # For 3-second logging interval
 
     def _setup_socket(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -92,13 +73,44 @@ class StatusBroadcaster(threading.Thread):
             logger.error("StatusBroadcaster socket not initialized")
             return
 
+        # Deadline-based timing to maintain consistent rate
+        next_deadline = time.monotonic() + self._period
+        
         while self._running.is_set():
+            # Always refresh cache from latest state before considering broadcast
+            try:
+                state = self._state_mgr.get_state()
+                cache.update_from_state(state)
+            except Exception as e:
+                logger.debug("StatusBroadcaster cache refresh failed: %s", e)
+
             # Skip broadcast if cache is stale (e.g., serial disconnected)
             if cache.age_s() <= self._stale_s:
                 payload = cache.to_ascii().encode("ascii", errors="ignore")
                 # memoryview avoids an extra copy in some implementations
                 sock.sendto(memoryview(payload), dest)
-            time.sleep(self._period)
+                
+                # Track multicast TX rate with EMA
+                now = time.monotonic()
+                if self._tx_count > 0:  # Skip first sample for period calculation
+                    period = now - self._tx_last_time
+                    if period > 0:
+                        # EMA update: 0.1 * new + 0.9 * old
+                        self._tx_ema_period = 0.1 * period + 0.9 * self._tx_ema_period
+                self._tx_last_time = now
+                self._tx_count += 1
+                
+                # Log rate every 3 seconds
+                if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
+                    tx_hz = 1.0 / self._tx_ema_period
+                    logger.debug(f"Multicast TX: {tx_hz:.1f} Hz (count={self._tx_count})")
+                    self._tx_last_log_time = now
+            
+            # Sleep until next deadline (compensates for work time)
+            sleep_time = next_deadline - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            next_deadline += self._period
 
     def stop(self) -> None:
         self._running.clear()
@@ -107,24 +119,3 @@ class StatusBroadcaster(threading.Thread):
                 self._sock.close()
         except Exception:
             pass
-
-
-def start_status_services(state_mgr: StateManager) -> tuple[StatusUpdater, StatusBroadcaster]:
-    """
-    Helper to start updater and broadcaster using central config.
-    """
-    rate_hz = cfg.STATUS_RATE_HZ
-    updater = StatusUpdater(state_mgr, rate_hz=rate_hz)
-
-    group = cfg.MCAST_GROUP
-    port = cfg.MCAST_PORT
-    ttl = cfg.MCAST_TTL
-    iface = cfg.MCAST_IF
-    stale_s = cfg.STATUS_STALE_S
-
-    logger.info(f"StatusBroadcaster config: group={group} port={port} ttl={ttl} iface={iface} rate_hz={rate_hz} stale_s={stale_s}")
-    broadcaster = StatusBroadcaster(group=group, port=port, ttl=ttl, iface_ip=iface, rate_hz=rate_hz, stale_s=stale_s)
-
-    updater.start()
-    broadcaster.start()
-    return updater, broadcaster

@@ -89,6 +89,13 @@ class ControllerState:
     overrun_count: int = 0
     last_period_s: float = 0.0
     ema_period_s: float = 0.0
+    
+    # Command frequency metrics
+    command_count: int = 0
+    last_command_time: float = 0.0
+    last_command_period_s: float = 0.0
+    ema_command_period_s: float = 0.0
+    command_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
 
 
 logger = logging.getLogger(__name__)
@@ -140,271 +147,15 @@ class StateManager:
 
     def reset_state(self) -> None:
         """
-        Reset the controller state to defaults.
+        Reset the controller state to a fresh instance.
 
-        This creates a new ControllerState instance with default values.
+        This is useful at controller startup to ensure buffers are initialized
+        to known defaults. Callers must ensure they hold appropriate locks in
+        higher layers if concurrent access is possible.
         """
         with self._state_lock:
             self._state = ControllerState()
-            logger.info("Controller state reset to defaults")
-
-    def update_telemetry(self,
-                        Position_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        Speed_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        Homed_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        InOut_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        Temperature_error_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        Position_error_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        Timing_data_in: Optional[Union[int, Sequence[int], np.ndarray]] = None,
-                        Gripper_data_in: Optional[Union[Sequence[int], np.ndarray]] = None,
-                        XTR_data: Optional[int] = None) -> None:
-        """
-        Update telemetry data from serial frame using zero-copy ndarray operations when possible.
-        """
-        with self._state_lock:
-            assert self._state
-            if Position_in is not None:
-                np.copyto(self._state.Position_in, np.asarray(Position_in, dtype=self._state.Position_in.dtype))
-            if Speed_in is not None:
-                np.copyto(self._state.Speed_in, np.asarray(Speed_in, dtype=self._state.Speed_in.dtype))
-            if Homed_in is not None:
-                np.copyto(self._state.Homed_in, np.asarray(Homed_in, dtype=self._state.Homed_in.dtype))
-            if InOut_in is not None:
-                np.copyto(self._state.InOut_in, np.asarray(InOut_in, dtype=self._state.InOut_in.dtype))
-            if Temperature_error_in is not None:
-                np.copyto(self._state.Temperature_error_in, np.asarray(Temperature_error_in, dtype=self._state.Temperature_error_in.dtype))
-            if Position_error_in is not None:
-                np.copyto(self._state.Position_error_in, np.asarray(Position_error_in, dtype=self._state.Position_error_in.dtype))
-            if Timing_data_in is not None:
-                if isinstance(Timing_data_in, int):
-                    self._state.Timing_data_in[0] = Timing_data_in
-                else:
-                    np.copyto(self._state.Timing_data_in, np.asarray(Timing_data_in, dtype=self._state.Timing_data_in.dtype))
-            if Gripper_data_in is not None:
-                np.copyto(self._state.Gripper_data_in, np.asarray(Gripper_data_in, dtype=self._state.Gripper_data_in.dtype))
-            if XTR_data is not None:
-                self._state.XTR_data = XTR_data
-
-    def update_telemetry_direct(self, frame_data: dict) -> None:
-        """
-        Update telemetry directly from unpacked frame data (dict).
-        """
-        with self._state_lock:
-            assert self._state
-            if "Position_in" in frame_data:
-                np.copyto(self._state.Position_in, np.asarray(frame_data["Position_in"], dtype=self._state.Position_in.dtype))
-            if "Speed_in" in frame_data:
-                np.copyto(self._state.Speed_in, np.asarray(frame_data["Speed_in"], dtype=self._state.Speed_in.dtype))
-            if "Homed_in" in frame_data:
-                np.copyto(self._state.Homed_in, np.asarray(frame_data["Homed_in"], dtype=self._state.Homed_in.dtype))
-            if "InOut_in" in frame_data:
-                np.copyto(self._state.InOut_in, np.asarray(frame_data["InOut_in"], dtype=self._state.InOut_in.dtype))
-            if "Temperature_error_in" in frame_data:
-                np.copyto(self._state.Temperature_error_in, np.asarray(frame_data["Temperature_error_in"], dtype=self._state.Temperature_error_in.dtype))
-            if "Position_error_in" in frame_data:
-                np.copyto(self._state.Position_error_in, np.asarray(frame_data["Position_error_in"], dtype=self._state.Position_error_in.dtype))
-            if "Timing_data_in" in frame_data:
-                timing = frame_data["Timing_data_in"]
-                if isinstance(timing, (list, tuple, np.ndarray)) and len(timing) > 0:
-                    self._state.Timing_data_in[0] = int(timing[0])
-            if "Gripper_data_in" in frame_data:
-                np.copyto(self._state.Gripper_data_in, np.asarray(frame_data["Gripper_data_in"], dtype=self._state.Gripper_data_in.dtype))
-
-    def update_command_outputs(self,
-                              Position_out: Optional[Union[Sequence[int], np.ndarray]] = None,
-                              Speed_out: Optional[Union[Sequence[int], np.ndarray]] = None,
-                              Affected_joint_out: Optional[Union[Sequence[int], np.ndarray]] = None,
-                              InOut_out: Optional[Union[Sequence[int], np.ndarray]] = None,
-                              Timeout_out: Optional[int] = None,
-                              Gripper_data_out: Optional[Union[Sequence[int], np.ndarray]] = None) -> None:
-        """
-        Update command output buffers using ndarray operations.
-        """
-        with self._state_lock:
-            assert self._state
-            if Position_out is not None:
-                np.copyto(self._state.Position_out, np.asarray(Position_out, dtype=self._state.Position_out.dtype))
-            if Speed_out is not None:
-                np.copyto(self._state.Speed_out, np.asarray(Speed_out, dtype=self._state.Speed_out.dtype))
-            if Affected_joint_out is not None:
-                np.copyto(self._state.Affected_joint_out, np.asarray(Affected_joint_out, dtype=self._state.Affected_joint_out.dtype))
-            if InOut_out is not None:
-                np.copyto(self._state.InOut_out, np.asarray(InOut_out, dtype=self._state.InOut_out.dtype))
-            if Timeout_out is not None:
-                self._state.Timeout_out = int(Timeout_out)
-            if Gripper_data_out is not None:
-                np.copyto(self._state.Gripper_data_out, np.asarray(Gripper_data_out, dtype=self._state.Gripper_data_out.dtype))
-
-    def set_serial_connection(self, ser: Any, port: str) -> None:
-        """
-        Set the serial connection object.
-        """
-        with self._state_lock:
-            assert self._state
-            self._state.ser = ser
-            logger.info(f"Serial connection set: {port}")
-
-    def clear_serial_connection(self) -> None:
-        """Clear the serial connection."""
-        with self._state_lock:
-            assert self._state
-            self._state.ser = None
-            logger.info("Serial connection cleared")
-
-    def is_connected(self) -> bool:
-        """
-        Check if serial connection is active.
-        """
-        with self._state_lock:
-            assert self._state
-            return self._state.ser is not None and self._state.ser.is_open if hasattr(self._state.ser, 'is_open') else False
-
-    def set_enabled(self, enabled: bool, reason: str = "") -> None:
-        """
-        Set the enabled state of the controller.
-        """
-        with self._state_lock:
-            assert self._state
-            self._state.enabled = enabled
-            if not enabled:
-                self._state.disabled_reason = reason
-                logger.info(f"Controller disabled: {reason}")
-            else:
-                self._state.disabled_reason = ""
-                logger.info("Controller enabled")
-
-    def is_enabled(self) -> bool:
-        """
-        Check if the controller is enabled.
-        """
-        with self._state_lock:
-            assert self._state
-            return self._state.enabled
-
-    def set_estop(self, active: bool) -> None:
-        """
-        Set the E-stop state.
-        """
-        with self._state_lock:
-            assert self._state
-            self._state.e_stop_active = active
-            if active:
-                logger.warning("E-stop activated")
-            else:
-                logger.info("E-stop cleared")
-
-    def is_estop_active(self) -> bool:
-        """
-        Check if E-stop is active.
-        """
-        with self._state_lock:
-            assert self._state
-            return self._state.e_stop_active
-
-    def reset_estop(self) -> None:
-        """
-        Reset E-stop condition and clear any error states.
-        """
-        with self._state_lock:
-            assert self._state
-            if self._state.e_stop_active:
-                # Clear E-stop flag
-                self._state.e_stop_active = False
-
-                # Clear any soft errors
-                self._state.soft_error = False
-
-                # Re-enable the controller
-                self._state.enabled = True
-                self._state.disabled_reason = ""
-
-                # Clear command outputs to safe state
-                self._state.Speed_out.fill(0)
-                # Mirror current position
-                np.copyto(self._state.Position_out, self._state.Position_in)
-
-                logger.info("E-stop reset completed - controller re-enabled")
-
-    def is_ready_for_motion(self) -> bool:
-        """
-        Check if the system is ready for motion commands.
-        """
-        with self._state_lock:
-            assert self._state
-            return (
-                self._state.enabled
-                and not self._state.e_stop_active
-                and not self._state.soft_error
-                and self._state.ser is not None
-            )
-
-    def get_active_command(self) -> Optional[Any]:
-        """
-        Get the currently active command.
-        """
-        with self._state_lock:
-            assert self._state
-            return self._state.active_command
-
-    def set_active_command(self, command: Any, command_id: Optional[str] = None) -> None:
-        """
-        Set the active command.
-        """
-        with self._state_lock:
-            assert self._state
-            self._state.active_command = command
-            self._state.active_command_id = command_id
-            self._state.last_command_time = time.time()
-
-    def clear_active_command(self) -> None:
-        """Clear the active command."""
-        with self._state_lock:
-            assert self._state
-            self._state.active_command = None
-            self._state.active_command_id = None
-
-    def get_command_queue_size(self) -> int:
-        """
-        Get the size of the command queue.
-        """
-        with self._state_lock:
-            assert self._state
-            return len(self._state.command_queue)
-
-    def is_command_queue_empty(self) -> bool:
-        """
-        Check if the command queue is empty.
-        """
-        with self._state_lock:
-            assert self._state
-            return len(self._state.command_queue) == 0
-
-    def set_network_config(self, ip: str, port: int) -> None:
-        """
-        Set network configuration.
-        """
-        with self._state_lock:
-            assert self._state
-            self._state.ip = ip
-            self._state.port = port
-            logger.info(f"Network config set: {ip}:{port}")
-
-    def record_start_time(self) -> None:
-        """Record the system start time."""
-        with self._state_lock:
-            assert self._state
-            self._state.start_time = time.time()
-
-    def get_uptime(self) -> float:
-        """
-        Get system uptime in seconds.
-        """
-        with self._state_lock:
-            assert self._state
-            if self._state.start_time > 0:
-                return time.time() - self._state.start_time
-            return 0.0
-
+            logger.info("Controller state reset")
 
 # Global singleton instance accessor
 _state_manager: Optional[StateManager] = None
@@ -425,17 +176,3 @@ def get_state() -> ControllerState:
     Convenience function to get the current controller state.
     """
     return get_instance().get_state()
-
-
-def is_ready_for_motion() -> bool:
-    """
-    Convenience function to check if system is ready for motion.
-    """
-    return get_instance().is_ready_for_motion()
-
-
-def reset_estop() -> None:
-    """
-    Convenience function to reset E-stop condition.
-    """
-    get_instance().reset_estop()

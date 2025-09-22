@@ -7,13 +7,13 @@ import logging
 import numpy as np
 from typing import List, Tuple, Optional
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from .base import MotionCommand, ExecutionStatus, ExecutionStatusCode
-from parol6.config import INTERVAL_S, TRACE_ENABLED, TRACE
+from .base import MotionCommand, ExecutionStatus, parse_int, parse_float, csv_ints, csv_floats
+from parol6.config import INTERVAL_S
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
+from math import ceil
 
 logger = logging.getLogger(__name__)
-
 
 @register_command("HOME")
 class HomeCommand(MotionCommand):
@@ -21,6 +21,13 @@ class HomeCommand(MotionCommand):
     A non-blocking command that tells the robot to perform its internal homing sequence.
     This version uses a state machine to allow re-homing even if the robot is already homed.
     """
+
+    __slots__ = (
+        "state",
+        "start_cmd_counter",
+        "timeout_counter",
+    )
+
     def __init__(self):
         super().__init__()
         # State machine: START -> WAIT_FOR_UNHOMED -> WAIT_FOR_HOMED -> FINISHED
@@ -30,7 +37,7 @@ class HomeCommand(MotionCommand):
         # Safety timeout (20 seconds at 0.01s interval)
         self.timeout_counter = 2000
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse HOME command (no parameters).
         
@@ -38,26 +45,13 @@ class HomeCommand(MotionCommand):
         """
         if len(parts) != 1:
             return (False, "HOME command takes no parameters")
-        
-        logger.info("Parsed HOME command")
+        self.log_trace("Parsed HOME command")
         return (True, None)
-
-    def setup(self, state, *, udp_transport=None, addr=None, gcode_interpreter=None) -> None:
-        """No pre-computation needed for HOME; bind dynamic context if provided."""
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
     def execute_step(self, state) -> ExecutionStatus:
         """
         Manages the homing command and monitors for completion using a state machine.
         """
-        if self.is_finished:
-            return ExecutionStatus.completed("Already finished")
-
         # --- State: START ---
         # On the first few executions, continuously send the 'home' (100) command.
         if self.state == "START":
@@ -75,15 +69,13 @@ class HomeCommand(MotionCommand):
         if self.state == "WAITING_FOR_UNHOMED":
             state.Command_out = CommandCode.IDLE
             # Homing sequence initiated detection
-            if any(h == 0 for h in state.Homed_in[:6]):
+            if np.any(state.Homed_in[:6] == 0):
                 logger.info("  -> Homing sequence initiated by robot.")
                 self.state = "WAITING_FOR_HOMED"
             # Homing timeout protection
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                logger.error("  -> ERROR: Timeout waiting for robot to start homing sequence.")
-                self.is_finished = True
-                return ExecutionStatus.failed("Homing timeout")
+                raise TimeoutError("Timeout waiting for robot to start homing sequence.")
             return ExecutionStatus.executing("Homing: waiting for unhomed")
 
         # --- State: WAITING_FOR_HOMED ---
@@ -91,10 +83,10 @@ class HomeCommand(MotionCommand):
         if self.state == "WAITING_FOR_HOMED":
             state.Command_out = CommandCode.IDLE
             # Homing completion verification
-            if all(h == 1 for h in state.Homed_in[:6]):
-                logger.info("Homing sequence complete. All joints reported home.")
+            if np.all(state.Homed_in[:6] == 1):
+                self.log_info("Homing sequence complete. All joints reported home.")
                 self.is_finished = True
-                state.Speed_out.fill(0)  # Ensure robot is stopped
+                self.stop_and_idle(state)
                 return ExecutionStatus.completed("Homing complete")
 
             return ExecutionStatus.executing("Homing: waiting for homed")
@@ -109,11 +101,25 @@ class JogCommand(MotionCommand):
     It performs all safety and validity checks upon initialization.
     """
     streamable = True  # Can be replaced in stream mode
+
+    __slots__ = (
+        "mode",
+        "command_step",
+        "joint",
+        "speed_percentage",
+        "duration",
+        "distance_deg",
+        "direction",
+        "joint_index",
+        "speed_out",
+        "command_len",
+        "target_position"
+    )
     
     def __init__(self):
         """
         Initializes the jog command.
-        Parameters are parsed in match() method.
+        Parameters are parsed in do_match() method.
         """
         super().__init__()
         self.mode = None
@@ -129,10 +135,9 @@ class JogCommand(MotionCommand):
         self.direction = 1
         self.joint_index = 0
         self.speed_out = 0
-        self.command_len = 0
         self.target_position = 0
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse JOG command parameters.
         
@@ -149,25 +154,25 @@ class JogCommand(MotionCommand):
             return (False, "JOG requires 4 parameters: joint, speed, duration, distance")
         
         try:
-            # Parse parameters
-            self.joint = int(parts[1])
-            self.speed_percentage = float(parts[2])
-            self.duration = None if parts[3].upper() == 'NONE' else float(parts[3])
-            self.distance_deg = None if parts[4].upper() == 'NONE' else float(parts[4])
+            # Parse parameters using utilities
+            self.joint = parse_int(parts[1])
+            self.speed_percentage = parse_float(parts[2])
+            self.duration = parse_float(parts[3])
+            self.distance_deg = parse_float(parts[4])
+            
+            if self.joint is None or self.speed_percentage is None:
+                return (False, "Joint and speed percentage are required")
             
             # Determine mode
             if self.duration and self.distance_deg:
                 self.mode = 'distance'
-                if TRACE_ENABLED:
-                    logger.log(TRACE, "Parsed Jog: Joint %s, Distance %s deg, Duration %ss.", self.joint, self.distance_deg, self.duration)
+                self.log_trace("Parsed Jog: Joint %s, Distance %s deg, Duration %ss.", self.joint, self.distance_deg, self.duration)
             elif self.duration:
                 self.mode = 'time'
-                if TRACE_ENABLED:
-                    logger.log(TRACE, "Parsed Jog: Joint %s, Speed %s%%, Duration %ss.", self.joint, self.speed_percentage, self.duration)
+                self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Duration %ss.", self.joint, self.speed_percentage, self.duration)
             elif self.distance_deg:
                 self.mode = 'distance'
-                if TRACE_ENABLED:
-                    logger.log(TRACE, "Parsed Jog: Joint %s, Speed %s%%, Distance %s deg.", self.joint, self.speed_percentage, self.distance_deg)
+                self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Distance %s deg.", self.joint, self.speed_percentage, self.distance_deg)
             else:
                 return (False, "JOG requires either duration or distance")
             
@@ -179,116 +184,93 @@ class JogCommand(MotionCommand):
         except Exception as e:
             return (False, f"Error parsing JOG: {str(e)}")
 
-    def setup(self, state, *, udp_transport=None, addr=None, gcode_interpreter=None):
+    def setup(self, state):
         """Pre-computes speeds and target positions using live data."""
-        # Bind dynamic context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
-
-        if TRACE_ENABLED:
-            logger.log(TRACE, "  -> Preparing for Jog command...")
-
         # Validate joint is set
         if self.joint is None:
-            logger.error("Joint index not set")
-            self.is_valid = False
-            return
+            raise RuntimeError("Joint index not set")
 
         # Joint direction and index mapping
         self.direction = 1 if 0 <= self.joint <= 5 else -1
         self.joint_index = self.joint if self.direction == 1 else self.joint - 6
+
+        lims = self.LIMS_STEPS[self.joint_index]
+        min_limit, max_limit = lims[0], lims[1]
         
         distance_steps = 0
-        if self.distance_deg:
-            distance_steps = int(PAROL6_ROBOT.DEG2STEPS(abs(self.distance_deg), self.joint_index))
+        if self.distance_deg is not None:
+            distance_steps = PAROL6_ROBOT.ops.deg_to_steps(abs(self.distance_deg), self.joint_index)
             self.target_position = state.Position_in[self.joint_index] + (distance_steps * self.direction)
             
-            min_limit, max_limit = PAROL6_ROBOT.Joint_limits_steps[self.joint_index]
             if not (min_limit <= self.target_position <= max_limit):
                 # Convert to degrees for clearer error message
-                target_deg = PAROL6_ROBOT.STEPS2DEG(self.target_position, self.joint_index)
-                min_deg = PAROL6_ROBOT.STEPS2DEG(min_limit, self.joint_index)
-                max_deg = PAROL6_ROBOT.STEPS2DEG(max_limit, self.joint_index)
-                logger.warning(f"  -> VALIDATION FAILED: Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°).")
-                self.is_valid = False
-                return
+                target_deg = PAROL6_ROBOT.ops.steps_to_deg(self.target_position, self.joint_index)
+                min_deg = PAROL6_ROBOT.ops.steps_to_deg(min_limit, self.joint_index)
+                max_deg = PAROL6_ROBOT.ops.steps_to_deg(max_limit, self.joint_index)
+                raise RuntimeWarning(f"Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°).")
 
-        # Motion timing calculations
-        speed_steps_per_sec = 0
+        # Motion timing calculations  
+        jog_min = self.JOG_MIN[self.joint_index]
+        jog_max = self.JOG_MAX[self.joint_index]
+        
         if self.mode == 'distance' and self.duration:
             speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
-            max_joint_jog_speed = PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]
-            if speed_steps_per_sec > max_joint_jog_speed:
-                logger.warning(f"  -> VALIDATION FAILED: Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({max_joint_jog_speed} steps/s).")
-                self.is_valid = False
-                return
+            if speed_steps_per_sec > jog_max:
+                raise RuntimeWarning(f"Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({jog_max} steps/s).")
             # Ensure speed is at least the minimum jog speed if not zero
             if speed_steps_per_sec > 0:
-                speed_steps_per_sec = max(speed_steps_per_sec, PAROL6_ROBOT.Joint_min_jog_speed[self.joint_index])
+                speed_steps_per_sec = max(speed_steps_per_sec, jog_min)
         else:
             if self.speed_percentage is None:
-                logger.error("Error: 'speed_percentage' must be provided if not calculating automatically.")
-                self.is_valid = False
-                return
-            speed_steps_per_sec = int(np.interp(
-                abs(self.speed_percentage),
-                [0, 100],
-                [PAROL6_ROBOT.Joint_min_jog_speed[self.joint_index],
-                 PAROL6_ROBOT.Joint_max_jog_speed[self.joint_index]]
-            ))
+                raise RuntimeWarning("'speed_percentage' must be provided if not calculating automatically.")
+            speed_steps_per_sec = int(self.linmap_pct(abs(self.speed_percentage), jog_min, jog_max))
 
         self.speed_out = speed_steps_per_sec * self.direction
-        self.command_len = int(self.duration / INTERVAL_S) if self.duration else float('inf')
-        if TRACE_ENABLED:
-            logger.log(TRACE, "  -> Jog command is ready.")
+        
+        # Start timer for time-based mode
+        if self.mode == 'time' and self.duration and self.duration > 0:
+            self.start_timer(self.duration)
 
     def execute_step(self, state) -> ExecutionStatus:
         """This is the EXECUTION phase. It runs on every loop cycle."""
-        if self.is_finished or not self.is_valid:
-            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
 
         # Type guard to ensure joint_index is valid
         if self.joint_index is None or not isinstance(self.joint_index, int):
-            logger.error("Invalid joint index in execute_step")
-            self.is_finished = True
-            return ExecutionStatus.failed("Invalid joint index")
+            raise RuntimeError("Invalid joint index in execute_step")
 
         stop_reason = None
-        current_pos = state.Position_in[self.joint_index]
+        cur = state.Position_in[self.joint_index]
 
-        if self.mode == 'time':
-            if self.command_step >= self.command_len:
-                stop_reason = "Timed jog finished."
-        elif self.mode == 'distance':
-            if (self.direction == 1 and current_pos >= self.target_position) or \
-               (self.direction == -1 and current_pos <= self.target_position):
-                stop_reason = "Distance jog finished."
+        if self.mode == 'time' and self.timer_expired():
+            stop_reason = "Timed jog finished."
+        elif self.mode == 'distance' and \
+            ((self.direction == 1 and cur >= self.target_position) or \
+            (self.direction == -1 and cur <= self.target_position)):
+            stop_reason = "Distance jog finished."
         
         if not stop_reason:
-            if (self.direction == 1 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[self.joint_index][1]) or \
-               (self.direction == -1 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[self.joint_index][0]):
+            # Use base class limit_hit_mask helper
+            speeds_array = np.zeros(6)
+            speeds_array[self.joint_index] = self.speed_out
+            limit_mask = self.limit_hit_mask(state.Position_in, speeds_array)
+            if limit_mask[self.joint_index]:
                 stop_reason = f"Limit reached on joint {self.joint_index + 1}."
 
         if stop_reason:
-            if stop_reason == "Timed jog finished.":
-                if TRACE_ENABLED:
-                    logger.log(TRACE, stop_reason)
+            if stop_reason.startswith("Limit"):
+                logger.warning(stop_reason)
             else:
-                logger.info(stop_reason)
+                self.log_trace(stop_reason)
+                
             self.is_finished = True
-            state.Speed_out.fill(0)
-            state.Command_out = CommandCode.IDLE
+            self.stop_and_idle(state)
             return ExecutionStatus.completed(stop_reason)
-        else:
-            state.Speed_out.fill(0)
-            state.Speed_out[self.joint_index] = self.speed_out
-            state.Command_out = CommandCode.JOG
-            self.command_step += 1
-            return ExecutionStatus.executing("Jogging")
+            
+        state.Speed_out.fill(0)
+        state.Speed_out[self.joint_index] = self.speed_out
+        state.Command_out = CommandCode.JOG
+        self.command_step += 1
+        return ExecutionStatus.executing("Jogging")
 
 
 @register_command("MULTIJOG")  
@@ -298,25 +280,40 @@ class MultiJogCommand(MotionCommand):
     It performs all safety and validity checks upon initialization.
     """
     streamable = True  # Can be replaced in stream mode
+
+    __slots__ = (
+        "command_step",
+        "joints",
+        "speed_percentages",
+        "duration",
+        "command_len",
+        "speeds_out",
+        "_lims_steps",
+        # optional bound context
+        "udp_transport",
+        "addr",
+        "gcode_interpreter",
+    )
     
     def __init__(self):
         """
         Initializes the multi-jog command.
-        Parameters are parsed in match() method.
+        Parameters are parsed in do_match() method.
         """
         super().__init__()
         self.command_step = 0
         
-        # Parameters (set in match())
+        # Parameters (set in do_match())
         self.joints = None
         self.speed_percentages = None
         self.duration = None
         self.command_len = 0
         
         # Calculated values
-        self.speeds_out = [0] * 6
+        self.speeds_out = np.zeros(6, dtype=np.int32)
+        self._lims_steps = PAROL6_ROBOT.joint.limits.steps
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse MULTIJOG command parameters.
         
@@ -333,10 +330,10 @@ class MultiJogCommand(MotionCommand):
             return (False, "MULTIJOG requires 3 parameters: joints, speeds, duration")
         
         try:
-            # Parse parameters
-            self.joints = [int(j) for j in parts[1].split(',')]
-            self.speed_percentages = [float(s) for s in parts[2].split(',')]
-            self.duration = float(parts[3])
+            # Parse parameters using utilities
+            self.joints = csv_ints(parts[1])
+            self.speed_percentages = csv_floats(parts[2])
+            self.duration = parse_float(parts[3]) or 0.0
             
             # Validate
             if len(self.joints) != len(self.speed_percentages):
@@ -345,107 +342,72 @@ class MultiJogCommand(MotionCommand):
             if self.duration <= 0:
                 return (False, "Duration must be positive")
             
-            # Check for conflicting joint commands
-            base_joints = set()
-            for joint in self.joints:
-                # Normalize the joint index to its base (0-5)
-                base_joint = joint % 6
-                # If the base joint is already in our set, it's a conflict.
-                if base_joint in base_joints:
-                    return (False, f"Conflicting commands for Joint {base_joint + 1}")
-                base_joints.add(base_joint)
+            # Conflict detection on base joints
+            base = set()
+            for j in self.joints:
+                b = j % 6
+                if b in base:
+                    return (False, f"Conflicting commands for Joint {b + 1}")
+                base.add(b)
             
-            if TRACE_ENABLED:
-                logger.log(TRACE, "Parsed MultiJog for joints %s with speeds %s%% for %ss.", self.joints, self.speed_percentages, self.duration)
+            self.log_trace("Parsed MultiJog for joints %s with speeds %s%% for %ss.", self.joints, self.speed_percentages, self.duration)
             
-            self.command_len = int(self.duration / INTERVAL_S)
+            self.command_len = ceil(self.duration / INTERVAL_S)
             self.is_valid = True
             return (True, None)
-            
         except ValueError as e:
             return (False, f"Invalid MULTIJOG parameters: {str(e)}")
         except Exception as e:
             return (False, f"Error parsing MULTIJOG: {str(e)}")
 
-    def setup(self, state, *, udp_transport=None, addr=None, gcode_interpreter=None):
+    def setup(self, state):
         """Pre-computes the speeds for each joint."""
-        # Bind dynamic context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
-
-        if TRACE_ENABLED:
-            logger.log(TRACE, "  -> Preparing for MultiJog command...")
-
         # Validate joints and speed_percentages are set
         if self.joints is None or self.speed_percentages is None:
-            logger.error("Joints or speed percentages not set")
-            self.is_valid = False
-            return
+            raise ValueError("Joints or speed percentages not set")
+        
+        # Vectorized computation for all joints
+        joints_arr = np.asarray(self.joints, dtype=int)
+        speeds_pct = np.asarray(self.speed_percentages, dtype=float)
 
-        for i, joint in enumerate(self.joints):
-            # Index mapping: 0-5 positive, 6-11 negative direction
-            direction = 1 if 0 <= joint <= 5 else -1
-            joint_index = joint if direction == 1 else joint - 6
-            speed_percentage = self.speed_percentages[i]
+        # Map to base joint index (0-5) and direction (+/-)
+        direction = np.where((joints_arr >= 0) & (joints_arr <= 5), 1, -1)
+        joint_index = np.where(direction == 1, joints_arr, joints_arr - 6)
 
-            # Check for joint index validity
-            if not (0 <= joint_index < 6):
-                logger.warning(f"  -> VALIDATION FAILED: Invalid joint index {joint_index}.")
-                self.is_valid = False
-                return
+        # Validate indices
+        invalid_mask = (joint_index < 0) | (joint_index >= 6)
+        if np.any(invalid_mask):
+            bad = joint_index[invalid_mask]
+            raise ValueError("Invalid joint indices %s.", bad.tolist())
 
-            # Calculate speed in steps/sec
-            speed_steps_per_sec = int(np.interp(
-                speed_percentage,
-                [0, 100],
-                [PAROL6_ROBOT.Joint_min_jog_speed[joint_index],
-                 PAROL6_ROBOT.Joint_max_jog_speed[joint_index]]
-            ))
-            self.speeds_out[joint_index] = speed_steps_per_sec * direction
-
-        if TRACE_ENABLED:
-            logger.log(TRACE, "  -> MultiJog command is ready.")
+        pct = np.clip(np.abs(speeds_pct) / 100.0, 0.0, 1.0)
+        for i, idx in enumerate(joint_index):
+            self.speeds_out[idx] = int(self.linmap_pct(
+                pct[i] * 100.0, self.JOG_MIN[idx], self.JOG_MAX[idx])) * direction[i]
+        
+        # Start timer if duration is specified
+        if self.duration and self.duration > 0:
+            self.start_timer(self.duration)
 
     def execute_step(self, state) -> ExecutionStatus:
         """This is the EXECUTION phase. It runs on every loop cycle."""
-        if self.is_finished or not self.is_valid:
-            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
-
-        # Stop if the duration has elapsed
-        if self.command_step >= self.command_len:
-            if TRACE_ENABLED:
-                logger.log(TRACE, "Timed multi-jog finished.")
+        # Stop if the duration has elapsed (check both timer and step count)
+        if self.timer_expired() or self.command_step >= self.command_len:
             self.is_finished = True
-            state.Speed_out.fill(0)
-            state.Command_out = CommandCode.IDLE
-            return ExecutionStatus.completed("MultiJog complete")
-        else:
-            # Continuously check for joint limits during the jog
-            for i in range(6):
-                if self.speeds_out[i] != 0:
-                    current_pos = state.Position_in[i]
-                    # Hitting positive limit while moving positively
-                    if self.speeds_out[i] > 0 and current_pos >= PAROL6_ROBOT.Joint_limits_steps[i][1]:
-                         logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
-                         self.is_finished = True
-                         state.Speed_out.fill(0)
-                         state.Command_out = CommandCode.IDLE
-                         return ExecutionStatus.completed(f"Limit reached on J{i+1}")
-                    # Hitting negative limit while moving negatively
-                    elif self.speeds_out[i] < 0 and current_pos <= PAROL6_ROBOT.Joint_limits_steps[i][0]:
-                         logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
-                         self.is_finished = True
-                         state.Speed_out.fill(0)
-                         state.Command_out = CommandCode.IDLE
-                         return ExecutionStatus.completed(f"Limit reached on J{i+1}")
+            self.stop_and_idle(state)
+            return ExecutionStatus.completed("MultiJog")
 
-            # If no limits are hit, apply the speeds
-            for i in range(6):
-                state.Speed_out[i] = self.speeds_out[i]
-            state.Command_out = CommandCode.JOG
-            self.command_step += 1
-            return ExecutionStatus.executing("MultiJogging")
+        # Use base class helper for limit checks
+        limit_mask = self.limit_hit_mask(state.Position_in, self.speeds_out)
+        if np.any(limit_mask):
+            i = np.argmax(limit_mask)  # first violating joint
+            logger.warning(f"Limit reached on joint {i + 1}. Stopping jog.")
+            self.is_finished = True
+            self.stop_and_idle(state)
+            return ExecutionStatus.completed(f"Limit reached on J{i+1}")
+
+        # Apply self.speeds_out
+        np.copyto(state.Speed_out, self.speeds_out, casting='no')
+        state.Command_out = CommandCode.JOG
+        self.command_step += 1
+        return ExecutionStatus.executing("MultiJog")

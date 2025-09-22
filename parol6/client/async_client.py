@@ -107,7 +107,7 @@ class AsyncRobotClient:
         logger.info(f"Status subscriber config: group={cfg.MCAST_GROUP} port={cfg.MCAST_PORT} iface={cfg.MCAST_IF}")
         # Quick readiness check (no blind wait): bounded by client's own timeout
         try:
-            await self.wait_for_server_ready(timeout=min(1.0, float(self.timeout or 0.3)), interval=0.05)
+            await self.wait_for_server_ready(timeout=min(1.0, float(self.timeout or 0.3)), interval=0.5)
         except Exception:
             pass
         async def _listener():
@@ -221,10 +221,6 @@ class AsyncRobotClient:
 
     # --------------- Motion / Control ---------------
 
-    async def ping(self) -> str | None:
-        """Return raw 'PONG|...' text (e.g., 'PONG|SERIAL=1') or None on timeout."""
-        return await self._request("PING", bufsize=256)
-
     async def home(self) -> bool:
         return await self._send("HOME")
 
@@ -260,6 +256,9 @@ class AsyncRobotClient:
         return await self._send(f"SET_PORT|{port_str}")
 
     # --------------- Status / Queries ---------------
+    async def ping(self) -> str | None:
+        """Return raw 'PONG|...' text (e.g., 'PONG|SERIAL=1') or None on timeout."""
+        return await self._request("PING", bufsize=256)
 
     async def get_angles(self) -> list[float] | None:
         resp = await self._request("GET_ANGLES", bufsize=1024)

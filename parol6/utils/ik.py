@@ -33,32 +33,21 @@ AXIS_MAP = {
 }
 
 def normalize_angle(angle):
-    """Normalize angle to [-pi, pi] range to handle angle wrapping"""
-    while angle > np.pi:
-        angle -= 2 * np.pi
-    while angle < -np.pi:
-        angle += 2 * np.pi
-    return angle
+    """Normalize angle(s) to [-pi, pi] range (supports scalar or ndarray)."""
+    a = np.asarray(angle, dtype=float)
+    a = (a + np.pi) % (2 * np.pi) - np.pi
+    return a.item() if np.isscalar(angle) else a
 
 def unwrap_angles(q_solution, q_current):
     """
-    Unwrap angles in the solution to be closest to current position.
-    This handles the angle wrapping issue where -179° and 181° are close but appear far.
+    Vectorized unwrap: bring solution angles near current by adding/subtracting 2*pi.
     """
-    q_unwrapped = q_solution.copy()
-    
-    for i in range(len(q_solution)):
-        # Angle difference for unwrapping
-        diff = q_solution[i] - q_current[i]
-        
-        # Unwrap angles beyond pi boundary
-        if diff > np.pi:
-            # Solution is too far in positive direction, subtract 2*pi
-            q_unwrapped[i] = q_solution[i] - 2 * np.pi
-        elif diff < -np.pi:
-            # Solution is too far in negative direction, add 2*pi
-            q_unwrapped[i] = q_solution[i] + 2 * np.pi
-    
+    qs = np.asarray(q_solution, dtype=float)
+    qc = np.asarray(q_current, dtype=float)
+    diff = qs - qc
+    q_unwrapped = qs.copy()
+    q_unwrapped[diff > np.pi] -= 2 * np.pi
+    q_unwrapped[diff < -np.pi] += 2 * np.pi
     return q_unwrapped
 
 IKResult = namedtuple('IKResult', 'success q iterations residual tolerance_used violations')
@@ -68,40 +57,29 @@ def calculate_adaptive_tolerance(robot, q, strict_tol=1e-10, loose_tol=1e-7):
     Calculate adaptive tolerance based on proximity to singularities.
     Near singularities: looser tolerance for easier convergence.
     Away from singularities: stricter tolerance for precise solutions.
-    
-    Parameters
-    ----------
-    robot : DHRobot
-        Robot model
-    q : array_like
-        Joint configuration
-    strict_tol : float
-        Strict tolerance away from singularities (default: 1e-10)
-    loose_tol : float
-        Loose tolerance near singularities (1e-7)
-        
-    Returns
-    -------
-    float
-        Adaptive tolerance value
     """
     global _prev_tolerance
-    
-    q_array = np.array(q, dtype=float)
-    
-    # Manipulability for singularity detection
-    manip = robot.manipulability(q_array)
-    singularity_threshold = 0.001
-    
-    sing_normalized = np.clip(manip / singularity_threshold, 0.0, 1.0)
-    adaptive_tol = loose_tol + (strict_tol - loose_tol) * sing_normalized
-    
-    # Log tolerance changes (only log significant changes to avoid spam)
-    if _prev_tolerance is None or abs(adaptive_tol - _prev_tolerance) / _prev_tolerance > 0.5:
-        tol_category = "LOOSE" if adaptive_tol > 1e-7 else "MODERATE" if adaptive_tol > 5e-10 else "STRICT"
-        logger.debug(f"Adaptive IK tolerance: {adaptive_tol:.2e} ({tol_category}) - Manipulability: {manip:.8f} (threshold: {singularity_threshold})")
+
+    q_array = np.asarray(q, dtype=float)
+    # Manipulability for singularity detection (scalar)
+    manip = float(robot.manipulability(q_array))
+    singularity_threshold = 1e-3
+
+    ratio = manip / singularity_threshold if singularity_threshold > 0.0 else 1.0
+    sing_normalized = float(np.clip(ratio, 0.0, 1.0))
+    adaptive_tol = float(loose_tol + (strict_tol - loose_tol) * sing_normalized)
+
+    # Log tolerance changes (only if DEBUG enabled and significant change)
+    prev = _prev_tolerance if _prev_tolerance is not None else adaptive_tol
+    if _prev_tolerance is None or abs(adaptive_tol - prev) > 0.5 * abs(prev):
+        if logger.isEnabledFor(logging.DEBUG):
+            tol_category = "LOOSE" if adaptive_tol > 1e-7 else "MODERATE" if adaptive_tol > 5e-10 else "STRICT"
+            logger.debug(
+                "Adaptive IK tolerance: %.2e (%s) - Manipulability: %.8f (threshold: %.3g)",
+                adaptive_tol, tol_category, manip, singularity_threshold
+            )
         _prev_tolerance = adaptive_tol
-    
+
     return adaptive_tol
 
 def calculate_configuration_dependent_max_reach(q_seed):
@@ -168,7 +146,7 @@ def solve_ik_with_adaptive_tol_subdivision(
     current_pose : SE3, optional
         Current pose (computed if None)
     max_depth : int, optional
-        Maximum subdivision depth (default: 8)
+        Maximum subdivision depth (default: 4)
     ilimit : int, optional
         Maximum iterations for IK solver (default: 100)
 
@@ -203,7 +181,6 @@ def solve_ik_with_adaptive_tol_subdivision(
             damping = 0.0000001
         else:
             # Workspace limit validation
-            # print(f"current_reach:{current_reach:.3f}, max_reach_threshold:{max_reach_threshold:.3f}")
             if not is_recovery and target_reach > max_reach_threshold:
                 logger.warning(f"Target reach limit exceeded: {target_reach:.3f} > {max_reach_threshold:.3f}")
                 return [], False, depth, 0
@@ -242,7 +219,8 @@ def solve_ik_with_adaptive_tol_subdivision(
     path, ok, its, resid = _solve(current_pose, target_pose, current_q, 0, adaptive_tol)
     # Joint limit constraint validation
     target_q = path[-1] if len(path) != 0 else None
-    solution_valid, violations = PAROL6_ROBOT.check_joint_limits(current_q, target_q)
+    solution_valid = PAROL6_ROBOT.check_limits(current_q, target_q, allow_recovery=True, log=True)
+    violations = None
     if ok and solution_valid:
         return IKResult(True, path[-1], its, resid, adaptive_tol, violations)
     else:

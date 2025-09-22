@@ -12,8 +12,10 @@ import logging
 from typing import Dict, Type, Optional, List, Callable, Any, Tuple
 from importlib import import_module
 import pkgutil
+import time
 
 from parol6.commands.base import CommandBase
+from parol6.config import TRACE
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class CommandRegistry:
     
     _instance: Optional[CommandRegistry] = None
     _commands: Dict[str, Type[CommandBase]] = {}
+    _class_to_name: Dict[Type[CommandBase], str] = {}
     _discovered: bool = False
     
     def __new__(cls) -> CommandRegistry:
@@ -41,6 +44,7 @@ class CommandRegistry:
         """Initialize the registry (only runs once due to singleton)."""
         if not hasattr(self, '_initialized'):
             self._commands = {}
+            self._class_to_name = {}
             self._discovered = False
             self._initialized = True
     
@@ -64,6 +68,8 @@ class CommandRegistry:
                 )
         else:
             self._commands[name] = command_class
+            # Maintain reverse mapping for fast class -> name lookup
+            self._class_to_name[command_class] = name
             logger.debug(f"Registered command '{name}' -> {command_class.__name__}")
     
     def get_command_class(self, name: str) -> Optional[Type[CommandBase]]:
@@ -82,6 +88,17 @@ class CommandRegistry:
         
         return self._commands.get(name)
     
+    def get_name_for_class(self, cls: Type[CommandBase]) -> Optional[str]:
+        """
+        Retrieve the registered command name for a given command class.
+        Returns None if the class is not registered.
+        """
+        # Ensure commands are discovered
+        if not self._discovered:
+            self.discover_commands()
+        # Prefer explicit reverse map; fall back to class attribute set by decorator
+        return self._class_to_name.get(cls) or getattr(cls, "_registered_name", None)
+
     def list_registered_commands(self) -> List[str]:
         """
         Return a list of all registered command names.
@@ -160,11 +177,14 @@ class CommandRegistry:
             return None, None
         
         command_name = parts[0].upper()
+        start_t = time.perf_counter()
+        logger.log(TRACE, "match_start name=%s parts=%d", command_name, len(parts))
         
         # Direct O(1) lookup of command class
         command_class = self._commands.get(command_name)
         
         if command_class is None:
+            logger.log(TRACE, "match_unknown name=%s", command_name)
             logger.debug(f"No command registered for: {command_name}")
             return None, None
         
@@ -174,12 +194,18 @@ class CommandRegistry:
             can_handle, error = command.match(parts)  # Pass pre-split parts
             
             if can_handle:
+                dur_ms = (time.perf_counter() - start_t) * 1000.0
+                logger.log(TRACE, "match_ok name=%s dur_ms=%.2f", command_name, dur_ms)
                 return command, None
             elif error:
-                logger.debug(f"Command '{command_name}' rejected: {error}")
+                dur_ms = (time.perf_counter() - start_t) * 1000.0
+                logger.log(TRACE, "match_error name=%s dur_ms=%.2f err=%s", command_name, dur_ms, error)
+                logger.warning(f"Command '{command_name}' rejected: {error}")
                 return None, error
                 
         except Exception as e:
+            dur_ms = (time.perf_counter() - start_t) * 1000.0
+            logger.log(TRACE, "match_error name=%s dur_ms=%.2f exc=%s", command_name, dur_ms, e)
             logger.error(f"Error creating command '{command_name}': {e}")
             return None, str(e)
         
@@ -236,3 +262,4 @@ list_registered_commands = _registry.list_registered_commands
 discover_commands = _registry.discover_commands
 clear_registry = _registry.clear
 create_command_from_parts = _registry.create_command_from_parts
+get_name_for_class = _registry.get_name_for_class

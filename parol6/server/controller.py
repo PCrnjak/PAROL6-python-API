@@ -20,14 +20,13 @@ from parol6.server.transports.serial_transport import SerialTransport
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports import create_and_connect_transport, is_simulation_mode
 from parol6.server.command_registry import discover_commands, create_command_from_parts
-from parol6.server.status_broadcast import start_status_services
+from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.status_cache import get_cache
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.gcode import GcodeInterpreter
-from parol6.config import INTERVAL_S, TRACE_ENABLED, TRACE
-from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, QueryCommand, MotionCommand, SystemCommand
+from parol6.config import *
+from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, QueryCommand, MotionCommand, SystemCommand, CommandContext
 from parol6.ack_policy import AckPolicy
-from parol6.config import get_com_port_with_fallback
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -51,6 +50,7 @@ class QueuedCommand:
     queued_time: float = field(default_factory=time.time)
     activated: bool = False
     initialized: bool = False
+    first_tick_logged: bool = False
 
 
 @dataclass
@@ -118,9 +118,6 @@ class Controller:
         
         # GCODE interpreter
         self.gcode_interpreter = GcodeInterpreter()
-        
-        # Stream mode
-        self.stream_mode = False
 
         # Status services (updater + multicast broadcaster)
         self._status_updater: Optional[Any] = None
@@ -142,10 +139,10 @@ class Controller:
         if not cmd_id or not self.ack_socket:
             return
         
-        # Debug log all outgoing ACKs
-        logger.debug(f"ACK {status} cmd={cmd_id} details='{details}' addr={addr}")
+        # Debug/Trace log all outgoing ACKs
+        logger.log(TRACE, "ack_send id=%s status=%s details=%s addr=%s", cmd_id, status, details, addr)
         
-        message = f"ACK|{cmd_id}|{status}|{details}".encode("utf-8")
+        message = f"ACK|{cmd_id}|{status}|{details}".encode("ascii")
         
         try:
             self.ack_socket.sendto(message, addr)
@@ -217,7 +214,17 @@ class Controller:
             
             # Start status updater and broadcaster (ASCII multicast at configured rate)
             try:
-                self._status_updater, self._status_broadcaster = start_status_services(self.state_manager)
+                logger.info(f"StatusBroadcaster config: group={MCAST_GROUP} port={MCAST_PORT} ttl={MCAST_TTL} iface={MCAST_IF} rate_hz={STATUS_RATE_HZ} stale_s={STATUS_STALE_S}")
+                broadcaster = StatusBroadcaster(
+                    state_mgr=self.state_manager,
+                    group=MCAST_GROUP,
+                    port=MCAST_PORT,
+                    ttl=MCAST_TTL,
+                    iface_ip=MCAST_IF,
+                    rate_hz=STATUS_RATE_HZ,
+                    stale_s=STATUS_STALE_S)
+
+                broadcaster.start()
                 logger.info("Status updater and broadcaster started")
             except Exception as e:
                 logger.warning(f"Failed to start status services: {e}")
@@ -369,7 +376,7 @@ class Controller:
                         # No commands - idle
                         state.Command_out = CommandCode.IDLE
                         state.Speed_out.fill(0)
-                        np.copyto(state.Position_out, state.Position_in)
+                        np.copyto(state.Position_out, state.Position_in, casting='no')
                 
                 # 4. Write to firmware
                 if self.serial_transport and self.serial_transport.is_connected():
@@ -414,11 +421,26 @@ class Controller:
                 
                 if now - prev_print > 5:
                     prev_print = now
+                    # Calculate command frequency
+                    cmd_hz = 0.0
+                    if state.ema_command_period_s > 0.0:
+                        cmd_hz = 1.0 / state.ema_command_period_s
+                    
+                    # Calculate short-term command rate from recent timestamps
+                    short_term_cmd_hz = 0.0
+                    if len(state.command_timestamps) >= 2:
+                        # Calculate rate from first and last timestamp in window
+                        time_span = state.command_timestamps[-1] - state.command_timestamps[0]
+                        if time_span > 0:
+                            short_term_cmd_hz = (len(state.command_timestamps) - 1) / time_span
+                    
                     logger.debug(
                         f"loop_count: {state.loop_count}, "
                         f"overrun_count: {state.overrun_count}, "
-                        f"ema_hz: {((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0):4f}"
-                        )
+                        f"loop_hz: {((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0):.2f}, "
+                        f"cmd_count: {state.command_count}, "
+                        f"cmd_hz: {cmd_hz:.2f} (short_term: {short_term_cmd_hz:.2f})"
+                    )
                 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
@@ -439,12 +461,64 @@ class Controller:
                 if tup is None:
                     continue
                 cmd_str, addr = tup
+                try:
+                    _n = cmd_str.split("|", 1)[0].upper() if isinstance(cmd_str, str) else "UNKNOWN"
+                except Exception:
+                    _n = "UNKNOWN"
+                logger.log(TRACE, "cmd_received name=%s from=%s", _n, addr)
                 state = self.state_manager.get_state()
+                
+                # Track command reception for frequency metrics
+                now = time.time()
+                if state.last_command_time > 0:
+                    # Calculate period between commands
+                    period = now - state.last_command_time
+                    state.last_command_period_s = period
+                    
+                    # Update EMA of command period (alpha=0.1)
+                    if state.ema_command_period_s <= 0.0:
+                        state.ema_command_period_s = period
+                    else:
+                        state.ema_command_period_s = 0.1 * period + 0.9 * state.ema_command_period_s
+                
+                state.last_command_time = now
+                state.command_count += 1
+                state.command_timestamps.append(now)
                 # No command IDs on wire; treat entire datagram as the command
                 cmd_parts = cmd_str.split('|')
                 cmd_name = cmd_parts[0].upper()
                 # Build server-side ack/wait policy
-                policy = AckPolicy.from_env(lambda: self.stream_mode)
+                policy = AckPolicy.from_env(lambda: state.stream_mode)
+
+                # Stream fast-path: if an active streamable command of the same type exists,
+                # reuse the instance by calling match/setup and skip object creation/queueing.
+                if state.stream_mode and self.active_command:
+                    logger.log(TRACE, "stream_fast_path_considered active=%s incoming=%s", type(self.active_command.command).__name__, cmd_name)
+                    active_inst = self.active_command.command
+                    if isinstance(active_inst, MotionCommand) and active_inst.streamable:
+                        active_name = active_inst._registered_name
+                        if active_name == cmd_name:
+                            can_handle, match_err = active_inst.match(cmd_parts)
+                            if can_handle:
+                                try:
+                                    active_inst.bind(CommandContext(
+                                        udp_transport=self.udp_transport,
+                                        addr=addr,
+                                        gcode_interpreter=self.gcode_interpreter,
+                                        dt=self.config.loop_interval
+                                    ))
+                                    active_inst.setup(state)
+                                except Exception as _e:
+                                    logger.error("Stream fast-path setup failed for %s: %s", active_name, _e)
+                                else:
+                                    logger.log(TRACE, "stream_fast_path_applied name=%s", active_name)
+                                    continue
+                            else:
+                                if match_err:
+                                    if self.udp_transport and policy.requires_ack(cmd_str):
+                                        self.udp_transport.send_response(f"ERROR|{match_err}", addr)
+                                    logger.log(TRACE, "Stream fast-path match failed for %s: %s", active_name, match_err)
+
                 # Create command instance from message
                 command, error = create_command_from_parts(cmd_parts)
                 if not command:
@@ -463,8 +537,18 @@ class Controller:
                 # Handle system commands (they can execute regardless of enable state)
                 if isinstance(command, SystemCommand):
                     # System commands execute immediately without queueing
-                    command.setup(state, udp_transport=self.udp_transport, addr=addr)
-                    status = command.execute_step(state)
+                    command.bind(CommandContext(
+                        udp_transport=self.udp_transport,
+                        addr=addr,
+                        gcode_interpreter=self.gcode_interpreter,
+                        dt=self.config.loop_interval
+                    ))
+                    logger.log(TRACE, "syscmd_execute_start name=%s", type(command).__name__)
+                    command.setup(state)
+                    status = command.tick(state)
+                    logger.log(TRACE, "syscmd_execute_%s name=%s msg=%s",
+                               "ok" if status.code == ExecutionStatusCode.COMPLETED else "err",
+                               type(command).__name__, status.message)
 
                     # Handle side-effects for certain system commands (e.g., SET_PORT)
                     try:
@@ -555,18 +639,19 @@ class Controller:
                 # Query commands execute immediately (bypass queue)
                 if isinstance(command, QueryCommand):
                     # Execute query immediately with context
-                    command.setup(
-                        state,
+                    command.bind(CommandContext(
                         udp_transport=self.udp_transport,
                         addr=addr,
                         gcode_interpreter=self.gcode_interpreter,
-                    )
-                    _ = command.execute_step(state)
+                        dt=self.config.loop_interval
+                    ))
+                    command.setup(state)
+                    _ = command.tick(state)
                     # Query commands send their own responses
                     continue
 
                 # Apply stream mode logic for streamable motion commands
-                if self.stream_mode and isinstance(command, MotionCommand) and getattr(command, 'streamable', False):
+                if state.stream_mode and isinstance(command, MotionCommand) and getattr(command, 'streamable', False):
                     # Cancel any active streamable command and replace it (suppress per-command ACK to reduce UDP chatter)
                     if self.active_command and isinstance(self.active_command.command, MotionCommand) and getattr(self.active_command.command, 'streamable', False):
                         self.active_command = None
@@ -578,13 +663,11 @@ class Controller:
                         self.command_queue.remove(queued_cmd)
                         removed += 1
                 if removed:
-                    if TRACE_ENABLED:
-                        logger.log(TRACE, "Stream mode: removed %d queued streamable command(s)", removed)
+                    logger.log(TRACE, "queued_streamables_removed count=%d", removed)
 
                 # Queue the command
                 status = self._queue_command(addr, command, None)
-                if TRACE_ENABLED:
-                    logger.log(TRACE, "Command %s queued with status: %s", cmd_name, status.code)
+                logger.log(TRACE, "Command %s queued with status: %s", cmd_name, status.code)
 
                 # For motion commands: ACK acceptance only if policy requires ACK
                 if isinstance(command, MotionCommand) and self.udp_transport:
@@ -633,6 +716,14 @@ class Controller:
             address=address
         )
         
+        # Bind dynamic context so the command can reply/inspect interpreter when executed
+        command.bind(CommandContext(
+            udp_transport=self.udp_transport,
+            addr=address,
+            gcode_interpreter=self.gcode_interpreter,
+            dt=self.config.loop_interval
+        ))
+        
         self.command_queue.append(queued_cmd)
         
         # Send acknowledgment
@@ -640,8 +731,7 @@ class Controller:
             queue_pos = len(self.command_queue)
             self._send_ack(command_id, "QUEUED", f"Position {queue_pos} in queue", address)
         
-        if TRACE_ENABLED:
-            logger.log(TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id)
+        logger.log(TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id)
         
         return ExecutionStatus(
             code=ExecutionStatusCode.QUEUED,
@@ -687,8 +777,7 @@ class Controller:
                             )
                         
                         ac.activated = True
-                        if TRACE_ENABLED:
-                            logger.log(TRACE, "Activated command: %s (id=%s)", type(ac.command).__name__, ac.command_id)
+                        logger.log(TRACE, "Activated command: %s (id=%s)", type(ac.command).__name__, ac.command_id)
 
                 else:
                     # Cancel command due to disabled controller
@@ -699,7 +788,10 @@ class Controller:
                     )
                 
                 # Execute command step
-                status = ac.command.execute_step(state)
+                if not getattr(ac, "first_tick_logged", False):
+                    logger.log(TRACE, "tick_start name=%s", type(ac.command).__name__)
+                    ac.first_tick_logged = True
+                status = ac.command.tick(state)
 
                 # Enqueue any generated commands (e.g., from GCODE parsed in queued mode)
                 if status.details and isinstance(status.details, dict) and 'enqueue' in status.details:
@@ -717,8 +809,7 @@ class Controller:
                     # Command completed successfully
                     name = type(ac.command).__name__
                     cid, addr = ac.command_id, ac.address
-                    if TRACE_ENABLED:
-                        logger.log(TRACE, "Command completed: %s (id=%s) at t=%f", name, cid, time.time())
+                    logger.log(TRACE, "Command completed: %s (id=%s) at t=%f", name, cid, time.time())
                     
                     # Send completion acknowledgment
                     if cid and addr:
