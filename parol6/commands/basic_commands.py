@@ -153,36 +153,30 @@ class JogCommand(MotionCommand):
         if len(parts) != 5:
             return (False, "JOG requires 4 parameters: joint, speed, duration, distance")
         
-        try:
-            # Parse parameters using utilities
-            self.joint = parse_int(parts[1])
-            self.speed_percentage = parse_float(parts[2])
-            self.duration = parse_float(parts[3])
-            self.distance_deg = parse_float(parts[4])
-            
-            if self.joint is None or self.speed_percentage is None:
-                return (False, "Joint and speed percentage are required")
-            
-            # Determine mode
-            if self.duration and self.distance_deg:
-                self.mode = 'distance'
-                self.log_trace("Parsed Jog: Joint %s, Distance %s deg, Duration %ss.", self.joint, self.distance_deg, self.duration)
-            elif self.duration:
-                self.mode = 'time'
-                self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Duration %ss.", self.joint, self.speed_percentage, self.duration)
-            elif self.distance_deg:
-                self.mode = 'distance'
-                self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Distance %s deg.", self.joint, self.speed_percentage, self.distance_deg)
-            else:
-                return (False, "JOG requires either duration or distance")
-            
-            self.is_valid = True
-            return (True, None)
-            
-        except ValueError as e:
-            return (False, f"Invalid JOG parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing JOG: {str(e)}")
+        # Parse parameters using utilities
+        self.joint = parse_int(parts[1])
+        self.speed_percentage = parse_float(parts[2])
+        self.duration = parse_float(parts[3])
+        self.distance_deg = parse_float(parts[4])
+        
+        if self.joint is None or self.speed_percentage is None:
+            return (False, "Joint and speed percentage are required")
+        
+        # Determine mode
+        if self.duration and self.distance_deg:
+            self.mode = 'distance'
+            self.log_trace("Parsed Jog: Joint %s, Distance %s deg, Duration %ss.", self.joint, self.distance_deg, self.duration)
+        elif self.duration:
+            self.mode = 'time'
+            self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Duration %ss.", self.joint, self.speed_percentage, self.duration)
+        elif self.distance_deg:
+            self.mode = 'distance'
+            self.log_trace("Parsed Jog: Joint %s, Speed %s%%, Distance %s deg.", self.joint, self.speed_percentage, self.distance_deg)
+        else:
+            return (False, "JOG requires either duration or distance")
+        
+        self.is_valid = True
+        return (True, None)
 
     def setup(self, state):
         """Pre-computes speeds and target positions using live data."""
@@ -207,7 +201,7 @@ class JogCommand(MotionCommand):
                 target_deg = PAROL6_ROBOT.ops.steps_to_deg(self.target_position, self.joint_index)
                 min_deg = PAROL6_ROBOT.ops.steps_to_deg(min_limit, self.joint_index)
                 max_deg = PAROL6_ROBOT.ops.steps_to_deg(max_limit, self.joint_index)
-                raise RuntimeWarning(f"Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°).")
+                raise ValueError(f"Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°).")
 
         # Motion timing calculations  
         jog_min = self.JOG_MIN[self.joint_index]
@@ -216,13 +210,13 @@ class JogCommand(MotionCommand):
         if self.mode == 'distance' and self.duration:
             speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
             if speed_steps_per_sec > jog_max:
-                raise RuntimeWarning(f"Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({jog_max} steps/s).")
+                raise ValueError(f"Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({jog_max} steps/s).")
             # Ensure speed is at least the minimum jog speed if not zero
             if speed_steps_per_sec > 0:
                 speed_steps_per_sec = max(speed_steps_per_sec, jog_min)
         else:
             if self.speed_percentage is None:
-                raise RuntimeWarning("'speed_percentage' must be provided if not calculating automatically.")
+                raise ValueError("'speed_percentage' must be provided if not calculating automatically.")
             speed_steps_per_sec = int(self.linmap_pct(abs(self.speed_percentage), jog_min, jog_max))
 
         self.speed_out = speed_steps_per_sec * self.direction
@@ -289,10 +283,6 @@ class MultiJogCommand(MotionCommand):
         "command_len",
         "speeds_out",
         "_lims_steps",
-        # optional bound context
-        "udp_transport",
-        "addr",
-        "gcode_interpreter",
     )
     
     def __init__(self):
@@ -329,36 +319,31 @@ class MultiJogCommand(MotionCommand):
         if len(parts) != 4:
             return (False, "MULTIJOG requires 3 parameters: joints, speeds, duration")
         
-        try:
-            # Parse parameters using utilities
-            self.joints = csv_ints(parts[1])
-            self.speed_percentages = csv_floats(parts[2])
-            self.duration = parse_float(parts[3]) or 0.0
-            
-            # Validate
-            if len(self.joints) != len(self.speed_percentages):
-                return (False, "Number of joints must match number of speeds")
-            
-            if self.duration <= 0:
-                return (False, "Duration must be positive")
-            
-            # Conflict detection on base joints
-            base = set()
-            for j in self.joints:
-                b = j % 6
-                if b in base:
-                    return (False, f"Conflicting commands for Joint {b + 1}")
-                base.add(b)
-            
-            self.log_trace("Parsed MultiJog for joints %s with speeds %s%% for %ss.", self.joints, self.speed_percentages, self.duration)
-            
-            self.command_len = ceil(self.duration / INTERVAL_S)
-            self.is_valid = True
-            return (True, None)
-        except ValueError as e:
-            return (False, f"Invalid MULTIJOG parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing MULTIJOG: {str(e)}")
+        # Parse parameters using utilities
+        self.joints = csv_ints(parts[1])
+        self.speed_percentages = csv_floats(parts[2])
+        self.duration = parse_float(parts[3]) or 0.0
+        
+        # Validate
+        if len(self.joints) != len(self.speed_percentages):
+            return (False, "Number of joints must match number of speeds")
+        
+        if self.duration <= 0:
+            return (False, "Duration must be positive")
+        
+        # Conflict detection on base joints
+        base = set()
+        for j in self.joints:
+            b = j % 6
+            if b in base:
+                return (False, f"Conflicting commands for Joint {b + 1}")
+            base.add(b)
+        
+        self.log_trace("Parsed MultiJog for joints %s with speeds %s%% for %ss.", self.joints, self.speed_percentages, self.duration)
+        
+        self.command_len = ceil(self.duration / INTERVAL_S)
+        self.is_valid = True
+        return (True, None)
 
     def setup(self, state):
         """Pre-computes the speeds for each joint."""
@@ -378,7 +363,7 @@ class MultiJogCommand(MotionCommand):
         invalid_mask = (joint_index < 0) | (joint_index >= 6)
         if np.any(invalid_mask):
             bad = joint_index[invalid_mask]
-            raise ValueError("Invalid joint indices %s.", bad.tolist())
+            raise ValueError(f"Invalid joint indices {bad.tolist()}")
 
         pct = np.clip(np.abs(speeds_pct) / 100.0, 0.0, 1.0)
         for i, idx in enumerate(joint_index):

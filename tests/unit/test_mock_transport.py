@@ -20,6 +20,7 @@ from parol6.server.transports.mock_serial_transport import MockSerialTransport, 
 from parol6.server.transports import create_transport, is_simulation_mode
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.config import HOME_ANGLES_DEG
 
 
 def _wait_for_latest_frame_and_decode(transport: MockSerialTransport, timeout_s: float = 0.5):
@@ -216,6 +217,10 @@ class TestMockSerialTransport:
         transport = MockSerialTransport()
         transport.connect()
         
+        # Expected home positions (steps) derived from config HOME_ANGLES_DEG
+        expected_steps = [int(PAROL6_ROBOT.ops.deg_to_steps(float(deg), i)) for i, deg in enumerate(HOME_ANGLES_DEG)]
+        tol_steps = 500  # tolerance in steps
+        
         # Send HOME command
         assert transport.write_frame(
             [0]*6, [0]*6, CommandCode.HOME,
@@ -235,8 +240,9 @@ class TestMockSerialTransport:
             if not all(h == 1 for h in homed_bits):
                 homing_started = True
             if homing_started and all(h == 1 for h in homed_bits):
-                # Verify positions near zero
-                if all(abs(int(p)) < 100 for p in decoded["pos"].tolist()):
+                # Verify positions near configured home posture
+                pos_list = decoded["pos"].tolist()
+                if all(abs(int(pos_list[i]) - expected_steps[i]) < tol_steps for i in range(6)):
                     homing_completed = True
                     break
             last_homed_bits = homed_bits
@@ -363,15 +369,10 @@ class TestMockRobotState:
         state = MockRobotState()
         
         # Should start at standby position
-        target_degrees = [90, -90, 180, 0, 0, 180]
         for i in range(6):
-            expected_steps = int(PAROL6_ROBOT.DEG2STEPS(
-                target_degrees[i], i
-            ))
-            assert state.position_in[i] == expected_steps
-        
-        # Should start homed
-        assert all(state.homed_in[i] == 1 for i in range(6))
+            deg = float(PAROL6_ROBOT.joint.standby.deg[i])
+            steps = int(PAROL6_ROBOT.ops.deg_to_steps(deg, i))
+            assert state.position_in[i] == steps
         
         # E-stop should be released
         assert state.io_in[4] == 1

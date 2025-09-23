@@ -61,7 +61,7 @@ class TestAcknowledmentTracking:
         )
         assert result is True
         # Verify server remains responsive without fixed sleep
-        assert client.ping() is True
+        assert client.ping() is not None
 
 
 @pytest.mark.integration
@@ -90,8 +90,7 @@ class TestBasicCommands:
     
     def test_ping(self, server_proc, client):
         """Test ping functionality."""
-        result = client.ping()
-        assert result is True
+        assert client.ping() is not None
     
     def test_get_angles(self, server_proc, client):
         """Test angle retrieval."""

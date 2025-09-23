@@ -3,9 +3,6 @@ GCODE command wrappers for robot control.
 
 These commands integrate the GCODE interpreter with the robot command system.
 """
-
-from __future__ import annotations
-
 from typing import Tuple, Optional, List, TYPE_CHECKING, Any
 
 from parol6.commands.base import CommandBase, ExecutionStatus
@@ -21,10 +18,7 @@ if TYPE_CHECKING:
 class GcodeCommand(CommandBase):
     """Execute a single GCODE line."""
     
-    gcode_line: str = ""
-    interpreter: Optional[GcodeInterpreter] = None
-    generated_commands: Optional[List[str]] = None
-    current_command_index: int = 0
+    __slots__ = ("gcode_line", "interpreter", "generated_commands", "current_command_index")
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE command."""
@@ -34,26 +28,23 @@ class GcodeCommand(CommandBase):
             return True, None
         return False, None
     
-    def setup(self, state: 'ControllerState') -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Set up GCODE interpreter and parse the line."""
         # Use injected interpreter or create one
         self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
-        try:
-            assert self.interpreter is not None
-            # Update interpreter position with current robot position
-            # Vectorized: convert all joints at once
-            current_angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-            current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
-            current_xyz = current_pose_matrix[:3, 3]
-            self.interpreter.state.update_position({
-                'X': current_xyz[0] * 1000,
-                'Y': current_xyz[1] * 1000,
-                'Z': current_xyz[2] * 1000
-            })
-            # Parse and store generated robot commands (strings)
-            self.generated_commands = self.interpreter.parse_line(self.gcode_line) or []
-        except Exception as e:
-            self.fail(f"GCODE parsing error: {str(e)}")
+        assert self.interpreter is not None
+        # Update interpreter position with current robot position
+        # Vectorized: convert all joints at once
+        current_angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
+        current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
+        current_xyz = current_pose_matrix[:3, 3]
+        self.interpreter.state.update_position({
+            'X': current_xyz[0] * 1000,
+            'Y': current_xyz[1] * 1000,
+            'Z': current_xyz[2] * 1000
+        })
+        # Parse and store generated robot commands (strings)
+        self.generated_commands = self.interpreter.parse_line(self.gcode_line) or []
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Return generated commands for the controller to enqueue."""
@@ -69,9 +60,7 @@ class GcodeCommand(CommandBase):
 class GcodeProgramCommand(CommandBase):
     """Load and execute a GCODE program."""
     
-    program_type: str = ""  # 'FILE' or 'INLINE'
-    program_data: str = ""
-    interpreter: Optional[GcodeInterpreter] = None
+    __slots__ = ("program_type", "program_data", "interpreter")
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GCODE_PROGRAM command."""
@@ -89,25 +78,22 @@ class GcodeProgramCommand(CommandBase):
             return True, None
         return False, None
     
-    def setup(self, state: 'ControllerState') -> None:
+    def do_setup(self, state: ControllerState) -> None:
         """Load the GCODE program using the interpreter."""
         # Use injected interpreter or create one
         self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
-        try:
-            assert self.interpreter is not None
-            if self.program_type == "FILE":
-                if not self.interpreter.load_file(self.program_data):
-                    self.fail(f"Failed to load GCODE file: {self.program_data}")
-                    return
-            elif self.program_type == "INLINE":
-                program_lines = self.program_data.split(';')
-                if not self.interpreter.load_program(program_lines):
-                    self.fail("Failed to load inline GCODE program")
-                    return
-            # Start program execution
-            self.interpreter.start_program()
-        except Exception as e:
-            self.fail(f"GCODE program error: {str(e)}")
+        assert self.interpreter is not None
+        if self.program_type == "FILE":
+            if not self.interpreter.load_file(self.program_data):
+                raise RuntimeError(f"Failed to load GCODE file: {self.program_data}")
+        elif self.program_type == "INLINE":
+            program_lines = self.program_data.split(';')
+            if not self.interpreter.load_program(program_lines):
+                raise RuntimeError("Failed to load inline GCODE program")
+        else:
+            raise ValueError("Invalid GCODE_PROGRAM type (expected FILE or INLINE)")
+        # Start program execution
+        self.interpreter.start_program()
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Signal that the program was loaded; controller will fetch commands."""
@@ -119,6 +105,7 @@ class GcodeProgramCommand(CommandBase):
 class GcodeStopCommand(CommandBase):
     """Stop GCODE program execution."""
     
+    __slots__ = ()
     is_immediate: bool = True
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
@@ -139,6 +126,7 @@ class GcodeStopCommand(CommandBase):
 class GcodePauseCommand(CommandBase):
     """Pause GCODE program execution."""
     
+    __slots__ = ()
     is_immediate: bool = True
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
@@ -159,6 +147,7 @@ class GcodePauseCommand(CommandBase):
 class GcodeResumeCommand(CommandBase):
     """Resume GCODE program execution."""
     
+    __slots__ = ()
     is_immediate: bool = True
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:

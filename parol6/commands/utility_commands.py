@@ -19,6 +19,7 @@ class DelayCommand(CommandBase):
     During the delay, it ensures the robot remains idle by sending the
     appropriate commands.
     """
+    __slots__ = ("duration",)
     def __init__(self):
         """
         Initializes the Delay command.
@@ -37,15 +38,12 @@ class DelayCommand(CommandBase):
         if len(parts) != 2:
             return (False, "DELAY requires 1 parameter: duration")
 
-        try:
-            self.duration = parse_float(parts[1])
-            if self.duration is None or self.duration <= 0:
-                return (False, f"Delay duration must be positive, got {parts[1]}")
-            logger.info(f"Parsed Delay command for {self.duration} seconds")
-            self.is_valid = True
-            return (True, None)
-        except Exception as e:
-            return (False, f"Error parsing DELAY: {str(e)}")
+        self.duration = parse_float(parts[1])
+        if self.duration is None or self.duration <= 0:
+            return (False, f"Delay duration must be positive, got {parts[1]}")
+        logger.info(f"Parsed Delay command for {self.duration} seconds")
+        self.is_valid = True
+        return (True, None)
 
     def setup(self, state):
         """Start the delay timer."""

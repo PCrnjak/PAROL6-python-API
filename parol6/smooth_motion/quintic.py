@@ -158,7 +158,7 @@ class QuinticPolynomial:
         Generate trajectory points at specified time interval.
 
         Args:
-            dt: Time step (default 0.01 for 100Hz)
+            dt: Time step
         """
         time_points = np.arange(0, self.T + dt, dt)
         trajectory = {

@@ -68,32 +68,26 @@ class CartesianJogCommand(MotionCommand):
         if len(parts) != 5:
             return (False, "CARTJOG requires 4 parameters: frame, axis, speed, duration")
         
-        try:
-            # Parse parameters
-            self.frame = parts[1].upper()
-            self.axis = parts[2]
-            self.speed_percentage = float(parts[3])
-            self.duration = float(parts[4])
-            
-            # Validate frame
-            if self.frame not in ['WRF', 'TRF']:
-                return (False, f"Invalid frame: {self.frame}. Must be WRF or TRF")
-            
-            # Validate axis
-            if self.axis not in AXIS_MAP:
-                return (False, f"Invalid axis: {self.axis}")
-            
-            # Store axis vectors for execution
-            self.axis_vectors = AXIS_MAP[self.axis]
-            self.is_rotation = any(self.axis_vectors[1])
-            
-            self.is_valid = True
-            return (True, None)
-            
-        except ValueError as e:
-            return (False, f"Invalid CARTJOG parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing CARTJOG: {str(e)}")
+        # Parse parameters
+        self.frame = parts[1].upper()
+        self.axis = parts[2]
+        self.speed_percentage = float(parts[3])
+        self.duration = float(parts[4])
+        
+        # Validate frame
+        if self.frame not in ['WRF', 'TRF']:
+            return (False, f"Invalid frame: {self.frame}. Must be WRF or TRF")
+        
+        # Validate axis
+        if self.axis not in AXIS_MAP:
+            return (False, f"Invalid axis: {self.axis}")
+        
+        # Store axis vectors for execution
+        self.axis_vectors = AXIS_MAP[self.axis]
+        self.is_rotation = any(self.axis_vectors[1])
+        
+        self.is_valid = True
+        return (True, None)
     
     def do_setup(self, state):
         """Set the end time when the command actually starts."""
@@ -176,6 +170,15 @@ class MovePoseCommand(MotionCommand):
     A non-blocking command to move the robot to a specific Cartesian pose.
     The movement itself is a joint-space interpolation.
     """
+    __slots__ = (
+        "command_step",
+        "trajectory_steps",
+        "pose",
+        "duration",
+        "velocity_percent",
+        "accel_percent",
+        "trajectory_type",
+    )
     def __init__(self, pose=None, duration=None):
         super().__init__()
         self.command_step = 0
@@ -204,22 +207,16 @@ class MovePoseCommand(MotionCommand):
         if len(parts) != 9:
             return (False, "MOVEPOSE requires 8 parameters: x, y, z, rx, ry, rz, duration, speed")
         
-        try:
-            # Parse pose (6 values)
-            self.pose = [float(parts[i]) for i in range(1, 7)]
-            
-            # Parse duration and speed
-            self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
-            
-            self.log_debug("Parsed MovePose: %s", self.pose)
-            self.is_valid = True
-            return (True, None)
-            
-        except ValueError as e:
-            return (False, f"Invalid MOVEPOSE parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing MOVEPOSE: {str(e)}")
+        # Parse pose (6 values)
+        self.pose = [float(parts[i]) for i in range(1, 7)]
+        
+        # Parse duration and speed
+        self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+        self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
+        
+        self.log_debug("Parsed MovePose: %s", self.pose)
+        self.is_valid = True
+        return (True, None)
     
     def do_setup(self, state):
         """Calculates the full trajectory just-in-time before execution."""
@@ -299,6 +296,14 @@ class MoveCartCommand(MotionCommand):
     2. Interpolating the pose in Cartesian space in real-time.
     3. Solving Inverse Kinematics for each intermediate step to ensure path validity.
     """
+    __slots__ = (
+        "pose",
+        "duration",
+        "velocity_percent",
+        "start_time",
+        "initial_pose",
+        "target_pose",
+    )
     def __init__(self):
         super().__init__()
         
@@ -328,30 +333,24 @@ class MoveCartCommand(MotionCommand):
         if len(parts) != 9:
             return (False, "MOVECART requires 8 parameters: x, y, z, rx, ry, rz, duration, speed")
         
-        try:
-            # Parse pose (6 values)
-            self.pose = [float(parts[i]) for i in range(1, 7)]
-            
-            # Parse duration and speed
-            self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
-            
-            # Validate that at least one timing parameter is given
-            if self.duration is None and self.velocity_percent is None:
-                return (False, "MOVECART requires either duration or velocity_percent")
-            
-            if self.duration is not None and self.velocity_percent is not None:
-                logger.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
-                self.velocity_percent = None  # Prioritize duration
-            
-            self.log_debug("Parsed MoveCart: %s", self.pose)
-            self.is_valid = True
-            return (True, None)
-            
-        except ValueError as e:
-            return (False, f"Invalid MOVECART parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing MOVECART: {str(e)}")
+        # Parse pose (6 values)
+        self.pose = [float(parts[i]) for i in range(1, 7)]
+        
+        # Parse duration and speed
+        self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+        self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
+        
+        # Validate that at least one timing parameter is given
+        if self.duration is None and self.velocity_percent is None:
+            return (False, "MOVECART requires either duration or velocity_percent")
+        
+        if self.duration is not None and self.velocity_percent is not None:
+            logger.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
+            self.velocity_percent = None  # Prioritize duration
+        
+        self.log_debug("Parsed MoveCart: %s", self.pose)
+        self.is_valid = True
+        return (True, None)
 
     def do_setup(self, state):
         """Captures the initial state and validates the path just before execution."""

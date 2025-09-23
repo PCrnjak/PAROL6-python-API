@@ -241,12 +241,12 @@ class MockSerialTransport:
         if state.homing_countdown > 0:
             state.homing_countdown -= 1
             if state.homing_countdown == 0:
-                # Homing complete - mark all joints as homed and move to target posture
-                # Target angles: 90, -90, 180, 0, 0, 180 (degrees)
-                target_deg = [90, -90, 180, 0, 0, 180]
+                # Homing complete - mark all joints as homed and move to configured home posture
+                target_deg = cfg.HOME_ANGLES_DEG
+                # Mark all 8 homed bits as 1 to satisfy status bitfield expectations
+                state.homed_in.fill(1)
                 for i in range(6):
-                    state.homed_in[i] = 1
-                    steps = int(PAROL6_ROBOT.ops.deg_to_steps(target_deg[i], i))
+                    steps = int(PAROL6_ROBOT.ops.deg_to_steps(float(target_deg[i]), i))
                     state.position_in[i] = steps
                     state.speed_in[i] = 0
                 # Clear HOME command to avoid immediately restarting homing

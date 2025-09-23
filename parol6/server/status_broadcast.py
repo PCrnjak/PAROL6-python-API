@@ -34,8 +34,8 @@ class StatusBroadcaster(threading.Thread):
         port: int = 50510,
         ttl: int = 1,
         iface_ip: str = "127.0.0.1",
-        rate_hz: float = 20.0,
-        stale_s: float = 0.2,
+        rate_hz: float = cfg.STATUS_RATE_HZ,
+        stale_s: float = cfg.STATUS_STALE_S,
     ) -> None:
         super().__init__(daemon=True)
         self._state_mgr = state_mgr
@@ -60,7 +60,31 @@ class StatusBroadcaster(threading.Thread):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.iface_ip))
+
+        # Prefer loopback interface for multicast; if that fails, fall back to primary NIC IP
+        def _detect_primary_ip() -> str:
+            tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                tmp.connect(("1.1.1.1", 80))
+                return tmp.getsockname()[0]
+            except Exception:
+                return "127.0.0.1"
+            finally:
+                try:
+                    tmp.close()
+                except Exception:
+                    pass
+
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.iface_ip))
+        except Exception:
+            try:
+                primary_ip = _detect_primary_ip()
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(primary_ip))
+                logger.info(f"StatusBroadcaster: fallback IP_MULTICAST_IF to {primary_ip}")
+            except Exception as e:
+                logger.warning(f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e}")
+
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
         self._sock = sock
 

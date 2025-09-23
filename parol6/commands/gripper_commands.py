@@ -28,6 +28,19 @@ class GripperCommand(MotionCommand):
     It internally selects the correct logic (position-based waiting, timed delay,
     or instantaneous) based on the specified action.
     """
+    __slots__ = (
+        "state",
+        "timeout_counter",
+        "object_debouncer",
+        "wait_counter",
+        "gripper_type",
+        "action",
+        "target_position",
+        "speed",
+        "current",
+        "state_to_set",
+        "port_index",
+    )
     def __init__(self):
         """
         Initializes the Gripper command.
@@ -68,67 +81,59 @@ class GripperCommand(MotionCommand):
             if len(parts) != 3:
                 return (False, "PNEUMATICGRIPPER requires 2 parameters: action, port")
             
-            try:
-                self.gripper_type = 'pneumatic'
-                self.action = parts[1].lower()
-                output_port = int(parts[2])
-                
-                # Validate action
-                if self.action not in ['open', 'close']:
-                    return (False, f"Invalid pneumatic gripper action: {self.action}")
-                
-                # Configure pneumatic settings
-                self.state_to_set = 1 if self.action == 'open' else 0
-                self.port_index = 2 if output_port == 1 else 3
-                
-                self.log_debug("Parsed PNEUMATICGRIPPER: action=%s, port=%s", self.action, output_port)
-                self.is_valid = True
-                return (True, None)
-                
-            except ValueError as e:
-                return (False, f"Invalid PNEUMATICGRIPPER parameters: {str(e)}")
+            self.gripper_type = 'pneumatic'
+            self.action = parts[1].lower()
+            output_port = int(parts[2])
+            
+            # Validate action
+            if self.action not in ['open', 'close']:
+                return (False, f"Invalid pneumatic gripper action: {self.action}")
+            
+            # Configure pneumatic settings
+            self.state_to_set = 1 if self.action == 'open' else 0
+            self.port_index = 2 if output_port == 1 else 3
+            
+            self.log_debug("Parsed PNEUMATICGRIPPER: action=%s, port=%s", self.action, output_port)
+            self.is_valid = True
+            return (True, None)
         
         elif command_name == "ELECTRICGRIPPER":
             if len(parts) != 5:
                 return (False, "ELECTRICGRIPPER requires 4 parameters: action, position, speed, current")
             
-            try:
-                self.gripper_type = 'electric'
+            self.gripper_type = 'electric'
+            
+            # Parse action
+            action_token = parts[1].upper()
+            self.action = 'move' if action_token in ('NONE', 'MOVE') else parts[1].lower()
+            
+            # Parse numeric parameters
+            position = int(parts[2])
+            speed = int(parts[3])
+            current = int(parts[4])
+            
+            # Configure based on action
+            if self.action == 'move':
+                self.target_position = position
+                self.speed = speed
+                self.current = current
                 
-                # Parse action
-                action_token = parts[1].upper()
-                self.action = 'move' if action_token in ('NONE', 'MOVE') else parts[1].lower()
-                
-                # Parse numeric parameters
-                position = int(parts[2])
-                speed = int(parts[3])
-                current = int(parts[4])
-                
-                # Configure based on action
-                if self.action == 'move':
-                    self.target_position = position
-                    self.speed = speed
-                    self.current = current
+                # Validate ranges
+                if not (0 <= position <= 255):
+                    return (False, f"Position must be 0-255, got {position}")
+                if not (0 <= speed <= 255):
+                    return (False, f"Speed must be 0-255, got {speed}")
+                if not (100 <= current <= 1000):
+                    return (False, f"Current must be 100-1000, got {current}")
                     
-                    # Validate ranges
-                    if not (0 <= position <= 255):
-                        return (False, f"Position must be 0-255, got {position}")
-                    if not (0 <= speed <= 255):
-                        return (False, f"Speed must be 0-255, got {speed}")
-                    if not (100 <= current <= 1000):
-                        return (False, f"Current must be 100-1000, got {current}")
-                        
-                elif self.action == 'calibrate':
-                    self.wait_counter = 200  # 2-second fixed delay for calibration
-                else:
-                    return (False, f"Invalid electric gripper action: {self.action}")
-                
-                self.log_debug("Parsed ELECTRICGRIPPER: action=%s, pos=%s, speed=%s, current=%s", self.action, position, speed, current)
-                self.is_valid = True
-                return (True, None)
-                
-            except ValueError as e:
-                return (False, f"Invalid ELECTRICGRIPPER parameters: {str(e)}")
+            elif self.action == 'calibrate':
+                self.wait_counter = 200  # 2-second fixed delay for calibration
+            else:
+                return (False, f"Invalid electric gripper action: {self.action}")
+            
+            self.log_debug("Parsed ELECTRICGRIPPER: action=%s, pos=%s, speed=%s, current=%s", self.action, position, speed, current)
+            self.is_valid = True
+            return (True, None)
         
         return (False, f"Unknown gripper command: {command_name}")
 
@@ -153,7 +158,6 @@ class GripperCommand(MotionCommand):
                     self.state = GripperState.SEND_CALIBRATE
                 else:  # 'move'
                     self.state = GripperState.WAIT_FOR_POSITION
-            # TODO: these states should be standardize in like an enum or something
             # --- Calibrate Logic (Timed Delay) ---
             if self.state == GripperState.SEND_CALIBRATE:
                 logger.debug("  -> Sending one-shot calibrate command...")

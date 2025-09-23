@@ -19,7 +19,7 @@ class TrajectoryGenerator:
         Initialize trajectory generator
 
         Args:
-            control_rate: Control loop frequency in Hz (default 100Hz for PAROL6)
+            control_rate: Control loop frequency in Hz
         """
         self.control_rate = control_rate
         self.dt = 1.0 / control_rate

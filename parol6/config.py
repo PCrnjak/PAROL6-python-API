@@ -49,9 +49,9 @@ SERIAL_BAUD: int = 3_000_000
 AUTO_HOME_DEFAULT: bool = True
 LOG_LEVEL_DEFAULT: str = "INFO"
 
-# COM port persistence file (absolute path at repository root)
-# This ensures persistence works regardless of current working directory.
-COM_PORT_FILE: str = str((Path(__file__).resolve().parents[3] / "serial_port.txt"))
+# COM port persistence file stored in user config directory by default (cross-platform).
+_default_com_file = Path.home() / ".parol6" / "com_port.txt"
+COM_PORT_FILE: str = os.getenv("PAROL6_COM_FILE", str(_default_com_file))
 
 # Multicast/broadcast status configuration (all overridable via env)
 # These defaults implement local-only multicast on loopback by default.
@@ -61,8 +61,25 @@ MCAST_TTL: int = int(os.getenv("PAROL6_MCAST_TTL", "1"))
 MCAST_IF: str = os.getenv("PAROL6_MCAST_IF", "127.0.0.1")
 
 # Status update/broadcast rates
-STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "20"))
+STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
+
+# Homing posture (degrees) for simulation/tests; can be overridden via env "PAROL6_HOME_ANGLES_DEG" (CSV)
+def _parse_home_angles() -> list[float]:
+    raw = os.getenv("PAROL6_HOME_ANGLES_DEG")
+    if not raw:
+        return [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
+    try:
+        parts = [p.strip() for p in raw.split(",")]
+        vals = [float(p) for p in parts]
+        # Ensure length 6
+        if len(vals) != 6:
+            return [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
+        return vals
+    except Exception:
+        return [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
+
+HOME_ANGLES_DEG: list[float] = _parse_home_angles()
 
 # Ack/Tracking policy toggles
 def _env_bool_optional(name: str) -> Optional[bool]:
@@ -91,6 +108,7 @@ def save_com_port(port: str) -> bool:
     """
     try:
         com_port_path = Path(COM_PORT_FILE)
+        com_port_path.parent.mkdir(parents=True, exist_ok=True)
         com_port_path.write_text(port.strip())
         logger.info(f"Saved COM port {port} to {COM_PORT_FILE}")
         return True

@@ -148,8 +148,8 @@ def robot_api_env(ports: TestPorts) -> Generator[Dict[str, str], None, None]:
     # Store original environment values
     original_env = {}
     env_vars = {
-        "PAROL6_SERVER_IP": ports.server_ip,
-        "PAROL6_SERVER_PORT": str(ports.server_port),
+        "PAROL6_CONTROLLER_IP": ports.server_ip,
+        "PAROL6_CONTROLLER_PORT": str(ports.server_port),
     }
     
     for key, value in env_vars.items():
@@ -197,8 +197,8 @@ def server_proc(request, ports: TestPorts, robot_api_env):
             extra_env={
                 "PAROL6_FAKE_SERIAL": "1", 
                 "PAROL6_NOAUTOHOME": "1",
-                "PAROL6_SERVER_IP": ports.server_ip,
-                "PAROL6_SERVER_PORT": str(ports.server_port),
+                "PAROL6_CONTROLLER_IP": ports.server_ip,
+                "PAROL6_CONTROLLER_PORT": str(ports.server_port),
             }
         )
         

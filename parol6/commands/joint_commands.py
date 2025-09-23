@@ -20,6 +20,16 @@ class MoveJointCommand(MotionCommand):
     A non-blocking command to move the robot's joints to a specific configuration.
     It pre-calculates the entire trajectory upon initialization.
     """
+    __slots__ = (
+        "command_step",
+        "trajectory_steps",
+        "target_angles",
+        "target_radians",
+        "duration",
+        "velocity_percent",
+        "accel_percent",
+        "trajectory_type",
+    )
     def __init__(self):
         super().__init__()
         self.command_step = 0
@@ -49,29 +59,23 @@ class MoveJointCommand(MotionCommand):
         if len(parts) != 9:
             return (False, "MOVEJOINT requires 8 parameters: 6 joint angles, duration, speed")
         
-        try:
-            # Parse joint angles
-            self.target_angles = np.asarray([float(parts[i]) for i in range(1, 7)], dtype=float)
-            
-            # Parse duration and speed
-            self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
-            self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
-            
-            # Validate joint limits
-            self.target_radians = np.deg2rad(self.target_angles)
-            for i in range(6):
-                min_rad, max_rad = PAROL6_ROBOT.joint.limits.rad[i]
-                if not (min_rad <= self.target_radians[i] <= max_rad):
-                    return (False, f"Joint {i+1} target ({self.target_angles[i]} deg) is out of range")
-            
-            self.log_debug("Parsed MoveJoint: %s", self.target_angles)
-            self.is_valid = True
-            return (True, None)
-            
-        except ValueError as e:
-            return (False, f"Invalid MOVEJOINT parameters: {str(e)}")
-        except Exception as e:
-            return (False, f"Error parsing MOVEJOINT: {str(e)}")
+        # Parse joint angles
+        self.target_angles = np.asarray([float(parts[i]) for i in range(1, 7)], dtype=float)
+        
+        # Parse duration and speed
+        self.duration = None if parts[7].upper() == 'NONE' else float(parts[7])
+        self.velocity_percent = None if parts[8].upper() == 'NONE' else float(parts[8])
+        
+        # Validate joint limits
+        self.target_radians = np.deg2rad(self.target_angles)
+        for i in range(6):
+            min_rad, max_rad = PAROL6_ROBOT.joint.limits.rad[i]
+            if not (min_rad <= self.target_radians[i] <= max_rad):
+                return (False, f"Joint {i+1} target ({self.target_angles[i]} deg) is out of range")
+        
+        self.log_debug("Parsed MoveJoint: %s", self.target_angles)
+        self.is_valid = True
+        return (True, None)
 
     def do_setup(self, state):
         """Calculates the trajectory just before execution begins."""
@@ -111,8 +115,7 @@ class MoveJointCommand(MotionCommand):
             )
         
         if len(self.trajectory_steps) == 0:
-            self.log_warning(" -> Trajectory calculation resulted in no steps. Command is invalid.")
-            self.is_valid = False
+            raise ValueError("Trajectory calculation resulted in no steps. Command is invalid.")
         self.log_trace(" -> Trajectory prepared with %s steps.", len(self.trajectory_steps))
 
     def execute_step(self, state) -> ExecutionStatus:

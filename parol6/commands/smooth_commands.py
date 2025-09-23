@@ -2,11 +2,10 @@
 Smooth Motion Commands
 Contains all smooth trajectory generation commands for advanced robot movements
 """
-
 import logging
 import numpy as np
 from numpy.typing import NDArray
-from typing import Tuple, Optional, List, Any, TYPE_CHECKING, Sequence
+from typing import Tuple, Optional, List, Any, TYPE_CHECKING, Sequence, Union
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import json
@@ -15,7 +14,17 @@ from parol6.smooth_motion import (
     CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
 )
 from parol6.utils.ik import solve_ik_with_adaptive_tol_subdivision
-from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode
+from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, MotionCommand
+from parol6.utils.errors import IKError
+from parol6.utils.frames import (
+    point_trf_to_wrf_mm,
+    pose6_trf_to_wrf,
+    se3_to_pose6_mm_deg,
+    transform_center_trf_to_wrf,
+    transform_start_pose_if_needed,
+    transform_command_params_to_wrf,
+)
+from parol6.config import INTERVAL_S, NEAR_MM_TOL_MM, ENTRY_MM_TOL_MM
 from parol6.commands.cartesian_commands import MovePoseCommand
 from parol6.server.command_registry import register_command
 from parol6.protocol.wire import CommandCode
@@ -26,205 +35,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Constants for TRF plane normal vectors
-PLANE_NORMALS_TRF = {
-    'XY': np.array([0, 0, 1]),   # Tool's Z-axis
-    'XZ': np.array([0, 1, 0]),   # Tool's Y-axis  
-    'YZ': np.array([1, 0, 0])    # Tool's X-axis
-}
 
-def point_trf_to_wrf_mm(point_mm: list, tool_pose: SE3) -> NDArray:
-    """Convert 3D point from TRF to WRF coordinates (both in mm)."""
-    point_trf = SE3(point_mm[0]/1000, point_mm[1]/1000, point_mm[2]/1000)
-    point_wrf: SE3 = tool_pose * point_trf
-    return point_wrf.t * 1000
-
-def pose6_trf_to_wrf(pose6_mm_deg: list, tool_pose: SE3) -> NDArray:
-    """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    pose_trf = SE3(pose6_mm_deg[0]/1000, pose6_mm_deg[1]/1000, pose6_mm_deg[2]/1000) * \
-               SE3.RPY(pose6_mm_deg[3:], unit='deg', order='xyz')
-    pose_wrf: SE3 = tool_pose * pose_trf
-    return np.concatenate([
-        pose_wrf.t * 1000,
-        pose_wrf.rpy(unit='deg', order='xyz')
-    ])
-
-def se3_to_pose6_mm_deg(T: SE3) -> NDArray:
-    """Convert SE3 transform to 6D pose [x,y,z,rx,ry,rz] (mm, degrees)."""
-    return np.concatenate([
-        T.t * 1000,
-        T.rpy(unit='deg', order='xyz')
-    ])
-
-def transform_center_trf_to_wrf(params: dict, tool_pose: SE3, transformed: dict) -> None:
-    """Transform 'center' parameter from TRF (mm) to WRF (mm) using tool_pose."""
-    center_trf = SE3(params['center'][0]/1000, 
-                     params['center'][1]/1000, 
-                     params['center'][2]/1000)
-    center_wrf: SE3 = tool_pose * center_trf
-    transformed['center'] = center_wrf.t * 1000
-
-def transform_start_pose_if_needed(start_pose, frame: str, current_position_in):
-    """Transform start_pose from TRF to WRF if needed."""
-    if frame == 'TRF' and start_pose:
-        # Get current tool pose for transformation
-        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                             for i, p in enumerate(current_position_in)])
-        tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
-        return pose6_trf_to_wrf(start_pose, tool_pose)
-    return start_pose
-
-def transform_command_params_to_wrf(command_type: str, params: dict, frame: str, current_position_in) -> dict:
-    """
-    Transform command parameters from TRF to WRF.
-    Handles position, orientation, and directional vectors correctly.
-    """
-    if frame == 'WRF':
-        return params
-    
-    # Get current tool pose
-    current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                         for i, p in enumerate(current_position_in)])
-    tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
-    
-    transformed = params.copy()
-    
-    # SMOOTH_CIRCLE - Transform center and plane normal
-    if command_type == 'SMOOTH_CIRCLE':
-        if 'center' in params:
-            transform_center_trf_to_wrf(params, tool_pose, transformed)
-        
-        if 'plane' in params:
-            normal_trf = PLANE_NORMALS_TRF[params['plane']]
-            normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf
-            logger.info(f"  -> TRF circle plane {params['plane']} transformed to WRF")
-    
-    # SMOOTH_ARC_CENTER - Transform center, end_pose, and implied plane
-    elif command_type == 'SMOOTH_ARC_CENTER':
-        if 'center' in params:
-            transform_center_trf_to_wrf(params, tool_pose, transformed)
-        
-        if 'end_pose' in params:
-            transformed['end_pose'] = pose6_trf_to_wrf(params['end_pose'], tool_pose)
-        
-        # Arc plane is determined by start, end, and center points
-        # But we should transform any specified plane normal
-        if 'plane' in params:
-            normal_trf = PLANE_NORMALS_TRF[params['plane']]
-            normal_wrf = tool_pose.R @ normal_trf
-            transformed['normal_vector'] = normal_wrf
-    
-    # SMOOTH_ARC_PARAM - Transform end_pose and arc plane
-    elif command_type == 'SMOOTH_ARC_PARAM':
-        if 'end_pose' in params:
-            transformed['end_pose'] = pose6_trf_to_wrf(params['end_pose'], tool_pose)
-        
-        # For parametric arc, the plane is usually XY of the tool
-        # Transform the assumed plane normal
-        if 'plane' not in params:
-            params['plane'] = 'XY'  # Default to XY plane
-        
-        normal_trf = PLANE_NORMALS_TRF[params.get('plane', 'XY')]
-        normal_wrf = tool_pose.R @ normal_trf
-        transformed['normal_vector'] = normal_wrf
-    
-    # SMOOTH_HELIX - Transform center and helix axis
-    elif command_type == 'SMOOTH_HELIX':
-        if 'center' in params:
-            transform_center_trf_to_wrf(params, tool_pose, transformed)
-        
-        # Transform helix axis (default is Z-axis of tool)
-        axis_trf = np.array([0, 0, 1])  # Tool's Z-axis
-        axis_wrf = tool_pose.R @ axis_trf
-        transformed['helix_axis'] = axis_wrf
-        
-        # Transform up vector (default is Y-axis of tool)
-        up_trf = np.array([0, 1, 0])  # Tool's Y-axis
-        up_wrf = tool_pose.R @ up_trf
-        transformed['up_vector'] = up_wrf
-    
-    # SMOOTH_SPLINE - Transform waypoints
-    elif command_type == 'SMOOTH_SPLINE':
-        if 'waypoints' in params:
-            transformed_waypoints = []
-            for wp in params['waypoints']:
-                transformed_waypoints.append(pose6_trf_to_wrf(wp, tool_pose))
-            transformed['waypoints'] = transformed_waypoints
-    
-    # SMOOTH_BLEND - Transform all segment definitions
-    elif command_type == 'SMOOTH_BLEND':
-        if 'segments' in params:
-            transformed_segments = []
-            for seg in params['segments']:
-                seg_transformed = seg.copy()
-                
-                # Transform based on segment type
-                if seg['type'] == 'LINE':
-                    if 'end' in seg:
-                        seg_transformed['end'] = pose6_trf_to_wrf(seg['end'], tool_pose)
-                
-                elif seg['type'] == 'ARC':
-                    if 'end' in seg:
-                        seg_transformed['end'] = pose6_trf_to_wrf(seg['end'], tool_pose)
-                    
-                    if 'center' in seg:
-                        # Create a temporary params dict to use the helper
-                        seg_params = {'center': seg['center']}
-                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
-                    
-                    # Transform plane normal if specified
-                    if 'plane' in seg:
-                        normal_trf = PLANE_NORMALS_TRF[seg['plane']]
-                        normal_wrf = tool_pose.R @ normal_trf
-                        seg_transformed['normal_vector'] = normal_wrf
-                
-                elif seg['type'] == 'CIRCLE':
-                    if 'center' in seg:
-                        # Create a temporary params dict to use the helper
-                        seg_params = {'center': seg['center']}
-                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
-                    
-                    if 'plane' in seg:
-                        normal_trf = PLANE_NORMALS_TRF[seg['plane']]
-                        normal_wrf = tool_pose.R @ normal_trf
-                        seg_transformed['normal_vector'] = normal_wrf
-                
-                elif seg['type'] == 'SPLINE':
-                    if 'waypoints' in seg:
-                        transformed_wps = []
-                        for wp in seg['waypoints']:
-                            transformed_wps.append(pose6_trf_to_wrf(wp, tool_pose))
-                        seg_transformed['waypoints'] = transformed_wps
-    
-                transformed_segments.append(seg_transformed)
-            transformed['segments'] = transformed_segments
-    
-    # Generic transformations for any command with these parameters
-    if 'start_pose' in params:
-        transformed['start_pose'] = pose6_trf_to_wrf(params['start_pose'], tool_pose)
-    
-    return transformed
-
-class BaseSmoothMotionCommand(CommandBase):
+class BaseSmoothMotionCommand(MotionCommand):
     """
     Base class for all smooth motion commands with proper error tracking.
     """
+    __slots__ = (
+        "description",
+        "trajectory",
+        "trajectory_command",
+        "transition_command",
+        "specified_start_pose",
+        "transition_complete",
+        "trajectory_prepared",
+        "trajectory_generated",
+    )
     
     def __init__(self, description="smooth motion"):
         super().__init__()
         self.description = description
-        self.trajectory = None
-        self.trajectory_command = None
-        self.transition_command = None
-        self.specified_start_pose = None
+        self.trajectory: Optional[np.ndarray] = None
+        self.trajectory_command: Optional["SmoothTrajectoryCommand"] = None
+        self.transition_command: Optional["MovePoseCommand"] = None
+        self.specified_start_pose: Optional[NDArray[np.floating]] = None
         self.transition_complete = False
         self.trajectory_prepared = False
         self.trajectory_generated = False
         
     # Parsing utility methods
     @staticmethod
-    def parse_start_pose(start_str: str) -> Optional[List[float]]:
+    def parse_start_pose(start_str: str) -> Optional[NDArray[np.floating]]:
         """
         Parse start pose from string.
         
@@ -232,13 +72,13 @@ class BaseSmoothMotionCommand(CommandBase):
             start_str: Either 'CURRENT', 'NONE', or comma-separated pose values
             
         Returns:
-            None for CURRENT/NONE, or list of floats for specified pose
+            None for CURRENT/NONE, or numpy array of floats for specified pose
         """
         if start_str.upper() in ('CURRENT', 'NONE'):
             return None
         else:
             try:
-                return list(map(float, start_str.split(',')))
+                return np.asarray(list(map(float, start_str.split(','))), dtype=np.float64)
             except Exception:
                 raise ValueError(f"Invalid start pose format: {start_str}")
     
@@ -327,17 +167,15 @@ class BaseSmoothMotionCommand(CommandBase):
         
         return traj_type, jerk_limit, index
     
-    def create_transition_command(self, current_pose, target_pose):
+    def create_transition_command(self, current_pose: np.ndarray, target_pose: NDArray[np.floating]) -> Optional["MovePoseCommand"]:
         """Create a MovePose command for smooth transition to start position."""
-        pos_error = np.linalg.norm(
-            np.array(target_pose[:3]) - np.array(current_pose[:3])
-        )
+        pos_error = np.linalg.norm(target_pose[:3] - current_pose[:3])
         
-        if pos_error < 2.0:  # 2mm threshold
-            logger.info(f"  -> Already near start position (error: {pos_error:.1f}mm)")
+        if pos_error < NEAR_MM_TOL_MM:  # proximity threshold
+            self.log_info("  -> Already near start position (error: %.1fmm)", pos_error)
             return None
         
-        logger.info(f"  -> Creating smooth transition to start ({pos_error:.1f}mm away)")
+        self.log_info("  -> Creating smooth transition to start (%.1fmm away)", pos_error)
         
         # Calculate transition speed based on distance
         if pos_error < 10:
@@ -349,36 +187,26 @@ class BaseSmoothMotionCommand(CommandBase):
         
         transition_duration = max(pos_error / transition_speed, 0.5)  # Minimum 0.5s
         
-        transition_cmd = MovePoseCommand()
-        transition_cmd.pose = target_pose
-        transition_cmd.duration = transition_duration
+        # MovePoseCommand expects a list, so convert array to list here
+        transition_cmd: MovePoseCommand = MovePoseCommand(target_pose.tolist(), transition_duration)
         
         return transition_cmd
     
     def get_current_pose_from_position(self, position_in):
         """Convert current position to pose [x,y,z,rx,ry,rz]"""
-        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                             for i, p in enumerate(position_in)])
+        current_q = PAROL6_ROBOT.ops.steps_to_rad(position_in)
         current_pose_se3 = PAROL6_ROBOT.robot.fkine(current_q)
         
         current_xyz = current_pose_se3.t * 1000  # Convert to mm
         current_rpy = current_pose_se3.rpy(unit='deg', order='xyz')
         return np.concatenate([current_xyz, current_rpy])
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Minimal preparation - just check if we need a transition."""
-        # Bind dynamic context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
-
-        logger.debug(f"  -> Preparing {self.description}...")
+        self.log_debug("  -> Preparing %s...", self.description)
         
         # If there's a specified start pose, prepare transition
-        if self.specified_start_pose:
+        if self.specified_start_pose is not None:
             actual_current_pose = self.get_current_pose_from_position(state.Position_in)
             self.transition_command = self.create_transition_command(
                 actual_current_pose, self.specified_start_pose
@@ -387,7 +215,7 @@ class BaseSmoothMotionCommand(CommandBase):
             if self.transition_command:
                 self.transition_command.setup(state)
                 if not self.transition_command.is_valid:
-                    logger.error("  -> ERROR: Cannot reach specified start position")
+                    self.log_error("  -> ERROR: Cannot reach specified start position")
                     self.fail("Cannot reach specified start position")
                     return
         else:
@@ -396,7 +224,7 @@ class BaseSmoothMotionCommand(CommandBase):
         # DON'T generate trajectory yet - wait until execution
         self.trajectory_generated = False
         self.trajectory_prepared = False
-        logger.debug(f"  -> {self.description} preparation complete (trajectory will be generated at execution)")
+        self.log_debug("  -> %s preparation complete (trajectory will be generated at execution)", self.description)
     
     def generate_main_trajectory(self, effective_start_pose):
         """Override this in subclasses to generate the specific motion trajectory."""
@@ -411,15 +239,14 @@ class BaseSmoothMotionCommand(CommandBase):
         if self.transition_command and not self.transition_complete:
             status = self.transition_command.execute_step(state)
             if status.code == ExecutionStatusCode.COMPLETED:
-                logger.info("  -> Transition complete")
+                self.log_info("  -> Transition complete")
                 self.transition_complete = True
                 # Continue to main trajectory generation next tick
                 return ExecutionStatus.executing("Transition completed")
             elif status.code == ExecutionStatusCode.FAILED:
                 self.fail(getattr(self.transition_command, 'error_message', 'Transition failed'))
                 self.finish()
-                state.Speed_out.fill(0)
-                state.Command_out = CommandCode.IDLE
+                MotionCommand.stop_and_idle(state)
                 return ExecutionStatus.failed("Transition failed")
             else:
                 return ExecutionStatus.executing("Transitioning")
@@ -428,14 +255,14 @@ class BaseSmoothMotionCommand(CommandBase):
         if not self.trajectory_generated:
             # Get ACTUAL current position NOW
             actual_current_pose = self.get_current_pose_from_position(state.Position_in)
-            logger.info(f"  -> Generating {self.description} from ACTUAL position: {[round(p, 1) for p in actual_current_pose[:3]]}")
+            self.log_info("  -> Generating %s from ACTUAL position: %s", self.description, [round(p, 1) for p in actual_current_pose[:3]])
 
             # Generate trajectory from where we ACTUALLY are
             self.trajectory = self.generate_main_trajectory(actual_current_pose)
             self.trajectory_command = SmoothTrajectoryCommand(self.trajectory, self.description)
 
             # Quick validation of first point only
-            current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)])
+            current_q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
             first_pose = self.trajectory[0]
             target_se3 = SE3(first_pose[0] / 1000, first_pose[1] / 1000, first_pose[2] / 1000) * SE3.RPY(first_pose[3:], unit='deg', order='xyz')
 
@@ -444,12 +271,11 @@ class BaseSmoothMotionCommand(CommandBase):
             )
 
             if not ik_result.success:
-                logger.error("  -> ERROR: Cannot reach first trajectory point")
+                self.log_error("  -> ERROR: Cannot reach first trajectory point")
                 self.finish()
                 self.fail("Cannot reach trajectory start")
-                state.Speed_out.fill(0)
-                state.Command_out = CommandCode.IDLE
-                return ExecutionStatus.failed("Cannot reach trajectory start")
+                MotionCommand.stop_and_idle(state)
+                return ExecutionStatus.failed("Cannot reach trajectory start", error=IKError("Cannot reach trajectory start"))
 
             self.trajectory_generated = True
             self.trajectory_prepared = True
@@ -457,7 +283,7 @@ class BaseSmoothMotionCommand(CommandBase):
             # Verify first point is close to current
             distance = np.linalg.norm(first_pose[:3] - np.array(actual_current_pose[:3]))
             if distance > 5.0:
-                logger.warning(f"  -> WARNING: First trajectory point {distance:.1f}mm from current!")
+                self.log_warning("  -> WARNING: First trajectory point %.1fmm from current!", distance)
 
         # Execute main trajectory
         if self.trajectory_command and self.trajectory_prepared:
@@ -547,8 +373,7 @@ class SmoothTrajectoryCommand:
         if self.trajectory_index >= len(self.trajectory):
             logger.info(f"Smooth {self.description} finished.")
             self.is_finished = True
-            state.Speed_out.fill(0)
-            state.Command_out = CommandCode.IDLE
+            MotionCommand.stop_and_idle(state)
             return ExecutionStatus.completed(f"Smooth {self.description} complete")
         
         # Get target pose for this step
@@ -558,7 +383,7 @@ class SmoothTrajectoryCommand:
         target_se3 = SE3(target_pose[0]/1000, target_pose[1]/1000, target_pose[2]/1000) * SE3.RPY(target_pose[3:], unit='deg', order='xyz')
         
         # Get current joint configuration
-        current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) for i, p in enumerate(state.Position_in)])
+        current_q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         
         # Solve IK
         ik_result = solve_ik_with_adaptive_tol_subdivision(
@@ -570,27 +395,24 @@ class SmoothTrajectoryCommand:
             self.is_finished = True
             self.error_state = True
             self.error_message = f"IK failed at point {self.trajectory_index}/{len(self.trajectory)}"
-            state.Speed_out.fill(0)
-            state.Command_out = CommandCode.IDLE
-            return ExecutionStatus.failed(self.error_message)
+            MotionCommand.stop_and_idle(state)
+            return ExecutionStatus.failed(self.error_message, error=IKError(self.error_message))
         
         # Convert to steps
-        target_steps = [int(PAROL6_ROBOT.RAD2STEPS(q, i)) for i, q in enumerate(ik_result.q)]
+        target_steps = PAROL6_ROBOT.ops.rad_to_steps(ik_result.q)
         
         # ADD VELOCITY LIMITING - This prevents violent movements
         if self.trajectory_index > 0:
-            for i in range(6):
-                step_diff = abs(target_steps[i] - state.Position_in[i])
-                max_step_diff = PAROL6_ROBOT.Joint_max_speed[i] * 0.01  # Max steps in 10ms
-                
-                # Use 1.2x safety margin
-                if step_diff > max_step_diff * 1.2:
-                    # Clamp the motion
-                    sign = 1 if target_steps[i] > state.Position_in[i] else -1
-                    target_steps[i] = state.Position_in[i] + sign * int(max_step_diff)
+            # Vectorized per-tick clamping with 1.2x safety margin
+            target_steps = PAROL6_ROBOT.ops.clamp_steps_delta(
+                state.Position_in,
+                np.asarray(target_steps, dtype=np.int32),
+                dt=INTERVAL_S,
+                safety=1.2
+            )
         
-        # Send position command
-        np.copyto(state.Position_out, np.asarray(target_steps, dtype=state.Position_out.dtype))
+        # Send position command (inline to avoid instance-method binding)
+        np.copyto(state.Position_out, np.asarray(target_steps, dtype=np.int32), casting='no')
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.MOVE
         
@@ -604,20 +426,36 @@ class SmoothTrajectoryCommand:
 class SmoothCircleCommand(BaseSmoothMotionCommand):
     """Execute smooth circular motion."""
     
-    center: List[float] = None
-    radius: float = 100
-    plane: str = 'XY'
-    duration: float = 5.0
-    clockwise: bool = False
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    center_mode: str = 'ABSOLUTE'
-    entry_mode: str = 'NONE'
-    normal_vector: Optional[NDArray] = None
-    current_position_in: Optional[Sequence[int]] = None
+    __slots__ = (
+        "center",
+        "radius",
+        "plane",
+        "duration",
+        "clockwise",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "center_mode",
+        "entry_mode",
+        "normal_vector",
+        "current_position_in",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth circle")
+        self.center: Optional[NDArray[np.floating]] = None
+        self.radius: float = 100.0
+        self.plane: str = 'XY'
+        self.duration: float = 5.0
+        self.clockwise: bool = False
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.center_mode: str = 'ABSOLUTE'
+        self.entry_mode: str = 'NONE'
+        self.normal_vector: Optional[NDArray] = None
+        self.current_position_in: Optional[NDArray[np.int32]] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_CIRCLE command.
         Format: SMOOTH_CIRCLE|center_x,y,z|radius|plane|frame|start_pose|timing_type|timing_value|[trajectory_type]|[jerk_limit]|[clockwise]
@@ -630,9 +468,10 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         
         try:
             # Parse center
-            self.center = list(map(float, parts[1].split(',')))
-            if len(self.center) != 3:
+            center_list = list(map(float, parts[1].split(',')))
+            if len(center_list) != 3:
                 return False, "Center must have 3 coordinates"
+            self.center = np.asarray(center_list, dtype=np.float64)
             
             # Parse radius
             self.radius = float(parts[2])
@@ -687,18 +526,11 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_CIRCLE parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF, then prepare normally."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         # Store current position for potential use in generate_main_trajectory
-        self.current_position_in = state.Position_in
+        self.current_position_in = np.asarray(state.Position_in, dtype=np.int32)
         
         if self.frame == 'TRF':
             # Transform parameters to WRF
@@ -714,15 +546,18 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             self.center = transformed['center']
             self.normal_vector = transformed.get('normal_vector')
             
-            logger.info(f"  -> TRF Circle: center {self.center[:3]} (WRF), normal {self.normal_vector}")
+            logger.info(f"  -> TRF Circle: center {self.center[:3].tolist()} (WRF), normal {self.normal_vector}")
             
-            # Transform start_pose if specified
-            self.specified_start_pose = transform_start_pose_if_needed(
-                self.specified_start_pose, self.frame, state.Position_in
-            )
+            # Transform start_pose if specified - convert array to list for the API
+            if self.specified_start_pose is not None:
+                result = transform_start_pose_if_needed(
+                    self.specified_start_pose.tolist(), self.frame, state.Position_in
+                )
+                if result is not None:
+                    self.specified_start_pose = np.asarray(result, dtype=np.float64)
         
         # Now do normal preparation with transformed parameters
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
     
     def generate_main_trajectory(self, effective_start_pose):
         """Generate circle starting from the actual start position."""
@@ -740,10 +575,14 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             logger.info(f"    Using WRF plane {self.plane} with normal: {normal}")
         
         logger.info(f"    Generating circle from position: {[round(p, 1) for p in effective_start_pose[:3]]}")
-        logger.info(f"    Circle center: {[round(c, 1) for c in self.center]}")
+        if self.center is not None:
+            logger.info(f"    Circle center: {[round(c, 1) for c in self.center]}")
         
         # Handle center_mode
-        actual_center = self.center.copy()
+        if self.center is not None:
+            actual_center = self.center.copy()
+        else:
+            actual_center = np.array([0.0, 0.0, 0.0])
         if self.center_mode == 'TOOL':
             # Center at current tool position
             actual_center = np.array(effective_start_pose[:3])
@@ -762,7 +601,7 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         
         # Automatically generate entry trajectory if needed
         entry_trajectory = None
-        if distance_from_perimeter > 2.0:  # More than 2mm off the perimeter
+        if distance_from_perimeter > ENTRY_MM_TOL_MM:  # perimeter tolerance
             effective_entry_mode = self.entry_mode
             
             # Auto-detect need for entry if not specified
@@ -814,16 +653,28 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
 class SmoothArcCenterCommand(BaseSmoothMotionCommand):
     """Execute smooth arc motion defined by center point."""
     
-    end_pose: List[float] = None
-    center: List[float] = None
-    duration: float = 5.0
-    clockwise: bool = False
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    normal_vector: Optional[NDArray] = None
+    __slots__ = (
+        "end_pose",
+        "center",
+        "duration",
+        "clockwise",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "normal_vector",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth arc (center)")
+        self.end_pose: Optional[List[float]] = None
+        self.center: Optional[List[float]] = None
+        self.duration: float = 5.0
+        self.clockwise: bool = False
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.normal_vector: Optional[NDArray] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_ARC_CENTER command.
         Format: SMOOTH_ARC_CENTER|end_x,y,z,rx,ry,rz|center_x,y,z|frame|start_pose|timing_type|timing_value|[trajectory_type]|[jerk_limit]|[clockwise]
@@ -877,15 +728,8 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_ARC_CENTER parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         if self.frame == 'TRF':
             params = {
@@ -904,7 +748,7 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
                 self.specified_start_pose, self.frame, state.Position_in
             )
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate arc from actual start to end with direct velocity profile."""
@@ -927,18 +771,32 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
 class SmoothArcParamCommand(BaseSmoothMotionCommand):
     """Execute smooth arc motion defined by radius and angle."""
     
-    end_pose: List[float] = None
-    radius: float = 100
-    arc_angle: float = 90
-    duration: float = 5.0
-    clockwise: bool = False
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    normal_vector: Optional[NDArray] = None
-    current_position_in: Optional[Sequence[int]] = None
+    __slots__ = (
+        "end_pose",
+        "radius",
+        "arc_angle",
+        "duration",
+        "clockwise",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "normal_vector",
+        "current_position_in",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth arc (param)")
+        self.end_pose: Optional[List[float]] = None
+        self.radius: float = 100.0
+        self.arc_angle: float = 90.0
+        self.duration: float = 5.0
+        self.clockwise: bool = False
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.normal_vector: Optional[NDArray] = None
+        self.current_position_in: Optional[Sequence[int]] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_ARC_PARAM command.
         Format: SMOOTH_ARC_PARAM|end_x,y,z,rx,ry,rz|radius|arc_angle|frame|start_pose|timing_type|timing_value|[trajectory_type]|[jerk_limit]|[clockwise]
@@ -990,15 +848,8 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_ARC_PARAM parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF, then prepare normally."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         self.current_position_in = state.Position_in
         
@@ -1023,7 +874,7 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
                 self.specified_start_pose, self.frame, state.Position_in
             )
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate arc based on radius and angle from actual start."""
@@ -1124,19 +975,34 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
 class SmoothHelixCommand(BaseSmoothMotionCommand):
     """Execute smooth helical motion."""
     
-    center: List[float] = None
-    radius: float = 100
-    pitch: float = 10
-    height: float = 100
-    duration: float = 5.0
-    clockwise: bool = False
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    helix_axis: Optional[NDArray] = None
-    up_vector: Optional[NDArray] = None
+    __slots__ = (
+        "center",
+        "radius",
+        "pitch",
+        "height",
+        "duration",
+        "clockwise",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "helix_axis",
+        "up_vector",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth helix")
+        self.center: Optional[List[float]] = None
+        self.radius: float = 100.0
+        self.pitch: float = 10.0
+        self.height: float = 100.0
+        self.duration: float = 5.0
+        self.clockwise: bool = False
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.helix_axis: Optional[NDArray] = None
+        self.up_vector: Optional[NDArray] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_HELIX command.
         Format: SMOOTH_HELIX|center_x,y,z|radius|pitch|height|frame|start_pose|timing_type|timing_value|[trajectory_type]|[jerk_limit]|[clockwise]
@@ -1190,15 +1056,8 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_HELIX parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         if self.frame == 'TRF':
             params = {'center': self.center}
@@ -1216,7 +1075,7 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
                 )
                 self.specified_start_pose = transformed.get('start_pose')
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate helix with entry trajectory if needed and proper trajectory profile."""
@@ -1303,14 +1162,24 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
 class SmoothSplineCommand(BaseSmoothMotionCommand):
     """Execute smooth spline motion through waypoints."""
     
-    waypoints: List[List[float]] = None
-    duration: float = 5.0
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    current_position_in: Optional[Sequence[int]] = None
+    __slots__ = (
+        "waypoints",
+        "duration",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "current_position_in",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth spline")
+        self.waypoints: Optional[List[List[float]]] = None
+        self.duration: float = 5.0
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.current_position_in: Optional[Sequence[int]] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_SPLINE command.
         Format: SMOOTH_SPLINE|wp1_x,y,z,rx,ry,rz;wp2_x,y,z,rx,ry,rz;...|frame|start_pose|timing_type|timing_value|[trajectory_type]|[jerk_limit]
@@ -1337,11 +1206,8 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
                     self.trajectory_type = parts[idx].lower()
                     idx += 1
                     if self.trajectory_type == 's_curve' and idx < len(parts):
-                        try:
-                            self.jerk_limit = float(parts[idx])
-                            idx += 1
-                        except ValueError:
-                            pass
+                        self.jerk_limit = float(parts[idx])
+                        idx += 1
                 needed = num * 6
                 if len(parts) - idx < needed:
                     return False, "Insufficient waypoint values"
@@ -1402,15 +1268,8 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_SPLINE parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF, then prepare normally."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         self.current_position_in = state.Position_in
         
@@ -1431,7 +1290,7 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
                 self.specified_start_pose, self.frame, state.Position_in
             )
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate spline starting from actual position."""
@@ -1475,14 +1334,24 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
 class SmoothBlendCommand(BaseSmoothMotionCommand):
     """Execute smooth blended trajectory through multiple segments."""
     
-    segment_definitions: List[dict] = None
-    blend_time: float = 0.5
-    frame: str = 'WRF'
-    trajectory_type: str = 'cubic'
-    jerk_limit: Optional[float] = None
-    current_position_in: Optional[Sequence[int]] = None
+    __slots__ = (
+        "segment_definitions",
+        "blend_time",
+        "frame",
+        "trajectory_type",
+        "jerk_limit",
+        "current_position_in",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth blend")
+        self.segment_definitions: Optional[List[dict]] = None
+        self.blend_time: float = 0.5
+        self.frame: str = 'WRF'
+        self.trajectory_type: str = 'cubic'
+        self.jerk_limit: Optional[float] = None
+        self.current_position_in: Optional[Sequence[int]] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_BLEND command.
         Format: SMOOTH_BLEND|segments_json|blend_time|frame|start_pose|[trajectory_type]|[jerk_limit]
@@ -1591,15 +1460,8 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError, json.JSONDecodeError) as e:
             return False, f"Invalid SMOOTH_BLEND parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform parameters if in TRF, then prepare normally."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         self.current_position_in = state.Position_in
         
@@ -1620,7 +1482,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
                 self.specified_start_pose, self.frame, state.Position_in
             )
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate blended trajectory starting from actual position."""
@@ -1774,17 +1636,30 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
 class SmoothWaypointsCommand(BaseSmoothMotionCommand):
     """Execute waypoint trajectory with corner cutting."""
     
-    waypoints: List[List[float]] = None
-    blend_radii: Any = 'auto'  # Can be 'auto' or list of floats
-    blend_mode: str = 'parabolic'
-    via_modes: List[str] = None
-    max_velocity: float = 100.0
-    max_acceleration: float = 500.0
-    trajectory_type: str = 'quintic'
-    frame: str = 'WRF'
-    duration: Optional[float] = None
+    __slots__ = (
+        "waypoints",
+        "blend_radii",
+        "blend_mode",
+        "via_modes",
+        "max_velocity",
+        "max_acceleration",
+        "trajectory_type",
+        "frame",
+        "duration",
+    )
+    def __init__(self) -> None:
+        super().__init__(description="smooth waypoints")
+        self.waypoints: Optional[List[List[float]]] = None
+        self.blend_radii: Any = 'auto'
+        self.blend_mode: str = 'parabolic'
+        self.via_modes: Optional[List[str]] = None
+        self.max_velocity: float = 100.0
+        self.max_acceleration: float = 500.0
+        self.trajectory_type: str = 'quintic'
+        self.frame: str = 'WRF'
+        self.duration: Optional[float] = None
     
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
         Parse SMOOTH_WAYPOINTS command.
         Format: SMOOTH_WAYPOINTS|wp1;wp2;...|blend_radii|blend_mode|via_modes|max_vel|max_accel|frame|[trajectory_type]|[duration]
@@ -1862,21 +1737,13 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_WAYPOINTS parameters: {e}"
     
-    def setup(self, state: 'ControllerState', *, udp_transport: Any = None, addr: Any = None, gcode_interpreter: Any = None) -> None:
+    def do_setup(self, state: 'ControllerState') -> None:
         """Transform waypoints if in TRF."""
-        # Bind context if provided
-        if udp_transport is not None:
-            self.udp_transport = udp_transport
-        if addr is not None:
-            self.addr = addr
-        if gcode_interpreter is not None:
-            self.gcode_interpreter = gcode_interpreter
 
         if self.frame == 'TRF':
             # Transform all waypoints to WRF
             transformed_waypoints = []
-            current_q = np.array([PAROL6_ROBOT.STEPS2RADS(p, i) 
-                                 for i, p in enumerate(state.Position_in)])
+            current_q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
             tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
             
             for wp in self.waypoints:
@@ -1891,7 +1758,7 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
             self.fail("At least 2 waypoints required")
             return
         
-        return super().setup(state, udp_transport=udp_transport, addr=addr, gcode_interpreter=gcode_interpreter)
+        return super().do_setup(state)
         
     def generate_main_trajectory(self, effective_start_pose):
         """Generate waypoint trajectory with corner cutting."""
@@ -1939,9 +1806,13 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
             planner_blend_mode = 'manual'
         
         # Generate trajectory with direct profile support
+        if planner_blend_mode == 'manual' and isinstance(full_blend_radii, list):
+            opt_radii = [float(r) for r in full_blend_radii]
+        else:
+            opt_radii = None
         trajectory = planner.plan_trajectory(
             blend_mode=planner_blend_mode,
-            blend_radii=full_blend_radii if planner_blend_mode == 'manual' else None,
+            blend_radii=opt_radii,
             via_modes=full_via_modes,
             trajectory_type=self.trajectory_type,
             jerk_limit=constraints['max_jerk'] if self.trajectory_type == 's_curve' else None
@@ -1949,7 +1820,7 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
         
         # Apply duration scaling if specified
         if self.duration and self.duration > 0:
-            current_duration = len(trajectory) / 100.0  # 100Hz sampling
+            current_duration = len(trajectory) / 100.0
             if current_duration > 0:
                 scale_factor = self.duration / current_duration
                 if scale_factor != 1.0:

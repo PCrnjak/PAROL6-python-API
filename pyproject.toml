@@ -13,8 +13,6 @@ dependencies = [
     "pyserial",
     "spatialmath-python",
     "roboticstoolbox-python",
-    "oclock",
-    "keyboard",
 ]
 
 [tool.setuptools.packages.find]

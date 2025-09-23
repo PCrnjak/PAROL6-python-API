@@ -47,7 +47,7 @@ The system uses a UDP-based client-server architecture that separates robot cont
 
 * **The Robot Controller (`controller.py`)**: 
   - Runs on the computer physically connected to the robot via USB/Serial
-  - Maintains a high-frequency control loop (100Hz) for real-time robot control
+  - Maintains a high-frequency control loop for real-time robot control
   - Handles all complex calculations (inverse kinematics, trajectory planning)
   - Requires heavy dependencies (roboticstoolbox, numpy, scipy)
   - Listens for UDP commands on port 5001

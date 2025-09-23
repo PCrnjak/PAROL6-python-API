@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 @register_command("GET_POSE")
 class GetPoseCommand(QueryCommand):
     """Get current robot pose matrix."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_POSE command."""
@@ -40,6 +41,7 @@ class GetPoseCommand(QueryCommand):
 @register_command("GET_ANGLES")
 class GetAnglesCommand(QueryCommand):
     """Get current joint angles in degrees."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_ANGLES command."""
@@ -61,6 +63,7 @@ class GetAnglesCommand(QueryCommand):
 @register_command("GET_IO")
 class GetIOCommand(QueryCommand):
     """Get current I/O status."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_IO command."""
@@ -80,6 +83,7 @@ class GetIOCommand(QueryCommand):
 @register_command("GET_GRIPPER")
 class GetGripperCommand(QueryCommand):
     """Get current gripper status."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_GRIPPER command."""
@@ -99,6 +103,7 @@ class GetGripperCommand(QueryCommand):
 @register_command("GET_SPEEDS")
 class GetSpeedsCommand(QueryCommand):
     """Get current joint speeds."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_SPEEDS command."""
@@ -118,6 +123,7 @@ class GetSpeedsCommand(QueryCommand):
 @register_command("GET_STATUS")
 class GetStatusCommand(QueryCommand):
     """Get aggregated robot status (pose, angles, I/O, gripper) from cache."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_STATUS command."""
@@ -140,6 +146,7 @@ class GetStatusCommand(QueryCommand):
 @register_command("GET_GCODE_STATUS")
 class GetGcodeStatusCommand(QueryCommand):
     """Get GCODE interpreter status."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a GET_GCODE_STATUS command."""
@@ -171,6 +178,7 @@ class GetGcodeStatusCommand(QueryCommand):
 @register_command("GET_LOOP_STATS")
 class GetLoopStatsCommand(QueryCommand):
     """Return control-loop metrics (no ACK dependency)."""
+    __slots__ = ()
 
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         if parts[0].upper() == "GET_LOOP_STATS":
@@ -196,6 +204,7 @@ class GetLoopStatsCommand(QueryCommand):
 @register_command("PING")
 class PingCommand(QueryCommand):
     """Respond to ping requests."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a PING command."""

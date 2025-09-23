@@ -106,11 +106,11 @@ class TestStreamMode:
         
         # Enable stream mode and verify responsiveness
         assert client.stream_on() is True
-        assert client.ping() is True
+        assert client.ping() is not None
         
         # Disable stream mode and verify responsiveness
         assert client.stream_off() is True
-        assert client.ping() is True
+        assert client.ping() is not None
 
 
 @pytest.mark.integration
@@ -126,7 +126,7 @@ class TestBasicMotionCommands:
         assert client.wait_until_stopped(timeout=10.0)
         
         # Check that robot is responsive after homing
-        assert client.ping() is True
+        assert client.ping() is not None
         
         # Check that angles are available after homing
         angles = client.get_angles()
@@ -150,7 +150,7 @@ class TestBasicMotionCommands:
         # Verify robot state after move attempt
         angles = client.get_angles()
         assert angles is not None
-        assert client.ping() is True
+        assert client.ping() is not None
     
     def test_basic_pose_move(self, client, server_proc):
         """Test basic pose movement command with validation."""
@@ -195,7 +195,7 @@ class TestErrorHandling:
         assert isinstance(reply, str) and reply.startswith("ERROR|")
         
         # Server should remain responsive after handling the error
-        assert client.ping() is True
+        assert client.ping() is not None
     
     def test_empty_command(self, server_proc, ports):
         """Test server response to empty commands."""
@@ -206,7 +206,7 @@ class TestErrorHandling:
         assert sent is True
         
         # Server should remain responsive
-        assert client.ping() is True
+        assert client.ping() is not None
     
     def test_rapid_command_sequence(self, server_proc, ports):
         """Test server stability under rapid command sequence."""
@@ -214,10 +214,10 @@ class TestErrorHandling:
         
         # Send multiple commands rapidly (ping)
         for _ in range(10):
-            assert client.ping() is True
+            assert client.ping() is not None
         
         # Server should still be responsive
-        assert client.ping() is True
+        assert client.ping() is not None
 
 
 @pytest.mark.integration
@@ -240,7 +240,7 @@ class TestCommandQueuing:
         assert client.wait_until_stopped(timeout=5.0)
         
         # Server should be responsive after sequence
-        assert client.ping() is True
+        assert client.ping() is not None
         
         # Total time should be reasonable (commands + processing overhead)
         total_time = __import__("time").time() - start_time

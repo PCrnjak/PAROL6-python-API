@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 @register_command("STOP")
 class StopCommand(SystemCommand):
     """Emergency stop command - immediately stops all motion."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a STOP command."""
@@ -50,6 +51,7 @@ class StopCommand(SystemCommand):
 @register_command("ENABLE")
 class EnableCommand(SystemCommand):
     """Enable the robot controller."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is an ENABLE command."""
@@ -73,6 +75,7 @@ class EnableCommand(SystemCommand):
 @register_command("DISABLE")
 class DisableCommand(SystemCommand):
     """Disable the robot controller."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a DISABLE command."""
@@ -97,6 +100,7 @@ class DisableCommand(SystemCommand):
 @register_command("CLEAR_ERROR")
 class ClearErrorCommand(SystemCommand):
     """Clear any error states in the controller."""
+    __slots__ = ()
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """Check if this is a CLEAR_ERROR command."""
@@ -123,8 +127,7 @@ class ClearErrorCommand(SystemCommand):
 class SetIOCommand(SystemCommand):
     """Set a digital I/O port state."""
     
-    port_index: Optional[int] = None
-    port_value: Optional[int] = None
+    __slots__ = ("port_index", "port_value")
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -139,26 +142,22 @@ class SetIOCommand(SystemCommand):
         if len(parts) != 3:
             return False, "SET_IO requires 2 parameters: port_index, value"
         
-        try:
-            self.port_index = parse_int(parts[1])
-            self.port_value = parse_int(parts[2])
-            
-            if self.port_index is None or self.port_value is None:
-                return False, "Port index and value must be integers"
-            
-            # Validate port index (0-7 for 8 I/O ports)
-            if not 0 <= self.port_index <= 7:
-                return False, f"Port index must be 0-7, got {self.port_index}"
-            
-            # Validate port value (0 or 1)
-            if self.port_value not in (0, 1):
-                return False, f"Port value must be 0 or 1, got {self.port_value}"
-            
-            logger.info(f"Parsed SET_IO: port {self.port_index} = {self.port_value}")
-            return True, None
-            
-        except ValueError as e:
-            return False, f"Invalid SET_IO parameters: {str(e)}"
+        self.port_index = parse_int(parts[1])
+        self.port_value = parse_int(parts[2])
+        
+        if self.port_index is None or self.port_value is None:
+            return False, "Port index and value must be integers"
+        
+        # Validate port index (0-7 for 8 I/O ports)
+        if not 0 <= self.port_index <= 7:
+            return False, f"Port index must be 0-7, got {self.port_index}"
+        
+        # Validate port value (0 or 1)
+        if self.port_value not in (0, 1):
+            return False, f"Port value must be 0 or 1, got {self.port_value}"
+        
+        logger.info(f"Parsed SET_IO: port {self.port_index} = {self.port_value}")
+        return True, None
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute set port - update I/O port state."""
@@ -178,7 +177,7 @@ class SetIOCommand(SystemCommand):
 @register_command("SET_PORT")
 class SetSerialPortCommand(SystemCommand):
     """Set the serial COM port used by the controller."""
-    port_str: Optional[str] = None
+    __slots__ = ("port_str",)
 
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -221,7 +220,7 @@ class SetSerialPortCommand(SystemCommand):
 class StreamCommand(SystemCommand):
     """Toggle stream mode for real-time jogging."""
     
-    stream_mode: Optional[bool] = None
+    __slots__ = ("stream_mode",)
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -263,7 +262,7 @@ class StreamCommand(SystemCommand):
 class SimulatorCommand(SystemCommand):
     """Toggle simulator (fake serial) mode on/off."""
 
-    mode_on: Optional[bool] = None
+    __slots__ = ("mode_on",)
 
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
         """

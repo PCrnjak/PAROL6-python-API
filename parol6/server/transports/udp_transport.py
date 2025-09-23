@@ -60,12 +60,26 @@ class UDPTransport:
             self.socket.setblocking(True)
             self.socket.settimeout(0.25)
             
-            # Allow address reuse
+            # Allow address/port reuse for fast restarts
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # type: ignore[attr-defined]
+            except Exception:
+                # Not available on all platforms
+                pass
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             
-            # Bind to address
-            self.socket.bind((self.ip, self.port))
+            # Bind to address with small retry window to avoid transient EADDRINUSE
+            _attempts = 3
+            _delay_s = 0.1
+            for _i in range(_attempts):
+                try:
+                    self.socket.bind((self.ip, self.port))
+                    break
+                except OSError as _e:
+                    if _i == _attempts - 1:
+                        raise
+                    time.sleep(_delay_s)
             
             self._running = True
             logger.info(f"UDP socket created and bound to {self.ip}:{self.port}")

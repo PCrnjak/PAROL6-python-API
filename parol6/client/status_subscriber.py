@@ -3,6 +3,7 @@ import socket
 import struct
 import time
 import logging
+import contextlib
 from typing import AsyncIterator
 
 from parol6 import config as cfg
@@ -65,26 +66,52 @@ class MulticastProtocol(asyncio.DatagramProtocol):
 
 
 def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.socket:
-    """Create and configure a multicast socket."""
+    """Create and configure a multicast socket with loopback-first semantics and robust joins."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    
-    # Allow multiple listeners on same port
+
+    # Allow multiple listeners on same port; prefer SO_REUSEPORT where available
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except Exception:
+        # Not available or not permitted on this platform; continue
+        pass
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-    
-    # Bind to port
+    # Bind to port (try wildcard first, then iface_ip)
     try:
         sock.bind(("", port))
-    except OSError as e:
+    except OSError:
         sock.bind((iface_ip, port))
-    
-    # Join multicast group on the specified interface
-    mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton(iface_ip))
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    
+
+    # Helper to determine active NIC IP (no packets sent)
+    def _detect_primary_ip() -> str:
+        tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            tmp.connect(("1.1.1.1", 80))
+            return tmp.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+        finally:
+            with contextlib.suppress(Exception):
+                tmp.close()
+
+    # Join multicast group on specified interface (loopback preferred), with fallbacks
+    try:
+        mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton(iface_ip))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except Exception:
+        # Retry using primary NIC IP
+        try:
+            primary_ip = _detect_primary_ip()
+            mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton(primary_ip))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except Exception:
+            # Final fallback: INADDR_ANY variant
+            mreq_any = struct.pack("=4sl", socket.inet_aton(group), socket.INADDR_ANY)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq_any)
+
     # Non-blocking for asyncio
     sock.setblocking(False)
-    
     return sock
 
 

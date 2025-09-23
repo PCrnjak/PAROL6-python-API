@@ -13,7 +13,9 @@ def test_pack_tx_frame_structure_and_command_byte():
     timeout_out = 7
     gripper_data_out = [123, 45, 67, 3, 0, 5]  # pos, spd, cur, cmd, mode, id
 
-    frame = wire.pack_tx_frame(
+    buf = bytearray(56)
+    wire.pack_tx_frame_into(
+        memoryview(buf),
         position_out,
         speed_out,
         CommandCode.MOVE,
@@ -22,6 +24,7 @@ def test_pack_tx_frame_structure_and_command_byte():
         timeout_out,
         gripper_data_out,
     )
+    frame = bytes(buf)
 
     # Structure: 3 start + 1 len + 52 payload + 2 end = 58 bytes
     assert isinstance(frame, (bytes, bytearray))
