@@ -3,9 +3,10 @@ GCODE command wrappers for robot control.
 
 These commands integrate the GCODE interpreter with the robot command system.
 """
-from typing import Tuple, Optional, List, TYPE_CHECKING, Any
+from typing import Tuple, Optional, List, TYPE_CHECKING
 
 from parol6.commands.base import CommandBase, ExecutionStatus
+from parol6.server.state import ControllerState
 from parol6.server.command_registry import register_command
 from parol6.gcode import GcodeInterpreter
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
