@@ -221,7 +221,8 @@ class ServerManager:
             "pid": self.pid,
             "server": None,
         }
-        import socket, json
+        import socket
+        import json
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
             sock.sendto(b"GET_SERVER_STATE", (host, port))

@@ -11,8 +11,8 @@ import time
 import math
 from typing import Union, List, Optional, Literal, Dict
 
-from ..protocol.types import Frame, Axis, IOStatus, GripperStatus, StatusAggregate, TrackingStatus
-from ..utils.tracking import send_robot_command_tracked, send_and_wait
+from ..protocol.types import Frame, Axis
+from ..utils.tracking import send_and_wait
 
 
 class AsyncRobotClient:
@@ -246,7 +246,7 @@ class AsyncRobotClient:
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
             
             # Extract rotation matrix elements 
-            r11, r12, r13 = pose_matrix[0], pose_matrix[1], pose_matrix[2]
+            r11, _, _ = pose_matrix[0], pose_matrix[1], pose_matrix[2]
             r21, r22, r23 = pose_matrix[4], pose_matrix[5], pose_matrix[6] 
             r31, r32, r33 = pose_matrix[8], pose_matrix[9], pose_matrix[10]
             
@@ -868,7 +868,7 @@ class AsyncRobotClient:
             waypoint_strs.extend(map(str, wp))
         
         # Build command with trajectory type
-        command_parts = [f"SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
+        command_parts = ["SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
         
         # Add trajectory type
         command_parts.append(trajectory_type)

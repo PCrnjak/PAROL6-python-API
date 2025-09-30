@@ -9,7 +9,7 @@ from collections import namedtuple
 from roboticstoolbox import DHRobot
 from spatialmath import SE3
 from spatialmath.base import trinterp
-import PAROL6_ROBOT
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 logger = logging.getLogger(__name__)
 

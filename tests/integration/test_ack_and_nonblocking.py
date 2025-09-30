@@ -9,13 +9,10 @@ import pytest
 import sys
 import os
 import time
-import uuid
-from typing import Dict, Any
 
 # Add the parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from tests.utils.udp import UDPClient
 from parol6 import RobotClient
 
 
@@ -89,11 +86,9 @@ class TestAcknowledmentTracking:
         )
         
         if isinstance(result, str):
-            cmd_id = result
             
             # Poll status while command runs
             start_time = time.time()
-            seen_statuses = []
             
             while time.time() - start_time < 2.0:
                 # In parol6, we would need to implement status polling or use tracker

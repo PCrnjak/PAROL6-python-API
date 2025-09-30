@@ -5,7 +5,7 @@ Contains commands for direct joint angle movements
 
 import logging
 import numpy as np
-import PAROL6_ROBOT
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import roboticstoolbox as rp
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class MoveJointCommand:
             if self.velocity_percent is not None:
                 logger.info("  -> INFO: Both duration and velocity were provided. Using duration.")
             command_len = int(self.duration / INTERVAL_S)
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
+            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len) # type: ignore
             
             for i in range(len(traj_generator.q)):
                 pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
@@ -121,7 +121,7 @@ class MoveJointCommand:
         else:
             logger.debug("  -> Using conservative values for MoveJoint.")
             command_len = 200
-            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len)
+            traj_generator = rp.tools.trajectory.jtraj(initial_pos_rad, target_pos_rad, command_len) # type: ignore
             for i in range(len(traj_generator.q)):
                 pos_step = [int(PAROL6_ROBOT.RAD2STEPS(p, j)) for j, p in enumerate(traj_generator.q[i])]
                 self.trajectory_steps.append((pos_step, None))

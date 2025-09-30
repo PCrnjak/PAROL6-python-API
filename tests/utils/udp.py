@@ -8,7 +8,7 @@ including acknowledgment listening and command sending utilities.
 import socket
 import time
 import threading
-from typing import Optional, Dict, Any, Callable, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 import logging
 import queue
 

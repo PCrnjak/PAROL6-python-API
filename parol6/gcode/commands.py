@@ -9,6 +9,7 @@ import numpy as np
 from typing import Dict, Optional
 import sys
 import os
+from parol6.PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
 
 # Add parent directory to path to import robot modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -136,7 +137,6 @@ class G1Command(GcodeCommand):
         # Convert feed rate (mm/min) to speed percentage
         # Import robot speed limits from configuration
         # Values are in m/s, convert to mm/min
-        from PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
         max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60  # m/s to mm/min
         min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60  # m/s to mm/min
         
@@ -237,7 +237,6 @@ class G2Command(GcodeCommand):
         start_rx, start_ry, start_rz = self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
         
         # Convert feed rate to speed percentage
-        from PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
         max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60
         min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60
         
@@ -345,7 +344,6 @@ class G3Command(GcodeCommand):
         start_rx, start_ry, start_rz = self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
         
         # Convert feed rate to speed percentage
-        from PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
         max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60
         min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60
         

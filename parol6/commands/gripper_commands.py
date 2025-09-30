@@ -4,7 +4,7 @@ Contains commands for electric and pneumatic gripper control
 """
 
 import logging
-import PAROL6_ROBOT
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 logger = logging.getLogger(__name__)
 

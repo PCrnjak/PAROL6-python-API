@@ -6,61 +6,27 @@ to the PAROL6 robot, as well as E-Stop functionality and safety limitations.
 
 # * If you press estop robot will stop and you need to enable it by pressing e
 
-from roboticstoolbox import DHRobot, RevoluteDH, ERobot, ELink, ETS, trapezoidal, quintic
-import roboticstoolbox as rp
-from math import pi, sin, cos
 import numpy as np
-from oclock import Timer, loop, interactiveloop
+from oclock import Timer
 import time
 import socket
-from spatialmath import SE3
 import select
 import serial
 import platform
 import os
-import re
 import logging
 import struct
 import keyboard
 import argparse
 import sys
 import json
-from typing import Optional, Tuple
-from spatialmath.base import trinterp
-from collections import namedtuple, deque
-from pathlib import Path
-
-# Ensure both package dir (parol6) and project root are on sys.path to import PAROL6_ROBOT and others
-_pkg_dir = Path(__file__).parent.parent        # .../parol6
-_root_dir = Path(__file__).parents[2]          # .../PAROL6-python-API
-for _p in (str(_root_dir), str(_pkg_dir)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-# Robust import of robot constants/kinematics
-try:
-    import PAROL6_ROBOT  # from project root
-except ModuleNotFoundError:
-    # Fallback: load directly from file path to handle non-standard execution contexts
-    try:
-        from importlib.util import spec_from_file_location, module_from_spec
-        _robot_path = (_root_dir / "PAROL6_ROBOT.py")
-        _spec = spec_from_file_location("PAROL6_ROBOT", str(_robot_path))
-        if _spec and _spec.loader:
-            PAROL6_ROBOT = module_from_spec(_spec)
-            sys.modules["PAROL6_ROBOT"] = PAROL6_ROBOT
-            _spec.loader.exec_module(PAROL6_ROBOT)  # type: ignore[attr-defined]
-        else:
-            raise
-    except Exception as e:
-        print(f"[FATAL] Unable to import PAROL6_ROBOT from {_robot_path}: {e}", file=sys.stderr)
-        raise
-
-from smooth_motion import CircularMotion, SplineMotion, MotionBlender, SCurveProfile, QuinticPolynomial, MotionConstraints
-from gcode import GcodeInterpreter
+from typing import Optional, Tuple, Any
+from collections import deque
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.gcode import GcodeInterpreter
 
 # Import all command classes from the modular commands directory
-from commands import (
+from parol6.commands import (
     # Helper class
     CommandValue,
     # Basic commands
@@ -74,7 +40,7 @@ from commands import (
     # Utility commands
     DelayCommand,
     # Smooth motion commands
-    SmoothTrajectoryCommand, SmoothCircleCommand,
+    SmoothCircleCommand,
     SmoothArcCenterCommand, SmoothArcParamCommand,
     SmoothHelixCommand, SmoothSplineCommand,
     SmoothBlendCommand, SmoothWaypointsCommand
@@ -234,11 +200,9 @@ int_to_3_bytes = struct.Struct('>I').pack # BIG endian order
 # data for output string (data that is being sent to the robot)
 #######################################################################################
 #######################################################################################
-start_bytes =  [0xff,0xff,0xff] 
-start_bytes = bytes(start_bytes)
+start_bytes = bytes([0xff,0xff,0xff])
 
-end_bytes =  [0x01,0x02] 
-end_bytes = bytes(end_bytes)
+end_bytes = bytes([0x01,0x02])
 
 
 # data for input string (Data that is being sent by the robot)
@@ -347,17 +311,17 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
     temp_error = data_buffer_list[38]
     position_error = data_buffer_list[39]
     timing_data = data_buffer_list[40:42]
-    Timeout_error_var = data_buffer_list[42]
-    xtr2 = data_buffer_list[43]
+    # Timeout_error_var = data_buffer_list[42]
+    # xtr2 = data_buffer_list[43]
     device_ID = data_buffer_list[44]
     Gripper_position = data_buffer_list[45:47]
     Gripper_speed = data_buffer_list[47:49]
     Gripper_current = data_buffer_list[49:51]
     Status = data_buffer_list[51]
     # The original object_detection byte at index 52 is ignored as it is not reliable.
-    CRC_byte = data_buffer_list[53]
-    endy_byte1 = data_buffer_list[54]
-    endy_byte2 = data_buffer_list[55]
+    # CRC_byte = data_buffer_list[53]
+    # endy_byte1 = data_buffer_list[54]
+    # endy_byte2 = data_buffer_list[55]
 
     # ... (Code for Homed, IO_var, temp_error, etc. remains the same) ...
 
@@ -379,8 +343,8 @@ def Unpack_data(data_buffer_list, Position_in,Speed_in,Homed_in,InOut_in,Tempera
 
     var = b'\x00' + b'\x00' + b''.join(timing_data)
     Timing_data_in[0] = Fuse_3_bytes(var)
-    Timeout_error = int.from_bytes(Timeout_error_var,"big")
-    XTR_data = int.from_bytes(xtr2,"big")
+    # Timeout_error = int.from_bytes(Timeout_error_var,"big")
+    # XTR_data = int.from_bytes(xtr2,"big")
 
     # --- Gripper Data Unpacking ---
     Gripper_data_in[0] = int.from_bytes(device_ID,"big")
@@ -749,7 +713,7 @@ def parse_smooth_motion_commands(parts):
         else:
             try:
                 return list(map(float, start_str.split(',')))
-            except:
+            except Exception:
                 logger.error(f"Warning: Invalid start pose format: {start_str}")
                 return None
     
@@ -1076,7 +1040,6 @@ def parse_smooth_motion_commands(parts):
                     
                 elif seg_type == 'SPLINE':
                     # Format: SPLINE|num_points|waypoint1;waypoint2;...|duration
-                    num_points = int(seg_parts[1])
                     waypoints = []
                     wp_strs = seg_parts[2].split(';')
                     for wp_str in wp_strs:
@@ -1207,7 +1170,7 @@ def send_acknowledgment(cmd_id: str, status: str, details: str = "", addr=None):
     # Also broadcast to localhost in case the client is local
     try:
         ack_socket.sendto(ack_message.encode('utf-8'), ('127.0.0.1', CLIENT_ACK_PORT))
-    except:
+    except Exception:
         pass
 
 def parse_command_with_id(message: str) -> Tuple[Optional[str], str]:
@@ -1326,7 +1289,7 @@ while timer.elapsed_time < 1100000:
                 
                 parts = message.split('|')
                 command_name = parts[0].upper()
-
+                command_obj: Any = None
                 # Immediate command dispatch
                 if command_name == 'STOP':
                     logger.info("Received STOP command. Halting all motion and clearing queue.")
@@ -1854,7 +1817,7 @@ while timer.elapsed_time < 1100000:
                             error_details = "Failed to load inline GCODE program"
                             command_queued = False
                     else:
-                        error_details = f"Invalid GCODE_PROGRAM format"
+                        error_details = "Invalid GCODE_PROGRAM format"
                         command_queued = False
                         
                 except Exception as e:

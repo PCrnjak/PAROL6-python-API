@@ -9,11 +9,9 @@ import socket
 from typing import List, Optional, Literal, Dict, Tuple, Union
 import time
 import threading
-import queue
 import uuid
 import json
 import os
-from collections import deque
 from datetime import datetime, timedelta
 
 def _get_env_int(name: str, default: int) -> int:
@@ -844,7 +842,7 @@ def smooth_spline(
         waypoint_strs.extend(map(str, wp))
     
     # Build command with trajectory type
-    command_parts = [f"SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
+    command_parts = ["SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str]
     
     # Add trajectory type
     command_parts.append(trajectory_type)

@@ -16,13 +16,16 @@ Compatible with:
 import sys
 import warnings
 from collections import namedtuple
-from typing import Tuple, Optional, Dict, List, Union
+from typing import Tuple, Optional, Dict, List, Sequence, Union, Any
 from roboticstoolbox import DHRobot
 from spatialmath.base import trinterp
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from spatialmath import SE3
 
 # Version compatibility check
 try:
     import numpy as np
+    from numpy.typing import NDArray
     # Numpy version validation
     np_version = tuple(map(int, np.__version__.split('.')[:2]))
     if np_version < (1, 23):
@@ -40,18 +43,6 @@ except ImportError as e:
     print(f"Error importing required packages: {e}")
     print("Please install: pip3 install numpy==1.23.4 scipy==1.11.4")
     sys.exit(1)
-
-from spatialmath import SE3
-import time
-from typing import List, Tuple, Optional, Dict, Union
-from collections import deque
-
-# Import PAROL6 specific modules (these should be in your path)
-try:
-    import PAROL6_ROBOT
-except ImportError:
-    print("Warning: PAROL6 modules not found. Some functions may not work.")
-    PAROL6_ROBOT = None
 
 # Global variable to track previous tolerance for logging changes
 _prev_tolerance = None
@@ -142,7 +133,7 @@ def solve_ik_with_adaptive_tol_subdivision(
         robot: DHRobot,
         target_pose: SE3,
         current_q,
-        current_pose: SE3 = None,
+        current_pose: SE3 | None = None,
         max_depth: int = 4,
         ilimit: int = 100,
         jogging: bool = False
@@ -475,7 +466,7 @@ class QuinticPolynomial:
         
         return validation
     
-    def validate_numerical_stability(self) -> Dict[str, any]:
+    def validate_numerical_stability(self) -> Dict[str, Any]:
         """
         Check for potential numerical stability issues.
         
@@ -602,7 +593,7 @@ class MultiAxisQuinticTrajectory:
         Returns:
             Dictionary with 'position', 'velocity', 'acceleration', 'jerk' lists
         """
-        result = {
+        result: Dict[str, List[float]] = {
             'position': [],
             'velocity': [],
             'acceleration': [],
@@ -1345,7 +1336,7 @@ class TrajectoryGenerator:
         self.trajectory_cache = {}
         self.constraints = MotionConstraints()  # Add constraints
         
-    def generate_timestamps(self, duration: float) -> np.ndarray:
+    def generate_timestamps(self, duration: Union[float, np.floating]) -> np.ndarray:
         """Generate evenly spaced timestamps for trajectory"""
         num_points = int(duration * self.control_rate)
         return np.linspace(0, duration, num_points)
@@ -1354,12 +1345,12 @@ class CircularMotion(TrajectoryGenerator):
     """Generate circular and arc trajectories in 3D space"""
     
     def generate_arc_3d(self, 
-                       start_pose: List[float], 
-                       end_pose: List[float], 
-                       center: List[float], 
-                       normal: Optional[List[float]] = None,
+                       start_pose: Sequence[float], 
+                       end_pose: Sequence[float], 
+                       center: Union[Sequence[float], NDArray], 
+                       normal: Optional[Union[Sequence[float], NDArray]] = None,
                        clockwise: bool = True,
-                       duration: float = 2.0) -> np.ndarray:
+                       duration: Union[float, np.floating] = 2.0) -> np.ndarray:
         """
         Generate a 3D circular arc trajectory
         
@@ -1382,13 +1373,13 @@ class CircularMotion(TrajectoryGenerator):
         # Arc geometry vectors
         r1 = start_pos - center_pt
         r2 = end_pos - center_pt
-        radius = np.linalg.norm(r1)
         
         # Arc plane normal computation
         if normal is None:
             normal = np.cross(r1, r2)
             if np.linalg.norm(normal) < 1e-6:  # Points are collinear
                 normal = np.array([0, 0, 1])  # Default to XY plane
+        normal = np.array(normal)
         normal = normal / np.linalg.norm(normal)
         
         # Arc sweep angle calculation
@@ -1432,12 +1423,12 @@ class CircularMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_arc_with_profile(self,
-                                 start_pose: List[float],
-                                 end_pose: List[float],
-                                 center: List[float],
-                                 normal: Optional[List[float]] = None,
+                                 start_pose: Sequence[float],
+                                 end_pose: Sequence[float],
+                                 center: Union[Sequence[float], NDArray],
+                                 normal: Optional[Union[Sequence[float], NDArray]] = None,
                                  clockwise: bool = True,
-                                 duration: float = 2.0,
+                                 duration: Union[float, np.floating] = 2.0,
                                  trajectory_type: str = 'cubic',
                                  jerk_limit: Optional[float] = None) -> np.ndarray:
         """
@@ -1471,13 +1462,13 @@ class CircularMotion(TrajectoryGenerator):
         # Arc geometry
         r1 = start_pos - center_pt
         r2 = end_pos - center_pt
-        radius = np.linalg.norm(r1)
         
         # Arc plane normal
         if normal is None:
             normal = np.cross(r1, r2)
             if np.linalg.norm(normal) < 1e-6:
                 normal = np.array([0, 0, 1])
+        normal = np.array(normal)
         normal = normal / np.linalg.norm(normal)
         
         # Calculate arc angle
@@ -1533,12 +1524,12 @@ class CircularMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_circle_3d(self,
-                      center: List[float],
+                      center: Union[Sequence[float], NDArray],
                       radius: float,
-                      normal: List[float] = [0, 0, 1],
-                      start_angle: float = None,
-                      duration: float = 4.0,
-                      start_point: List[float] = None) -> np.ndarray:
+                      normal: Union[Sequence[float], NDArray] = [0, 0, 1],
+                      start_angle: Optional[float] = None,
+                      duration: Union[float, np.floating] = 4.0,
+                      start_point: Optional[Sequence[float]] = None) -> np.ndarray:
         """
         Generate a complete circle trajectory that starts at start_point
         """
@@ -1546,8 +1537,8 @@ class CircularMotion(TrajectoryGenerator):
         trajectory = []
         
         # Circle coordinate system
-        normal_np = np.array(normal)
-        normal = normal_np / np.linalg.norm(normal_np)
+        normal = np.array(normal)
+        normal = normal / np.linalg.norm(normal)
         u = self._get_perpendicular_vector(normal)
         v = np.cross(normal, u)
         
@@ -1566,7 +1557,7 @@ class CircularMotion(TrajectoryGenerator):
             
             if dist_in_plane < 0.001:
                 # Center start point - undefined angle
-                print(f"    WARNING: Start point is at circle center, using default position")
+                print("    WARNING: Start point is at circle center, using default position")
                 start_angle = 0
                 actual_start = center_np + radius * u
             else:
@@ -1581,7 +1572,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.3:  # More than 30% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
                     # Note: We do NOT adjust the center - this ensures repeatability
                     # The same command will always produce the same geometric circle
                 
@@ -1607,14 +1598,14 @@ class CircularMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_circle_with_profile(self,
-                                    center: List[float],
+                                    center: Union[Sequence[float], NDArray],
                                     radius: float,
-                                    normal: List[float] = [0, 0, 1],
-                                    duration: float = 4.0,
+                                    normal: Union[Sequence[float], NDArray] = [0, 0, 1],
+                                    duration: Union[float, np.floating] = 4.0,
                                     trajectory_type: str = 'cubic',
                                     jerk_limit: Optional[float] = None,
-                                    start_angle: float = None,
-                                    start_point: List[float] = None) -> np.ndarray:
+                                    start_angle: Optional[float] = None,
+                                    start_point: Optional[Sequence[float]] = None) -> np.ndarray:
         """
         Generate circle with specified trajectory profile.
         
@@ -1639,7 +1630,7 @@ class CircularMotion(TrajectoryGenerator):
         # Calculate control rate (100-200Hz range)
         base_rate = self.control_rate
         required_rate = min_points / duration
-        adaptive_rate = min(200, max(base_rate, required_rate))
+        adaptive_rate = float(min(200, max(base_rate, required_rate)))
         
         # Temporarily override control rate for small circles
         if radius < 30 and adaptive_rate > base_rate:
@@ -1665,19 +1656,19 @@ class CircularMotion(TrajectoryGenerator):
                 raise ValueError(f"Unknown trajectory type: {trajectory_type}")
         finally:
             # Restore original control rate if we changed it
-            if original_rate is not None:
+            if original_rate is not None and original_dt is not None:
                 self.control_rate = original_rate
                 self.dt = original_dt
         
         return result
     
     def generate_quintic_circle(self,
-                               center: List[float],
+                               center: Union[Sequence[float], NDArray],
                                radius: float,
-                               normal: List[float] = [0, 0, 1],
-                               duration: float = 4.0,
-                               start_angle: float = None,
-                               start_point: List[float] = None) -> np.ndarray:
+                               normal: Union[Sequence[float], NDArray] = [0, 0, 1],
+                               duration: Union[float, np.floating] = 4.0,
+                               start_angle: Optional[float] = None,
+                               start_point: Optional[Sequence[float]] = None) -> np.ndarray:
         """
         Generate circle trajectory using quintic polynomial velocity profile.
         Provides smooth acceleration and deceleration in Cartesian space.
@@ -1686,8 +1677,8 @@ class CircularMotion(TrajectoryGenerator):
         num_points = int(duration * self.control_rate)
         
         # Setup coordinate system
-        normal_np = np.array(normal)
-        normal = normal_np / np.linalg.norm(normal_np)
+        normal = np.array(normal)
+        normal = normal / np.linalg.norm(normal)
         u = self._get_perpendicular_vector(normal)
         v = np.cross(normal, u)
         center_np = np.array(center)
@@ -1712,7 +1703,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
         else:
             start_angle = 0 if start_angle is None else start_angle
         
@@ -1756,13 +1747,13 @@ class CircularMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_scurve_circle(self,
-                              center: List[float],
+                              center: Union[Sequence[float], NDArray],
                               radius: float,
-                              normal: List[float] = [0, 0, 1],
-                              duration: float = 4.0,
+                              normal: Union[Sequence[float], NDArray] = [0, 0, 1],
+                              duration: Union[float, np.floating] = 4.0,
                               jerk_limit: Optional[float] = 5000.0,
-                              start_angle: float = None,
-                              start_point: List[float] = None) -> np.ndarray:
+                              start_angle: Optional[float] = None,
+                              start_point: Optional[Sequence[float]] = None) -> np.ndarray:
         """
         Generate circle trajectory using S-curve velocity profile.
         Provides jerk-limited motion in Cartesian space for maximum smoothness.
@@ -1774,8 +1765,8 @@ class CircularMotion(TrajectoryGenerator):
         num_points = int(duration * self.control_rate)
         
         # Setup coordinate system
-        normal_np = np.array(normal)
-        normal = normal_np / np.linalg.norm(normal_np)
+        normal = np.array(normal)
+        normal = normal / np.linalg.norm(normal)
         u = self._get_perpendicular_vector(normal)
         v = np.cross(normal, u)
         center_np = np.array(center)
@@ -1800,7 +1791,7 @@ class CircularMotion(TrajectoryGenerator):
                 if radius_error > radius * 0.05:  # More than 5% off
                     print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print(f"    WARNING: Large distance from circle - consider using entry trajectory")
+                        print("    WARNING: Large distance from circle - consider using entry trajectory")
         else:
             start_angle = 0 if start_angle is None else start_angle
         
@@ -1880,7 +1871,7 @@ class CircularMotion(TrajectoryGenerator):
                             normal: np.ndarray,
                             duration: float = 1.0,
                             profile_type: str = 'quintic',
-                            control_rate: float = None) -> np.ndarray:
+                            control_rate: float | None = None) -> np.ndarray:
         """
         Generate smooth entry trajectory to circle starting point.
         
@@ -1953,8 +1944,8 @@ class CircularMotion(TrajectoryGenerator):
         
         return np.array(trajectory)
     
-    def _slerp_orientation(self, start_orient: List[float], 
-                          end_orient: List[float], 
+    def _slerp_orientation(self, start_orient: NDArray[np.floating], 
+                          end_orient: NDArray[np.floating], 
                           t: float) -> np.ndarray:
         """Spherical linear interpolation for orientation"""
         # Convert to quaternions
@@ -1983,15 +1974,15 @@ class HelixMotion(TrajectoryGenerator):
             return np.cross(v, [0, 1, 0]) / np.linalg.norm(np.cross(v, [0, 1, 0]))
     
     def generate_helix_with_profile(self,
-                                   center: List[float],
+                                   center: Union[Sequence[float], NDArray],
                                    radius: float,
                                    pitch: float,
                                    height: float,
-                                   axis: List[float] = [0, 0, 1],
-                                   duration: float = 4.0,
+                                   axis: Union[Sequence[float], NDArray] = [0, 0, 1],
+                                   duration: Union[float, np.floating] = 4.0,
                                    trajectory_type: str = 'cubic',
                                    jerk_limit: Optional[float] = None,
-                                   start_point: Optional[List[float]] = None,
+                                   start_point: Optional[Sequence[float]] = None,
                                    clockwise: bool = False) -> np.ndarray:
         """
         Generate helix with specified trajectory profile.
@@ -2030,13 +2021,13 @@ class HelixMotion(TrajectoryGenerator):
             raise ValueError(f"Unknown trajectory type: {trajectory_type}")
     
     def generate_cubic_helix(self,
-                           center: List[float],
+                           center: Union[Sequence[float], NDArray],
                            radius: float,
                            pitch: float,
                            height: float,
-                           axis: List[float] = [0, 0, 1],
-                           duration: float = 4.0,
-                           start_point: Optional[List[float]] = None,
+                           axis: Union[Sequence[float], NDArray] = [0, 0, 1],
+                           duration: Union[float, np.floating] = 4.0,
+                           start_point: Optional[Sequence[float]] = None,
                            clockwise: bool = False) -> np.ndarray:
         """
         Generate helix with cubic (linear) interpolation.
@@ -2047,8 +2038,8 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
         
         # Setup coordinate system
-        axis_np = np.array(axis)
-        axis = axis_np / np.linalg.norm(axis_np)
+        axis = np.array(axis)
+        axis = axis / np.linalg.norm(axis)
         u = self._get_perpendicular_vector(axis)
         v = np.cross(axis, u)
         center_np = np.array(center)
@@ -2096,13 +2087,13 @@ class HelixMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_quintic_helix(self,
-                              center: List[float],
+                              center: Union[Sequence[float], NDArray],
                               radius: float,
                               pitch: float,
                               height: float,
-                              axis: List[float] = [0, 0, 1],
-                              duration: float = 4.0,
-                              start_point: Optional[List[float]] = None,
+                              axis: Union[Sequence[float], NDArray] = [0, 0, 1],
+                              duration: Union[float, np.floating] = 4.0,
+                              start_point: Optional[Sequence[float]] = None,
                               clockwise: bool = False) -> np.ndarray:
         """
         Generate helix with quintic polynomial profile.
@@ -2113,8 +2104,8 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
         
         # Setup coordinate system
-        axis_np = np.array(axis)
-        axis = axis_np / np.linalg.norm(axis_np)
+        axis = np.array(axis)
+        axis = axis / np.linalg.norm(axis)
         u = self._get_perpendicular_vector(axis)
         v = np.cross(axis, u)
         center_np = np.array(center)
@@ -2162,14 +2153,14 @@ class HelixMotion(TrajectoryGenerator):
         return np.array(trajectory)
     
     def generate_scurve_helix(self,
-                             center: List[float],
+                             center: Union[Sequence[float], NDArray],
                              radius: float,
                              pitch: float,
                              height: float,
-                             axis: List[float] = [0, 0, 1],
-                             duration: float = 4.0,
+                             axis: Union[Sequence[float], NDArray] = [0, 0, 1],
+                             duration: Union[float, np.floating] = 4.0,
                              jerk_limit: Optional[float] = None,
-                             start_point: Optional[List[float]] = None,
+                             start_point: Optional[Sequence[float]] = None,
                              clockwise: bool = False) -> np.ndarray:
         """
         Generate helix with S-curve (smoothstep) profile.
@@ -2180,8 +2171,8 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
         
         # Setup coordinate system
-        axis_np = np.array(axis)
-        axis = axis_np / np.linalg.norm(axis_np)
+        axis = np.array(axis)
+        axis = axis / np.linalg.norm(axis)
         u = self._get_perpendicular_vector(axis)
         v = np.cross(axis, u)
         center_np = np.array(center)
@@ -2295,18 +2286,18 @@ class SplineMotion(TrajectoryGenerator):
             
             # Determine boundary velocities based on behavior
             if behavior == 'stop':
-                v0 = [0] * 6
-                vf = [0] * 6
+                v0 = [0.0] * 6
+                vf = [0.0] * 6
             else:  # continuous
                 # Calculate velocities for smooth transition
                 if i == 0:
-                    v0 = [0] * 6
+                    v0 = [0.0] * 6
                 else:
                     # Use previous segment's final velocity
-                    v0 = prev_vf if prev_vf is not None else [0] * 6
+                    v0 = prev_vf if prev_vf is not None else [0.0] * 6
                 
                 if i == num_waypoints - 2:
-                    vf = [0] * 6
+                    vf = [0.0] * 6
                 else:
                     # Calculate velocity toward next waypoint using correct segment timing
                     # Use the NEXT segment's time, not current segment time
@@ -2565,7 +2556,6 @@ class SplineMotion(TrajectoryGenerator):
             s_curve_params.append(s)
         
         # Re-sample the trajectory according to S-curve profile
-        original_indices = np.linspace(0, len(basic_trajectory) - 1, len(basic_trajectory))
         new_indices = np.array(s_curve_params) * (len(basic_trajectory) - 1)
         
         # Interpolate each dimension
@@ -2877,7 +2867,7 @@ class AdvancedMotionBlender:
                 blend_traj.append(pose)
             
             return np.array(blend_traj)
-        except:
+        except Exception:
             # Fallback to quintic if S-curve not available
             return self._blend_quintic(traj1, traj2, blend_samples)
     
@@ -2913,7 +2903,6 @@ class AdvancedMotionBlender:
         p0, v0, a0 = self.extract_trajectory_state(traj1, -1)
         pf, vf, af = self.extract_trajectory_state(traj2, 0)
         
-        T = blend_samples * self.dt
         blend_traj = []
         
         for i in range(blend_samples):
@@ -2939,7 +2928,6 @@ class AdvancedMotionBlender:
         
         # Cubic coefficients (4 constraints: p0, pf, v0, vf)
         # p(t) = a0 + a1*t + a2*t² + a3*t³
-        num_dims = len(p0)
         blend_traj = []
         
         for i in range(blend_samples):
@@ -3522,9 +3510,6 @@ class WaypointTrajectoryPlanner:
         if total_length < 1e-6:
             return trajectory
         
-        # Normalize arc lengths to [0, 1]
-        s_values = np.array(arc_lengths) / total_length
-        
         # Generate new time mapping based on profile
         num_points = len(trajectory)
         new_trajectory = np.zeros_like(trajectory)
@@ -3679,7 +3664,7 @@ class SmoothMotionCommand:
             )
             
             if not ik_result.success:
-                print(f"Smooth motion validation failed: Cannot reach first waypoint")
+                print("Smooth motion validation failed: Cannot reach first waypoint")
                 self.is_valid = False
                 return False
                 
