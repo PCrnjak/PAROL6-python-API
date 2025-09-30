@@ -123,3 +123,5 @@ cython_debug/
 
 # VS Code
 .vscode/
+
+serial_port.txt

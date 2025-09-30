@@ -7,44 +7,17 @@ Implements command objects that interface with the existing robot API.
 
 import numpy as np
 from typing import Dict, Optional
-import sys
-import os
-from parol6.PAROL6_ROBOT import Cartesian_linear_velocity_max, Cartesian_linear_velocity_min
-
-# Add parent directory to path to import robot modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from parol6.PAROL6_ROBOT import cart
 from .state import GcodeState
 from .coordinates import WorkCoordinateSystem
 from .utils import ijk_to_center, radius_to_center, validate_arc
+from parol6.commands.base import CommandBase
 
-
-class GcodeCommand:
+class GcodeCommand(CommandBase):
     """Base class for GCODE commands"""
     
     def __init__(self):
-        self.is_valid = True
-        self.is_finished = False
-        self.error_message = None
-        
-    def prepare_for_execution(self, current_position_in):
-        """
-        Prepare command for execution
-        
-        Args:
-            current_position_in: Current robot position
-        """
-        pass
-    
-    def execute_step(self, Position_in, Homed_in, Speed_out, Command_out, **kwargs):
-        """
-        Execute one step of the command
-        
-        Returns:
-            True if command is finished
-        """
-        self.is_finished = True
-        return self.is_finished
+        super().__init__()
     
     def to_robot_command(self) -> str:
         """
@@ -137,8 +110,8 @@ class G1Command(GcodeCommand):
         # Convert feed rate (mm/min) to speed percentage
         # Import robot speed limits from configuration
         # Values are in m/s, convert to mm/min
-        max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60  # m/s to mm/min
-        min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60  # m/s to mm/min
+        max_speed_mm_min = cart.vel.linear.max * 1000 * 60  # m/s to mm/min
+        min_speed_mm_min = cart.vel.linear.min * 1000 * 60  # m/s to mm/min
         
         # Map feed rate to percentage (0-100)
         speed_percentage = np.interp(
@@ -237,8 +210,8 @@ class G2Command(GcodeCommand):
         start_rx, start_ry, start_rz = self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
         
         # Convert feed rate to speed percentage
-        max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60
-        min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60
+        max_speed_mm_min = cart.vel.linear.max * 1000 * 60
+        min_speed_mm_min = cart.vel.linear.min * 1000 * 60
         
         speed_percentage = np.interp(
             self.feed_rate,
@@ -344,8 +317,8 @@ class G3Command(GcodeCommand):
         start_rx, start_ry, start_rz = self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
         
         # Convert feed rate to speed percentage
-        max_speed_mm_min = Cartesian_linear_velocity_max * 1000 * 60
-        min_speed_mm_min = Cartesian_linear_velocity_min * 1000 * 60
+        max_speed_mm_min = cart.vel.linear.max * 1000 * 60
+        min_speed_mm_min = cart.vel.linear.min * 1000 * 60
         
         speed_percentage = np.interp(
             self.feed_rate,
@@ -380,10 +353,10 @@ class G4Command(GcodeCommand):
         """
         super().__init__()
         # Validate and clamp dwell time
-        if dwell_time < 0:
-            self.dwell_time = 0
-        elif dwell_time > 300:  # Max 5 minutes
-            self.dwell_time = 300
+        if dwell_time < 0.0:
+            self.dwell_time = 0.0
+        elif dwell_time > 300.0:  # Max 5 minutes
+            self.dwell_time = 300.0
         else:
             self.dwell_time = dwell_time
     

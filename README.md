@@ -2,7 +2,7 @@
 
 ## 1. Important Notes & Disclaimers
 * **Software Origin**: This control system is based on the `experimental_kinematics` branch of the `PAROL_commander_software` repository. The core communication functions were derived from the `Serial_sender_good_latest.py` file; however, the approach to motion planning has been altered from the original implementation. This system was created by editing the `Commander_minimal_version.py` file, which was used as a base.
-* **Automatic Homing on Startup**: By default, the `headless_commander.py` script will immediately command the robot to home itself upon startup. This is done for convenience but can be disabled. To prevent automatic homing, comment out or delete the corresponding line in `headless_commander.py`.
+* **Automatic Homing on Startup**: By default, the controller will home on startup. To disable auto-home without editing code, set environment variable `PAROL6_NOAUTOHOME=1` (the provided ServerManager does this by default in tests). If starting programmatically, pass `no_autohome=True` when launching the server.
 * **AI-Assisted Development**: This code was developed with significant AI assistance. While the core logic has been corrected and improved, it has not been exhaustively tested in all scenarios. Users should proceed with caution and verify functionality for their specific needs.
 
 ## 2. Safety Precautions & Disclaimer
@@ -45,14 +45,14 @@ pip3 install keyboard
 ### Client-Server Design
 The system uses a UDP-based client-server architecture that separates robot control from command generation:
 
-* **The Robot Controller (`headless_commander.py`)**: 
+* **The Robot Controller (`controller.py`)**: 
   - Runs on the computer physically connected to the robot via USB/Serial
-  - Maintains a high-frequency control loop (100Hz) for real-time robot control
+  - Maintains a high-frequency control loop for real-time robot control
   - Handles all complex calculations (inverse kinematics, trajectory planning)
   - Requires heavy dependencies (roboticstoolbox, numpy, scipy)
   - Listens for UDP commands on port 5001
 
-* **The Remote Client (`robot_api.py`)**: 
+* **The Python Client (`parol6.client`)**: 
   - Can run on any computer (same or different from controller)
   - Sends simple text commands via UDP
   - Requires minimal dependencies (mostly Python standard library)
@@ -60,13 +60,13 @@ The system uses a UDP-based client-server architecture that separates robot cont
   - Optionally receives acknowledgments on port 5002
 
 * **Support Modules**:
-  - `smooth_motion.py`: Advanced trajectory generation algorithms
+  - `parol6/smooth_motion/`: Advanced trajectory generation algorithms (modular package)
   - `PAROL6_ROBOT.py`: Robot-specific parameters and kinematic model
 
 ### Command Module Architecture
 The robot controller organizes command execution through a modular architecture. All command classes are located in `./commands/`, with each module containing functionally related commands:
 
-* **`ik_helpers.py`** - Inverse kinematics solving and helper functions
+* **`utils/ik.py`** - Inverse kinematics solving and helper functions (moved from commands)
 * **`basic_commands.py`** - Home, Jog, and MultiJog commands
 * **`cartesian_commands.py`** - Cartesian space movement commands
 * **`joint_commands.py`** - Joint space movement commands
@@ -733,7 +733,7 @@ These commands request current robot state without moving the robot:
 
 The system is designed with a client-server architecture where most dependencies are only needed on the server (robot controller) side. The client API (`robot_api.py`) uses only standard Python libraries for UDP communication, making it lightweight and portable.
 
-#### Server Dependencies (for `headless_commander.py`)
+#### Server Dependencies (for `controller.py`)
 Install Python 3 and the following packages on the computer connected to the robot:
 
 ```bash
@@ -769,11 +769,11 @@ pip3 install spatialmath
 
 #### Server Side (Robot Controller Computer)
 Required files in the same folder:
-* `headless_commander.py` - Main server/controller
+* `controller.py` - Main server/controller
 * `PAROL6_ROBOT.py` - Robot configuration and kinematic model  
-* `smooth_motion.py` - Advanced trajectory generation
+* `parol6/smooth_motion/` - Advanced trajectory generation package (split modules)
 * `commands/` - Modular command classes directory
-  - `ik_helpers.py` - IK solving and helper functions
+  - `utils/ik.py` - IK solving and helper functions
   - `basic_commands.py` - Home, Jog, MultiJog commands
   - `cartesian_commands.py` - Cartesian movement commands
   - `joint_commands.py` - Joint space movements
@@ -807,7 +807,7 @@ The client can run on any computer on the same network as the server, or on the 
 
 2. **Start Controller**: On the robot controller computer, navigate to the folder containing the server files and run:
     ```bash
-    python headless_commander.py
+    python controller.py
     ```
     The controller will:
     - Connect to the robot via serial port (prompts if `com_port.txt` not found)
@@ -905,3 +905,29 @@ while True:
 For additional support, refer to the [PAROL commander software repository](https://github.com/PCrnjak/PAROL-commander-software).
 
 Or you can head over to the [PAROL6 Discord channel](https://discord.com/invite/prjUvjmGpZ) for extra support
+
+## Refactored Python API quick start (parol6)
+
+The legacy examples use `robot_api.py`. In the refactored API, use the packaged client:
+
+```python
+from parol6 import RobotClient
+# or: from parol6.client import AsyncRobotClient
+
+client = RobotClient(host="127.0.0.1", port=5001, ack_port=5002)
+
+# Ping server
+assert client.ping() is not None
+
+# Tracked home
+result = client.home(wait_for_ack=True, timeout=15.0)
+print(result)  # {'status': 'QUEUED'/'COMPLETED'/..., 'command_id': '...', 'completed': bool, 'details': '...', 'ack_time': datetime or None}
+
+# Basic getters
+angles = client.get_angles()
+io = client.get_io()
+```
+
+Notes:
+- To disable auto-homing on server startup, set `PAROL6_NOAUTOHOME=1`.
+- Smooth motion internals are now a modular package at `parol6/smooth_motion/` with stable re-exports in `parol6.smooth_motion`.

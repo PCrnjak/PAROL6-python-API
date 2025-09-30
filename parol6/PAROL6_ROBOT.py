@@ -1,336 +1,518 @@
-# This file acts as configuration file for robot you are using
-# It works in conjustion with configuration file from robotics toolbox
-from roboticstoolbox import DHRobot, RevoluteDH
+# Clean, hierarchical, vectorized, and typed robot configuration and helpers
+from dataclasses import dataclass
 from math import pi
+from typing import Final, Callable, Sequence, Union, Any
+import logging
+from numpy.typing import ArrayLike
 import numpy as np
+from numpy.typing import NDArray
+from roboticstoolbox import DHRobot, RevoluteDH
 
-Joint_num = 6 # Number of joints
+logger = logging.getLogger(__name__)
+
+# -----------------------------
+# Typing aliases
+# -----------------------------
+IndexArg = Union[int, NDArray[np.int_], None]
+
+Vec6f = NDArray[np.float64]
+Vec6i = NDArray[np.int32]
+Limits2f = NDArray[np.float64]  # shape (6,2)
+
+# -----------------------------
+# Kinematics and conversion constants
+# -----------------------------
+Joint_num = 6
 Microstep = 32
-steps_per_revolution=200
-degree_per_step_constant = 360/(32*200) 
-radian_per_step_constant = (2*pi) / (32*200)
-radian_per_sec_2_deg_per_sec_const = 360/ (2*np.pi)
-deg_per_sec_2_radian_per_sec_const = (2*np.pi) / 360
+steps_per_revolution = 200
 
-# robot length values (metres)
-a1 = 110.50 / 1000
-a2 = 23.42 / 1000
-a3 = 180 / 1000
-a4 = 43.5 / 1000
-a5 = 176.35 / 1000
-a6 = 62.8 / 1000
-a7 = 45.25 / 1000
+# Conversion constants
+degree_per_step_constant: float = 360.0 / (Microstep * steps_per_revolution)
+radian_per_step_constant: float = (2.0 * np.pi) / (Microstep * steps_per_revolution)
+radian_per_sec_2_deg_per_sec_const: float = 360.0 / (2.0 * np.pi)
+deg_per_sec_2_radian_per_sec_const: float = (2.0 * np.pi) / 360.0
 
-# robot length values for electric gripper (metres) [replace a6 and a7 values with the below values]
-# a6 = 117 / 1000
-# a7 = 0 / 1000
+# -----------------------------
+# Robot geometry (meters)
+# -----------------------------
+a1 = 110.50 / 1000.0
+a2 = 23.42 / 1000.0
+a3 = 180.0 / 1000.0
+a4 = 43.5 / 1000.0
+a5 = 176.35 / 1000.0
+a6 = 62.8 / 1000.0
+a7 = 45.25 / 1000.0
 
-alpha_DH = [-pi / 2,pi,pi/2,-pi/2,pi/2,pi]
+# For electric gripper, these may change:
+# a6 = 117 / 1000.0
+# a7 = 0 / 1000.0
 
+alpha_DH = np.array([-pi / 2, pi, pi / 2, -pi / 2, pi / 2, pi], dtype=np.float64)
+
+# DH Robot model
 robot = DHRobot(
     [
-        RevoluteDH(d=a1, a=a2, alpha=alpha_DH[0]),
-        RevoluteDH(a=a3,d = 0,alpha=alpha_DH[1]),
-        RevoluteDH(alpha= alpha_DH[2], a= -a4),
-        RevoluteDH(d=-a5, a=0, alpha=alpha_DH[3]),
-        RevoluteDH(a=0,d=0,alpha=alpha_DH[4]),
-        RevoluteDH(alpha=alpha_DH[5], a = -a7,d = -a6),
+        RevoluteDH(d=a1, a=a2, alpha=float(alpha_DH[0])),
+        RevoluteDH(a=a3, d=0.0, alpha=float(alpha_DH[1])),
+        RevoluteDH(alpha=float(alpha_DH[2]), a=-a4),
+        RevoluteDH(d=-a5, a=0.0, alpha=float(alpha_DH[3])),
+        RevoluteDH(a=0.0, d=0.0, alpha=float(alpha_DH[4])),
+        RevoluteDH(alpha=float(alpha_DH[5]), a=-a7, d=-a6),
     ],
     name="PAROL6",
 )
-#print(robot.isspherical())
-#pyplot = rtb.backends.PyPlot()
 
-# in degrees
-Joints_standby_position_degree = np.array([0,-90,180,0,0,180]) 
-# in radians
-Joints_standby_position_radian = [np.deg2rad(angle) for angle in Joints_standby_position_degree]
+# -----------------------------
+# Raw parameter arrays
+# -----------------------------
+# Limits (deg) you get after homing and moving to extremes
+_joint_limits_degree: Limits2f = np.array(
+    [
+        [-123.046875, 123.046875],
+        [-145.0088, -3.375],
+        [107.866, 287.8675],
+        [-105.46975, 105.46975],
+        [-90.0, 90.0],
+        [0.0, 360.0],
+    ],
+    dtype=np.float64,
+)
 
-# values you get after homing robot and moving it to its most left and right sides
-# In degrees
-Joint_limits_degree: list[list[float]] =[[-123.046875,123.046875], [-145.0088,-3.375], [107.866,287.8675], [-105.46975,105.46975], [-90,90], [0,360]] 
+_joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree).astype(np.float64)
 
-# in radians
-Joint_limits_radian = []
-for limits in Joint_limits_degree:
-    radian_limits = [np.deg2rad(angle) for angle in limits]
-    Joint_limits_radian.append(radian_limits)
+# Reduction ratio per joint
+_joint_ratio: NDArray[np.float64] = np.array(
+    [6.4, 20.0, 20.0 * (38.0 / 42.0), 4.0, 4.0, 10.0], dtype=np.float64
+)
 
-# Reduction ratio we have on our joints
-Joint_reduction_ratio = [6.4, 20, 20*(38/42) , 4, 4, 10] 
+# Joint speeds (steps/s)
+_joint_max_speed: Vec6i = np.array([6500, 18000, 20000, 20000, 22000, 22000], dtype=np.int32)
+_joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
-# min and max jog speeds. Usually slower from real maximal speeds
-Joint_max_jog_speed = [1500, 3000, 3600, 7000, 7000, 18000]
-Joint_min_jog_speed = [100,100,100,100,100,100]
+# Jog speeds (steps/s)
+_joint_max_jog_speed: Vec6i = np.array([1500, 3000, 3600, 7000, 7000, 18000], dtype=np.int32)
+_joint_min_jog_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
-# LINEAR CARTESIAN JOG MAX MIN SPEED IN METERS PER SECOND
-Cartesian_linear_velocity_min_JOG = 0.002
-Cartesian_linear_velocity_max_JOG = 0.06
+# Joint accelerations (rad/s^2) - scalar limits applied per joint
+_joint_max_acc_rad: float = float(32000)
+_joint_min_acc_rad: float = float(100)
 
-# LINEAR CARTESIAN MAX MIN SPEED IN METERS PER SECOND
-Cartesian_linear_velocity_min = 0.002
-Cartesian_linear_velocity_max = 0.06
+# Maximum jerk limits (steps/s^3) per joint
+_joint_max_jerk: Vec6i = np.array([1600, 1000, 1100, 3000, 3000, 2000], dtype=np.int32)
 
-# LINEAR CARTESIAN MAX MIN ACC IN METERS PER SECOND²
-Cartesian_linear_acc_min = 0.002
-Cartesian_linear_acc_max = 0.06
+# Cartesian limits
+_cart_linear_velocity_min_JOG: float = float(0.002)
+_cart_linear_velocity_max_JOG: float = float(0.06)
 
-# ANGULAR CARTESIAN JOG MAX MIN SPEED IN DEGREES PER SECOND
-Cartesian_angular_velocity_min = 0.7
-Cartesian_angular_velocity_max = 25
+_cart_linear_velocity_min: float = float(0.002)
+_cart_linear_velocity_max: float = float(0.06)
 
-Joint_max_speed = [6500,18000,20000,20000,22000,22000] # max speed in STEP/S used
-Joint_min_speed = [100,100,100,100,100,100] # min speed in STEP/S used 
+_cart_linear_acc_min: float = float(0.002)
+_cart_linear_acc_max: float = float(0.06)
 
-Joint_max_acc = 32000 # max acceleration in RAD/S²
-Joint_min_acc = 100 # min acceleration in RAD/S²
+_cart_angular_velocity_min: float = float(0.7)   # deg/s
+_cart_angular_velocity_max: float = float(25.0)  # deg/s
 
-Cart_lin_velocity_limits = [[-100,100],[-100,100],[-100,100]]
-Cart_ang_velocity_limits = [[-100,100],[-100,100],[-100,100]]
+# Standby positions
+_standby_deg: Vec6f = np.array([90.0, -90.0, 180.0, 0.0, 0.0, 180.0], dtype=np.float64)
+_standby_rad: Vec6f = np.deg2rad(_standby_deg).astype(np.float64)
 
-
-Commands_list = [ "Input","Output","Dummy","Begin","Home","Delay","End","Loop","MoveJoint","MovePose","SpeedJoint","MoveCart",
-                 "MoveCart","MoveCartRelTRF","Gripper","Gripper_cal"]
-
-Commands_list_true = [item + "()" for item in Commands_list]
-
-# 360 / (200 * 32) = 0.05625
-def DEG2STEPS(Degrees, index):
-    Steps = Degrees / degree_per_step_constant * Joint_reduction_ratio[index]
-    return Steps
-
-Joint_limits_steps =[[DEG2STEPS(Joint_limits_degree[0][0],0),DEG2STEPS(Joint_limits_degree[0][1],0)],
-                      [DEG2STEPS(Joint_limits_degree[1][0],1),DEG2STEPS(Joint_limits_degree[1][1],1)],
-                      [DEG2STEPS(Joint_limits_degree[2][0],2),DEG2STEPS(Joint_limits_degree[2][1],2)],
-                      [DEG2STEPS(Joint_limits_degree[3][0],3),DEG2STEPS(Joint_limits_degree[3][1],3)],
-                      [DEG2STEPS(Joint_limits_degree[4][0],4),DEG2STEPS(Joint_limits_degree[4][1],4)],
-                      [DEG2STEPS(Joint_limits_degree[5][0],5),DEG2STEPS(Joint_limits_degree[5][1],5)]]
-Joint_limits_steps = [[int(i[0]),int(i[1])] for i in Joint_limits_steps]
-
-
-def STEPS2DEG(Steps,index):
-    Degrees = Steps * degree_per_step_constant / Joint_reduction_ratio[index]
-    return Degrees
-
-def RAD2STEPS(Rads,index):
-    deg = np.rad2deg(Rads)
-    steps = DEG2STEPS(deg,index)
-    return steps
-
-def STEPS2RADS(Steps,index):
-    deg = STEPS2DEG(Steps,index)
-    rads = np.deg2rad(deg)
-    return rads
-
-def RAD2DEG(radian):
-    return np.rad2deg(radian)
-
-def DEG2RAD(degree):
-    return np.deg2rad(degree)
-
-def SPEED_STEPS2DEG(Steps_per_second,index):
-
-    '''     Transform true RADS/S to true RPM.
-    Both these values are true values at witch MOTORS SPIN  '''
-
-    degrees_per_step = degree_per_step_constant / Joint_reduction_ratio[index]
-    degrees_per_second = Steps_per_second * degrees_per_step
-    return degrees_per_second
-
-def SPEED_DEG2STEPS(Deg_per_second,index):
-    steps_per_second = Deg_per_second / degree_per_step_constant * Joint_reduction_ratio[index]
-    return steps_per_second
-
-def SPEED_STEP2RAD(Steps_per_second,index):
-    degrees_per_step = radian_per_step_constant / Joint_reduction_ratio[index]
-    rad_per_second = Steps_per_second * degrees_per_step
-    return rad_per_second
-
-def SPEED_RAD2STEP(Rad_per_second,index):
-    steps_per_second = Rad_per_second / radian_per_step_constant * Joint_reduction_ratio[index]
-    return steps_per_second
-
-def RAD_SEC_2_DEG_SEC(rad_per_sec):
-    return rad_per_sec * radian_per_sec_2_deg_per_sec_const
-
-def DEG_SEC_2_RAD_SEC(deg_per_sec):
-    return deg_per_sec * deg_per_sec_2_radian_per_sec_const
-
-
-def check_joint_limits(q, target_q=None, allow_recovery=True):
+# -----------------------------
+# Vectorized helpers (ops)
+# -----------------------------
+def _apply_ratio(values: NDArray, idx: IndexArg) -> NDArray:
     """
-    Check if joint angles are within their limits, with support for recovery movements.
-    
-    Parameters
-    ----------
-    q : array_like
-        Current joint angles in radians
-    target_q : array_like, optional
-        Target joint angles in radians. If provided, recovery logic is applied.
-    allow_recovery : bool, optional
-        Whether to allow recovery movements when current position violates limits
-        
-    Returns
-    -------
-    bool
-        True if movement is allowed (within limits or valid recovery), False otherwise
-    dict
-        Dictionary with joint limit violation details and recovery information
+    Apply per-joint gear ratio.
+    If idx is None, broadcast ratio across last dimension (length 6).
+    If idx is an int or ndarray of ints, select ratios accordingly.
     """
-    q_array = np.array(q)
-    target_array = np.array(target_q) if target_q is not None else None
-    violations = {}
-    all_valid = True
-    
-    for i in range(min(len(q_array), len(Joint_limits_radian))):
-        min_limit = Joint_limits_radian[i][0]
-        max_limit = Joint_limits_radian[i][1]
-        current_pos = q_array[i]
-        
-        # Check if current position violates limits
-        current_violates = current_pos < min_limit or current_pos > max_limit
-        
-        if current_violates:
-            violation_type = 'below_min' if current_pos < min_limit else 'above_max'
-            
-            # If we have a target and recovery is enabled, check if it's a recovery movement
-            if target_array is not None and allow_recovery:
-                target_pos = target_array[i]
-                is_recovery = False
-                
-                if current_pos > max_limit:  # Past upper limit
-                    # Recovery means moving towards or below the upper limit
-                    is_recovery = target_pos <= current_pos
-                    recovery_direction = "move joint towards negative direction"
-                elif current_pos < min_limit:  # Past lower limit
-                    # Recovery means moving towards or above the lower limit  
-                    is_recovery = target_pos >= current_pos
-                    recovery_direction = "move joint towards positive direction"
+    if idx is None:
+        return values * _joint_ratio
+    idx_arr = np.asarray(idx)
+    return values * _joint_ratio[idx_arr]
+
+
+def deg_to_steps(deg: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+    """Degrees to steps (gear ratio aware). Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(deg):
+        return np.int32((deg / degree_per_step_constant) * _joint_ratio[idx]) # type: ignore
+    deg_arr = np.asarray(deg, dtype=np.float64)
+    steps_f = _apply_ratio(deg_arr / degree_per_step_constant, idx)
+    return steps_f.astype(np.int32, copy=False)
+
+
+def steps_to_deg(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+    """Steps to degrees (gear ratio aware). Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
+        return np.float64((steps * degree_per_step_constant) / _joint_ratio[idx]) # type: ignore
+    steps_arr = np.asarray(steps, dtype=np.float64)
+    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
+    return (steps_arr * degree_per_step_constant) / ratio
+
+
+def rad_to_steps(rad: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+    """Radians to steps. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(rad):
+        return np.int32((rad / radian_per_step_constant) * _joint_ratio[idx]) # type: ignore
+    rad_arr = np.asarray(rad, dtype=np.float64)
+    deg_arr = np.rad2deg(rad_arr)
+    return deg_to_steps(deg_arr, idx)
+
+
+def steps_to_rad(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+    """Steps to radians. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
+        return np.float64((steps * radian_per_step_constant) / _joint_ratio[idx]) # type: ignore
+    deg_arr = steps_to_deg(steps, idx)
+    return np.deg2rad(deg_arr)
+
+
+def speed_steps_to_deg(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+    """Speed: steps/s to deg/s. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
+        return np.float64((sps * degree_per_step_constant) / _joint_ratio[idx]) # type: ignore
+    sps_arr = np.asarray(sps, dtype=np.float64)
+    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
+    return (sps_arr * degree_per_step_constant) / ratio
+
+
+def speed_deg_to_steps(dps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+    """Speed: deg/s to steps/s. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(dps):
+        return np.int32((dps / degree_per_step_constant) * _joint_ratio[idx]) # type: ignore
+    dps_arr = np.asarray(dps, dtype=np.float64)
+    stepsps = _apply_ratio(dps_arr / degree_per_step_constant, idx)
+    return stepsps.astype(np.int32, copy=False)
+
+
+def speed_steps_to_rad(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+    """Speed: steps/s to rad/s. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
+        return np.float64((sps * radian_per_step_constant) / _joint_ratio[idx]) # type: ignore
+    sps_arr = np.asarray(sps, dtype=np.float64)
+    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
+    return (sps_arr * radian_per_step_constant) / ratio
+
+
+def speed_rad_to_steps(rps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+    """Speed: rad/s to steps/s. Fast scalar path when idx is int."""
+    if isinstance(idx, (int, np.integer)) and np.isscalar(rps):
+        return np.int32((rps / radian_per_step_constant) * _joint_ratio[idx]) # type: ignore
+    rps_arr = np.asarray(rps, dtype=np.float64)
+    stepsps = _apply_ratio(rps_arr / radian_per_step_constant, idx)
+    return stepsps.astype(np.int32, copy=False)
+
+
+def clip_speed_to_joint_limits(sps: ArrayLike) -> NDArray[np.int32]:
+    """Clip steps/s vector to per-joint limits (int32)."""
+    sps_arr = np.asarray(sps, dtype=np.int32)
+    return np.clip(sps_arr, -_joint_max_speed, _joint_max_speed).astype(np.int32, copy=False)
+
+
+def clamp_steps_delta(
+    prev_steps: ArrayLike, target_steps: ArrayLike, dt: float, safety: float = 1.2
+) -> NDArray[np.int32]:
+    """
+    Clamp per-tick step change to max allowed based on joint.max_speed and dt.
+    Returns int32 array.
+    """
+    prev_arr = np.asarray(prev_steps, dtype=np.int32)
+    tgt_arr = np.asarray(target_steps, dtype=np.int32)
+    step_diff = tgt_arr - prev_arr
+    max_step_diff = (_joint_max_speed * dt * safety).astype(np.int32)
+    sign = np.sign(step_diff).astype(np.int32)
+    over = np.abs(step_diff) > max_step_diff
+    clamped = tgt_arr.copy()
+    clamped[over] = prev_arr[over] + sign[over] * max_step_diff[over]
+    return clamped.astype(np.int32, copy=False)
+
+# -----------------------------
+# Limits (steps) derived from deg
+# -----------------------------
+_joint_limits_steps_list: list[list[int]] = []
+for j in range(6):
+    mn_deg, mx_deg = float(_joint_limits_degree[j, 0]), float(_joint_limits_degree[j, 1])
+    mn_steps = int(deg_to_steps(mn_deg, idx=j))
+    mx_steps = int(deg_to_steps(mx_deg, idx=j))
+    _joint_limits_steps_list.append([mn_steps, mx_steps])
+_joint_limits_steps: NDArray[np.int32] = np.array(_joint_limits_steps_list, dtype=np.int32)  # (6,2)
+
+# -----------------------------
+# Typed hierarchical API
+# -----------------------------
+@dataclass(frozen=True)
+class JointLimits:
+    deg: Limits2f
+    rad: Limits2f
+    steps: NDArray[np.int32]
+
+
+@dataclass(frozen=True)
+class JointJogSpeed:
+    max: Vec6i
+    min: Vec6i
+
+
+@dataclass(frozen=True)
+class JointSpeed:
+    max: Vec6i
+    min: Vec6i
+    jog: JointJogSpeed
+
+
+@dataclass(frozen=True)
+class JointAcc:
+    max_rad: float
+    min_rad: float
+
+
+@dataclass(frozen=True)
+class JointJerk:
+    max: Vec6i
+
+
+@dataclass(frozen=True)
+class Standby:
+    deg: Vec6f
+    rad: Vec6f
+
+
+@dataclass(frozen=True)
+class Joint:
+    limits: JointLimits
+    speed: JointSpeed
+    acc: JointAcc
+    jerk: JointJerk
+    ratio: NDArray[np.float64]
+    standby: Standby
+
+
+@dataclass(frozen=True)
+class RangeF:
+    min: float
+    max: float
+
+
+@dataclass(frozen=True)
+class CartVel:
+    linear: RangeF
+    jog: RangeF
+    angular: RangeF
+
+
+@dataclass(frozen=True)
+class CartAcc:
+    linear: RangeF
+
+
+@dataclass(frozen=True)
+class Cart:
+    vel: CartVel
+    acc: CartAcc
+
+
+@dataclass(frozen=True)
+class Conv:
+    degree_per_step: float
+    radian_per_step: float
+    rad_sec_to_deg_sec: float
+    deg_sec_to_rad_sec: float
+
+
+@dataclass(frozen=True)
+class Ops:
+    # Use Callable[..., T] to allow optional idx parameter without arity errors in type checkers
+    deg_to_steps: Callable[..., np.int32 | NDArray[np.int32]]
+    steps_to_deg: Callable[..., np.float64 | NDArray[np.float64]]
+    rad_to_steps: Callable[..., np.int32 | NDArray[np.int32]]
+    steps_to_rad: Callable[..., np.float64 | NDArray[np.float64]]
+    speed_deg_to_steps: Callable[..., np.int32 | NDArray[np.int32]]
+    speed_steps_to_deg: Callable[..., np.float64 | NDArray[np.float64]]
+    speed_rad_to_steps: Callable[..., np.int32 | NDArray[np.int32]]
+    speed_steps_to_rad: Callable[..., np.float64 | NDArray[np.float64]]
+    clip_speed_to_joint_limits: Callable[[ArrayLike], NDArray[np.int32]]
+    clamp_steps_delta: Callable[[ArrayLike, ArrayLike, float, float], NDArray[np.int32]]
+
+
+joint: Final[Joint] = Joint(
+    limits=JointLimits(
+        deg=_joint_limits_degree,
+        rad=_joint_limits_radian,
+        steps=_joint_limits_steps,
+    ),
+    speed=JointSpeed(
+        max=_joint_max_speed,
+        min=_joint_min_speed,
+        jog=JointJogSpeed(
+            max=_joint_max_jog_speed,
+            min=_joint_min_jog_speed,
+        ),
+    ),
+    acc=JointAcc(
+        max_rad=_joint_max_acc_rad,
+        min_rad=_joint_min_acc_rad,
+    ),
+    jerk=JointJerk(
+        max=_joint_max_jerk,
+    ),
+    ratio=_joint_ratio,
+    standby=Standby(
+        deg=_standby_deg,
+        rad=_standby_rad,
+    ),
+)
+
+cart: Final[Cart] = Cart(
+    vel=CartVel(
+        linear=RangeF(min=_cart_linear_velocity_min, max=_cart_linear_velocity_max),
+        jog=RangeF(min=_cart_linear_velocity_min_JOG, max=_cart_linear_velocity_max_JOG),
+        angular=RangeF(min=_cart_angular_velocity_min, max=_cart_angular_velocity_max),
+    ),
+    acc=CartAcc(
+        linear=RangeF(min=_cart_linear_acc_min, max=_cart_linear_acc_max),
+    ),
+)
+
+conv: Final[Conv] = Conv(
+    degree_per_step=degree_per_step_constant,
+    radian_per_step=radian_per_step_constant,
+    rad_sec_to_deg_sec=radian_per_sec_2_deg_per_sec_const,
+    deg_sec_to_rad_sec=deg_per_sec_2_radian_per_sec_const,
+)
+
+ops: Final[Ops] = Ops(
+    deg_to_steps=deg_to_steps,
+    steps_to_deg=steps_to_deg,
+    rad_to_steps=rad_to_steps,
+    steps_to_rad=steps_to_rad,
+    speed_deg_to_steps=speed_deg_to_steps,
+    speed_steps_to_deg=speed_steps_to_deg,
+    speed_rad_to_steps=speed_rad_to_steps,
+    speed_steps_to_rad=speed_steps_to_rad,
+    clip_speed_to_joint_limits=clip_speed_to_joint_limits,
+    clamp_steps_delta=clamp_steps_delta,
+)
+
+# -----------------------------
+# Fast, vectorized limit checking with edge-triggered logging
+# -----------------------------
+_last_violation_mask = np.zeros(6, dtype=bool)
+_last_any_violation = False
+# TODO: confirm whether this is actually faster than the previous loop based approach
+def check_limits(q: ArrayLike, target_q: ArrayLike | None = None, allow_recovery: bool = True, *, log: bool = True) -> bool:
+    """
+    Vectorized limits check in radians.
+    - q: current joint angles in radians (array-like)
+    - target_q: optional target joint angles in radians (array-like)
+    - allow_recovery: allow movement that heads back toward valid range if currently violating
+    - log: emit edge-triggered warning/info logs on violation state changes
+
+    Returns True if move is allowed (within limits or valid recovery), False otherwise.
+    """
+    global _last_violation_mask, _last_any_violation
+
+    q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
+    mn = joint.limits.rad[:, 0]
+    mx = joint.limits.rad[:, 1]
+
+    below = q_arr < mn
+    above = q_arr > mx
+    cur_viol = below | above
+
+    if target_q is None:
+        ok_mask = ~cur_viol
+        t_below = t_above = None
+    else:
+        t = np.asarray(target_q, dtype=np.float64).reshape(-1)
+        t_below = t < mn
+        t_above = t > mx
+        t_viol = t_below | t_above
+        if allow_recovery:
+            rec_ok = (above & (t <= q_arr)) | (below & (t >= q_arr))
+        else:
+            rec_ok = np.zeros(6, dtype=bool)
+        ok_mask = (~cur_viol & ~t_viol) | (cur_viol & rec_ok)
+
+    all_ok = bool(np.all(ok_mask))
+
+    if log:
+        viol = ~ok_mask
+        any_viol = bool(np.any(viol))
+
+        # Edge-triggered violation logs
+        if any_viol and (np.any(viol != _last_violation_mask) or not _last_any_violation):
+            idxs = np.where(viol)[0]
+            tokens = []
+            for i in idxs:
+                if cur_viol[i]:
+                    tokens.append(f"J{i+1}:" + ("cur<min" if below[i] else "cur>max"))
                 else:
-                    recovery_direction = ""
-                
-                violations[f'joint_{i+1}'] = {
-                    'current_value': current_pos,
-                    'target_value': target_pos if target_array is not None else None,
-                    'min_limit': min_limit,
-                    'max_limit': max_limit,
-                    'violation': violation_type,
-                    'is_recovery': is_recovery,
-                    'recovery_direction': recovery_direction if not is_recovery else None,
-                    'movement_allowed': is_recovery
-                }
-                
-                # Only flag as invalid if it's not a recovery movement
-                if not is_recovery:
-                    all_valid = False
-            else:
-                # No target provided or recovery disabled - flag as violation
-                violations[f'joint_{i+1}'] = {
-                    'current_value': current_pos,
-                    'target_value': None,
-                    'min_limit': min_limit,
-                    'max_limit': max_limit,
-                    'violation': violation_type,
-                    'is_recovery': False,
-                    'recovery_direction': None,
-                    'movement_allowed': False
-                }
-                all_valid = False
-        elif target_array is not None:
-            # Current is within limits, check if target would violate
-            target_pos = target_array[i]
-            target_violates = target_pos < min_limit or target_pos > max_limit
-            
-            if target_violates:
-                target_violation_type = 'below_min' if target_pos < min_limit else 'above_max'
-                violations[f'joint_{i+1}'] = {
-                    'current_value': current_pos,
-                    'target_value': target_pos,
-                    'min_limit': min_limit,
-                    'max_limit': max_limit,
-                    'violation': f'target_{target_violation_type}',
-                    'is_recovery': False,
-                    'recovery_direction': None,
-                    'movement_allowed': False
-                }
-                all_valid = False
-    
-    return all_valid, violations
+                    # target violates
+                    if t_below is not None and t_below[i]:
+                        tokens.append(f"J{i+1}:target<min")
+                    elif t_above is not None and t_above[i]:
+                        tokens.append(f"J{i+1}:target>max")
+                    else:
+                        tokens.append(f"J{i+1}:violation")
+            logger.warning("LIMIT VIOLATION: %s", " ".join(tokens))
+        elif (not any_viol) and _last_any_violation:
+            logger.info("Limits back in range")
 
-def extract_from_can_id(can_id):
-    # Extracting ID2 (first 4 MSB)
+        _last_violation_mask[:] = viol
+        _last_any_violation = any_viol
+
+    return all_ok
+
+
+def check_limits_mask(q: ArrayLike, target_q: ArrayLike | None = None, allow_recovery: bool = True) -> NDArray[np.bool_]:
+    """Return per-joint boolean mask (True if OK for that joint)."""
+    q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
+    mn = joint.limits.rad[:, 0]
+    mx = joint.limits.rad[:, 1]
+    below = q_arr < mn
+    above = q_arr > mx
+    cur_viol = below | above
+
+    if target_q is None:
+        return ~cur_viol
+    t = np.asarray(target_q, dtype=np.float64).reshape(-1)
+    t_below = t < mn
+    t_above = t > mx
+    t_viol = t_below | t_above
+    if allow_recovery:
+        rec_ok = (above & (t <= q_arr)) | (below & (t >= q_arr))
+    else:
+        rec_ok = np.zeros(6, dtype=bool)
+    ok_mask = (~cur_viol & ~t_viol) | (cur_viol & rec_ok)
+    return ok_mask
+
+# -----------------------------
+# CAN helpers and bitfield utils (used by transports/gripper)
+# -----------------------------
+def extract_from_can_id(can_id: int):
     id2 = (can_id >> 7) & 0xF
-
-    # Extracting CAN Command (next 6 bits)
     can_command = (can_id >> 1) & 0x3F
-
-    # Extracting Error Bit (last bit)
     error_bit = can_id & 0x1
-    
     return id2, can_command, error_bit
 
-
-def combine_2_can_id(id2, can_command, error_bit):
-    # Combine components into an 11-bit CAN ID
+def combine_2_can_id(id2: int, can_command: int, error_bit: int) -> int:
     can_id = 0
-
-    # Add ID2 (first 4 MSB)
     can_id |= (id2 & 0xF) << 7
-
-    # Add CAN Command (next 6 bits)
     can_id |= (can_command & 0x3F) << 1
-
-    # Add Error Bit (last bit)
     can_id |= (error_bit & 0x1)
-
     return can_id
 
-# Fuse bitfield list to byte
 def fuse_bitfield_2_bytearray(var_in):
     number = 0
     for b in var_in:
-        number = (2 * number) + b
+        number = (2 * number) + int(b)
     return bytes([number])
 
-# Splits byte to bitfield list
-def split_2_bitfield(var_in):
-    #return [var_in >> i & 1 for i in range(7,-1,-1)] 
+def split_2_bitfield(var_in: int):
     return [(var_in >> i) & 1 for i in range(7, -1, -1)]
 
-
 if __name__ == "__main__":
-    """
-    print(DEG2STEPS(180,2))
-    print(STEPS2DEG(57905,2))
-    print(RAD2STEPS(pi,5))
-    print(STEPS2RADS(32000,5))
-    print(SPEED_STEPS2DEG(1000,5))
-    print(SPEED_STEP2RAD(1000,5))
-    print(Joint_limits_radian)
-    print(Joints_standby_position_radian)
-    print(Joint_limits_steps)
-    print(Joint_limits_radian)
-    print(DEG2STEPS(-62.5,1))
-    """
-
-    J0_var = STEPS2RADS(1,0)
-    J1_var = STEPS2RADS(1,1)
-    J2_var = STEPS2RADS(1,2)
-    J3_var = STEPS2RADS(1,3)
-    J4_var = STEPS2RADS(1,4)
-    J5_var = STEPS2RADS(1,5)
-
-
-    print("Joint 1 smallest step:",RAD2DEG(J0_var))
-    print("Joint 2 smallest step:",RAD2DEG(J1_var))
-    print("Joint 3 smallest step:",RAD2DEG(J2_var))
-    print("Joint 4 smallest step:",RAD2DEG(J3_var))
-    print("Joint 5 smallest step:",RAD2DEG(J4_var))
-    print("Joint 6 smallest step:",RAD2DEG(J5_var))
-    print("rad 2 step:",SPEED_RAD2STEP(-2.948504399390715 / 2,5))
-    print("standby radian is",Joints_standby_position_radian)
-
-    test = RAD2STEPS(0.0001,5)
-    print(test)
-
-    #robot.ikine_LMS()
+    # Simple sanity prints
+    j_step_rad = steps_to_rad(np.array([1, 1, 1, 1, 1, 1], dtype=np.int32))
+    print("Smallest step (deg):", np.rad2deg(j_step_rad))
+    print("Standby rad:", joint.standby.rad)

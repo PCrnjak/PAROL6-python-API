@@ -1,12 +1,13 @@
 """
-Server management for PAROL6 headless controller.
+Server management for PAROL6 controller.
 
-Provides lifecycle management and automatic spawning of the headless controller process.
+Provides lifecycle management and automatic spawning of the controller process.
 """
 
 import asyncio
 import contextlib
 import logging
+import re
 import os
 import signal
 import subprocess
@@ -16,12 +17,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from collections import deque
 
+# Precompiled regex patterns for server log normalization
+_SIMPLE_FORMAT_RE = re.compile(
+    r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|TRACE)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
+)
 
 @dataclass
 class ServerOptions:
-    """Options for launching the headless controller."""
+    """Options for launching the controller."""
 
     com_port: str | None = None
     no_autohome: bool = True  # Set PAROL6_NOAUTOHOME=1 by default
@@ -30,7 +34,7 @@ class ServerOptions:
 
 class ServerManager:
     """
-    Manages the lifecycle of the headless PAROL6 controller.
+    Manages the lifecycle of the PAROL6 controller.
 
     - Writes com_port.txt in the controller working directory to preselect the port.
     - Spawns the controller as a subprocess using sys.executable.
@@ -38,7 +42,15 @@ class ServerManager:
     - Can be used with a custom controller script path or defaults to the package's bundled controller.
     """
 
-    def __init__(self, controller_path: str | None = None) -> None:
+    def __init__(self, controller_path: str | None = None, normalize_logs: bool = False) -> None:
+        """
+        Initialize the ServerManager.
+        
+        Args:
+            controller_path: Optional path to controller script. If None, uses bundled controller.
+            normalize_logs: If True, parse and normalize controller log output to avoid duplicate
+                          timestamp/level/module info. Set to True when used from web GUI.
+        """
         if controller_path:
             self.controller_path = Path(controller_path).resolve()
             if not self.controller_path.exists():
@@ -46,13 +58,13 @@ class ServerManager:
                     f"Controller script not found: {self.controller_path}"
                 )
         else:
-            # Use the package's bundled headless commander
-            self.controller_path = Path(__file__).parent / "headless_commander.py"
+            # Use the package's bundled commander
+            self.controller_path = Path(__file__).parent / "controller.py"
             
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
-        self._log_buffer = deque(maxlen=5000)
+        self.normalize_logs = normalize_logs
 
     @property
     def pid(self) -> int | None:
@@ -61,35 +73,20 @@ class ServerManager:
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def _write_com_port_hint(self, com_port: str) -> None:
-        """
-        The headless_commander.py reads com_port.txt at startup.
-        Write it unconditionally before launch for consistent behavior across OSes.
-        """
-        cwd = self.controller_path.parent
-        hint = cwd / "com_port.txt"
-        try:
-            hint.write_text(com_port.strip() + "\n", encoding="utf-8")
-        except Exception as e:
-            # Non-fatal: controller can still prompt or auto-detect depending on OS
-            logging.warning("ServerManager: failed to write %s: %s", hint, e)
-
     async def start_controller(
-        self, 
-        com_port: str | None = None, 
+        self,
+        com_port: str | None = None,
         no_autohome: bool = True,
-        extra_env: dict | None = None
+        extra_env: dict | None = None,
+        server_host: str | None = None,
+        server_port: int | None = None,
     ) -> None:
         """Start the controller if not already running."""
         if self.is_running():
             return
-
-        # Working directory should be the PAROL6-python-API root to find dependencies
-        cwd = self.controller_path.parent.parent
-
-        # Optional COM port preseed
-        if com_port:
-            self._write_com_port_hint(com_port)
+        # Working directory should be the PAROL6-python-API repo root to find dependencies
+        # Use a more direct approach to find the package root
+        cwd = Path(__file__).resolve().parents[2]  # parol6/server/manager.py -> repo root
 
         env = os.environ.copy()
         # Disable autohome unless explicitly overridden
@@ -97,15 +94,22 @@ class ServerManager:
             env["PAROL6_NOAUTOHOME"] = "1"
         if extra_env:
             env.update(extra_env)
+        # Explicitly bind controller (if provided)
+        if server_host:
+            env["PAROL6_CONTROLLER_IP"] = server_host
+        if server_port is not None:
+            env["PAROL6_CONTROLLER_PORT"] = str(server_port)
+        # Ensure the subprocess can import the local 'parol6' package
+        existing_py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing_py_path}" if existing_py_path else str(cwd)
 
-        # Launch the controller
-        args = [sys.executable, "-u", str(self.controller_path)]
+        # Launch the controller as a module to ensure package imports resolve
+        args = [sys.executable, "-u", "-m", "parol6.server.controller"]
         
-        # Add log level argument if available
-        current_level = logging.getLogger().level
-        level_name = logging.getLevelName(current_level)
-        if level_name != "Level " + str(current_level):  # Valid level name
-            args.append(f"--log-level={level_name}")
+        level_name = logging.getLevelName(logging.getLogger().level)
+        args.append(f"--log-level={level_name}")
+        if com_port:
+            args.append(f"--serial={com_port}")
             
         try:
             self._proc = subprocess.Popen(
@@ -135,36 +139,43 @@ class ServerManager:
         """Read controller stdout and forward to logging."""
         try:
             assert proc.stdout is not None
+            # Maintain last logger/level for multi-line tracebacks
+            last_logger = "parol6.server"
+
             for raw_line in iter(proc.stdout.readline, ""):
                 if self._stop_reader.is_set():
                     break
                 line = raw_line.rstrip("\r\n")
-                if line:
-                    # Skip timestamp prefix if present (format: HH:MM:SS.mmm [LEVEL] message)
-                    space_pos = line.find(" ")
-                    if space_pos > 0 and space_pos < 15:  # Reasonable timestamp length
-                        # Check if it looks like a timestamp
-                        timestamp_part = line[:space_pos]
-                        if ":" in timestamp_part:
-                            line = line[space_pos + 1:].lstrip()
-                    
-                    # Preserve severity if headless prefixes with [LEVEL]
+                if not line:
+                    continue
+
+                if self.normalize_logs:
+                    # Normalize child log line and route to embedded module logger
                     level = logging.INFO
+                    logger_name: str | None = None
                     msg = line
 
-                    if line.startswith("[DEBUG]"):
-                        level, msg = logging.DEBUG, line[7:].lstrip()
-                    elif line.startswith("[INFO]"):
-                        level, msg = logging.INFO, line[6:].lstrip()
-                    elif line.startswith("[WARNING]"):
-                        level, msg = logging.WARNING, line[9:].lstrip()
-                    elif line.startswith("[ERROR]"):
-                        level, msg = logging.ERROR, line[7:].lstrip()
-                    elif line.startswith("[CRITICAL]"):
-                        level, msg = logging.CRITICAL, line[10:].lstrip()
+                    s = _SIMPLE_FORMAT_RE.match(line)
+                    if s:
+                        _, level_name, logger_name, actual_message = s.groups()
+                        logger_name = (logger_name or "").strip()
+                        msg = actual_message
+                        level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                    elif line.startswith("Traceback"):
+                        # Traceback and continuation lines -> keep last context, escalate on Traceback
+                        level = logging.ERROR
 
-                    self._log_buffer.append(raw_line.rstrip("\r\n"))
-                    logging.log(level, "[SERVER] %s", msg)
+                    # Choose target logger
+                    target_logger_name = logger_name or last_logger or "parol6.server"
+                    target_logger = logging.getLogger(target_logger_name)
+                    target_logger.log(level, msg)
+
+                    # Update last context if we identified a module
+                    if logger_name:
+                        last_logger = logger_name
+                else:
+                    # No normalization - forward line as-is to root logger
+                    print(line)
         except Exception as e:
             logging.warning("ServerManager: output reader stopped: %s", e)
 
@@ -207,31 +218,38 @@ class ServerManager:
 
         self._proc = None
 
-    def get_logs(self, tail: int = 200) -> list[str]:
-        """Return the last N lines captured from the controller stdout."""
-        return list(self._log_buffer)[-tail:]
+    async def await_ready(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 5001,
+        timeout: float = 10.0,
+        poll_interval: float = 0.2,
+    ) -> bool:
+        """
+        Wait until the controller responds to PING.
 
-    async def get_status(self, host: str = "127.0.0.1", port: int = 5001, timeout: float = 1.0) -> dict:
+        Returns:
+            True if the server becomes ready within timeout, else False.
         """
-        Query controller's server state over UDP and merge with process info.
-        Returns a dict; if unreachable, returns minimal info.
-        """
-        status = {
-            "running": self.is_running(),
-            "pid": self.pid,
-            "server": None,
-        }
-        import socket
-        import json
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(timeout)
-            sock.sendto(b"GET_SERVER_STATE", (host, port))
-            data, _ = sock.recvfrom(4096)
-            resp = data.decode("utf-8")
-            if resp.startswith("SERVER_STATE|"):
-                payload = resp.split("|", 1)[1]
-                status["server"] = json.loads(payload)
-        return status
+        import socket as _socket
+        import time as _time
+
+        deadline = _time.time() + max(0.0, float(timeout))
+        while _time.time() < deadline:
+            # Try a simple PING
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(min(0.5, poll_interval))
+                    sock.sendto(b"PING", (host, port))
+                    data, _ = sock.recvfrom(256)
+                    if data.decode("ascii").startswith("PONG"):
+                        return True
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+
+        return False
 
 
 async def ensure_server(
@@ -239,7 +257,8 @@ async def ensure_server(
     port: int = 5001, 
     manage: bool = False, 
     com_port: str | None = None, 
-    extra_env: dict | None = None
+    extra_env: dict | None = None,
+    normalize_logs: bool = False
 ) -> Optional[ServerManager]:
     """
     Ensure a PAROL6 server is running and accessible.
@@ -250,7 +269,9 @@ async def ensure_server(
         manage: If True, automatically spawn controller if ping fails
         com_port: COM port for spawned controller
         extra_env: Additional environment variables for spawned controller
-        
+        normalize_logs: If True, parse and normalize controller log output to avoid duplicate
+                          timestamp/level/module info. Set to True when used from web GUI.
+
     Returns:
         ServerManager instance if manage=True and server was spawned, None otherwise
         
@@ -268,7 +289,7 @@ async def ensure_server(
             sock.settimeout(1.0)
             sock.sendto(b"PING", (host, port))
             data, _ = sock.recvfrom(256)
-            if data.decode('utf-8').strip().upper() == "PONG":
+            if data.decode('ascii').startswith("PONG"):
                 logging.info(f"Server already running at {host}:{port}")
                 return None
     except Exception:
@@ -280,25 +301,25 @@ async def ensure_server(
     
     # Spawn controller
     logging.info(f"Server not responding at {host}:{port}, starting controller...")
-    manager = ServerManager()
+    # Prepare environment for child controller bind tuple
+    env_to_pass = dict(extra_env) if extra_env else {}
+    env_to_pass["PAROL6_CONTROLLER_IP"] = host
+    env_to_pass["PAROL6_CONTROLLER_PORT"] = str(port)
+    manager = ServerManager(normalize_logs=normalize_logs)
     await manager.start_controller(
-        com_port=com_port, 
+        com_port=com_port,
         no_autohome=True,
-        extra_env=extra_env
+        extra_env=env_to_pass,
+        server_host=host,
+        server_port=port,
     )
-    
-    try:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(2.0)
-            sock.sendto(b"PING", (host, port))
-            data, _ = sock.recvfrom(256)
-            if data.decode('utf-8').strip().upper() == "PONG":
-                logging.info(f"Successfully started server at {host}:{port}")
-                return manager
-    except Exception as e:
-        logging.error(f"Failed to verify server startup: {e}")
-    
+
+    # Wait for readiness within a short window
+    ok = await manager.await_ready(host=host, port=port, timeout=5.0)
+    if ok:
+        logging.info(f"Successfully started server at {host}:{port}")
+        return manager
+
     logging.error("Server spawn failed or not responding after startup")
     await manager.stop_controller()
     return None

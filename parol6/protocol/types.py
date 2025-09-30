@@ -5,7 +5,15 @@ Defines enums, TypedDicts, and dataclasses used across the public API.
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal, TypedDict
+
+
+# Stream mode state enum
+class StreamModeState(Enum):
+    """Stream mode state for jog commands."""
+    OFF = 0  # Stream mode disabled (default FIFO queueing)
+    ON = 1   # Stream mode enabled (latest-wins for jog commands)
 
 
 # Frame literals
@@ -52,3 +60,18 @@ class TrackingStatus(TypedDict):
     details: str
     completed: bool
     ack_time: datetime | None
+
+
+class SendResult(TypedDict):
+    """Standardized result for command-sending APIs."""
+    command_id: str | None
+    status: AckStatus
+    details: str
+    completed: bool
+    ack_time: datetime | None
+
+
+class WireResponse(TypedDict):
+    """Typed wrapper for parsed wire responses."""
+    type: Literal['PONG','POSE','ANGLES','IO','GRIPPER','SPEEDS','STATUS','GCODE_STATUS','SERVER_STATE']
+    payload: dict | list | str

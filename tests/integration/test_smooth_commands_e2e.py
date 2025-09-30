@@ -33,13 +33,8 @@ class TestSmoothMotionMinimal:
         print("Homing robot for smooth motion tests...")
         
         # Home the robot first
-        result = client.home(wait_for_ack=True, timeout=15.0)
-        if isinstance(result, dict):
-            assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
-        
-        # Wait for homing to complete
-        import time
-        time.sleep(3.0)
+        result = client.home()
+        assert result is True
         
         # Wait for robot to be stopped
         assert client.wait_until_stopped(timeout=10.0)
@@ -55,19 +50,16 @@ class TestSmoothMotionMinimal:
             duration=2.0,
             plane='XY',
             frame='WRF',
-            wait_for_ack=True,
-            timeout=10.0
         )
         
         # Check if we should xfail due to FAKE_SERIAL limitations
         _check_if_fake_serial_xfail(result)
         
         # Should complete successfully in FAKE_SERIAL mode
-        assert isinstance(result, dict)
-        assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
+        assert result is True
         
         # Wait for completion and verify robot stops
-        time.sleep(3.0)
+        assert client.wait_until_stopped(timeout=4.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
     
     def test_smooth_arc_center_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -77,16 +69,13 @@ class TestSmoothMotionMinimal:
             center=[50, 50, 150],
             duration=2.0,
             frame='WRF',
-            wait_for_ack=True,
-            timeout=10.0
         )
         
         _check_if_fake_serial_xfail(result)
         
-        assert isinstance(result, dict)
-        assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
+        assert result is True
         
-        time.sleep(3.0)
+        assert client.wait_until_stopped(timeout=4.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
     
     def test_smooth_spline_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -101,16 +90,13 @@ class TestSmoothMotionMinimal:
             waypoints=waypoints,
             duration=3.0,
             frame='WRF',
-            wait_for_ack=True,
-            timeout=12.0
         )
         
         _check_if_fake_serial_xfail(result)
         
-        assert isinstance(result, dict)
-        assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
+        assert result is True
         
-        time.sleep(4.0)
+        assert client.wait_until_stopped(timeout=5.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
     
     def test_smooth_helix_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -122,16 +108,13 @@ class TestSmoothMotionMinimal:
             height=60,
             duration=3.0,
             frame='WRF',
-            wait_for_ack=True,
-            timeout=12.0
         )
         
         _check_if_fake_serial_xfail(result)
         
-        assert isinstance(result, dict)
-        assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
+        assert result is True
         
-        time.sleep(4.0)
+        assert client.wait_until_stopped(timeout=5.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
     
     def test_smooth_blend_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -156,16 +139,13 @@ class TestSmoothMotionMinimal:
             segments=segments,
             blend_time=0.3,
             frame='WRF',
-            wait_for_ack=True,
-            timeout=12.0
         )
         
         _check_if_fake_serial_xfail(result)
         
-        assert isinstance(result, dict)
-        assert result.get('status') in ['COMPLETED', 'QUEUED', 'EXECUTING']
+        assert result is True
         
-        time.sleep(4.0)
+        assert client.wait_until_stopped(timeout=5.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
 

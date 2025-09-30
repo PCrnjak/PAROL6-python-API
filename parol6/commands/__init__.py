@@ -1,101 +1,29 @@
 """
-Commands Module for PAROL6 Robot Controller
-Contains all command classes for robot control operations
+Commands package for PAROL6.
+
+Important:
+- Do NOT import individual command modules here to avoid circular imports.
+- The controller uses dynamic discovery via CommandRegistry.discover_commands()
+  which imports command modules at runtime to trigger @register_command decorators.
 """
 
-# Import helper functions and constants
-from .ik_helpers import (
+# Re-export non-problematic IK helpers for convenience
+from parol6.utils.ik import (
     CommandValue,
     normalize_angle,
     unwrap_angles,
     calculate_adaptive_tolerance,
     solve_ik_with_adaptive_tol_subdivision,
     quintic_scaling,
-    AXIS_MAP
+    AXIS_MAP,
 )
 
-# Import basic commands
-from .basic_commands import (
-    HomeCommand,
-    JogCommand,
-    MultiJogCommand
-)
-
-# Import cartesian commands
-from .cartesian_commands import (
-    CartesianJogCommand,
-    MovePoseCommand,
-    MoveCartCommand
-)
-
-# Import joint commands
-from .joint_commands import (
-    MoveJointCommand
-)
-
-# Import gripper commands
-from .gripper_commands import (
-    GripperCommand
-)
-
-# Import utility commands
-from .utility_commands import (
-    DelayCommand
-)
-
-# Import smooth motion commands
-from .smooth_commands import (
-    transform_command_params_to_wrf,
-    BaseSmoothMotionCommand,
-    SmoothTrajectoryCommand,
-    SmoothCircleCommand,
-    SmoothArcCenterCommand,
-    SmoothArcParamCommand,
-    SmoothHelixCommand,
-    SmoothSplineCommand,
-    SmoothBlendCommand,
-    SmoothWaypointsCommand
-)
-
-# Export all command classes
 __all__ = [
-    # Helper functions
-    'CommandValue',
-    'normalize_angle',
-    'unwrap_angles',
-    'calculate_adaptive_tolerance',
-    'solve_ik_with_adaptive_tol_subdivision',
-    'quintic_scaling',
-    'AXIS_MAP',
-    
-    # Basic commands
-    'HomeCommand',
-    'JogCommand',
-    'MultiJogCommand',
-    
-    # Cartesian commands
-    'CartesianJogCommand',
-    'MovePoseCommand',
-    'MoveCartCommand',
-    
-    # Joint commands
-    'MoveJointCommand',
-    
-    # Gripper commands
-    'GripperCommand',
-    
-    # Utility commands
-    'DelayCommand',
-    
-    # Smooth motion commands
-    'transform_command_params_to_wrf',
-    'BaseSmoothMotionCommand',
-    'SmoothTrajectoryCommand',
-    'SmoothCircleCommand',
-    'SmoothArcCenterCommand',
-    'SmoothArcParamCommand',
-    'SmoothHelixCommand',
-    'SmoothSplineCommand',
-    'SmoothBlendCommand',
-    'SmoothWaypointsCommand'
+    "CommandValue",
+    "normalize_angle",
+    "unwrap_angles",
+    "calculate_adaptive_tolerance",
+    "solve_ik_with_adaptive_tol_subdivision",
+    "quintic_scaling",
+    "AXIS_MAP",
 ]

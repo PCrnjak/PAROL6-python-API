@@ -2,31 +2,70 @@
 Synchronous facade for AsyncRobotClient.
 
 - In sync code: use RobotClient and call methods directly.
-- In async code (event loop running): this class raises to prevent blocking;
-  use AsyncRobotClient instead and `await` the methods.
-
+- In async code (event loop running): use AsyncRobotClient and `await` the methods.
 """
 
 import asyncio
-from typing import Awaitable, TypeVar, Union, Optional, List, Literal, Dict
+import threading
+import atexit
+from typing import TypeVar, Union, Optional, List, Literal, Dict, Coroutine, Any
 
 from .async_client import AsyncRobotClient
-from ..protocol.types import Frame, Axis  # keep your existing imports
+from ..protocol.types import Frame, Axis
 
 T = TypeVar("T")
 
 
-def _run(coro: Awaitable[T]) -> T:
+# Persistent background event loop for sync wrapper
+_SYNC_LOOP: asyncio.AbstractEventLoop | None = None
+_SYNC_THREAD: threading.Thread | None = None
+_SYNC_LOOP_READY = threading.Event()
+
+
+def _loop_worker(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+    _SYNC_LOOP_READY.set()
+    loop.run_forever()
+
+
+def _stop_sync_loop() -> None:
+    global _SYNC_LOOP, _SYNC_THREAD
+    if _SYNC_LOOP is not None:
+        try:
+            _SYNC_LOOP.call_soon_threadsafe(_SYNC_LOOP.stop)
+        except Exception:
+            pass
+        _SYNC_LOOP = None
+        _SYNC_THREAD = None
+
+
+def _ensure_sync_loop() -> None:
+    """Start a persistent background event loop if not started yet."""
+    global _SYNC_LOOP, _SYNC_THREAD
+    if _SYNC_LOOP is None:
+        _SYNC_LOOP = asyncio.new_event_loop()
+        _SYNC_THREAD = threading.Thread(
+            target=_loop_worker, args=(_SYNC_LOOP,), name="parol6-sync-loop", daemon=True
+        )
+        _SYNC_THREAD.start()
+        _SYNC_LOOP_READY.wait(timeout=1.0)
+        atexit.register(_stop_sync_loop)
+
+
+def _run(coro: Coroutine[Any, Any, T]) -> T:
     """
-    Run an async coroutine to completion when no event loop is running.
-    If a loop is already running, raise to avoid deadlocks.
+    Run an async coroutine to completion using a persistent background event loop.
+    If a loop is already running in this thread, raise to avoid deadlocks.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop -> safe to run
-        return asyncio.run(coro)
-    # A loop is running; blocking would be unsafe.
+        # No running loop in this thread -> submit to persistent loop
+        _ensure_sync_loop()
+        assert _SYNC_LOOP is not None
+        fut = asyncio.run_coroutine_threadsafe(coro, _SYNC_LOOP)
+        return fut.result()
+    # A loop is running in this thread; blocking would be unsafe.
     raise RuntimeError(
         "RobotClient was used while an event loop is running.\n"
         "Use AsyncRobotClient and `await` the method instead."
@@ -47,10 +86,9 @@ class RobotClient:
         port: int = 5001,
         timeout: float = 2.0,
         retries: int = 1,
-        ack_port: int = 5002,
     ) -> None:
         self._inner = AsyncRobotClient(
-            host=host, port=port, timeout=timeout, retries=retries, ack_port=ack_port
+            host=host, port=port, timeout=timeout, retries=retries
         )
 
     @property
@@ -58,36 +96,50 @@ class RobotClient:
         """Access the underlying async client if you need it."""
         return self._inner
 
+    # Expose common configuration attributes
+    @property
+    def host(self) -> str:
+        return self._inner.host
+
+    @property
+    def port(self) -> int:
+        return self._inner.port
+
     # ---------- motion / control ----------
 
-    def ping(self) -> bool:
-        return _run(self._inner.ping())
+    def home(self) -> bool:
+        return _run(self._inner.home())
 
-    def home(self, wait_for_ack: bool = False, timeout: float = 30.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.home(wait_for_ack, timeout, non_blocking))
+    def stop(self) -> bool:
+        return _run(self._inner.stop())
 
-    def stop(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stop(wait_for_ack, timeout, non_blocking))
+    def enable(self) -> bool:
+        return _run(self._inner.enable())
 
-    def enable(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.enable(wait_for_ack, timeout, non_blocking))
+    def disable(self) -> bool:
+        return _run(self._inner.disable())
 
-    def disable(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.disable(wait_for_ack, timeout, non_blocking))
+    def clear_error(self) -> bool:
+        return _run(self._inner.clear_error())
 
-    def clear_error(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.clear_error(wait_for_ack, timeout, non_blocking))
+    def stream_on(self) -> bool:
+        return _run(self._inner.stream_on())
 
-    def stream_on(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stream_on(wait_for_ack, timeout, non_blocking))
+    def stream_off(self) -> bool:
+        return _run(self._inner.stream_off())
+    
+    def simulator_on(self) -> bool:
+        return _run(self._inner.simulator_on())
 
-    def stream_off(self, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.stream_off(wait_for_ack, timeout, non_blocking))
+    def simulator_off(self) -> bool:
+        return _run(self._inner.simulator_off())
 
-    def set_com_port(self, port_str: str, wait_for_ack: bool = False, timeout: float = 2.0, non_blocking: bool = False) -> Union[str, dict]:
-        return _run(self._inner.set_com_port(port_str, wait_for_ack, timeout, non_blocking))
+    def set_serial_port(self, port_str: str) -> bool:
+        return _run(self._inner.set_serial_port(port_str))
 
     # ---------- status / queries ----------
+    def ping(self) -> str | None:
+        return _run(self._inner.ping())
 
     def get_angles(self) -> List[float] | None:
         return _run(self._inner.get_angles())
@@ -110,6 +162,9 @@ class RobotClient:
     def get_status(self) -> dict | None:
         return _run(self._inner.get_status())
 
+    def get_loop_stats(self) -> dict | None:
+        return _run(self._inner.get_loop_stats())
+
     # ---------- helper methods ----------
 
     def get_pose_rpy(self) -> List[float] | None:
@@ -128,21 +183,37 @@ class RobotClient:
         self,
         timeout: float = 90.0,
         settle_window: float = 1.0,
-        poll_interval: float = 0.2,
         speed_threshold: float = 2.0,
-        angle_threshold: float = 0.5,
-        show_progress: bool = False,
+        angle_threshold: float = 0.5
     ) -> bool:
         return _run(
             self._inner.wait_until_stopped(
                 timeout=timeout,
                 settle_window=settle_window,
-                poll_interval=poll_interval,
                 speed_threshold=speed_threshold,
                 angle_threshold=angle_threshold,
-                show_progress=show_progress,
             )
         )
+
+    # ---------- responsive waits / raw send ----------
+
+    def wait_for_server_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
+        """Poll ping() until server responds or timeout."""
+        return _run(self._inner.wait_for_server_ready(timeout=timeout, interval=interval))
+
+    def wait_for_status(self, predicate, timeout: float = 5.0) -> bool:
+        """
+        Wait until a multicast status satisfies predicate(status) within timeout.
+        Note: predicate is executed in the client's event loop thread.
+        """
+        return _run(self._inner.wait_for_status(predicate, timeout=timeout))
+
+    def send_raw(self, message: str, await_reply: bool = False, timeout: float = 2.0) -> bool | str | None:
+        """
+        Send a raw UDP message; optionally await a single reply and return its text.
+        Returns True on fire-and-forget send, str on reply, or None on timeout/error when awaiting.
+        """
+        return _run(self._inner.send_raw(message, await_reply=await_reply, timeout=timeout))
 
     # ---------- extended controls / motion ----------
 
@@ -154,10 +225,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.move_joints(
                 joint_angles,
@@ -166,9 +234,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -180,10 +245,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.move_pose(
                 pose,
@@ -192,9 +254,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -206,10 +265,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.move_cartesian(
                 pose,
@@ -218,9 +274,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -232,10 +285,7 @@ class RobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.move_cartesian_rel_trf(
                 deltas,
@@ -244,9 +294,6 @@ class RobotClient:
                 accel_percentage,
                 profile,
                 tracking,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -256,19 +303,13 @@ class RobotClient:
         speed_percentage: int,
         duration: float | None = None,
         distance_deg: float | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.jog_joint(
                 joint_index,
                 speed_percentage,
                 duration,
                 distance_deg,
-                wait_for_ack,
-                timeout,
-                non_blocking,
             )
         )
 
@@ -278,13 +319,10 @@ class RobotClient:
         axis: Axis,
         speed_percentage: int,
         duration: float,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.jog_cartesian(
-                frame, axis, speed_percentage, duration, wait_for_ack, timeout, non_blocking
+                frame, axis, speed_percentage, duration
             )
         )
 
@@ -293,11 +331,16 @@ class RobotClient:
         joints: List[int],
         speeds: List[float],
         duration: float,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.jog_multiple(joints, speeds, duration, wait_for_ack, timeout, non_blocking))
+    ) -> bool:
+        return _run(self._inner.jog_multiple(joints, speeds, duration))
+
+    def set_io(self, index: int, value: int) -> bool:
+        """Set digital I/O bit (0..7) to 0 or 1."""
+        return _run(self._inner.set_io(index, value))
+
+    def delay(self, seconds: float) -> bool:
+        """Insert a non-blocking delay in the motion queue."""
+        return _run(self._inner.delay(seconds))
 
     # ---------- IO / gripper ----------
 
@@ -305,11 +348,8 @@ class RobotClient:
         self,
         action: str,
         port: int,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.control_pneumatic_gripper(action, port, wait_for_ack, timeout, non_blocking))
+    ) -> bool:
+        return _run(self._inner.control_pneumatic_gripper(action, port))
 
     def control_electric_gripper(
         self,
@@ -317,13 +357,10 @@ class RobotClient:
         position: int | None = 255,
         speed: int | None = 150,
         current: int | None = 500,
-        wait_for_ack: bool = False,
-        timeout: float = 2.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.control_electric_gripper(
-                action, position, speed, current, wait_for_ack, timeout, non_blocking
+                action, position, speed, current
             )
         )
 
@@ -332,56 +369,32 @@ class RobotClient:
     def execute_gcode(
         self,
         gcode_line: str,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.execute_gcode(gcode_line, wait_for_ack, timeout, non_blocking))
+    ) -> bool:
+        return _run(self._inner.execute_gcode(gcode_line))
 
     def execute_gcode_program(
         self,
         program_lines: List[str],
-        wait_for_ack: bool = False,
-        timeout: float = 30.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.execute_gcode_program(program_lines, wait_for_ack, timeout, non_blocking))
+    ) -> bool:
+        return _run(self._inner.execute_gcode_program(program_lines))
 
     def load_gcode_file(
         self,
         filepath: str,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.load_gcode_file(filepath, wait_for_ack, timeout, non_blocking))
+    ) -> bool:
+        return _run(self._inner.load_gcode_file(filepath))
 
     def get_gcode_status(self) -> dict | None:
         return _run(self._inner.get_gcode_status())
 
-    def pause_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.pause_gcode_program(wait_for_ack, timeout, non_blocking))
+    def pause_gcode_program(self) -> bool:
+        return _run(self._inner.pause_gcode_program())
 
-    def resume_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.resume_gcode_program(wait_for_ack, timeout, non_blocking))
+    def resume_gcode_program(self) -> bool:
+        return _run(self._inner.resume_gcode_program())
 
-    def stop_gcode_program(
-        self,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
-        return _run(self._inner.stop_gcode_program(wait_for_ack, timeout, non_blocking))
+    def stop_gcode_program(self) -> bool:
+        return _run(self._inner.stop_gcode_program())
 
     # ---------- smooth motion ----------
 
@@ -399,10 +412,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.smooth_circle(
                 center=center,
@@ -417,9 +427,6 @@ class RobotClient:
                 clockwise=clockwise,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -434,10 +441,7 @@ class RobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.smooth_arc_center(
                 end_pose=end_pose,
@@ -449,9 +453,34 @@ class RobotClient:
                 clockwise=clockwise,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
+            )
+        )
+
+    def smooth_arc_param(
+        self,
+        end_pose: List[float],
+        radius: float,
+        arc_angle: float,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        start_pose: Optional[List[float]] = None,
+        duration: Optional[float] = None,
+        speed_percentage: Optional[float] = None,
+        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
+        jerk_limit: Optional[float] = None,
+        clockwise: bool = False,
+    ) -> bool:
+        return _run(
+            self._inner.smooth_arc_param(
+                end_pose=end_pose,
+                radius=radius,
+                arc_angle=arc_angle,
+                frame=frame,
+                start_pose=start_pose,
+                duration=duration,
+                speed_percentage=speed_percentage,
+                trajectory_type=trajectory_type,
+                jerk_limit=jerk_limit,
+                clockwise=clockwise,
             )
         )
 
@@ -464,10 +493,7 @@ class RobotClient:
         speed_percentage: Optional[float] = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.smooth_spline(
                 waypoints=waypoints,
@@ -477,9 +503,6 @@ class RobotClient:
                 speed_percentage=speed_percentage,
                 trajectory_type=trajectory_type,
                 jerk_limit=jerk_limit,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -496,10 +519,7 @@ class RobotClient:
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
         clockwise: bool = False,
-        wait_for_ack: bool = False,
-        timeout: float = 10.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.smooth_helix(
                 center=center,
@@ -513,9 +533,6 @@ class RobotClient:
                 duration=duration,
                 speed_percentage=speed_percentage,
                 clockwise=clockwise,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
@@ -527,10 +544,7 @@ class RobotClient:
         start_pose: Optional[List[float]] = None,
         duration: Optional[float] = None,
         speed_percentage: Optional[float] = None,
-        wait_for_ack: bool = False,
-        timeout: float = 15.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.smooth_blend(
                 segments=segments,
@@ -539,9 +553,32 @@ class RobotClient:
                 start_pose=start_pose,
                 duration=duration,
                 speed_percentage=speed_percentage,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
+            )
+        )
+
+    def smooth_waypoints(
+        self,
+        waypoints: List[List[float]],
+        blend_radii: Literal["AUTO"] | List[float] = "AUTO",
+        blend_mode: Literal["parabolic", "circular", "none"] = "parabolic",
+        via_modes: Optional[List[str]] = None,
+        max_velocity: float = 100.0,
+        max_acceleration: float = 500.0,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "quintic",
+        duration: Optional[float] = None,
+    ) -> bool:
+        return _run(
+            self._inner.smooth_waypoints(
+                waypoints=waypoints,
+                blend_radii=blend_radii,
+                blend_mode=blend_mode,
+                via_modes=via_modes,
+                max_velocity=max_velocity,
+                max_acceleration=max_acceleration,
+                frame=frame,
+                trajectory_type=trajectory_type,
+                duration=duration,
             )
         )
 
@@ -553,34 +590,22 @@ class RobotClient:
         x: float | None = None,
         y: float | None = None,
         z: float | None = None,
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.set_work_coordinate_offset(
                 coordinate_system=coordinate_system,
                 x=x,
                 y=y,
                 z=z,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )
 
     def zero_work_coordinates(
         self,
         coordinate_system: str = "G54",
-        wait_for_ack: bool = False,
-        timeout: float = 5.0,
-        non_blocking: bool = False,
-    ) -> Union[str, dict]:
+    ) -> bool:
         return _run(
             self._inner.zero_work_coordinates(
                 coordinate_system=coordinate_system,
-                wait_for_ack=wait_for_ack,
-                timeout=timeout,
-                non_blocking=non_blocking,
             )
         )

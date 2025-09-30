@@ -9,12 +9,11 @@ description = "Python library for controlling PAROL6 robot arms"
 
 requires-python = ">=3.11"
 dependencies = [
-    "numpy",
+    "numpy==1.26.4",
     "pyserial",
     "spatialmath-python",
-    "roboticstoolbox-python",
-    "oclock",
-    "keyboard",
+    "roboticstoolbox-python==1.0.3",
+    "scipy==1.11.4"
 ]
 
 [tool.setuptools.packages.find]
