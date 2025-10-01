@@ -10,11 +10,11 @@ from numpy.typing import NDArray
 from typing import List, Tuple, Optional, cast
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
-from parol6.utils.ik import solve_ik_with_adaptive_tol_subdivision, quintic_scaling, AXIS_MAP
+from parol6.utils.ik import solve_ik_simple, quintic_scaling, AXIS_MAP
 from .base import ExecutionStatus, MotionCommand, MotionProfile
 from parol6.utils.errors import IKError
 from parol6.protocol.wire import CommandCode
-from parol6.config import JOG_IK_ILIMIT, INTERVAL_S, TRACE, DEFAULT_ACCEL_PERCENT
+from parol6.config import INTERVAL_S, TRACE, DEFAULT_ACCEL_PERCENT
 from parol6.server.command_registry import register_command
 
 logger = logging.getLogger(__name__)
@@ -148,7 +148,7 @@ class CartesianJogCommand(MotionCommand):
             target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_with_adaptive_tol_subdivision(PAROL6_ROBOT.robot, target_pose, q_current, ilimit=JOG_IK_ILIMIT, jogging=True)
+        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S
@@ -159,7 +159,7 @@ class CartesianJogCommand(MotionCommand):
 
         # --- D. Speed Scaling using base class helper ---
         scaled_speeds = self.scale_speeds_to_joint_max(state.Speed_out)
-        np.copyto(state.Speed_out, scaled_speeds, casting='no')
+        np.copyto(state.Speed_out, scaled_speeds)
 
         return ExecutionStatus.executing("CARTJOG")
 
@@ -226,7 +226,7 @@ class MovePoseCommand(MotionCommand):
         pose = cast(List[float], self.pose)
         target_pose = SE3(pose[0] / 1000.0, pose[1] / 1000.0, pose[2] / 1000.0) * SE3.RPY(pose[3:6], unit='deg', order='xyz')
         
-        ik_solution = solve_ik_with_adaptive_tol_subdivision(
+        ik_solution = solve_ik_simple(
             PAROL6_ROBOT.robot, target_pose, initial_pos_rad, ilimit=100)
 
         if not ik_solution.success:
@@ -360,7 +360,7 @@ class MoveCartCommand(MotionCommand):
         pose = cast(List[float], self.pose)
         self.target_pose = SE3(pose[0]/1000.0, pose[1]/1000.0, pose[2]/1000.0) * SE3.RPY(pose[3:6], unit='deg', order='xyz')
 
-        ik_check = solve_ik_with_adaptive_tol_subdivision(
+        ik_check = solve_ik_simple(
             PAROL6_ROBOT.robot, cast(SE3, self.target_pose), initial_q_rad
         )
 
@@ -417,7 +417,7 @@ class MoveCartCommand(MotionCommand):
 
         current_q_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         # TODO: is it doing the expensive IK solving twice per command??? once in setup and once in execution??
-        ik_solution = solve_ik_with_adaptive_tol_subdivision(
+        ik_solution = solve_ik_simple(
             PAROL6_ROBOT.robot, current_target_pose, current_q_rad
         )
 

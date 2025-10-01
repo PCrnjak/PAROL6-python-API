@@ -49,21 +49,8 @@ a7 = 45.25 / 1000.0
 
 alpha_DH = np.array([-pi / 2, pi, pi / 2, -pi / 2, pi / 2, pi], dtype=np.float64)
 
-# DH Robot model
-robot = DHRobot(
-    [
-        RevoluteDH(d=a1, a=a2, alpha=float(alpha_DH[0])),
-        RevoluteDH(a=a3, d=0.0, alpha=float(alpha_DH[1])),
-        RevoluteDH(alpha=float(alpha_DH[2]), a=-a4),
-        RevoluteDH(d=-a5, a=0.0, alpha=float(alpha_DH[3])),
-        RevoluteDH(a=0.0, d=0.0, alpha=float(alpha_DH[4])),
-        RevoluteDH(alpha=float(alpha_DH[5]), a=-a7, d=-a6),
-    ],
-    name="PAROL6",
-)
-
 # -----------------------------
-# Raw parameter arrays
+# Joint limits (defined before robot model)
 # -----------------------------
 # Limits (deg) you get after homing and moving to extremes
 _joint_limits_degree: Limits2f = np.array(
@@ -80,6 +67,22 @@ _joint_limits_degree: Limits2f = np.array(
 
 _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree).astype(np.float64)
 
+# DH Robot model with joint limits incorporated
+robot = DHRobot(
+    [
+        RevoluteDH(d=a1, a=a2, alpha=float(alpha_DH[0]), qlim=_joint_limits_radian[0]),
+        RevoluteDH(a=a3, d=0.0, alpha=float(alpha_DH[1]), qlim=_joint_limits_radian[1]),
+        RevoluteDH(alpha=float(alpha_DH[2]), a=-a4, qlim=_joint_limits_radian[2]),
+        RevoluteDH(d=-a5, a=0.0, alpha=float(alpha_DH[3]), qlim=_joint_limits_radian[3]),
+        RevoluteDH(a=0.0, d=0.0, alpha=float(alpha_DH[4]), qlim=_joint_limits_radian[4]),
+        RevoluteDH(alpha=float(alpha_DH[5]), a=-a7, d=-a6, qlim=_joint_limits_radian[5]),
+    ],
+    name="PAROL6",
+)
+
+# -----------------------------
+# Additional raw parameter arrays
+# -----------------------------
 # Reduction ratio per joint
 _joint_ratio: NDArray[np.float64] = np.array(
     [6.4, 20.0, 20.0 * (38.0 / 42.0), 4.0, 4.0, 10.0], dtype=np.float64

@@ -2,7 +2,7 @@
 Base abstractions and helpers for command implementations.
 """
 from dataclasses import dataclass
-from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING, List, ClassVar, cast
+from typing import Tuple, Optional, Dict, Any, List, ClassVar, cast
 from abc import ABC, abstractmethod
 from enum import Enum
 import logging
@@ -373,7 +373,7 @@ class QueryCommand(CommandBase):
             status = self.execute_step(state)
         except Exception as e:
             # Hard failure safeguards
-            self.fail(f"Unhandled exception: {e}")
+            self.fail(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status
 
@@ -424,7 +424,10 @@ class MotionCommand(CommandBase):
     def scale_speeds_to_joint_max(self, speeds: np.ndarray) -> np.ndarray:
         denom = np.where(self.J_MAX != 0.0, self.J_MAX, 1.0)
         scale = float(np.max(np.abs(speeds) / denom))
-        return np.rint(speeds / scale) if scale > 1.0 else speeds
+        if scale > 1.0:
+            return np.rint(speeds / scale).astype(np.int32)
+        else:
+            return np.asarray(speeds, dtype=np.int32)
 
     def limit_hit_mask(self, pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
         return ((speeds > 0) & (pos_steps >= self.LIMS_STEPS[:, 1])) | ((speeds < 0) & (pos_steps <= self.LIMS_STEPS[:, 0]))
@@ -467,8 +470,8 @@ class MotionCommand(CommandBase):
             status = self.execute_step(state)
         except Exception as e:
             # Hard failure safeguards
-            self.fail_and_idle(state, f"Unhandled exception: {e}")
-            self.log_error(f"Unhandled exception: {e}")
+            self.fail_and_idle(state, str(e))
+            self.log_error(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status
 
@@ -570,7 +573,7 @@ class SystemCommand(CommandBase):
         try:
             status = self.execute_step(state)
         except Exception as e:
-            self.fail(f"Unhandled exception: {e}")
-            self.log_error("Unhandled exception: %s", e)
+            self.fail(str(e))
+            self.log_error(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status

@@ -13,7 +13,6 @@ from spatialmath import SE3
 from parol6.smooth_motion import (
     CircularMotion, SplineMotion, HelixMotion, WaypointTrajectoryPlanner
 )
-from parol6.utils.ik import solve_ik_with_adaptive_tol_subdivision
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, MotionCommand
 from parol6.utils.errors import IKError
 from parol6.utils.frames import (

@@ -651,7 +651,7 @@ class Controller:
                     continue
 
                 # Apply stream mode logic for streamable motion commands
-                if state.stream_mode and isinstance(command, MotionCommand) and getattr(command, 'streamable', False):
+                if state.stream_mode and isinstance(command, MotionCommand) and command.streamable:
                     # Cancel any active streamable command and replace it (suppress per-command ACK to reduce UDP chatter)
                     if self.active_command and isinstance(self.active_command.command, MotionCommand) and getattr(self.active_command.command, 'streamable', False):
                         self.active_command = None
@@ -759,7 +759,6 @@ class Controller:
             ac = self.active_command
             try:
                 state = self.state_manager.get_state()
-                ac = self.active_command
                 
                 # Check if controller is enabled
                 if state.enabled:

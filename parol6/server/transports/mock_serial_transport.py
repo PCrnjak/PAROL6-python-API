@@ -26,6 +26,8 @@ class MockRobotState:
     """Internal state of the simulated robot."""
     # Joint positions (in steps)
     position_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    # Floating accumulator for high-fidelity integration (steps, float)
+    position_f: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.float64))
     # Joint speeds (in steps/sec)
     speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Homed status per joint
@@ -57,7 +59,9 @@ class MockRobotState:
             deg = float(PAROL6_ROBOT.joint.standby.deg[i])
             steps = int(PAROL6_ROBOT.ops.deg_to_steps(deg, i))
             self.position_in[i] = steps
-        
+        # Initialize float accumulator from integer steps
+        self.position_f = self.position_in.astype(np.float64)
+
         # Ensure E-stop is not pressed (bit 4 = 1 means released)
         self.io_in[4] = 1
 
@@ -136,6 +140,8 @@ class MockSerialTransport:
         """
         try:
             self._state.position_in = state.Position_in.copy()
+            # keep high-fidelity accumulator in sync
+            self._state.position_f = self._state.position_in.astype(np.float64)
             self._state.homed_in = state.Homed_in.copy()
             self._state.position_out = self._state.position_in.copy()
             self._state.last_update = time.time()
@@ -248,6 +254,7 @@ class MockSerialTransport:
                 for i in range(6):
                     steps = int(PAROL6_ROBOT.ops.deg_to_steps(float(target_deg[i]), i))
                     state.position_in[i] = steps
+                    state.position_f[i] = float(steps)
                     state.speed_in[i] = 0
                 # Clear HOME command to avoid immediately restarting homing
                 state.command_out = CommandCode.IDLE
@@ -268,64 +275,84 @@ class MockSerialTransport:
                 state.speed_in[i] = 0
                 
         elif state.command_out == CommandCode.JOG or state.command_out == 123:
-            # Speed control mode
+            # Speed control mode (float-accumulated integration like firmware step scheduling)
+            prev_pos_f = state.position_f.copy()
             for i in range(6):
-                v = int(state.speed_out[i])
+                v_cmd = float(state.speed_out[i])
                 # Apply speed limits
-                max_v = int(PAROL6_ROBOT.joint.speed.max[i])
-                v = max(-max_v, min(max_v, v))
-                
-                # Integrate position
-                new_pos = int(state.position_in[i] + v * dt)
-                
+                max_v = float(PAROL6_ROBOT.joint.speed.max[i])
+                if v_cmd > max_v:
+                    v_cmd = max_v
+                elif v_cmd < -max_v:
+                    v_cmd = -max_v
+
+                # Integrate float position
+                new_pos_f = float(state.position_f[i] + v_cmd * dt)
+
                 # Apply joint limits
                 jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
-                if new_pos < jmin:
-                    new_pos = jmin
-                    v = 0
-                elif new_pos > jmax:
-                    new_pos = jmax
-                    v = 0
-                
-                state.speed_in[i] = v
-                state.position_in[i] = new_pos
+                if new_pos_f < float(jmin):
+                    new_pos_f = float(jmin)
+                elif new_pos_f > float(jmax):
+                    new_pos_f = float(jmax)
+
+                state.position_f[i] = new_pos_f
+
+            # Report actual velocity based on realized motion during this dt
+            if dt > 0:
+                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(np.int32)
+            else:
+                realized_v = np.zeros(6, dtype=np.int32)
+            # Clip to joint limits for reporting
+            vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)
+            state.speed_in[:] = np.clip(realized_v, -vmax, vmax)
                 
         elif state.command_out == CommandCode.MOVE or state.command_out == 156:
-            # Position control mode
+            # Position control mode (float-accumulated and per-tick speed clamp)
+            prev_pos_f = state.position_f.copy()
             for i in range(6):
-                target = state.position_out[i]
-                current = state.position_in[i]
-                err = int(target - current)
-                
-                if err == 0:
-                    state.speed_in[i] = 0
-                    continue
-                
-                # Calculate step size based on max speed
-                max_step = int(PAROL6_ROBOT.joint.speed.max[i] * dt)
-                if max_step < 1:
-                    max_step = 1
-                
-                # Move toward target
-                step = max(-max_step, min(max_step, err))
-                new_pos = current + step
-                
+                target = float(state.position_out[i])
+                current_f = float(state.position_f[i])
+                err_f = target - current_f
+
+                # Calculate max move this tick from per-joint max speed
+                max_step_f = float(PAROL6_ROBOT.joint.speed.max[i]) * float(dt)
+                if max_step_f < 1.0:
+                    # ensure some progress at very small dt
+                    max_step_f = 1.0
+
+                move = float(err_f)
+                if move > max_step_f:
+                    move = max_step_f
+                elif move < -max_step_f:
+                    move = -max_step_f
+
+                new_pos_f = current_f + move
+
                 # Apply joint limits
                 jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
-                if new_pos < jmin:
-                    new_pos = jmin
-                    step = 0
-                elif new_pos > jmax:
-                    new_pos = jmax
-                    step = 0
-                
-                state.position_in[i] = int(new_pos)
-                state.speed_in[i] = int(step / dt) if dt > 0 else 0
+                if new_pos_f < float(jmin):
+                    new_pos_f = float(jmin)
+                elif new_pos_f > float(jmax):
+                    new_pos_f = float(jmax)
+
+                state.position_f[i] = new_pos_f
+
+            # Report actual velocity based on realized motion
+            if dt > 0:
+                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(np.int32)
+            else:
+                realized_v = np.zeros(6, dtype=np.int32)
+            vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)
+            state.speed_in[:] = np.clip(realized_v, -vmax, vmax)
                 
         else:
             # Idle or unknown command - hold position
             for i in range(6):
                 state.speed_in[i] = 0
+
+        # Sync integer telemetry from high-fidelity accumulator
+        state.position_in[:] = np.rint(state.position_f).astype(np.int32)
     
     
     # ================================

@@ -21,10 +21,6 @@ TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes
 
 logger = logging.getLogger(__name__)
 
-# IK / motion planning
-# Iteration limit for jogging IK solves (kept conservative for speed while jogging)
-JOG_IK_ILIMIT: int = 20
-
 # Default control/sample rates (Hz)
 CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "250"))
 
