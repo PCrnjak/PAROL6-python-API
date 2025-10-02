@@ -652,6 +652,12 @@ class Controller:
 
                 # Apply stream mode logic for streamable motion commands
                 if state.stream_mode and isinstance(command, MotionCommand) and command.streamable:
+                    # Drain UDP buffer to discard stale commands before processing new one
+                    if self.udp_transport:
+                        drained = self.udp_transport.drain_buffer()
+                        if drained > 0:
+                            logger.log(TRACE, "udp_buffer_drained count=%d", drained)
+                    
                     # Cancel any active streamable command and replace it (suppress per-command ACK to reduce UDP chatter)
                     if self.active_command and isinstance(self.active_command.command, MotionCommand) and getattr(self.active_command.command, 'streamable', False):
                         self.active_command = None
@@ -837,6 +843,13 @@ class Controller:
                             addr
                         )
                     
+                    # If this is a streamable command, clear all queued streamable commands
+                    # to prevent pileup when commands fail repeatedly (e.g., IK failures at limits)
+                    if isinstance(ac.command, MotionCommand) and getattr(ac.command, 'streamable', False):
+                        removed = self._clear_streamable_commands(f"Active streamable command failed: {status.message}")
+                        if removed > 0:
+                            logger.info(f"Cleared {removed} queued streamable commands due to active command failure")
+                    
                     self.active_command = None
                 
                 return status
@@ -915,6 +928,41 @@ class Controller:
         logger.info(f"Cleared {len(cleared)} commands from queue: {reason}")
         
         return cleared
+    
+    def _clear_streamable_commands(self, reason: str = "Streamable commands cleared") -> int:
+        """
+        Clear all queued streamable motion commands.
+        
+        This is used to prevent command pileup when streamable commands fail repeatedly
+        (e.g., IK failures when jogging at kinematic limits).
+        
+        Args:
+            reason: Reason for clearing streamable commands
+            
+        Returns:
+            Number of commands cleared
+        """
+        removed_count = 0
+        
+        # Iterate through a copy of the queue to safely remove items
+        for queued_cmd in list(self.command_queue):
+            if isinstance(queued_cmd.command, MotionCommand) and getattr(queued_cmd.command, 'streamable', False):
+                self.command_queue.remove(queued_cmd)
+                removed_count += 1
+                
+                # Send cancellation acknowledgment (though streamable commands typically don't have IDs)
+                if queued_cmd.command_id and queued_cmd.address:
+                    self._send_ack(
+                        queued_cmd.command_id,
+                        "CANCELLED",
+                        reason,
+                        queued_cmd.address
+                    )
+        
+        if removed_count > 0:
+            logger.debug(f"Cleared {removed_count} streamable commands from queue: {reason}")
+        
+        return removed_count
     
     
     

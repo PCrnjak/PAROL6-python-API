@@ -148,7 +148,7 @@ class CartesianJogCommand(MotionCommand):
             target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
+        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S

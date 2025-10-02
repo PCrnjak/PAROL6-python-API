@@ -135,6 +135,48 @@ class UDPTransport:
         except Exception as e:
             logger.error(f"Unexpected error in receive_one: {e}")
             return None
+    
+    def drain_buffer(self) -> int:
+        """
+        Drain all pending messages from the UDP receive buffer.
+        
+        This is useful in stream mode to discard stale commands when new ones arrive.
+        Returns the number of messages drained.
+        """
+        if not self.socket or not self._running:
+            return 0
+        
+        drained_count = 0
+        original_timeout = None
+        
+        try:
+            # Temporarily switch to non-blocking mode
+            original_timeout = self.socket.gettimeout()
+            self.socket.setblocking(False)
+            
+            # Read all pending messages until buffer is empty
+            while True:
+                try:
+                    nbytes, _ = self.socket.recvfrom_into(self._rxv)
+                    if nbytes > 0:
+                        drained_count += 1
+                except socket.error:
+                    # No more data available (expected)
+                    break
+            
+            # Restore original timeout
+            self.socket.settimeout(original_timeout)
+            
+        except Exception as e:
+            logger.error(f"Error draining UDP buffer: {e}")
+            # Try to restore timeout even if draining failed
+            try:
+                if original_timeout is not None:
+                    self.socket.settimeout(original_timeout)
+            except:
+                pass
+        
+        return drained_count
 
     def send_response(self, message: str, address: Tuple[str, int]) -> bool:
         """

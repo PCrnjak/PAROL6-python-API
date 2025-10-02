@@ -43,7 +43,7 @@ def solve_ik_simple(
     target_pose: SE3,
     current_q,
     ilimit: int = 100,
-    tol: float = 1e-6,
+    tol: float = 1e-12,
     jogging: bool = False
 ):
     """
@@ -85,25 +85,20 @@ def solve_ik_simple(
         tolerance_used - Tolerance used for convergence
         violations - Error message if failed, None if successful
     """
-    # Use simple, consistent damping - no adaptive heuristics
-    damping = 0.0000001 if jogging else 0.0001
-    
-    # Use library's IK solver with proper joint limit checking
-    # The library now has smart wrapping that respects extended joint limits
-    result = robot.ets().ikine_LM(
+    result = robot.ets().ik_LM(
         target_pose,
         q0=current_q,
-        ilimit=ilimit,
-        tol=tol,
-        joint_limits=True,  # Library validates against robot.qlim with smart wrapping
+        tol=1e-10,
+        joint_limits=True,
         k=0.0,
-        method="sugihara",
-        pi=1
+        method="sugihara"
     )
-    
-    if result.success:
-        # Optional: unwrap to minimize joint motion (helps with continuous trajectories)
-        q_unwrapped = unwrap_angles(result.q, current_q)
+    q = result[0]
+    success = result[1] > 0
+    iterations = result[2]
+    remaining = result[3]
+    if success:
+        q_unwrapped = unwrap_angles(q, current_q)
         
         # Verify unwrapped solution still within limits
         within_limits = PAROL6_ROBOT.check_limits(
@@ -111,16 +106,16 @@ def solve_ik_simple(
         )
         
         if within_limits:
-            result.q = q_unwrapped
+            q = q_unwrapped
         # else: use original result.q which already passed library's limit check
     
-    violations = None if result.success else f"IK failed: {result.reason}"
+    violations = None if success else f"IK failed to solve."
     
     return IKResult(
-        success=result.success,
-        q=result.q if result.success else None,
-        iterations=result.iterations,
-        residual=result.residual,
+        success=success,
+        q=q if success else None,
+        iterations=iterations,
+        residual=remaining,
         tolerance_used=tol,
         violations=violations
     )
