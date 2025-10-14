@@ -79,6 +79,10 @@ class StatusCache:
                 current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A  # 4x4
                 pose_flat = current_pose_matrix.reshape(-1)  # 16
                 self.pose = np.asarray(pose_flat, dtype=np.float64)
+                # Convert translation from meters to mm for all consumers (indices 3, 7, 11)
+                self.pose[3] *= 1000.0   # X translation
+                self.pose[7] *= 1000.0   # Y translation
+                self.pose[11] *= 1000.0  # Z translation
                 self._pose_ascii = self._format_csv_from_list(self.pose)
                 changed_any = True
 

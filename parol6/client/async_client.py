@@ -6,6 +6,8 @@ import json
 import math
 import random
 import time
+import numpy as np
+from spatialmath import SO3
 from typing import List, Dict, Optional, Literal, cast, AsyncIterator
 from collections.abc import Iterable
 
@@ -290,8 +292,9 @@ class AsyncRobotClient:
 
     async def get_pose(self) -> list[float] | None:
         """
-        Returns 16-element transformation matrix (flattened) or None on failure.
+        Returns 16-element transformation matrix (flattened) with translation in mm.
         Expected wire format: "POSE|p0,p1,p2,...,p15"
+        Note: Server already broadcasts translation in mm.
         """
         resp = await self._request("GET_POSE", bufsize=2048)
         if not resp:
@@ -308,8 +311,9 @@ class AsyncRobotClient:
         Aggregate status.
         Expected format:
           STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
-        Returns dict with keys: pose (list[float] len=16), angles (list[float] len=6),
+        Returns dict with keys: pose (list[float] len=16 with translation in mm), angles (list[float] len=6),
                                 io (list[int] len=5), gripper (list[int] len>=6)
+        Note: Server already broadcasts translation in mm.
         """
         resp = await self._request("GET_STATUS", bufsize=4096)
         if not resp:
@@ -331,42 +335,31 @@ class AsyncRobotClient:
     async def get_pose_rpy(self) -> list[float] | None:
         """
         Get robot pose as [x, y, z, rx, ry, rz] in mm and degrees.
-        Converts 4x4 matrix to xyz + RPY Euler angles.
+        Converts 4x4 matrix to xyz + RPY Euler angles using order='xyz' to match server convention.
+        Note: get_pose() already returns mm for translation, so direct usage.
         """
         pose_matrix = await self.get_pose()
         if not pose_matrix or len(pose_matrix) != 16:
             return None
         
         try:
-            # Extract translation
+            # Extract translation (already in mm from get_pose())
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
             
-            # Extract rotation matrix elements 
-            r11, _, _ = pose_matrix[0], pose_matrix[1], pose_matrix[2]
-            r21, r22, r23 = pose_matrix[4], pose_matrix[5], pose_matrix[6] 
-            r31, r32, r33 = pose_matrix[8], pose_matrix[9], pose_matrix[10]
+            # Extract rotation matrix (column-major in SE3, so rows are [0,4,8], [1,5,9], [2,6,10])
+            R = np.array([
+                [pose_matrix[0], pose_matrix[1], pose_matrix[2]],
+                [pose_matrix[4], pose_matrix[5], pose_matrix[6]],
+                [pose_matrix[8], pose_matrix[9], pose_matrix[10]]
+            ])
             
-            # Convert to RPY (XYZ convention) in degrees
-            # Handle gimbal lock cases
-            sy = math.sqrt(r11*r11 + r21*r21)
-            
-            if sy > 1e-6:  # Not at gimbal lock
-                rx = math.atan2(r32, r33)
-                ry = math.atan2(-r31, sy)  
-                rz = math.atan2(r21, r11)
-            else:  # Gimbal lock case
-                rx = math.atan2(-r23, r22)
-                ry = math.atan2(-r31, sy)
-                rz = 0.0
-            
-            # Convert to degrees
-            rx_deg = math.degrees(rx)
-            ry_deg = math.degrees(ry)
-            rz_deg = math.degrees(rz)
+            # Use spatialmath to extract RPY with order='zyx' to match server target construction
+            rpy_rad = SO3(R).rpy(order='zyx', unit='rad')
+            rx_deg, ry_deg, rz_deg = math.degrees(rpy_rad[0]), math.degrees(rpy_rad[1]), math.degrees(rpy_rad[2])
             
             return [x, y, z, rx_deg, ry_deg, rz_deg]
             
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, ImportError):
             return None
 
     async def get_pose_xyz(self) -> list[float] | None:

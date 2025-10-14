@@ -27,10 +27,14 @@ class GetPoseCommand(QueryCommand):
         return False, None
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return pose data."""  
+        """Execute immediately and return pose data with translation in mm."""  
         q_current = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
         pose_flat = current_pose_matrix.flatten()
+        # Convert translation from meters to mm (indices 3, 7, 11)
+        pose_flat[3] *= 1000.0   # X translation
+        pose_flat[7] *= 1000.0   # Y translation
+        pose_flat[11] *= 1000.0  # Z translation
         pose_str = ",".join(map(str, pose_flat))
         self.reply_ascii("POSE", pose_str)
         

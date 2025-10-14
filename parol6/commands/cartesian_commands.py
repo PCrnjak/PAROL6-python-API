@@ -148,7 +148,7 @@ class CartesianJogCommand(MotionCommand):
             target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current)
+        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S
@@ -224,10 +224,11 @@ class MovePoseCommand(MotionCommand):
 
         initial_pos_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         pose = cast(List[float], self.pose)
-        target_pose = SE3(pose[0] / 1000.0, pose[1] / 1000.0, pose[2] / 1000.0) * SE3.RPY(pose[3:6], unit='deg', order='xyz')
+        target_pose = SE3.RPY(pose[3:6], unit='deg', order='zyx')
+        target_pose.t = np.array(pose[:3]) / 1000.0
         
         ik_solution = solve_ik_simple(
-            PAROL6_ROBOT.robot, target_pose, initial_pos_rad, ilimit=100)
+            PAROL6_ROBOT.robot, target_pose, initial_pos_rad)
 
         if not ik_solution.success:
             error_str = "An intermediate point on the path is unreachable."
@@ -358,17 +359,10 @@ class MoveCartCommand(MotionCommand):
         initial_q_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         self.initial_pose = PAROL6_ROBOT.robot.fkine(initial_q_rad)
         pose = cast(List[float], self.pose)
-        self.target_pose = SE3(pose[0]/1000.0, pose[1]/1000.0, pose[2]/1000.0) * SE3.RPY(pose[3:6], unit='deg', order='xyz')
-
-        ik_check = solve_ik_simple(
-            PAROL6_ROBOT.robot, cast(SE3, self.target_pose), initial_q_rad
-        )
-
-        if not ik_check.success:
-            error_str = "An intermediate point on the path is unreachable."
-            if ik_check.violations:
-                 error_str += f" Reason: Path violates joint limits: {ik_check.violations}"
-            raise IKError(error_str)
+        
+        # Construct pose: rotation first, then set translation (ZYX convention)
+        self.target_pose = SE3.RPY(pose[3:6], unit='deg', order='zyx')
+        self.target_pose.t = np.array(pose[:3]) / 1000.0  # Vectorized translation assignment
 
         if self.velocity_percent is not None:
             # Calculate the total distance for translation and rotation
