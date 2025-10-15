@@ -7,10 +7,32 @@ name = "parol6"
 version = "0.1.0"
 description = "Python library for controlling PAROL6 robot arms"
 
-requires-python = ">=3.11"
+requires-python = ">=3.10,<3.12"
 dependencies = [
-    "roboticstoolbox-python @ file:external/robotics-toolbox-python",
-    "numpy==1.26.4",
+    # TEMPORARY SOLUTION: Using custom-built robotics-toolbox-python wheels from forked repository
+    # The proper solution requires the upstream maintainers to complete the merge of their "future" branch.
+    # Until then, we use platform-specific wheels from: https://github.com/Jepson2k/robotics-toolbox-python/releases/tag/v1.2.0
+    
+    # macOS ARM64 (Apple Silicon)
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp310-cp310-macosx_11_0_arm64.whl ; python_version == '3.10' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp311-cp311-macosx_11_0_arm64.whl ; python_version == '3.11' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    
+    # macOS x86_64 (Intel)
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp310-cp310-macosx_11_0_x86_64.whl ; python_version == '3.10' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp311-cp311-macosx_11_0_x86_64.whl ; python_version == '3.11' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    
+    # Windows AMD64
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp310-cp310-win_amd64.whl ; python_version == '3.10' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp311-cp311-win_amd64.whl ; python_version == '3.11' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    
+    # Linux x86_64
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    
+    # Linux aarch64 (ARM64)
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.0/roboticstoolbox_python-1.2.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    
     "pyserial",
     "spatialmath-python",
     "scipy==1.11.4"
