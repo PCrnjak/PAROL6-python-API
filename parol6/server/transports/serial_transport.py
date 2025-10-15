@@ -261,8 +261,17 @@ class SerialTransport:
                         time.sleep(0.1)
                         continue
                     try:
-                        # Read into preallocated scratch buffer
-                        n = ser.readinto(self._scratch_mv)
+                        # Check if data is available to avoid empty read syscalls
+                        iw = ser.in_waiting
+                        
+                        if iw <= 0:
+                            # No data available, short sleep and continue
+                            time.sleep(min(INTERVAL_S, 0.0015))
+                            continue
+                        
+                        # Read up to available bytes into preallocated scratch buffer
+                        k = min(iw, len(self._scratch))
+                        n = ser.readinto(self._scratch_mv[:k])
                     except serial.SerialException as e:
                         logger.error(f"Serial reader error: {e}")
                         self.disconnect()
@@ -283,21 +292,28 @@ class SerialTransport:
                         # Timeout or no data; loop to check shutdown_event
                         continue
 
-                    # Append into ring buffer and parse
+                    # Batch append into ring buffer and parse
                     cap = self._r_cap
                     head = self._r_head
                     tail = self._r_tail
                     rb = self._ring
                     src = self._scratch
-                    for i in range(n):
-                        rb[head] = src[i]
-                        head += 1
-                        if head == cap:
-                            head = 0
-                        if head == tail:
-                            tail += 1
-                            if tail == cap:
-                                tail = 0
+
+                    # Calculate overflow and adjust tail if needed
+                    avail = (head - tail + cap) % cap
+                    free = cap - 1 - avail  # keep one slot empty to disambiguate full/empty
+                    over = max(0, n - free)
+                    if over:
+                        tail = (tail + over) % cap
+
+                    # Batch copy into ring buffer using slices
+                    first = min(n, cap - head)
+                    rb[head:head + first] = src[:first]
+                    remain = n - first
+                    if remain:
+                        rb[0:remain] = src[first:n]
+                    head = (head + n) % cap
+
                     self._r_head = head
                     self._r_tail = tail
                     self._parse_ring_for_frames()

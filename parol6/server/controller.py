@@ -113,6 +113,10 @@ class Controller:
         self.first_frame_received = False  # Track if we've received data from robot
         self._serial_last_version = 0  # Version of last decoded serial frame
         
+        # TX coalescing state (reduce redundant serial writes)
+        self._last_tx: Optional[Dict[str, Any]] = None
+        self._tx_keepalive_s = float(os.getenv("PAROL6_TX_KEEPALIVE_S", "0.2"))
+        
         # Thread for command processing
         self.command_thread = None
         
@@ -200,6 +204,19 @@ class Controller:
             
             # Initialize robot state
             self.state_manager.reset_state()
+            
+            # Initialize TX coalescing state
+            state = self.state_manager.get_state()
+            self._last_tx = {
+                "pos": np.empty_like(state.Position_out),
+                "spd": np.empty_like(state.Speed_out),
+                "cmd": None,
+                "aff": np.empty_like(state.Affected_joint_out),
+                "io": np.empty_like(state.InOut_out),
+                "tout": None,
+                "grip": np.empty_like(state.Gripper_data_out),
+                "last_sent": 0.0,
+            }
 
             # Optionally queue auto-home per policy (default OFF)
             if self.config.auto_home:
@@ -335,6 +352,9 @@ class Controller:
                         try:
                             self.serial_transport.start_reader(self.shutdown_event)
                             self.first_frame_received = False
+                            # Reset TX keepalive to force prompt write after reconnect
+                            if self._last_tx is not None:
+                                self._last_tx["last_sent"] = 0.0
                             logger.info("Serial reader thread started (after reconnect)")
                         except Exception as e:
                             logger.warning("Failed to start serial reader after reconnect: %s", e)
@@ -379,21 +399,44 @@ class Controller:
                         np.copyto(state.Position_out, state.Position_in, casting='no')
                 
                 # 4. Write to firmware
-                if self.serial_transport and self.serial_transport.is_connected():
-                    # Optimized to pass arrays directly without creating lists
-                    ok = self.serial_transport.write_frame(
-                        state.Position_out,
-                        state.Speed_out,
-                        state.Command_out.value,
-                        state.Affected_joint_out,
-                        state.InOut_out,
-                        state.Timeout_out,
-                        state.Gripper_data_out,
+                if self.serial_transport and self.serial_transport.is_connected() and self._last_tx is not None:
+                    # Check if state has changed or keepalive needed
+                    now = time.perf_counter()
+                    dirty = (
+                        (state.Command_out.value != self._last_tx["cmd"]) or
+                        (not np.array_equal(state.Position_out, self._last_tx["pos"])) or
+                        (not np.array_equal(state.Speed_out, self._last_tx["spd"])) or
+                        (not np.array_equal(state.Affected_joint_out, self._last_tx["aff"])) or
+                        (not np.array_equal(state.InOut_out, self._last_tx["io"])) or
+                        (int(state.Timeout_out) != int(self._last_tx["tout"])) or
+                        (not np.array_equal(state.Gripper_data_out, self._last_tx["grip"]))
                     )
-                    if ok:
-                        # Auto-reset one-shot gripper modes after successful send
-                        if state.Gripper_data_out[4] in (1, 2):
-                            state.Gripper_data_out[4] = 0
+                    
+                    # Write if dirty or keepalive timeout reached
+                    if dirty or (now - self._last_tx["last_sent"] >= self._tx_keepalive_s):
+                        ok = self.serial_transport.write_frame(
+                            state.Position_out,
+                            state.Speed_out,
+                            state.Command_out.value,
+                            state.Affected_joint_out,
+                            state.InOut_out,
+                            state.Timeout_out,
+                            state.Gripper_data_out,
+                        )
+                        if ok:
+                            # Update last TX snapshot
+                            self._last_tx["cmd"] = state.Command_out.value
+                            np.copyto(self._last_tx["pos"], state.Position_out)
+                            np.copyto(self._last_tx["spd"], state.Speed_out)
+                            np.copyto(self._last_tx["aff"], state.Affected_joint_out)
+                            np.copyto(self._last_tx["io"], state.InOut_out)
+                            self._last_tx["tout"] = int(state.Timeout_out)
+                            np.copyto(self._last_tx["grip"], state.Gripper_data_out)
+                            self._last_tx["last_sent"] = now
+                            
+                            # Auto-reset one-shot gripper modes after successful send
+                            if state.Gripper_data_out[4] in (1, 2):
+                                state.Gripper_data_out[4] = 0
 
                 # 5. Maintain loop timing using deadline scheduling + update loop metrics
                 now = time.perf_counter()
@@ -413,13 +456,17 @@ class Controller:
                 if sleep > 0:
                     time.sleep(sleep)
                 else:
-                    # Overrun; catch up and log if severe
+                    # Overrun; catch up
                     state.overrun_count += 1
                     next_t = time.perf_counter()
-                    if -sleep > tick * 0.5:
-                        logger.warning(f"Control loop overrun by {-sleep:.4f}s (target: {tick:.4f}s)")
                 
                 if now - prev_print > 5:
+                    # Warn only if short-term average period degraded >10% vs target
+                    if state.ema_period_s > tick * 1.10:
+                        logger.warning(
+                            f"Control loop avg period degraded by +{((state.ema_period_s / tick) - 1.0) * 100.0:.0f}% "
+                            f"(avg={state.ema_period_s:.4f}s target={tick:.4f}s); latest overrun={-sleep:.4f}s"
+                        )
                     prev_print = now
                     # Calculate command frequency
                     cmd_hz = 0.0
@@ -567,6 +614,9 @@ class Controller:
                                     if self.serial_transport and hasattr(self.serial_transport, "start_reader"):
                                         self.serial_transport.start_reader(self.shutdown_event)
                                         self.first_frame_received = False
+                                        # Reset TX keepalive to force prompt write after reconnect
+                                        if self._last_tx is not None:
+                                            self._last_tx["last_sent"] = 0.0
                                         logger.info("Serial reader thread started (after SET_PORT)")
                                 except Exception as e:
                                     logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
@@ -612,6 +662,9 @@ class Controller:
                                 if self.serial_transport:
                                     self.serial_transport.start_reader(self.shutdown_event)
                                     self.first_frame_received = False
+                                    # Reset TX keepalive to force prompt write after transport switch
+                                    if self._last_tx is not None:
+                                        self._last_tx["last_sent"] = 0.0
                                     logger.info("Serial reader thread started (after SIMULATOR toggle)")
                             except Exception as e:
                                 logger.warning(f"Failed to (re)configure transport on SIMULATOR: {e}")

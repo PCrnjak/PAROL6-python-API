@@ -112,6 +112,18 @@ class MockSerialTransport:
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_running = False
         
+        # Precompute motion simulation constants
+        self._vmax_f = PAROL6_ROBOT.joint.speed.max.astype(np.float64, copy=False)
+        self._vmax_i32 = PAROL6_ROBOT.joint.speed.max.astype(np.int32, copy=False)
+        lims = np.asarray(PAROL6_ROBOT.joint.limits.steps, dtype=np.int64)
+        self._jmin_f = lims[:, 0].astype(np.float64, copy=False)
+        self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
+        
+        # Scratch buffers for motion simulation
+        self._prev_pos_f = np.zeros((6,), dtype=np.float64)
+        
+        self._state.last_update = time.perf_counter()
+        
         logger.info("MockSerialTransport initialized - simulation mode active")
     
     def connect(self, port: Optional[str] = None) -> bool:
@@ -129,6 +141,8 @@ class MockSerialTransport:
         
         self._connected = True
         self._state = MockRobotState()  # Reset state on connect
+        # Initialize time base to perf_counter for consistent scheduling
+        self._state.last_update = time.perf_counter()
         logger.info(f"MockSerialTransport connected to simulated port: {self.port}")
         return True
 
@@ -144,7 +158,7 @@ class MockSerialTransport:
             self._state.position_f = self._state.position_in.astype(np.float64)
             self._state.homed_in = state.Homed_in.copy()
             self._state.position_out = self._state.position_in.copy()
-            self._state.last_update = time.time()
+            self._state.last_update = time.perf_counter()
             self._state.homing_countdown = 0
 
             # Clear speeds and hold position
@@ -275,37 +289,24 @@ class MockSerialTransport:
                 state.speed_in[i] = 0
                 
         elif state.command_out == CommandCode.JOG or state.command_out == 123:
-            # Speed control mode (float-accumulated integration like firmware step scheduling)
-            prev_pos_f = state.position_f.copy()
-            for i in range(6):
-                v_cmd = float(state.speed_out[i])
-                # Apply speed limits
-                max_v = float(PAROL6_ROBOT.joint.speed.max[i])
-                if v_cmd > max_v:
-                    v_cmd = max_v
-                elif v_cmd < -max_v:
-                    v_cmd = -max_v
-
-                # Integrate float position
-                new_pos_f = float(state.position_f[i] + v_cmd * dt)
-
-                # Apply joint limits
-                jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
-                if new_pos_f < float(jmin):
-                    new_pos_f = float(jmin)
-                elif new_pos_f > float(jmax):
-                    new_pos_f = float(jmax)
-
-                state.position_f[i] = new_pos_f
-
-            # Report actual velocity based on realized motion during this dt
+            # Speed control mode (vectorized float-accumulated integration)
+            np.copyto(self._prev_pos_f, state.position_f)
+            
+            # Clip commanded speeds to joint limits
+            v_cmd = np.clip(state.speed_out.astype(np.float64, copy=False), -self._vmax_f, self._vmax_f)
+            
+            # Integrate position
+            new_pos_f = state.position_f + v_cmd * dt
+            
+            # Apply joint limits
+            np.clip(new_pos_f, self._jmin_f, self._jmax_f, out=state.position_f)
+            
+            # Report actual velocity based on realized motion
             if dt > 0:
-                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(np.int32)
+                realized_v = np.rint((state.position_f - self._prev_pos_f) / dt).astype(np.int32)
+                np.clip(realized_v, -self._vmax_i32, self._vmax_i32, out=state.speed_in)
             else:
-                realized_v = np.zeros(6, dtype=np.int32)
-            # Clip to joint limits for reporting
-            vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)
-            state.speed_in[:] = np.clip(realized_v, -vmax, vmax)
+                state.speed_in.fill(0)
                 
         elif state.command_out == CommandCode.MOVE or state.command_out == 156:
             # Position control mode (float-accumulated and per-tick speed clamp)
@@ -367,13 +368,17 @@ class MockSerialTransport:
 
         def _run():
             self._reader_running = True
+            period = self._frame_interval
+            next_deadline = time.perf_counter()
+            
             try:
                 while not shutdown_event.is_set():
                     if not self._connected:
                         time.sleep(0.05)
                         continue
-                    now = time.time()
-                    if now - self._last_frame_time >= self._frame_interval:
+                    
+                    now = time.perf_counter()
+                    if now >= next_deadline:
                         # Advance simulation before publishing a new frame
                         try:
                             dt = now - self._state.last_update
@@ -383,12 +388,20 @@ class MockSerialTransport:
                         except Exception:
                             logger.exception("MockSerialTransport: simulation step failed")
 
-                        payload = self._encode_payload_from_state()
-                        self._frame_buf[:52] = payload
+                        self._encode_payload_into(self._frame_mv)
                         self._frame_version += 1
-                        self._frame_ts = now
-                        self._last_frame_time = now
-                    time.sleep(min(self._frame_interval, 0.01))
+                        self._frame_ts = time.time()
+                        
+                        # Advance deadline
+                        next_deadline += period
+                        # If we fell far behind, resync to avoid tight catch-up loop
+                        if next_deadline < now - period:
+                            next_deadline = now + period
+                    else:
+                        # Sleep until next deadline (or at most 2ms to stay responsive)
+                        sleep_time = min(next_deadline - now, 0.002)
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
             finally:
                 self._reader_running = False
 
@@ -397,12 +410,13 @@ class MockSerialTransport:
         t.start()
         return t
 
-    def _encode_payload_from_state(self) -> bytes:
+    def _encode_payload_into(self, out_mv: memoryview) -> None:
         """
-        Build a 52-byte payload per firmware layout from the simulated state.
+        Build a 52-byte payload per firmware layout from the simulated state directly into memoryview.
+        Zero-allocation version for use in the reader loop.
         """
         st = self._state
-        out = bytearray(52)
+        out = out_mv
         # Positions (6 * 3 bytes)
         off = 0
         for i in range(6):
@@ -450,8 +464,6 @@ class MockSerialTransport:
         out[47] = (spd >> 8) & 0xFF; out[48] = spd & 0xFF
         out[49] = (cur >> 8) & 0xFF; out[50] = cur & 0xFF
         out[51] = status & 0xFF
-
-        return bytes(out)
 
     def get_latest_frame_view(self) -> tuple[Optional[memoryview], int, float]:
         """
