@@ -15,6 +15,7 @@ from parol6.smooth_motion import (
 )
 from parol6.commands.base import CommandBase, ExecutionStatus, ExecutionStatusCode, MotionCommand
 from parol6.utils.errors import IKError
+from parol6.utils.ik import solve_ik
 from parol6.utils.frames import (
     point_trf_to_wrf_mm,
     pose6_trf_to_wrf,
@@ -26,6 +27,7 @@ from parol6.utils.frames import (
 from parol6.config import INTERVAL_S, NEAR_MM_TOL_MM, ENTRY_MM_TOL_MM
 from parol6.commands.cartesian_commands import MovePoseCommand
 from parol6.server.command_registry import register_command
+from parol6.server.state import get_fkine_se3
 from parol6.protocol.wire import CommandCode
 from parol6.smooth_motion.advanced import AdvancedMotionBlender
 
@@ -193,8 +195,7 @@ class BaseSmoothMotionCommand(MotionCommand):
     
     def get_current_pose_from_position(self, position_in):
         """Convert current position to pose [x,y,z,rx,ry,rz]"""
-        current_q = PAROL6_ROBOT.ops.steps_to_rad(position_in)
-        current_pose_se3 = PAROL6_ROBOT.robot.fkine(current_q)
+        current_pose_se3 = get_fkine_se3()
         
         current_xyz = current_pose_se3.t * 1000  # Convert to mm
         current_rpy = current_pose_se3.rpy(unit='deg', order='xyz')
@@ -265,8 +266,8 @@ class BaseSmoothMotionCommand(MotionCommand):
             first_pose = self.trajectory[0]
             target_se3 = SE3(first_pose[0] / 1000, first_pose[1] / 1000, first_pose[2] / 1000) * SE3.RPY(first_pose[3:], unit='deg', order='xyz')
 
-            ik_result = solve_ik_with_adaptive_tol_subdivision(
-                PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
+            ik_result = solve_ik(
+                PAROL6_ROBOT.robot, target_se3, current_q, jogging=False
             )
 
             if not ik_result.success:
@@ -385,8 +386,8 @@ class SmoothTrajectoryCommand:
         current_q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         
         # Solve IK
-        ik_result = solve_ik_with_adaptive_tol_subdivision(
-            PAROL6_ROBOT.robot, target_se3, current_q, ilimit=50, jogging=False
+        ik_result = solve_ik(
+            PAROL6_ROBOT.robot, target_se3, current_q, jogging=False
         )
         
         if not ik_result.success:
@@ -1741,10 +1742,8 @@ class SmoothWaypointsCommand(BaseSmoothMotionCommand):
 
         if self.frame == 'TRF':
             # Transform all waypoints to WRF
+            tool_pose = get_fkine_se3()
             transformed_waypoints = []
-            current_q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-            tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
-            
             for wp in self.waypoints:
                 transformed_wp = pose6_trf_to_wrf(wp, tool_pose)
                 transformed_waypoints.append(transformed_wp)

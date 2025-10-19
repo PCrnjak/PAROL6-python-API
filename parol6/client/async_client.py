@@ -328,6 +328,31 @@ class AsyncRobotClient:
             return None
         return cast(Dict, json.loads(resp.split("|", 1)[1]))
 
+    async def set_tool(self, tool_name: str) -> bool:
+        """
+        Set the current end-effector tool configuration.
+        
+        Args:
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
+        
+        Returns:
+            True if successful
+        """
+        return await self._send(f"SET_TOOL|{tool_name.upper()}")
+
+    async def get_tool(self) -> dict | None:
+        """
+        Get the current tool configuration and available tools.
+        
+        Returns:
+            Dict with keys: 'tool' (current tool name), 'available' (list of available tools)
+            Expected wire format: "TOOL|{json}"
+        """
+        resp = await self._request("GET_TOOL", bufsize=1024)
+        if not resp or not resp.startswith("TOOL|"):
+            return None
+        return cast(Dict, json.loads(resp.split("|", 1)[1]))
+
     # --------------- Helper methods ---------------
 
     async def get_pose_rpy(self) -> list[float] | None:

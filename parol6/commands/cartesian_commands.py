@@ -16,6 +16,7 @@ from parol6.utils.errors import IKError
 from parol6.protocol.wire import CommandCode
 from parol6.config import INTERVAL_S, TRACE, DEFAULT_ACCEL_PERCENT
 from parol6.server.command_registry import register_command
+from parol6.server.state import get_fkine_se3
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class CartesianJogCommand(MotionCommand):
         state.Command_out = CommandCode.JOG
         
         q_current = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        T_current = PAROL6_ROBOT.robot.fkine(q_current)
+        T_current = get_fkine_se3()
 
         if not isinstance(T_current, SE3):
             return ExecutionStatus.executing("Waiting for valid pose")
@@ -357,9 +358,7 @@ class MoveCartCommand(MotionCommand):
 
     def do_setup(self, state):
         """Captures the initial state and validates the path just before execution."""
-        # Capture initial state from live data
-        initial_q_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        self.initial_pose = PAROL6_ROBOT.robot.fkine(initial_q_rad)
+        self.initial_pose = get_fkine_se3()
         pose = cast(List[float], self.pose)
         
         # Construct pose: rotation first, then set translation (xyz convention)
@@ -412,7 +411,6 @@ class MoveCartCommand(MotionCommand):
         current_target_pose = cast(SE3, _ctp)
 
         current_q_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        # TODO: is it doing the expensive IK solving twice per command??? once in setup and once in execution??
         ik_solution = solve_ik(
             PAROL6_ROBOT.robot, current_target_pose, current_q_rad
         )

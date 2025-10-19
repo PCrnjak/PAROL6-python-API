@@ -6,7 +6,7 @@ These commands integrate the GCODE interpreter with the robot command system.
 from typing import Tuple, Optional, List, TYPE_CHECKING
 
 from parol6.commands.base import CommandBase, ExecutionStatus
-from parol6.server.state import ControllerState
+from parol6.server.state import ControllerState, get_fkine_matrix
 from parol6.server.command_registry import register_command
 from parol6.gcode import GcodeInterpreter
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
@@ -35,9 +35,7 @@ class GcodeCommand(CommandBase):
         self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
         assert self.interpreter is not None
         # Update interpreter position with current robot position
-        # Vectorized: convert all joints at once
-        current_angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        current_pose_matrix = PAROL6_ROBOT.robot.fkine(current_angles_rad).A
+        current_pose_matrix = get_fkine_matrix()
         current_xyz = current_pose_matrix[:3, 3]
         self.interpreter.state.update_position({
             'X': current_xyz[0] * 1000,

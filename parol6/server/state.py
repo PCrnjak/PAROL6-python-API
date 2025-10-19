@@ -8,6 +8,7 @@ import time
 import logging
 import numpy as np
 from parol6.protocol.wire import CommandCode
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 
 @dataclass
@@ -34,6 +35,9 @@ class ControllerState:
     disabled_reason: str = ""
     e_stop_active: bool = False
     stream_mode: bool = False
+    
+    # Tool configuration (affects kinematics and visualization)
+    _current_tool: str = "NONE"
 
     # I/O buffers and protocol tracking (serial frame parsing state)
     input_byte: int = 0
@@ -92,10 +96,32 @@ class ControllerState:
     
     # Command frequency metrics
     command_count: int = 0
-    last_command_time: float = 0.0
     last_command_period_s: float = 0.0
     ema_command_period_s: float = 0.0
     command_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
+    
+    # Forward kinematics cache (invalidated when Position_in or current_tool changes)
+    _fkine_last_pos_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    _fkine_last_tool: str = ""
+    _fkine_se3: Any = None  # SE3 instance from spatialmath
+    _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
+    _fkine_flat_mm: np.ndarray = field(default_factory=lambda: np.zeros((16,), dtype=np.float64))
+    
+    @property
+    def current_tool(self) -> str:
+        """Get the current tool name."""
+        return self._current_tool
+    
+    @current_tool.setter
+    def current_tool(self, tool_name: str) -> None:
+        """Set the current tool and apply it to the robot model."""
+        if tool_name != self._current_tool:
+            self._current_tool = tool_name
+            # Apply tool to robot model (rebuilds with tool as final link)
+            PAROL6_ROBOT.apply_tool(tool_name)
+            # Invalidate cache
+            self._fkine_se3 = None
+            logger.info(f"Tool changed to {tool_name}, fkine cache invalidated")
 
 
 logger = logging.getLogger(__name__)
@@ -176,3 +202,108 @@ def get_state() -> ControllerState:
     Convenience function to get the current controller state.
     """
     return get_instance().get_state()
+
+
+# -----------------------------
+# Forward kinematics cache management
+# -----------------------------
+
+def invalidate_fkine_cache() -> None:
+    """
+    Invalidate the fkine cache, forcing recomputation on next access.
+    Call this when the robot model changes (e.g., tool change).
+    """
+    state = get_state()
+    state._fkine_se3 = None
+    state._fkine_last_tool = ""
+    logger.debug("fkine cache invalidated")
+
+
+def ensure_fkine_updated(state: ControllerState) -> None:
+    """
+    Ensure the fkine cache is up to date with current Position_in and tool.
+    If Position_in or current_tool has changed, recalculate fkine and update cache.
+    
+    This function is thread-safe when called with state from get_state().
+    
+    Parameters
+    ----------
+    state : ControllerState
+        The controller state to update
+    """
+    # Check if cache is valid
+    pos_changed = not np.array_equal(state.Position_in, state._fkine_last_pos_in)
+    tool_changed = state.current_tool != state._fkine_last_tool
+    
+    if pos_changed or tool_changed or state._fkine_se3 is None:
+        # Recompute fkine
+        q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
+        T = PAROL6_ROBOT.robot.fkine(q)  # type: ignore[attr-defined]
+        
+        # Cache SE3 object
+        state._fkine_se3 = T
+        
+        # Cache as 4x4 matrix
+        mat = T.A.copy()
+        np.copyto(state._fkine_mat, mat)
+        
+        # Cache as flattened 16-vector with mm translation
+        flat = mat.reshape(-1).copy()
+        flat[3] *= 1000.0   # X translation to mm
+        flat[7] *= 1000.0   # Y translation to mm
+        flat[11] *= 1000.0  # Z translation to mm
+        np.copyto(state._fkine_flat_mm, flat)
+        
+        # Update cache tracking
+        np.copyto(state._fkine_last_pos_in, state.Position_in)
+        state._fkine_last_tool = state.current_tool
+
+
+def get_fkine_se3(state: ControllerState | None = None):
+    """
+    Get the current end-effector pose as an SE3 object.
+    Automatically updates cache if needed.
+    
+    Returns
+    -------
+    SE3
+        Current end-effector pose
+    """
+    if state is None:
+        state = get_state()
+    ensure_fkine_updated(state)
+    return state._fkine_se3
+
+
+def get_fkine_matrix(state: ControllerState | None = None) -> np.ndarray:
+    """
+    Get the current end-effector pose as a 4x4 homogeneous transformation matrix.
+    Automatically updates cache if needed.
+    Translation is in meters.
+    
+    Returns
+    -------
+    np.ndarray
+        4x4 transformation matrix (translation in meters)
+    """
+    if state is None:
+        state = get_state()
+    ensure_fkine_updated(state)
+    return state._fkine_mat
+
+
+def get_fkine_flat_mm(state: ControllerState | None = None) -> np.ndarray:
+    """
+    Get the current end-effector pose as a flattened 16-element array.
+    Automatically updates cache if needed.
+    Translation components (indices 3, 7, 11) are in millimeters for compatibility.
+    
+    Returns
+    -------
+    np.ndarray
+        Flattened 16-element pose array (translation in mm)
+    """
+    if state is None:
+        state = get_state()
+    ensure_fkine_updated(state)
+    return state._fkine_flat_mm

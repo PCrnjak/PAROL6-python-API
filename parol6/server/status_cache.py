@@ -5,7 +5,7 @@ from numpy.typing import ArrayLike
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.server.state import ControllerState
+from parol6.server.state import ControllerState, get_fkine_flat_mm
 
 
 class StatusCache:
@@ -33,6 +33,7 @@ class StatusCache:
 
         self.last_update_s: float = 0.0  # last cache build (any section)
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
+        self._last_tool_name: str = "NONE"  # Track tool changes
 
         # Cached ASCII fragments to reduce allocations
         self._angles_ascii: str = "0,0,0,0,0,0"
@@ -65,24 +66,25 @@ class StatusCache:
         changed_any = False
 
         with self._lock:
-            if self._last_pos_in is None or not np.array_equal(state.Position_in, self._last_pos_in): # Position changed
-                np.copyto(self._last_pos_in, state.Position_in)
+            # Check if position or tool changed
+            tool_changed = state.current_tool != self._last_tool_name
+            pos_changed = self._last_pos_in is None or not np.array_equal(state.Position_in, self._last_pos_in)
+            
+            if pos_changed or tool_changed:
+                if pos_changed:
+                    np.copyto(self._last_pos_in, state.Position_in)
+                if tool_changed:
+                    self._last_tool_name = state.current_tool
+                    
                 # Vectorized steps->deg
                 self.angles_deg = np.asarray(PAROL6_ROBOT.ops.steps_to_deg(state.Position_in))  # float64, shape (6,)
                 # Publish angles list and ASCII
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
 
-                # Vectorized steps->rad for FK
-                q_current = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)  # float64, shape (6,)
-                # robot.fkine expects joint vector in radians
-                current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A  # 4x4
-                pose_flat = current_pose_matrix.reshape(-1)  # 16
-                self.pose = np.asarray(pose_flat, dtype=np.float64)
-                # Convert translation from meters to mm for all consumers (indices 3, 7, 11)
-                self.pose[3] *= 1000.0   # X translation
-                self.pose[7] *= 1000.0   # Y translation
-                self.pose[11] *= 1000.0  # Z translation
+                # Get cached fkine (automatically updates if needed)
+                pose_flat_mm = get_fkine_flat_mm(state)  # Already in mm for translation
+                np.copyto(self.pose, pose_flat_mm)
                 self._pose_ascii = self._format_csv_from_list(self.pose)
                 changed_any = True
 

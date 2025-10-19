@@ -11,6 +11,7 @@ from .base import MotionCommand, ExecutionStatus, parse_int, parse_float, csv_in
 from parol6.config import INTERVAL_S
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
+from parol6.tools import TOOL_CONFIGS, list_tools
 from math import ceil
 
 logger = logging.getLogger(__name__)
@@ -396,3 +397,50 @@ class MultiJogCommand(MotionCommand):
         state.Command_out = CommandCode.JOG
         self.command_step += 1
         return ExecutionStatus.executing("MultiJog")
+
+
+@register_command("SET_TOOL")
+class SetToolCommand(MotionCommand):
+    """
+    Set the current end-effector tool configuration.
+    Changes the tool transform used for forward/inverse kinematics.
+    """
+    
+    __slots__ = ("tool_name",)
+    
+    def __init__(self):
+        super().__init__()
+        self.tool_name = None
+    
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Parse SET_TOOL command parameters.
+        
+        Format: SET_TOOL|tool_name
+        Example: SET_TOOL|PNEUMATIC
+        """
+        if len(parts) != 2:
+            return (False, "SET_TOOL requires 1 parameter: tool_name")
+        
+        self.tool_name = parts[1].strip().upper()
+        
+        # Validate tool name during parsing
+        if self.tool_name not in TOOL_CONFIGS:
+            available = list_tools()
+            return (False, f"Unknown tool '{self.tool_name}'. Available: {available}")
+        
+        self.log_trace(f"Parsed SET_TOOL command: {self.tool_name}")
+        return (True, None)
+    
+    def execute_step(self, state) -> ExecutionStatus:
+        """Set the tool in state and update robot kinematics."""
+        # Type guard
+        if self.tool_name is None:
+            raise RuntimeError("Tool name not set")
+        
+        # Update server state - property setter handles tool application and cache invalidation
+        state.current_tool = self.tool_name
+        
+        self.log_info(f"Tool set to: {self.tool_name}")
+        self.is_finished = True
+        return ExecutionStatus.completed(f"Tool set: {self.tool_name}")

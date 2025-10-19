@@ -9,7 +9,9 @@ from parol6.commands.base import QueryCommand, ExecutionStatus
 from parol6.server.command_registry import register_command
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.status_cache import get_cache
+from parol6.server.state import get_fkine_flat_mm
 from parol6 import config as cfg
+from parol6.tools import list_tools
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -28,13 +30,7 @@ class GetPoseCommand(QueryCommand):
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
         """Execute immediately and return pose data with translation in mm."""  
-        q_current = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        current_pose_matrix = PAROL6_ROBOT.robot.fkine(q_current).A
-        pose_flat = current_pose_matrix.flatten()
-        # Convert translation from meters to mm (indices 3, 7, 11)
-        pose_flat[3] *= 1000.0   # X translation
-        pose_flat[7] *= 1000.0   # Y translation
-        pose_flat[11] *= 1000.0  # Z translation
+        pose_flat = get_fkine_flat_mm()
         pose_str = ",".join(map(str, pose_flat))
         self.reply_ascii("POSE", pose_str)
         
@@ -224,3 +220,27 @@ class PingCommand(QueryCommand):
         
         self.finish()
         return ExecutionStatus.completed("PONG")
+
+
+@register_command("GET_TOOL")
+class GetToolCommand(QueryCommand):
+    """Get current tool configuration and available tools."""
+    __slots__ = ()
+    
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """Check if this is a GET_TOOL command."""
+        if parts[0].upper() == "GET_TOOL":
+            return True, None
+        return False, None
+    
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        """Execute immediately and return current tool info."""
+        
+        payload = {
+            "tool": state.current_tool,
+            "available": list_tools()
+        }
+        self.reply_json("TOOL", payload)
+        
+        self.finish()
+        return ExecutionStatus.completed("Tool info sent")
