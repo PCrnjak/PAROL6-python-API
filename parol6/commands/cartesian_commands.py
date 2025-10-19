@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from typing import List, Tuple, Optional, cast
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from spatialmath import SE3
-from parol6.utils.ik import solve_ik_simple, quintic_scaling, AXIS_MAP
+from parol6.utils.ik import solve_ik, quintic_scaling, AXIS_MAP
 from .base import ExecutionStatus, MotionCommand, MotionProfile
 from parol6.utils.errors import IKError
 from parol6.protocol.wire import CommandCode
@@ -18,7 +18,7 @@ from parol6.config import INTERVAL_S, TRACE, DEFAULT_ACCEL_PERCENT
 from parol6.server.command_registry import register_command
 
 logger = logging.getLogger(__name__)
-# TODO: we really need to normalize and be consistent with the logging such that it lines of with the lifecycle and includes the commands name, etc. 
+
 @register_command("CARTJOG")
 class CartesianJogCommand(MotionCommand):
     """
@@ -121,13 +121,18 @@ class CartesianJogCommand(MotionCommand):
         delta_angular_rad = np.deg2rad(angular_speed_degs * INTERVAL_S)
 
         # Create the small incremental transformation (delta_pose)
-        # Use explicit per-axis rotations to match original GUI behavior
         trans_vec = np.array(self.axis_vectors[0]) * delta_linear
         rot_vec = np.array(self.axis_vectors[1]) * delta_angular_rad
         
-        # Build delta transformation using explicit rotation matrices
-        if np.any(rot_vec != 0):
-            # Find which axis has rotation (should be only one for single-axis jog)
+        # Build delta transformation
+        if not self.is_rotation:
+            target_pose = SE3.Rt(T_current.R, T_current.t)
+            
+            if self.frame == 'WRF':
+                target_pose.t = T_current.t + trans_vec
+            else:  # TRF
+                target_pose.t = T_current.t + (T_current.R @ trans_vec)
+        else:
             if rot_vec[0] != 0:  # RX rotation
                 delta_pose = SE3.Rx(rot_vec[0]) * SE3(trans_vec)
             elif rot_vec[1] != 0:  # RY rotation
@@ -136,19 +141,16 @@ class CartesianJogCommand(MotionCommand):
                 delta_pose = SE3.Rz(rot_vec[2]) * SE3(trans_vec)
             else:
                 delta_pose = SE3(trans_vec)
-        else:
-            delta_pose = SE3(trans_vec)
-
-        # Apply the transformation in the correct reference frame
-        if self.frame == 'WRF':
-            # Pre-multiply to apply the change in the World Reference Frame
-            target_pose = delta_pose * T_current
-        else: # TRF
-            # Post-multiply to apply the change in the Tool Reference Frame
-            target_pose = T_current * delta_pose
+            # Apply the transformation in the correct reference frame
+            if self.frame == 'WRF':
+                # Pre-multiply to apply the change in the World Reference Frame
+                target_pose = delta_pose * T_current
+            else: # TRF
+                # Post-multiply to apply the change in the Tool Reference Frame
+                target_pose = T_current * delta_pose
         
         # --- C. Solve IK and Calculate Velocities ---
-        var = solve_ik_simple(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
+        var = solve_ik(PAROL6_ROBOT.robot, target_pose, q_current, jogging=True)
 
         if var.success:
             q_velocities = (var.q - q_current) / INTERVAL_S
@@ -224,10 +226,10 @@ class MovePoseCommand(MotionCommand):
 
         initial_pos_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         pose = cast(List[float], self.pose)
-        target_pose = SE3.RPY(pose[3:6], unit='deg', order='zyx')
+        target_pose = SE3.RPY(pose[3:6], unit='deg', order='xyz')
         target_pose.t = np.array(pose[:3]) / 1000.0
         
-        ik_solution = solve_ik_simple(
+        ik_solution = solve_ik(
             PAROL6_ROBOT.robot, target_pose, initial_pos_rad)
 
         if not ik_solution.success:
@@ -360,8 +362,8 @@ class MoveCartCommand(MotionCommand):
         self.initial_pose = PAROL6_ROBOT.robot.fkine(initial_q_rad)
         pose = cast(List[float], self.pose)
         
-        # Construct pose: rotation first, then set translation (ZYX convention)
-        self.target_pose = SE3.RPY(pose[3:6], unit='deg', order='zyx')
+        # Construct pose: rotation first, then set translation (xyz convention)
+        self.target_pose = SE3.RPY(pose[3:6], unit='deg', order='xyz')
         self.target_pose.t = np.array(pose[:3]) / 1000.0  # Vectorized translation assignment
 
         if self.velocity_percent is not None:
@@ -411,7 +413,7 @@ class MoveCartCommand(MotionCommand):
 
         current_q_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         # TODO: is it doing the expensive IK solving twice per command??? once in setup and once in execution??
-        ik_solution = solve_ik_simple(
+        ik_solution = solve_ik(
             PAROL6_ROBOT.robot, current_target_pose, current_q_rad
         )
 

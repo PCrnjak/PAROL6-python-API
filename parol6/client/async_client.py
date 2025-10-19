@@ -294,7 +294,6 @@ class AsyncRobotClient:
         """
         Returns 16-element transformation matrix (flattened) with translation in mm.
         Expected wire format: "POSE|p0,p1,p2,...,p15"
-        Note: Server already broadcasts translation in mm.
         """
         resp = await self._request("GET_POSE", bufsize=2048)
         if not resp:
@@ -313,7 +312,6 @@ class AsyncRobotClient:
           STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
         Returns dict with keys: pose (list[float] len=16 with translation in mm), angles (list[float] len=6),
                                 io (list[int] len=5), gripper (list[int] len>=6)
-        Note: Server already broadcasts translation in mm.
         """
         resp = await self._request("GET_STATUS", bufsize=4096)
         if not resp:
@@ -334,31 +332,23 @@ class AsyncRobotClient:
 
     async def get_pose_rpy(self) -> list[float] | None:
         """
-        Get robot pose as [x, y, z, rx, ry, rz] in mm and degrees.
-        Converts 4x4 matrix to xyz + RPY Euler angles using order='xyz' to match server convention.
-        Note: get_pose() already returns mm for translation, so direct usage.
+        Get robot pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] using RPY order='xyz'.
         """
         pose_matrix = await self.get_pose()
         if not pose_matrix or len(pose_matrix) != 16:
             return None
         
         try:
-            # Extract translation (already in mm from get_pose())
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
-            
-            # Extract rotation matrix (column-major in SE3, so rows are [0,4,8], [1,5,9], [2,6,10])
+            # Rotation matrix rows (row-major layout)
             R = np.array([
                 [pose_matrix[0], pose_matrix[1], pose_matrix[2]],
                 [pose_matrix[4], pose_matrix[5], pose_matrix[6]],
                 [pose_matrix[8], pose_matrix[9], pose_matrix[10]]
             ])
-            
-            # Use spatialmath to extract RPY with order='zyx' to match server target construction
-            rpy_rad = SO3(R).rpy(order='zyx', unit='rad')
-            rx_deg, ry_deg, rz_deg = math.degrees(rpy_rad[0]), math.degrees(rpy_rad[1]), math.degrees(rpy_rad[2])
-            
-            return [x, y, z, rx_deg, ry_deg, rz_deg]
-            
+            # Use xyz convention (rx, ry, rz) - Roll-Pitch-Yaw
+            rpy_deg = SO3(R).rpy(order='xyz', unit='deg')
+            return [x, y, z, rpy_deg[0], rpy_deg[1], rpy_deg[2]]
         except (ValueError, IndexError, ImportError):
             return None
 

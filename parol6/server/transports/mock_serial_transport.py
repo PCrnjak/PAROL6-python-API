@@ -224,8 +224,8 @@ class MockSerialTransport:
         
         # Update simulation state with command
         self._state.command_out = command_out
-        self._state.position_out = position_out
-        self._state.speed_out = speed_out
+        self._state.position_out = np.array(position_out, dtype=np.int32, copy=False)
+        self._state.speed_out = np.array(speed_out, dtype=np.float64, copy=False)
         
         # Track frame reception
         self._frames_received += 1
@@ -380,13 +380,10 @@ class MockSerialTransport:
                     now = time.perf_counter()
                     if now >= next_deadline:
                         # Advance simulation before publishing a new frame
-                        try:
-                            dt = now - self._state.last_update
-                            if dt > 0:
-                                self._simulate_motion(dt)
-                                self._state.last_update = now
-                        except Exception:
-                            logger.exception("MockSerialTransport: simulation step failed")
+                        dt = now - self._state.last_update
+                        if dt > 0:
+                            self._simulate_motion(dt)
+                            self._state.last_update = now
 
                         self._encode_payload_into(self._frame_mv)
                         self._frame_version += 1

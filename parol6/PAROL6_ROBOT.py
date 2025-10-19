@@ -6,7 +6,9 @@ import logging
 from numpy.typing import ArrayLike
 import numpy as np
 from numpy.typing import NDArray
-from roboticstoolbox import DHRobot, RevoluteDH
+import roboticstoolbox as rtb
+from roboticstoolbox.tools.urdf import URDF
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +35,7 @@ radian_per_sec_2_deg_per_sec_const: float = 360.0 / (2.0 * np.pi)
 deg_per_sec_2_radian_per_sec_const: float = (2.0 * np.pi) / 360.0
 
 # -----------------------------
-# Robot geometry (meters)
-# -----------------------------
-a1 = 110.50 / 1000.0
-a2 = 23.42 / 1000.0
-a3 = 180.0 / 1000.0
-a4 = 43.5 / 1000.0
-a5 = 176.35 / 1000.0
-a6 = 62.8 / 1000.0
-a7 = 45.25 / 1000.0
-
-# For electric gripper, these may change:
-# a6 = 117 / 1000.0
-# a7 = 0 / 1000.0
-
-alpha_DH = np.array([-pi / 2, pi, pi / 2, -pi / 2, pi / 2, pi], dtype=np.float64)
-
-# -----------------------------
-# Joint limits (defined before robot model)
+# Joint limits
 # -----------------------------
 # Limits (deg) you get after homing and moving to extremes
 _joint_limits_degree: Limits2f = np.array(
@@ -67,18 +52,15 @@ _joint_limits_degree: Limits2f = np.array(
 
 _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree).astype(np.float64)
 
-# DH Robot model with joint limits incorporated
-robot = DHRobot(
-    [
-        RevoluteDH(d=a1, a=a2, alpha=float(alpha_DH[0]), qlim=_joint_limits_radian[0]),
-        RevoluteDH(a=a3, d=0.0, alpha=float(alpha_DH[1]), qlim=_joint_limits_radian[1]),
-        RevoluteDH(alpha=float(alpha_DH[2]), a=-a4, qlim=_joint_limits_radian[2]),
-        RevoluteDH(d=-a5, a=0.0, alpha=float(alpha_DH[3]), qlim=_joint_limits_radian[3]),
-        RevoluteDH(a=0.0, d=0.0, alpha=float(alpha_DH[4]), qlim=_joint_limits_radian[4]),
-        RevoluteDH(alpha=float(alpha_DH[5]), a=-a7, d=-a6, qlim=_joint_limits_radian[5]),
-    ],
-    name="PAROL6",
-)
+# URDF-based robot model (frames/limits aligned with controller)
+def _load_urdf_robot() -> rtb.Robot:
+    base_path = Path(__file__).resolve().parent / "urdf_model"
+    urdf_path = base_path / "urdf" / "PAROL6.urdf"
+    urdf_string = urdf_path.read_text(encoding="utf-8")
+    urdf = URDF.loadstr(urdf_string, str(urdf_path), base_path=base_path)
+    return rtb.Robot(urdf.elinks, name=urdf.name)
+
+robot = _load_urdf_robot()
 
 # -----------------------------
 # Additional raw parameter arrays

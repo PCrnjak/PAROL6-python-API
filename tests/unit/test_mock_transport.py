@@ -125,8 +125,8 @@ class TestMockSerialTransport:
         
         # Verify internal state updated
         assert transport._state.command_out == command_out
-        assert transport._state.position_out == position_out
-        assert transport._state.speed_out == speed_out
+        assert np.array_equal(transport._state.position_out, position_out)
+        assert np.array_equal(transport._state.speed_out, speed_out)
         
         # Disconnect and try again - should fail
         transport.disconnect()

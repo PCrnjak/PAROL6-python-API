@@ -36,44 +36,26 @@ def unwrap_angles(q_solution, q_current):
     q_unwrapped[diff < -np.pi] += 2 * np.pi
     return q_unwrapped
 
-IKResult = namedtuple('IKResult', 'success q iterations residual tolerance_used violations')
+IKResult = namedtuple('IKResult', 'success q iterations residual violations')
 
-def solve_ik_simple(
+def solve_ik(
     robot: DHRobot,
     target_pose: SE3,
     current_q,
-    ilimit: int = 100,
-    tol: float = 1e-12,
     jogging: bool = False,
     safety_margin_rad: float = 0.03
 ):
     """
-    Simplified IK solver using roboticstoolbox's built-in capabilities.
-    
-    Removes brittle heuristics:
-    - No adaptive tolerance based on manipulability
-    - No configuration-dependent workspace limits
-    - No recovery mode detection
-    - No complex subdivision logic
-    
-    Instead, relies on:
-    - Proper joint limits defined in robot.qlim
-    - Fixed, consistent damping
-    - Library's built-in joint limit validation with smart wrapping
-    - Safety margin buffer to keep solutions away from limits
-    
+    IK solver
+
     Parameters
     ----------
     robot : DHRobot
-        Robot model (with qlim properly set on each link)
+        Robot model
     target_pose : SE3
         Target pose to reach
     current_q : array_like
         Current joint configuration in radians
-    ilimit : int, optional
-        Maximum iterations for IK solver (default: 100)
-    tol : float, optional
-        Convergence tolerance (default: 1e-6)
     jogging : bool, optional
         If True, use very strict tolerance for jogging (default: False)
     safety_margin_rad : float, optional
@@ -89,7 +71,6 @@ def solve_ik_simple(
         tolerance_used - Tolerance used for convergence
         violations - Error message if failed, None if successful
     """
-    # Call IK with full joint limits
     result = robot.ets().ik_LM(
         target_pose,
         q0=current_q,
@@ -161,7 +142,6 @@ def solve_ik_simple(
         q=q if success else None,
         iterations=iterations,
         residual=remaining,
-        tolerance_used=tol,
         violations=violations
     )
 

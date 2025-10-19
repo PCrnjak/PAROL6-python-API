@@ -35,7 +35,7 @@ def point_trf_to_wrf_mm(point_mm: Sequence[float], tool_pose: SE3) -> NDArray:
 
 def pose6_trf_to_wrf(pose6_mm_deg: Sequence[float], tool_pose: SE3) -> NDArray:
     """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    pose_trf = SE3(pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0) * SE3.RPY(
+    pose_trf = SE3(pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0) * SE3.RPY(  # type: ignore[arg-type]
         pose6_mm_deg[3:], unit="deg", order="xyz"
     )
     pose_wrf = cast(SE3, tool_pose * pose_trf)
