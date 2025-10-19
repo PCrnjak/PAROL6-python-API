@@ -29,7 +29,7 @@ class TestMoveCartAccuracy:
         print(f"\nHome pose (mm, deg): {home_pose}")
         
         # This is in mm for position, degrees for orientation
-        target = [0.000, 263, 242, -90, 0, -90]
+        target = [0.000, 263, 242, 90, 0, 90]
         
         # Execute movecart
         result = client.move_cartesian(target, speed_percentage=50)
@@ -71,9 +71,9 @@ class TestMoveCartAccuracy:
         
         # Define multiple targets to test
         targets = [
-            [0.0, 200.0, 250.0, -90.0, 0, -90.0],
-            [50.0, 250.0, 200.0, -90, 0, -90.0],
-            [0.0, 263.0, 242.0, -90, 0, -90.0],
+            [0.0, 200.0, 250.0, 90.0, 0, 90.0],
+            [50.0, 250.0, 200.0, 90, 0, 90.0],
+            [0.0, 263.0, 242.0, 90, 0, 90.0],
         ]
         
         for idx, target in enumerate(targets):

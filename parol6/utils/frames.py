@@ -14,7 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 from spatialmath import SE3
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.server.state import get_state, get_fkine_se3
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,7 @@ def transform_start_pose_if_needed(
 ) -> Optional[NDArray]:
     """Transform start_pose from TRF to WRF if needed."""
     if frame == "TRF" and start_pose:
-        current_q = PAROL6_ROBOT.ops.steps_to_rad(current_position_in)
-        tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
+        tool_pose = get_fkine_se3()
         return pose6_trf_to_wrf(start_pose, tool_pose)
     return np.asarray(start_pose, dtype=float) if start_pose is not None else None
 
@@ -76,8 +75,7 @@ def transform_command_params_to_wrf(
         return params
 
     # Get current tool pose
-    current_q = PAROL6_ROBOT.ops.steps_to_rad(current_position_in)
-    tool_pose = PAROL6_ROBOT.robot.fkine(current_q)
+    tool_pose = get_fkine_se3()
 
     transformed = params.copy()
 

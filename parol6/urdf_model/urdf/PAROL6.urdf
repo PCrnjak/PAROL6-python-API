@@ -511,12 +511,4 @@
     <selfCollide>true</selfCollide> 
   </gazebo>
 
-  <link name="tool0"/>
-  <joint name="L6_to_tool0" type="fixed">
-    <parent link="L6"/>
-    <child link="tool0"/>
-    <!-- DH tip offset: Tx(-a7) with Rx(pi) -->
-    <origin xyz="-0.04525 0 0" rpy="3.141592653589793 0 0"/>
-  </joint>
-
 </robot>
