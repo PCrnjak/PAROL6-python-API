@@ -9,9 +9,10 @@ from parol6.commands.base import QueryCommand, ExecutionStatus
 from parol6.server.command_registry import register_command
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.status_cache import get_cache
-from parol6.server.state import get_fkine_flat_mm
+from parol6.server.state import get_fkine_flat_mm, get_fkine_matrix
 from parol6 import config as cfg
 from parol6.tools import list_tools
+from parol6.server.transports import is_simulation_mode
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -19,18 +20,40 @@ if TYPE_CHECKING:
 
 @register_command("GET_POSE")
 class GetPoseCommand(QueryCommand):
-    """Get current robot pose matrix."""
-    __slots__ = ()
+    """Get current robot pose matrix in specified frame (WRF or TRF)."""
+    __slots__ = ("frame",)
     
     def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
-        """Check if this is a GET_POSE command."""
+        """Check if this is a GET_POSE command and parse optional frame parameter."""
         if parts[0].upper() == "GET_POSE":
+            # Parse optional frame parameter (default WRF for backward compatibility)
+            if len(parts) > 1:
+                self.frame = parts[1].upper()
+                if self.frame not in ("WRF", "TRF"):
+                    return False, f"Invalid frame: {self.frame}. Must be WRF or TRF"
+            else:
+                self.frame = "WRF"
             return True, None
         return False, None
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return pose data with translation in mm."""  
-        pose_flat = get_fkine_flat_mm()
+        """Execute immediately and return pose data with translation in mm."""
+        if self.frame == "TRF":
+            # Get current pose as 4x4 matrix (translation in meters)
+            T = get_fkine_matrix(state)
+            
+            # Compute inverse to express world in tool frame: T^(-1) = [R^T | -R^T * t]
+            T_inv = np.linalg.inv(T)
+            
+            # Convert translation to mm
+            T_inv[0:3, 3] *= 1000.0
+            
+            # Flatten row-major (same format as WRF)
+            pose_flat = T_inv.reshape(-1)
+        else:
+            # WRF: use existing implementation
+            pose_flat = get_fkine_flat_mm(state)
+        
         pose_str = ",".join(map(str, pose_flat))
         self.reply_ascii("POSE", pose_str)
         
@@ -213,9 +236,17 @@ class PingCommand(QueryCommand):
         return False, None
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute immediately and return PONG with serial connectivity bit."""
-        # Consider serial "connected" if we've observed a fresh serial frame recently
-        serial_connected = 1 if get_cache().age_s() <= cfg.STATUS_STALE_S else 0
+        """Execute immediately and return PONG with serial connectivity bit (0 in simulator mode)."""
+        # Check if we're in simulator mode
+        sim = is_simulation_mode()
+        
+        # In simulator mode, report SERIAL=0 (not real hardware)
+        # Otherwise, check if we've observed fresh serial frames recently
+        if sim:
+            serial_connected = 0
+        else:
+            serial_connected = 1 if get_cache().age_s() <= cfg.STATUS_STALE_S else 0
+        
         self.reply_ascii("PONG", f"SERIAL={serial_connected}")
         
         self.finish()
@@ -244,3 +275,50 @@ class GetToolCommand(QueryCommand):
         
         self.finish()
         return ExecutionStatus.completed("Tool info sent")
+
+
+@register_command("GET_CURRENT_ACTION")
+class GetCurrentActionCommand(QueryCommand):
+    """Get the current executing action/command and its state."""
+    __slots__ = ()
+    
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """Check if this is a GET_CURRENT_ACTION command."""
+        if parts[0].upper() == "GET_CURRENT_ACTION":
+            return True, None
+        return False, None
+    
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        """Execute immediately and return current action info."""
+        payload = {
+            "current": state.action_current,
+            "state": state.action_state,
+            "next": state.action_next
+        }
+        self.reply_json("ACTION", payload)
+        
+        self.finish()
+        return ExecutionStatus.completed("Current action info sent")
+
+
+@register_command("GET_QUEUE")
+class GetQueueCommand(QueryCommand):
+    """Get the list of queued non-streamable commands."""
+    __slots__ = ()
+    
+    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+        """Check if this is a GET_QUEUE command."""
+        if parts[0].upper() == "GET_QUEUE":
+            return True, None
+        return False, None
+    
+    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
+        """Execute immediately and return queue info."""
+        payload = {
+            "non_streamable": state.queue_nonstreamable,
+            "size": len(state.queue_nonstreamable)
+        }
+        self.reply_json("QUEUE", payload)
+        
+        self.finish()
+        return ExecutionStatus.completed("Queue info sent")

@@ -6,7 +6,6 @@ SYSTEM_COMMANDS: set[str] = {
     "STOP",
     "ENABLE",
     "DISABLE",
-    "CLEAR_ERROR",
     "SET_PORT",
     "STREAM",
     "SIMULATOR",
@@ -21,6 +20,8 @@ QUERY_COMMANDS: set[str] = {
     "GET_STATUS",
     "GET_GCODE_STATUS",
     "GET_LOOP_STATS",
+    "GET_CURRENT_ACTION",
+    "GET_QUEUE",
     "PING",
 }
 

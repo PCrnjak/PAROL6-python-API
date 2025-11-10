@@ -110,17 +110,19 @@ class RobotClient:
     def home(self) -> bool:
         return _run(self._inner.home())
 
-    def stop(self) -> bool:
-        return _run(self._inner.stop())
-
     def enable(self) -> bool:
         return _run(self._inner.enable())
 
     def disable(self) -> bool:
         return _run(self._inner.disable())
 
-    def clear_error(self) -> bool:
-        return _run(self._inner.clear_error())
+    def stop(self) -> bool:
+        """Alias for disable() - stops motion and disables controller."""
+        return self.disable()
+
+    def start(self) -> bool:
+        """Alias for enable() - enables controller."""
+        return self.enable()
 
     def stream_on(self) -> bool:
         return _run(self._inner.stream_on())
@@ -164,6 +166,46 @@ class RobotClient:
 
     def get_loop_stats(self) -> dict | None:
         return _run(self._inner.get_loop_stats())
+
+    def get_tool(self) -> dict | None:
+        """
+        Get the current tool configuration and available tools.
+        
+        Returns:
+            Dict with keys: 'tool' (current tool name), 'available' (list of available tools)
+        """
+        return _run(self._inner.get_tool())
+
+    def set_tool(self, tool_name: str) -> bool:
+        """
+        Set the current end-effector tool configuration.
+        
+        Args:
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
+        
+        Returns:
+            True if successful
+        """
+        return _run(self._inner.set_tool(tool_name))
+
+    def get_current_action(self) -> dict | None:
+        """
+        Get the current executing action/command and its state.
+        
+        Returns:
+            Dict with keys: 'current' (current action name), 'state' (action state), 
+                           'next' (next action if any)
+        """
+        return _run(self._inner.get_current_action())
+
+    def get_queue(self) -> dict | None:
+        """
+        Get the list of queued non-streamable commands.
+        
+        Returns:
+            Dict with keys: 'non_streamable' (list of queued commands), 'size' (queue size)
+        """
+        return _run(self._inner.get_queue())
 
     # ---------- helper methods ----------
 

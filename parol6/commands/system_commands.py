@@ -86,41 +86,15 @@ class DisableCommand(SystemCommand):
         return False, None
     
     def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute disable - set controller to disabled state."""
+        """Execute disable - zero speeds and set controller to disabled state."""
         logger.info("DISABLE command executed")
+        state.Speed_out.fill(0)  # Zero all speeds first
         state.enabled = False
         state.disabled_reason = "User requested disable"
         state.Command_out = CommandCode.DISABLE
-        state.Speed_out.fill(0)
         
         self.finish()
         return ExecutionStatus.completed("Controller disabled")
-
-
-@register_command("CLEAR_ERROR")
-class ClearErrorCommand(SystemCommand):
-    """Clear any error states in the controller."""
-    __slots__ = ()
-    
-    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
-        """Check if this is a CLEAR_ERROR command."""
-        if parts[0].upper() == "CLEAR_ERROR":
-            if len(parts) != 1:
-                return False, "CLEAR_ERROR command takes no parameters"
-            return True, None
-        return False, None
-    
-    def execute_step(self, state: 'ControllerState') -> ExecutionStatus:
-        """Execute clear error - reset error states."""
-        logger.info("CLEAR_ERROR command executed")
-        
-        # Clear any error states
-        # The actual error clearing logic depends on what errors are tracked
-        # For now, we'll just ensure the controller is in a clean state
-        state.Command_out = CommandCode.IDLE  # No specific CLEAR_ERROR code
-        
-        self.finish()
-        return ExecutionStatus.completed("Errors cleared")
 
 
 @register_command("SET_IO")

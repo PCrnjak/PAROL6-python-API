@@ -45,12 +45,15 @@ class GripperStatus(TypedDict):
     object_detect: int
 
 
-class StatusAggregate(TypedDict):
+class StatusAggregate(TypedDict, total=False):
     """Aggregate robot status."""
     pose: list[float]  # 4x4 transformation matrix flattened (len=16)
     angles: list[float]  # 6 joint angles in degrees
     io: IOStatus | list[int]  # Back-compat with existing server format
     gripper: GripperStatus | list[int]
+    action_current: str  # Current executing action/command name
+    action_state: str  # Current action state (IDLE, EXECUTING, etc)
+    action_next: str  # Next non-streamable action in queue
 
 
 class TrackingStatus(TypedDict):

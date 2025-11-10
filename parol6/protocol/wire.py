@@ -448,7 +448,8 @@ def decode_simple(resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER",
 def decode_status(resp: str) -> StatusAggregate | None:
     """
     Decode aggregate status:
-      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
+      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj|
+             ACTION_CURRENT=...|ACTION_STATE=...
 
     Returns a dict matching StatusAggregate or None on parse failure.
     """
@@ -463,6 +464,8 @@ def decode_status(resp: str) -> StatusAggregate | None:
         "speeds": None,
         "io": None,
         "gripper": None,
+        "action_current": None,
+        "action_state": None,
     }
     for sec in sections:
         if sec.startswith("POSE="):
@@ -480,9 +483,19 @@ def decode_status(resp: str) -> StatusAggregate | None:
         elif sec.startswith("GRIPPER="):
             vals = [int(x) for x in sec[len("GRIPPER="):].split(",") if x]
             result["gripper"] = vals
+        elif sec.startswith("ACTION_CURRENT="):
+            result["action_current"] = sec[len("ACTION_CURRENT="):]
+        elif sec.startswith("ACTION_STATE="):
+            result["action_state"] = sec[len("ACTION_STATE="):]
 
-    # Basic validation
-    if result["pose"] is None and result["angles"] is None and result["io"] is None and result["gripper"] is None:
+    # Basic validation: accept if at least one of the core groups is present
+    if (
+        result["pose"] is None
+        and result["angles"] is None
+        and result["io"] is None
+        and result["gripper"] is None
+        and result["action_current"] is None
+    ):
         return None
 
     return cast(StatusAggregate, result)

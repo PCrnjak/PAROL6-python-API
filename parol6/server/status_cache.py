@@ -41,12 +41,19 @@ class StatusCache:
         self._io_ascii: str = "0,0,0,0,0"
         self._gripper_ascii: str = "0,0,0,0,0,0"
         self._pose_ascii: str = ",".join("0" for _ in range(16))
+        
+        # Action tracking fields
+        self._action_current: str = ""
+        self._action_state: str = "IDLE"
+        
         self._ascii_full: str = (
             f"STATUS|POSE={self._pose_ascii}"
             f"|ANGLES={self._angles_ascii}"
             f"|SPEEDS={self._speeds_ascii}"
             f"|IO={self._io_ascii}"
             f"|GRIPPER={self._gripper_ascii}"
+            f"|ACTION_CURRENT={self._action_current}"
+            f"|ACTION_STATE={self._action_state}"
         )
 
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
@@ -106,7 +113,14 @@ class StatusCache:
                 self._gripper_ascii = self._format_csv_from_list(self.gripper)
                 changed_any = True
 
-            # 5) Assemble full ASCII only if any section changed
+            # 5) Action tracking
+            if (self._action_current != state.action_current or 
+                self._action_state != state.action_state):
+                self._action_current = state.action_current
+                self._action_state = state.action_state
+                changed_any = True
+
+            # 6) Assemble full ASCII only if any section changed
             if changed_any:
                 self._ascii_full = (
                     f"STATUS|POSE={self._pose_ascii}"
@@ -114,6 +128,8 @@ class StatusCache:
                     f"|SPEEDS={self._speeds_ascii}"
                     f"|IO={self._io_ascii}"
                     f"|GRIPPER={self._gripper_ascii}"
+                    f"|ACTION_CURRENT={self._action_current}"
+                    f"|ACTION_STATE={self._action_state}"
                 )
                 self.last_update_s = now
 

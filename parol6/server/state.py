@@ -80,6 +80,12 @@ class ControllerState:
     active_command: Any = None
     active_command_id: Optional[str] = None
     last_command_time: float = 0.0
+    
+    # Action tracking for status broadcast and queries
+    action_current: str = ""
+    action_state: str = "IDLE"  # IDLE, EXECUTING, COMPLETED, FAILED
+    action_next: str = ""
+    queue_nonstreamable: List[str] = field(default_factory=list)
 
     # Network setup and uptime
     ip: str = "127.0.0.1"

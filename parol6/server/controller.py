@@ -785,6 +785,20 @@ class Controller:
         
         self.command_queue.append(queued_cmd)
         
+        # Update non-streamable queue snapshot
+        state = self.state_manager.get_state()
+        state.queue_nonstreamable = [
+            type(qc.command).__name__ 
+            for qc in self.command_queue 
+            if not (isinstance(qc.command, MotionCommand) and getattr(qc.command, 'streamable', False))
+        ]
+        
+        # Update next action
+        if state.queue_nonstreamable:
+            state.action_next = state.queue_nonstreamable[0]
+        else:
+            state.action_next = ""
+        
         # Send acknowledgment
         if command_id and address:
             queue_pos = len(self.command_queue)
@@ -824,6 +838,10 @@ class Controller:
                     # Perform setup and EXECUTING ACK only once
                     if ac and not getattr(ac, "activated", False):
                         ac.command.setup(state)
+                        
+                        # Update action tracking
+                        state.action_current = type(ac.command).__name__
+                        state.action_state = "EXECUTING"
                         
                         # Send executing acknowledgment once
                         if ac.command_id and ac.address:
@@ -878,6 +896,18 @@ class Controller:
                             addr
                         )
                     
+                    # Update action tracking to idle
+                    state.action_current = ""
+                    state.action_state = "IDLE"
+                    
+                    # Update queue snapshot and next action
+                    state.queue_nonstreamable = [
+                        type(qc.command).__name__ 
+                        for qc in self.command_queue 
+                        if not (isinstance(qc.command, MotionCommand) and getattr(qc.command, 'streamable', False))
+                    ]
+                    state.action_next = state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
+                    
                     # Record and clear
                     self.active_command = None
                     
@@ -896,12 +926,24 @@ class Controller:
                             addr
                         )
                     
+                    # Update action tracking to idle
+                    state.action_current = ""
+                    state.action_state = "IDLE"
+                    
                     # If this is a streamable command, clear all queued streamable commands
                     # to prevent pileup when commands fail repeatedly (e.g., IK failures at limits)
                     if isinstance(ac.command, MotionCommand) and getattr(ac.command, 'streamable', False):
                         removed = self._clear_streamable_commands(f"Active streamable command failed: {status.message}")
                         if removed > 0:
                             logger.info(f"Cleared {removed} queued streamable commands due to active command failure")
+                    
+                    # Update queue snapshot and next action
+                    state.queue_nonstreamable = [
+                        type(qc.command).__name__ 
+                        for qc in self.command_queue 
+                        if not (isinstance(qc.command, MotionCommand) and getattr(qc.command, 'streamable', False))
+                    ]
+                    state.action_next = state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
                     
                     self.active_command = None
                 
@@ -943,6 +985,11 @@ class Controller:
                 self.active_command.address
             )
         
+        # Update action tracking to idle
+        state = self.state_manager.get_state()
+        state.action_current = ""
+        state.action_state = "IDLE"
+        
         # Record and clear
         self.active_command = None
     
@@ -979,6 +1026,11 @@ class Controller:
                 cleared.append((queued_cmd.command_id, status))
         
         logger.info(f"Cleared {len(cleared)} commands from queue: {reason}")
+        
+        # Update action tracking
+        state = self.state_manager.get_state()
+        state.queue_nonstreamable = []
+        state.action_next = ""
         
         return cleared
     

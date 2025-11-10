@@ -226,17 +226,19 @@ class AsyncRobotClient:
     async def home(self) -> bool:
         return await self._send("HOME")
 
-    async def stop(self) -> bool:
-        return await self._send("STOP")
-
     async def enable(self) -> bool:
         return await self._send("ENABLE")
 
     async def disable(self) -> bool:
         return await self._send("DISABLE")
 
-    async def clear_error(self) -> bool:
-        return await self._send("CLEAR_ERROR")
+    async def stop(self) -> bool:
+        """Alias for disable() - stops motion and disables controller."""
+        return await self.disable()
+
+    async def start(self) -> bool:
+        """Alias for enable() - enables controller."""
+        return await self.enable()
 
     async def stream_on(self) -> bool:
         self._stream_mode = True
@@ -290,12 +292,18 @@ class AsyncRobotClient:
         vals = wire.decode_simple(resp, "SPEEDS")
         return cast(List[float] | None, vals)
 
-    async def get_pose(self) -> list[float] | None:
+    async def get_pose(self, frame: Literal["WRF", "TRF"] = "WRF") -> list[float] | None:
         """
         Returns 16-element transformation matrix (flattened) with translation in mm.
+        
+        Args:
+            frame: Reference frame - "WRF" for World Reference Frame (default), 
+                   "TRF" for Tool Reference Frame
+        
         Expected wire format: "POSE|p0,p1,p2,...,p15"
         """
-        resp = await self._request("GET_POSE", bufsize=2048)
+        command = f"GET_POSE {frame}" if frame != "WRF" else "GET_POSE"
+        resp = await self._request(command, bufsize=2048)
         if not resp:
             return None
         vals = wire.decode_simple(resp, "POSE")
@@ -350,6 +358,33 @@ class AsyncRobotClient:
         """
         resp = await self._request("GET_TOOL", bufsize=1024)
         if not resp or not resp.startswith("TOOL|"):
+            return None
+        return cast(Dict, json.loads(resp.split("|", 1)[1]))
+
+    async def get_current_action(self) -> dict | None:
+        """
+        Get the current executing action/command and its state.
+        
+        Returns:
+            Dict with keys: 'current' (current action name), 'state' (action state), 
+                           'next' (next action if any)
+            Expected wire format: "ACTION|{json}"
+        """
+        resp = await self._request("GET_CURRENT_ACTION", bufsize=1024)
+        if not resp or not resp.startswith("ACTION|"):
+            return None
+        return cast(Dict, json.loads(resp.split("|", 1)[1]))
+
+    async def get_queue(self) -> dict | None:
+        """
+        Get the list of queued non-streamable commands.
+        
+        Returns:
+            Dict with keys: 'non_streamable' (list of queued commands), 'size' (queue size)
+            Expected wire format: "QUEUE|{json}"
+        """
+        resp = await self._request("GET_QUEUE", bufsize=2048)
+        if not resp or not resp.startswith("QUEUE|"):
             return None
         return cast(Dict, json.loads(resp.split("|", 1)[1]))
 
