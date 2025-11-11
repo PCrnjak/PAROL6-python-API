@@ -1,9 +1,11 @@
 """
 Quintic polynomial primitives and multi-axis quintic trajectory.
 """
-from typing import Dict, Optional, List
+
+from typing import Any, Optional
 
 import numpy as np
+
 from .motion_constraints import MotionConstraints
 
 
@@ -88,9 +90,17 @@ class QuinticPolynomial:
     def _prepare_derivative_coeffs(self):
         """Pre-compute coefficients for velocity, acceleration, and jerk."""
         self.vel_coeffs = np.array(
-            [self.coeffs[1], 2 * self.coeffs[2], 3 * self.coeffs[3], 4 * self.coeffs[4], 5 * self.coeffs[5]]
+            [
+                self.coeffs[1],
+                2 * self.coeffs[2],
+                3 * self.coeffs[3],
+                4 * self.coeffs[4],
+                5 * self.coeffs[5],
+            ]
         )
-        self.acc_coeffs = np.array([2 * self.coeffs[2], 6 * self.coeffs[3], 12 * self.coeffs[4], 20 * self.coeffs[5]])
+        self.acc_coeffs = np.array(
+            [2 * self.coeffs[2], 6 * self.coeffs[3], 12 * self.coeffs[4], 20 * self.coeffs[5]]
+        )
         self.jerk_coeffs = np.array([6 * self.coeffs[3], 24 * self.coeffs[4], 60 * self.coeffs[5]])
 
     def position(self, t: float) -> float:
@@ -153,7 +163,7 @@ class QuinticPolynomial:
             return self.jerk(t)
         raise ValueError(f"Derivative order {derivative} not supported (max is 3)")
 
-    def get_trajectory_points(self, dt: float = 0.01) -> Dict[str, np.ndarray]:
+    def get_trajectory_points(self, dt: float = 0.01) -> dict[str, np.ndarray]:
         """
         Generate trajectory points at specified time interval.
 
@@ -170,7 +180,7 @@ class QuinticPolynomial:
         }
         return trajectory
 
-    def validate_continuity(self, tolerance: float = 1e-10) -> Dict[str, bool]:
+    def validate_continuity(self, tolerance: float = 1e-10) -> dict[str, bool]:
         """
         Validate that boundary conditions are satisfied.
         """
@@ -184,20 +194,22 @@ class QuinticPolynomial:
         }
         return validation
 
-    def validate_numerical_stability(self) -> Dict[str, object]:
+    def validate_numerical_stability(self) -> dict[str, Any]:
         """
         Check for potential numerical stability issues.
         """
-        stability: Dict[str, object] = {"is_stable": True, "warnings": [], "metrics": {}}
+        warnings: list[str] = []
+        metrics: dict[str, float] = {}
+        is_stable = True
 
         # Check condition number (ratio of time to distance)
         distance = abs(self.qf - self.q0)
         if distance > 1e-6:
             time_distance_ratio = self.T / distance
-            stability["metrics"]["time_distance_ratio"] = time_distance_ratio
+            metrics["time_distance_ratio"] = time_distance_ratio
             if time_distance_ratio > 100:
-                stability["is_stable"] = False
-                stability["warnings"].append(f"Poor conditioning: T/d ratio = {time_distance_ratio:.1f}")
+                is_stable = False
+                warnings.append(f"Poor conditioning: T/d ratio = {time_distance_ratio:.1f}")
 
         # Check coefficient magnitudes
         coeff_magnitudes = [abs(c) for c in self.coeffs]
@@ -207,18 +219,18 @@ class QuinticPolynomial:
 
         if min_nonzero_coeff > 0:
             coeff_ratio = max_coeff / min_nonzero_coeff
-            stability["metrics"]["coefficient_ratio"] = coeff_ratio
+            metrics["coefficient_ratio"] = coeff_ratio
             if coeff_ratio > 1e6:
-                stability["warnings"].append(f"Large coefficient ratio: {coeff_ratio:.2e}")
+                warnings.append(f"Large coefficient ratio: {coeff_ratio:.2e}")
 
         if self.T < 0.001:
-            stability["warnings"].append(f"Very small duration T={self.T} may cause numerical issues")
+            warnings.append(f"Very small duration T={self.T} may cause numerical issues")
 
         max_jerk = max(abs(self.jerk(t)) for t in np.linspace(0, self.T, 10))
         if max_jerk > 1e6:
-            stability["warnings"].append(f"Very large jerk values: {max_jerk:.2e}")
+            warnings.append(f"Very large jerk values: {max_jerk:.2e}")
 
-        return stability
+        return {"is_stable": is_stable, "warnings": warnings, "metrics": metrics}
 
 
 class MultiAxisQuinticTrajectory:
@@ -231,13 +243,13 @@ class MultiAxisQuinticTrajectory:
 
     def __init__(
         self,
-        q0: List[float],
-        qf: List[float],
-        v0: Optional[List[float]] = None,
-        vf: Optional[List[float]] = None,
-        a0: Optional[List[float]] = None,
-        af: Optional[List[float]] = None,
-        T: Optional[float] = None,
+        q0: list[float],
+        qf: list[float],
+        v0: list[float] | None = None,
+        vf: list[float] | None = None,
+        a0: list[float] | None = None,
+        af: list[float] | None = None,
+        T: float | None = None,
         constraints: Optional["MotionConstraints"] = None,
     ):
         """
@@ -255,25 +267,30 @@ class MultiAxisQuinticTrajectory:
         """
         self.num_axes = len(q0)
 
-        # Default boundary conditions
-        v0 = v0 if v0 is not None else [0] * self.num_axes
-        vf = vf if vf is not None else [0] * self.num_axes
-        a0 = a0 if a0 is not None else [0] * self.num_axes
-        af = af if af is not None else [0] * self.num_axes
+        # Default boundary conditions (use floats to satisfy typing)
+        v0 = v0 if v0 is not None else [0.0] * self.num_axes
+        vf = vf if vf is not None else [0.0] * self.num_axes
+        a0 = a0 if a0 is not None else [0.0] * self.num_axes
+        af = af if af is not None else [0.0] * self.num_axes
 
-        # Calculate minimum time if not specified
-        if T is None:
-            T = self._calculate_minimum_time(q0, qf, v0, vf, constraints)
-
-        self.T = T
+        # Determine duration as a concrete float
+        T_val: float = T if T is not None else self._calculate_minimum_time(q0, qf, v0, vf, constraints)
+        self.T: float = T_val
 
         # Generate quintic polynomial for each axis
-        self.axis_trajectories: List[QuinticPolynomial] = []
+        self.axis_trajectories: list[QuinticPolynomial] = []
         for i in range(self.num_axes):
-            quintic = QuinticPolynomial(q0[i], qf[i], v0[i], vf[i], a0[i], af[i], T)
+            quintic = QuinticPolynomial(q0[i], qf[i], v0[i], vf[i], a0[i], af[i], T_val)
             self.axis_trajectories.append(quintic)
 
-    def _calculate_minimum_time(self, q0, qf, v0, vf, constraints: Optional["MotionConstraints"]) -> float:
+    def _calculate_minimum_time(
+        self,
+        q0: list[float],
+        qf: list[float],
+        v0: list[float],
+        vf: list[float],
+        constraints: Optional["MotionConstraints"],
+    ) -> float:
         """
         Calculate minimum time based on velocity and acceleration constraints.
         """
@@ -282,7 +299,7 @@ class MultiAxisQuinticTrajectory:
             max_distance = max(abs(qf[i] - q0[i]) for i in range(self.num_axes))
             return max(2.0, max_distance / 50.0)  # Assume 50 units/s default
 
-        min_times: List[float] = []
+        min_times: list[float] = []
         for i in range(self.num_axes):
             distance = abs(qf[i] - q0[i])
 
@@ -299,11 +316,16 @@ class MultiAxisQuinticTrajectory:
         # Use maximum time to ensure all constraints are satisfied
         return max(min_times) * 1.2 if min_times else 2.0
 
-    def evaluate_all(self, t: float) -> Dict[str, List[float]]:
+    def evaluate_all(self, t: float) -> dict[str, list[float]]:
         """
         Evaluate all axes at time t.
         """
-        result: Dict[str, List[float]] = {"position": [], "velocity": [], "acceleration": [], "jerk": []}
+        result: dict[str, list[float]] = {
+            "position": [],
+            "velocity": [],
+            "acceleration": [],
+            "jerk": [],
+        }
         for traj in self.axis_trajectories:
             result["position"].append(traj.position(t))
             result["velocity"].append(traj.velocity(t))
@@ -311,7 +333,7 @@ class MultiAxisQuinticTrajectory:
             result["jerk"].append(traj.jerk(t))
         return result
 
-    def get_trajectory_points(self, dt: float = 0.01) -> Dict[str, np.ndarray]:
+    def get_trajectory_points(self, dt: float = 0.01) -> dict[str, np.ndarray]:
         """Generate trajectory points for all axes."""
         time_points = np.arange(0, self.T + dt, dt)
         num_points = len(time_points)

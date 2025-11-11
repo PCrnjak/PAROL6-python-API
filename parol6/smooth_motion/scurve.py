@@ -2,7 +2,7 @@
 S-curve profile generator and multi-axis S-curve trajectory.
 """
 
-from typing import Dict, Optional, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
 
@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from .quintic import QuinticPolynomial
 
 from .motion_constraints import MotionConstraints
+
+
+class FeasibilityInfo(TypedDict, total=False):
+    status: str
+    warnings: list[str]
+    achievable_a: float
+    achievable_v: float
 
 
 class SCurveProfile:
@@ -55,6 +62,11 @@ class SCurveProfile:
         self.v_start = float(v_start)
         self.v_end = float(v_end)
 
+        # Initialize typed containers for type checkers
+        self.profile_type: str = ""
+        self.segments: dict[str, float] = {}
+        self.segment_boundaries: list[dict[str, float]] = []
+
         # Check feasibility and adjust parameters if needed
         self.feasibility_status = self._check_feasibility()
 
@@ -64,7 +76,7 @@ class SCurveProfile:
         # Pre-calculate segment boundaries for proper evaluation
         self._calculate_segment_boundaries()
 
-    def _calculate_profile(self):
+    def _calculate_profile(self) -> tuple[str, dict[str, float]]:
         """
         Calculate the S-curve profile type and segment durations.
 
@@ -78,7 +90,7 @@ class SCurveProfile:
         # Asymmetric profiles for non-zero boundary velocities
         return self._calculate_asymmetric_profile()
 
-    def _calculate_symmetric_profile(self):
+    def _calculate_symmetric_profile(self) -> tuple[str, dict[str, float]]:
         """Calculate symmetric S-curve profile (v_start = v_end = 0)."""
         # Time to reach maximum acceleration from zero (jerk phase)
         T_j = self.a_max / self.j_max if self.j_max > 0 else 0.0
@@ -87,21 +99,27 @@ class SCurveProfile:
         d_jerk = (self.a_max**3) / (self.j_max**2) if self.j_max > 0 else 0.0
 
         # Check if we can reach maximum velocity
-        d_to_vmax = (self.v_max**2 / self.a_max + self.v_max * self.a_max / self.j_max) if self.a_max > 0 and self.j_max > 0 else float("inf")
+        d_to_vmax = (
+            (self.v_max**2 / self.a_max + self.v_max * self.a_max / self.j_max)
+            if self.a_max > 0 and self.j_max > 0
+            else float("inf")
+        )
 
         if self.distance < 2 * d_jerk:
             # Case 1: Reduced acceleration profile (never reach a_max)
             profile_type = "reduced"
-            a_reached = (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+            a_reached = (
+                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+            )
             T_j_actual = a_reached / self.j_max if self.j_max > 0 else 0.0
 
             segments = {
                 "T_j1": T_j_actual,  # Jerk up
-                "T_a": 0.0,          # No constant acceleration
+                "T_a": 0.0,  # No constant acceleration
                 "T_j2": T_j_actual,  # Jerk down
-                "T_v": 0.0,          # No cruise
+                "T_v": 0.0,  # No cruise
                 "T_j3": T_j_actual,  # Jerk down (decel)
-                "T_d": 0.0,          # No constant deceleration
+                "T_d": 0.0,  # No constant deceleration
                 "T_j4": T_j_actual,  # Jerk up (decel end)
                 "a_reached": a_reached,
                 "v_reached": a_reached * T_j_actual,
@@ -110,8 +128,14 @@ class SCurveProfile:
             # Case 2: Triangular velocity profile (never reach v_max)
             profile_type = "triangular"
 
-            v_reached = np.sqrt(max(self.distance * self.a_max - 2 * self.a_max**3 / self.j_max**2, 0.0))
-            T_a = (v_reached - self.a_max**2 / self.j_max) / self.a_max if self.a_max > 0 and self.j_max > 0 else 0.0
+            v_reached = np.sqrt(
+                max(self.distance * self.a_max - 2 * self.a_max**3 / self.j_max**2, 0.0)
+            )
+            T_a = (
+                (v_reached - self.a_max**2 / self.j_max) / self.a_max
+                if self.a_max > 0 and self.j_max > 0
+                else 0.0
+            )
 
             segments = {
                 "T_j1": T_j,
@@ -128,10 +152,18 @@ class SCurveProfile:
             profile_type = "full"
 
             # Time at constant acceleration (after jerk phases)
-            T_a = (self.v_max - self.a_max**2 / self.j_max) / self.a_max if self.a_max > 0 and self.j_max > 0 else 0.0
+            T_a = (
+                (self.v_max - self.a_max**2 / self.j_max) / self.a_max
+                if self.a_max > 0 and self.j_max > 0
+                else 0.0
+            )
 
             # Distance covered during acceleration/deceleration
-            d_accel = self.v_max**2 / self.a_max + self.v_max * self.a_max / self.j_max if self.a_max > 0 and self.j_max > 0 else 0.0
+            d_accel = (
+                self.v_max**2 / self.a_max + self.v_max * self.a_max / self.j_max
+                if self.a_max > 0 and self.j_max > 0
+                else 0.0
+            )
 
             # Distance at cruise velocity
             d_cruise = self.distance - 2 * d_accel
@@ -164,7 +196,7 @@ class SCurveProfile:
 
         return profile_type, segments
 
-    def _calculate_asymmetric_profile(self):
+    def _calculate_asymmetric_profile(self) -> tuple[str, dict[str, float]]:
         """Calculate asymmetric S-curve for non-zero boundary velocities."""
         v_diff = abs(self.v_end - self.v_start)
         v_avg = (self.v_start + self.v_end) / 2
@@ -192,7 +224,9 @@ class SCurveProfile:
                 T_v = d_cruise / v_peak
             else:
                 T_v = 0.0
-                v_peak = np.sqrt(max((2 * self.distance * self.a_max + self.v_start**2 + self.v_end**2) / 2, 0.0))
+                v_peak = np.sqrt(
+                    max((2 * self.distance * self.a_max + self.v_start**2 + self.v_end**2) / 2, 0.0)
+                )
         else:
             # Simple case - just decelerate
             T_a = 0.0
@@ -213,7 +247,7 @@ class SCurveProfile:
         }
         return "asymmetric", segments
 
-    def _check_feasibility(self) -> Dict[str, object]:
+    def _check_feasibility(self) -> FeasibilityInfo:
         """
         Check if S-curve profile is achievable with given constraints.
 
@@ -230,10 +264,13 @@ class SCurveProfile:
             else float("inf")
         )
 
-        feasibility: Dict[str, object] = {"status": "feasible", "warnings": []}
+        warnings: list[str] = []
+        feasibility: FeasibilityInfo = {"status": "feasible", "warnings": warnings}
 
         if self.distance < 2 * d_min_jerk:
-            achievable_a = (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+            achievable_a = (
+                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+            )
             feasibility["status"] = "reduced_acceleration"
             feasibility["achievable_a"] = achievable_a
             feasibility["warnings"].append(
@@ -256,16 +293,18 @@ class SCurveProfile:
 
         if self.v_max <= 0 or self.a_max <= 0 or self.j_max <= 0:
             feasibility["status"] = "invalid_constraints"
-            feasibility["warnings"].append("Invalid constraints: v_max, a_max, and j_max must all be positive")
+            feasibility["warnings"].append(
+                "Invalid constraints: v_max, a_max, and j_max must all be positive"
+            )
 
         return feasibility
 
-    def _calculate_segment_boundaries(self):
+    def _calculate_segment_boundaries(self) -> None:
         """
         Pre-calculate position, velocity, and acceleration at segment boundaries.
         This ensures proper continuity across segments.
         """
-        self.segment_boundaries: List[Dict[str, float]] = []
+        boundary_list: list[dict[str, float]] = []
 
         # Initial state
         pos = 0.0
@@ -279,7 +318,7 @@ class SCurveProfile:
             acc_end = acc + j * T_j1
             vel_end = vel + acc * T_j1 + 0.5 * j * T_j1**2
             pos_end = pos + vel * T_j1 + 0.5 * acc * T_j1**2 + (1 / 6) * j * T_j1**3
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -300,7 +339,7 @@ class SCurveProfile:
             acc_end = acc
             vel_end = vel + acc * T_a
             pos_end = pos + vel * T_a + 0.5 * acc * T_a**2
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -321,7 +360,7 @@ class SCurveProfile:
             acc_end = acc + j * T_j2
             vel_end = vel + acc * T_j2 + 0.5 * j * T_j2**2
             pos_end = pos + vel * T_j2 + 0.5 * acc * T_j2**2 + (1 / 6) * j * T_j2**3
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -342,7 +381,7 @@ class SCurveProfile:
             acc_end = 0.0
             vel_end = vel
             pos_end = pos + vel * T_v
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -363,7 +402,7 @@ class SCurveProfile:
             acc_end = j * T_j3
             vel_end = vel + 0.5 * j * T_j3**2
             pos_end = pos + vel * T_j3 + (1 / 6) * j * T_j3**3
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -384,7 +423,7 @@ class SCurveProfile:
             acc_end = acc
             vel_end = vel + acc * T_d
             pos_end = pos + vel * T_d + 0.5 * acc * T_d**2
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -405,7 +444,7 @@ class SCurveProfile:
             acc_end = acc + j * T_j4
             vel_end = vel + acc * T_j4 + 0.5 * j * T_j4**2
             pos_end = pos + vel * T_j4 + 0.5 * acc * T_j4**2 + (1 / 6) * j * T_j4**3
-            self.segment_boundaries.append(
+            boundary_list.append(
                 {
                     "pos_start": pos,
                     "vel_start": vel,
@@ -418,8 +457,10 @@ class SCurveProfile:
                 }
             )
             pos, vel, acc = pos_end, vel_end, acc_end
+        # finalize
+        self.segment_boundaries = boundary_list
 
-    def generate_trajectory_quintics(self) -> List["QuinticPolynomial"]:
+    def generate_trajectory_quintics(self) -> list["QuinticPolynomial"]:
         """
         Generate quintic polynomials for each segment of the S-curve.
 
@@ -428,7 +469,7 @@ class SCurveProfile:
         """
         from .quintic import QuinticPolynomial  # Local import to avoid cycle
 
-        quintics: List[QuinticPolynomial] = []
+        quintics: list[QuinticPolynomial] = []
         for seg in self.segment_boundaries:
             if seg["duration"] > 0:
                 q = QuinticPolynomial(
@@ -448,7 +489,7 @@ class SCurveProfile:
         """Get total time for the S-curve trajectory."""
         return float(self.segments["T_total"])
 
-    def evaluate_at_time(self, t: float) -> Dict[str, float]:
+    def evaluate_at_time(self, t: float) -> dict[str, float]:
         """
         Evaluate S-curve at specific time.
 
@@ -461,8 +502,18 @@ class SCurveProfile:
         if t >= self.segments["T_total"]:
             if self.segment_boundaries:
                 last = self.segment_boundaries[-1]
-                return {"position": last["pos_end"], "velocity": last["vel_end"], "acceleration": 0.0, "jerk": 0.0}
-            return {"position": self.distance, "velocity": self.v_end, "acceleration": 0.0, "jerk": 0.0}
+                return {
+                    "position": last["pos_end"],
+                    "velocity": last["vel_end"],
+                    "acceleration": 0.0,
+                    "jerk": 0.0,
+                }
+            return {
+                "position": self.distance,
+                "velocity": self.v_end,
+                "acceleration": 0.0,
+                "jerk": 0.0,
+            }
 
         # Find which segment we're in
         cumulative_time = 0.0
@@ -475,7 +526,7 @@ class SCurveProfile:
         # Fallback
         return {"position": self.distance, "velocity": self.v_end, "acceleration": 0.0, "jerk": 0.0}
 
-    def _evaluate_in_segment(self, segment: Dict[str, float], t: float) -> Dict[str, float]:
+    def _evaluate_in_segment(self, segment: dict[str, float], t: float) -> dict[str, float]:
         """
         Evaluate motion within a specific segment using proper kinematics.
         """
@@ -503,12 +554,12 @@ class MultiAxisSCurveTrajectory:
 
     def __init__(
         self,
-        start_pose: List[float],
-        end_pose: List[float],
-        v0: Optional[List[float]] = None,
-        vf: Optional[List[float]] = None,
-        T: Optional[float] = None,
-        jerk_limit: Optional[float] = None,
+        start_pose: list[float],
+        end_pose: list[float],
+        v0: list[float] | None = None,
+        vf: list[float] | None = None,
+        T: float | None = None,
+        jerk_limit: float | None = None,
     ):
         """
         Create synchronized S-curve trajectories for multiple axes.
@@ -525,12 +576,16 @@ class MultiAxisSCurveTrajectory:
         self.end_pose = np.array(end_pose, dtype=float)
         self.num_axes = len(start_pose)
 
-        self.v0 = np.array(v0, dtype=float) if v0 is not None else np.zeros(self.num_axes, dtype=float)
-        self.vf = np.array(vf, dtype=float) if vf is not None else np.zeros(self.num_axes, dtype=float)
+        self.v0 = (
+            np.array(v0, dtype=float) if v0 is not None else np.zeros(self.num_axes, dtype=float)
+        )
+        self.vf = (
+            np.array(vf, dtype=float) if vf is not None else np.zeros(self.num_axes, dtype=float)
+        )
 
         self.constraints = MotionConstraints()
 
-        self.axis_profiles: List[Optional[SCurveProfile]] = []
+        self.axis_profiles: list[SCurveProfile | None] = []
         self.max_time = 0.0
 
         for i in range(self.num_axes):
@@ -542,11 +597,15 @@ class MultiAxisSCurveTrajectory:
 
             joint_constraints = self.constraints.get_joint_constraints(i)
             if joint_constraints is None:
-                joint_constraints = {"v_max": 10000.0, "a_max": 20000.0, "j_max": jerk_limit if jerk_limit else 50000.0}
+                joint_constraints = {
+                    "v_max": 10000.0,
+                    "a_max": 20000.0,
+                    "j_max": jerk_limit if jerk_limit else 50000.0,
+                }
 
             j_max = jerk_limit if jerk_limit is not None else joint_constraints["j_max"]
 
-            profile = SCurveProfile(
+            axis_profile = SCurveProfile(
                 float(distance),
                 float(joint_constraints["v_max"]),
                 float(joint_constraints["a_max"]),
@@ -554,21 +613,21 @@ class MultiAxisSCurveTrajectory:
                 v_start=float(self.v0[i]),
                 v_end=float(self.vf[i]),
             )
-            self.axis_profiles.append(profile)
-            self.max_time = max(self.max_time, profile.get_total_time())
+            self.axis_profiles.append(axis_profile)
+            self.max_time = max(self.max_time, axis_profile.get_total_time())
 
         self.T = float(T) if T is not None else float(self.max_time)
 
         # Calculate time scaling factors for synchronization
-        self.time_scales: List[float] = []
-        for profile in self.axis_profiles:
-            if profile is not None and self.T > 0:
-                scale = profile.get_total_time() / self.T
+        self.time_scales: list[float] = []
+        for maybe_profile in self.axis_profiles:
+            if maybe_profile is not None and self.T > 0:
+                scale = maybe_profile.get_total_time() / self.T
                 self.time_scales.append(scale)
             else:
                 self.time_scales.append(1.0)
 
-    def get_trajectory_points(self, dt: float = 0.01) -> Dict[str, np.ndarray]:
+    def get_trajectory_points(self, dt: float = 0.01) -> dict[str, np.ndarray]:
         """
         Generate synchronized trajectory points for all axes.
 
@@ -584,20 +643,26 @@ class MultiAxisSCurveTrajectory:
 
         for idx, t in enumerate(timestamps):
             for axis in range(self.num_axes):
-                if self.axis_profiles[axis] is None:
+                axis_profile = self.axis_profiles[axis]
+                if axis_profile is None:
                     positions[idx, axis] = self.start_pose[axis]
                     velocities[idx, axis] = 0.0
                     accelerations[idx, axis] = 0.0
                 else:
                     t_scaled = t * self.time_scales[axis]
-                    values = self.axis_profiles[axis].evaluate_at_time(t_scaled)
+                    values = axis_profile.evaluate_at_time(t_scaled)
                     positions[idx, axis] = self.start_pose[axis] + values["position"]
                     velocities[idx, axis] = values["velocity"]
                     accelerations[idx, axis] = values["acceleration"]
 
-        return {"position": positions, "velocity": velocities, "acceleration": accelerations, "timestamps": timestamps}
+        return {
+            "position": positions,
+            "velocity": velocities,
+            "acceleration": accelerations,
+            "timestamps": timestamps,
+        }
 
-    def evaluate_at_time(self, t: float) -> Dict[str, np.ndarray]:
+    def evaluate_at_time(self, t: float) -> dict[str, np.ndarray]:
         """
         Evaluate trajectory at specific time.
 
@@ -609,13 +674,14 @@ class MultiAxisSCurveTrajectory:
         acceleration = np.zeros(self.num_axes)
 
         for axis in range(self.num_axes):
-            if self.axis_profiles[axis] is None:
+            axis_profile = self.axis_profiles[axis]
+            if axis_profile is None:
                 position[axis] = self.start_pose[axis]
                 velocity[axis] = 0.0
                 acceleration[axis] = 0.0
             else:
-                t_scaled = min(t * self.time_scales[axis], self.axis_profiles[axis].get_total_time())
-                values = self.axis_profiles[axis].evaluate_at_time(t_scaled)
+                t_scaled = min(t * self.time_scales[axis], axis_profile.get_total_time())
+                values = axis_profile.evaluate_at_time(t_scaled)
                 position[axis] = self.start_pose[axis] + values["position"]
                 velocity[axis] = values["velocity"]
                 acceleration[axis] = values["acceleration"]

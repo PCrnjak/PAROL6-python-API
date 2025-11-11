@@ -2,7 +2,8 @@
 Shared trajectory planning utilities.
 """
 
-from typing import Sequence, Tuple
+from collections.abc import Sequence
+
 import numpy as np
 
 from parol6.config import CONTROL_RATE_HZ
@@ -75,7 +76,9 @@ def plan_linear_cubic(
     return traj
 
 
-def _trapezoid_timings(distance: float, v_max: float, a_max: float) -> Tuple[float, float, float, float, bool]:
+def _trapezoid_timings(
+    distance: float, v_max: float, a_max: float
+) -> tuple[float, float, float, float, bool]:
     """
     Compute trapezoid or triangular profile timing.
 

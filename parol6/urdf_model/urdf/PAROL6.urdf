@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com)
      Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
@@ -403,112 +403,112 @@
   </joint>
 
 
-  <transmission name="TRANS_L1"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L1"> 
+  <transmission name="TRANS_L1">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L1">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L1"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L1">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <transmission name="TRANS_L2"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L2"> 
+  <transmission name="TRANS_L2">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L2">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L2"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L2">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <transmission name="TRANS_L3"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L3"> 
+  <transmission name="TRANS_L3">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L3">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L3"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L3">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <transmission name="TRANS_L4"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L4"> 
+  <transmission name="TRANS_L4">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L4">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L4"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L4">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <transmission name="TRANS_L5"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L5"> 
+  <transmission name="TRANS_L5">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L5">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L5"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L5">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <transmission name="TRANS_L6"> 
-    <type>transmission_interface/SimpleTransmission</type> 
-    <joint name="L6"> 
+  <transmission name="TRANS_L6">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="L6">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    </joint> 
-    <actuator name="ACT_L6"> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="ACT_L6">
 
-    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface> 
-    <mechanicalReduction>1</mechanicalReduction> 
-    </actuator> 
-  </transmission> 
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+    </actuator>
+  </transmission>
 
-  <gazebo> 
-    <plugin name="control" filename="libgazebo_ros_control.so"> 
-    <robotNamespace>/</robotNamespace> 
-    </plugin> 
-  </gazebo> 
-
-  <gazebo reference="L1"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo>
+    <plugin name="control" filename="libgazebo_ros_control.so">
+    <robotNamespace>/</robotNamespace>
+    </plugin>
   </gazebo>
 
-  <gazebo reference="L2"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo reference="L1">
+    <selfCollide>true</selfCollide>
   </gazebo>
 
-  <gazebo reference="L3"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo reference="L2">
+    <selfCollide>true</selfCollide>
   </gazebo>
 
-  <gazebo reference="L4"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo reference="L3">
+    <selfCollide>true</selfCollide>
   </gazebo>
 
-  <gazebo reference="L5"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo reference="L4">
+    <selfCollide>true</selfCollide>
   </gazebo>
 
-  <gazebo reference="L6"> 
-    <selfCollide>true</selfCollide> 
+  <gazebo reference="L5">
+    <selfCollide>true</selfCollide>
+  </gazebo>
+
+  <gazebo reference="L6">
+    <selfCollide>true</selfCollide>
   </gazebo>
 
 </robot>

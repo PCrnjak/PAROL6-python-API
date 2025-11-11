@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import AsyncMock
 
 from parol6 import RobotClient

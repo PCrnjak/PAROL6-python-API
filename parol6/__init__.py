@@ -11,17 +11,17 @@ Key components:
 - ensure_server: Convenience function to auto-start controller when needed
 """
 
+from . import PAROL6_ROBOT
 from ._version import __version__
 from .client.async_client import AsyncRobotClient
-from .client.sync_client import RobotClient
 from .client.manager import ServerManager, ensure_server
-from . import PAROL6_ROBOT
+from .client.sync_client import RobotClient
 
 __all__ = [
     "__version__",
-    "AsyncRobotClient", 
+    "AsyncRobotClient",
     "RobotClient",
     "ServerManager",
     "ensure_server",
-    "PAROL6_ROBOT"
+    "PAROL6_ROBOT",
 ]

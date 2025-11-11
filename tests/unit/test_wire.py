@@ -1,6 +1,4 @@
-import json
 import pytest
-
 from parol6.protocol import wire
 
 

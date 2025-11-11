@@ -1,8 +1,8 @@
 import threading
 import time
-from typing import List, Optional
-from numpy.typing import ArrayLike
+
 import numpy as np
+from numpy.typing import ArrayLike
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.state import ControllerState, get_fkine_flat_mm
@@ -41,11 +41,11 @@ class StatusCache:
         self._io_ascii: str = "0,0,0,0,0"
         self._gripper_ascii: str = "0,0,0,0,0,0"
         self._pose_ascii: str = ",".join("0" for _ in range(16))
-        
+
         # Action tracking fields
         self._action_current: str = ""
         self._action_state: str = "IDLE"
-        
+
         self._ascii_full: str = (
             f"STATUS|POSE={self._pose_ascii}"
             f"|ANGLES={self._angles_ascii}"
@@ -61,7 +61,7 @@ class StatusCache:
 
     def _format_csv_from_list(self, vals: ArrayLike) -> str:
         # Using str() on each value preserves prior formatting semantics
-        return ",".join(str(v) for v in vals) # type: ignore
+        return ",".join(str(v) for v in vals)  # type: ignore
 
     def update_from_state(self, state: ControllerState) -> None:
         """
@@ -75,16 +75,20 @@ class StatusCache:
         with self._lock:
             # Check if position or tool changed
             tool_changed = state.current_tool != self._last_tool_name
-            pos_changed = self._last_pos_in is None or not np.array_equal(state.Position_in, self._last_pos_in)
-            
+            pos_changed = self._last_pos_in is None or not np.array_equal(
+                state.Position_in, self._last_pos_in
+            )
+
             if pos_changed or tool_changed:
                 if pos_changed:
                     np.copyto(self._last_pos_in, state.Position_in)
                 if tool_changed:
                     self._last_tool_name = state.current_tool
-                    
+
                 # Vectorized steps->deg
-                self.angles_deg = np.asarray(PAROL6_ROBOT.ops.steps_to_deg(state.Position_in))  # float64, shape (6,)
+                self.angles_deg = np.asarray(
+                    PAROL6_ROBOT.ops.steps_to_deg(state.Position_in)
+                )  # float64, shape (6,)
                 # Publish angles list and ASCII
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
@@ -114,8 +118,10 @@ class StatusCache:
                 changed_any = True
 
             # 5) Action tracking
-            if (self._action_current != state.action_current or 
-                self._action_state != state.action_state):
+            if (
+                self._action_current != state.action_current
+                or self._action_state != state.action_state
+            ):
                 self._action_current = state.action_current
                 self._action_state = state.action_state
                 changed_any = True
@@ -152,7 +158,7 @@ class StatusCache:
 
 
 # Module-level singleton
-_status_cache: Optional[StatusCache] = None
+_status_cache: StatusCache | None = None
 
 
 def get_cache() -> StatusCache:

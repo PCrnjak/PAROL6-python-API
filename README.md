@@ -45,14 +45,14 @@ pip3 install keyboard
 ### Client-Server Design
 The system uses a UDP-based client-server architecture that separates robot control from command generation:
 
-* **The Robot Controller (`controller.py`)**: 
+* **The Robot Controller (`controller.py`)**:
   - Runs on the computer physically connected to the robot via USB/Serial
   - Maintains a high-frequency control loop for real-time robot control
   - Handles all complex calculations (inverse kinematics, trajectory planning)
   - Requires heavy dependencies (roboticstoolbox, numpy, scipy)
   - Listens for UDP commands on port 5001
 
-* **The Python Client (`parol6.client`)**: 
+* **The Python Client (`parol6.client`)**:
   - Can run on any computer (same or different from controller)
   - Sends simple text commands via UDP
   - Requires minimal dependencies (mostly Python standard library)
@@ -102,9 +102,9 @@ The system includes an optional acknowledgment tracking feature that provides fe
 Example of non-blocking usage:
 ```python
 # Send command and get ID immediately
-cmd_id = move_robot_joints([90, -45, 90, 0, 45, 180], 
-                          duration=5, 
-                          wait_for_ack=True, 
+cmd_id = move_robot_joints([90, -45, 90, 0, 45, 180],
+                          duration=5,
+                          wait_for_ack=True,
                           non_blocking=True)
 
 # Do other work...
@@ -122,7 +122,7 @@ if status and status['completed']:
 
 #### `home_robot()`
 * **Purpose**: Initiates the robot's built-in homing sequence.
-* **Parameters**: 
+* **Parameters**:
     * `wait_for_ack` (bool, optional): Enable command tracking. Default: False
     * `timeout` (float, optional): Timeout for acknowledgment in seconds. Default: 30.0
     * `non_blocking` (bool, optional): Return immediately with command ID. Default: False
@@ -151,8 +151,8 @@ if status and status['completed']:
     move_robot_joints([90, -45, 90, 0, 45, 180], speed_percentage=75)
 
     # Move with acknowledgment tracking
-    result = move_robot_joints([0, -90, 180, 0, 0, 180], 
-                               duration=5.5, 
+    result = move_robot_joints([0, -90, 180, 0, 0, 180],
+                               duration=5.5,
                                wait_for_ack=True)
     if result['status'] == 'COMPLETED':
         print("Move completed successfully")
@@ -285,16 +285,16 @@ All smooth commands also support reference frame selection through the `frame` p
 * **Python API Usage**:
     ```python
     from robot_api import smooth_circle
-    
+
     # Draw a 50mm radius circle at absolute position
     smooth_circle(center=[200, 0, 200], radius=50, plane='XY', duration=5.0)
-    
+
     # Draw a circle centered 30mm ahead of current tool position
-    smooth_circle(center=[30, 0, 0], radius=25, center_mode='TOOL', 
+    smooth_circle(center=[30, 0, 0], radius=25, center_mode='TOOL',
                  entry_mode='TANGENT', duration=4.0)
-    
+
     # Draw a circle with automatic entry from current position
-    smooth_circle(center=[250, 50, 200], radius=40, entry_mode='AUTO', 
+    smooth_circle(center=[250, 50, 200], radius=40, entry_mode='AUTO',
                  speed_percentage=60)
     ```
 
@@ -317,8 +317,8 @@ All smooth commands also support reference frame selection through the `frame` p
 * **Python API Usage**:
     ```python
     from robot_api import smooth_arc_center
-    smooth_arc_center(end_pose=[250, 50, 200, 0, 0, 90], 
-                     center=[200, 0, 200], 
+    smooth_arc_center(end_pose=[250, 50, 200, 0, 0, 90],
+                     center=[200, 0, 200],
                      duration=3.0)
     ```
 
@@ -392,7 +392,7 @@ All smooth commands also support reference frame selection through the `frame` p
 * **Python API Usage**:
     ```python
     from robot_api import smooth_helix
-    smooth_helix(center=[200, 0, 150], radius=30, pitch=20, 
+    smooth_helix(center=[200, 0, 150], radius=30, pitch=20,
                 height=100, duration=10.0)
     ```
 
@@ -413,7 +413,7 @@ All smooth commands also support reference frame selection through the `frame` p
     from robot_api import smooth_blend
     segments = [
         {'type': 'LINE', 'end': [250, 0, 200, 0, 0, 0], 'duration': 2.0},
-        {'type': 'CIRCLE', 'center': [250, 0, 200], 'radius': 50, 
+        {'type': 'CIRCLE', 'center': [250, 0, 200], 'radius': 50,
          'plane': 'XY', 'duration': 4.0, 'clockwise': False},
         {'type': 'LINE', 'end': [200, 0, 200, 0, 0, 0], 'duration': 2.0}
     ]
@@ -446,9 +446,9 @@ All smooth commands also support reference frame selection through the `frame` p
     ]
     # Automatic blending with quintic trajectories
     smooth_waypoints(waypoints, blend_radii='auto', trajectory_type='quintic')
-    
+
     # Custom blend radii with S-curve profile
-    smooth_waypoints(waypoints, blend_radii=[10, 15, 10], 
+    smooth_waypoints(waypoints, blend_radii=[10, 15, 10],
                     trajectory_type='s_curve', max_velocity=100.0)
     ```
 
@@ -478,7 +478,7 @@ execute_gcode("G1 X200 Y100 Z150 F100")
 # Execute GCODE program
 program = [
     "G21 ; Set units to mm",
-    "G90 ; Absolute positioning", 
+    "G90 ; Absolute positioning",
     "G1 X200 Y0 Z200 F150",
     "G2 X250 Y50 I25 J25 ; Arc move",
     "M3 ; Close gripper"
@@ -635,20 +635,20 @@ These commands request current robot state without moving the robot:
 * **Python API Usage**:
     ```python
     from robot_api import execute_trajectory
-    
+
     # Execute trajectory in world frame
-    trajectory = [[200, 0, 200, 0, 0, 0], 
+    trajectory = [[200, 0, 200, 0, 0, 0],
                   [250, 50, 200, 0, 0, 45],
                   [200, 100, 200, 0, 0, 90]]
-    execute_trajectory(trajectory, timing_mode='duration', 
+    execute_trajectory(trajectory, timing_mode='duration',
                       timing_value=10.0, motion_type='spline')
-    
+
     # Execute trajectory in tool frame (spline only)
     tool_trajectory = [[20, 0, 0, 0, 0, 0],
                       [20, 20, 0, 0, 0, 30],
                       [0, 20, 10, 0, 0, 60]]
     execute_trajectory(tool_trajectory, frame='TRF',
-                      timing_mode='speed', 
+                      timing_mode='speed',
                       timing_value=40, motion_type='spline')
     ```
 
@@ -682,19 +682,19 @@ These commands request current robot state without moving the robot:
 * **Python API Usage**:
     ```python
     from robot_api import chain_smooth_motions
-    
+
     # Chain motions in world frame (default)
     motions = [
         {'type': 'circle', 'center': [200, 0, 200], 'radius': 50, 'duration': 5},
-        {'type': 'arc', 'end_pose': [250, 50, 200, 0, 0, 90], 
+        {'type': 'arc', 'end_pose': [250, 50, 200, 0, 0, 90],
          'center': [225, 25, 200], 'duration': 3}
     ]
     chain_smooth_motions(motions, ensure_continuity=True)
-    
+
     # Chain motions in tool frame
     tool_motions = [
         {'type': 'circle', 'center': [0, 30, 0], 'radius': 25, 'duration': 4},
-        {'type': 'arc', 'end_pose': [30, 30, 0, 0, 0, 45], 
+        {'type': 'arc', 'end_pose': [30, 30, 0, 0, 0, 45],
          'center': [15, 15, 0], 'duration': 3}
     ]
     chain_smooth_motions(tool_motions, frame='TRF', ensure_continuity=True)
@@ -770,7 +770,7 @@ pip3 install spatialmath
 #### Server Side (Robot Controller Computer)
 Required files in the same folder:
 * `controller.py` - Main server/controller
-* `PAROL6_ROBOT.py` - Robot configuration and kinematic model  
+* `PAROL6_ROBOT.py` - Robot configuration and kinematic model
 * `parol6/smooth_motion/` - Advanced trajectory generation package (split modules)
 * `commands/` - Modular command classes directory
   - `utils/ik.py` - IK solving and helper functions
@@ -823,21 +823,21 @@ Commands can be sent from:
 3. **Send Commands**: Use the API functions from `robot_api.py`:
     ```python
     from robot_api import *
-    
+
     # Example sequence
     home_robot()
     move_robot_joints([90, -90, 160, 12, 12, 180], duration=5.5)
     delay_robot(0.5)
-    
+
     # Smooth motion example
     smooth_circle([200, 0, 200], radius=50, duration=5.0)
-    
+
     # Non-blocking example with status checking
-    cmd_id = move_robot_pose([250, 0, 200, 180, 0, 90], 
+    cmd_id = move_robot_pose([250, 0, 200, 180, 0, 90],
                              speed_percentage=50,
-                             wait_for_ack=True, 
+                             wait_for_ack=True,
                              non_blocking=True)
-    
+
     # Check status after some time
     import time
     time.sleep(2)
@@ -858,7 +858,7 @@ If running client and server on different computers:
 
 2. **Firewall Settings**: Ensure UDP port 5001 is open on the robot controller computer.
 
-3. **Network Requirements**: 
+3. **Network Requirements**:
     - Both computers must be on the same network
     - Low latency recommended for real-time control
     - Command acknowledgments use port 5002 (optional feature)
@@ -872,25 +872,25 @@ from robot_api import *
 import time
 
 # Send multiple commands non-blocking
-cmd1 = move_robot_joints([90, -45, 90, 0, 45, 180], 
-                         duration=3, 
-                         wait_for_ack=True, 
+cmd1 = move_robot_joints([90, -45, 90, 0, 45, 180],
+                         duration=3,
+                         wait_for_ack=True,
                          non_blocking=True)
 
-cmd2 = smooth_circle([200, 0, 200], radius=30, 
-                    duration=5, 
-                    wait_for_ack=True, 
+cmd2 = smooth_circle([200, 0, 200], radius=30,
+                    duration=5,
+                    wait_for_ack=True,
                     non_blocking=True)
 
 # Monitor both commands
 while True:
     status1 = check_command_status(cmd1)
     status2 = check_command_status(cmd2)
-    
+
     if status1 and status1['completed'] and status2 and status2['completed']:
         print("Both commands completed!")
         break
-    
+
     time.sleep(0.1)
 ```
 

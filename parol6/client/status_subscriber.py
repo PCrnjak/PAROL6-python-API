@@ -1,36 +1,36 @@
 import asyncio
+import contextlib
+import logging
 import socket
 import struct
 import time
-import logging
-import contextlib
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from parol6 import config as cfg
-from parol6.protocol.wire import decode_status
 from parol6.protocol.types import StatusAggregate
+from parol6.protocol.wire import decode_status
 
 logger = logging.getLogger(__name__)
 
 
 class MulticastProtocol(asyncio.DatagramProtocol):
     """Protocol handler for multicast UDP datagrams that works with uvloop."""
-    
+
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
         self.transport = None
         self.receive_count = 0
         self.last_log_time = time.time()
-        
+
         # EMA rate tracking for multicast RX
         self._rx_count = 0
         self._rx_last_time = time.monotonic()
         self._rx_ema_period = 0.05  # Initialize with 20 Hz expected
         self._rx_last_log_time = time.monotonic()
-        
+
     def connection_made(self, transport):
         self.transport = transport
-        
+
     def datagram_received(self, data, addr):
         # Track multicast RX rate with EMA
         now = time.monotonic()
@@ -41,13 +41,13 @@ class MulticastProtocol(asyncio.DatagramProtocol):
                 self._rx_ema_period = 0.1 * period + 0.9 * self._rx_ema_period
         self._rx_last_time = now
         self._rx_count += 1
-        
+
         # Log rate every 3 seconds
         if now - self._rx_last_log_time >= 3.0 and self._rx_ema_period > 0:
             rx_hz = 1.0 / self._rx_ema_period
             logger.debug(f"Multicast RX: {rx_hz:.1f} Hz (count={self._rx_count})")
             self._rx_last_log_time = now
-        
+
         try:
             self.queue.put_nowait((data, addr))
         except asyncio.QueueFull:
@@ -57,10 +57,10 @@ class MulticastProtocol(asyncio.DatagramProtocol):
                 self.queue.put_nowait((data, addr))
             except:
                 pass
-                
+
     def error_received(self, exc):
         logger.error(f"Error received: {exc}")
-        
+
     def connection_lost(self, exc):
         logger.info(f"Connection lost: {exc}")
 
@@ -116,13 +116,11 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
 
 
 async def subscribe_status(
-    group: str | None = None,
-    port: int | None = None,
-    iface_ip: str | None = None
+    group: str | None = None, port: int | None = None, iface_ip: str | None = None
 ) -> AsyncIterator[StatusAggregate]:
     """
     Async generator that yields decoded STATUS dicts from the UDP multicast broadcaster.
-    
+
     Uses create_datagram_endpoint for uvloop compatibility.
 
     Usage:
@@ -137,37 +135,36 @@ async def subscribe_status(
     group = group or cfg.MCAST_GROUP
     port = port or cfg.MCAST_PORT
     iface_ip = iface_ip or cfg.MCAST_IF
-    
+
     logger.info(f"subscribe_status starting: group={group}, port={port}, iface_ip={iface_ip}")
 
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue(maxsize=100) # type: ignore
-    
+    queue = asyncio.Queue(maxsize=100)  # type: ignore
+
     # Create the socket with multicast configuration
     sock = _create_multicast_socket(group, port, iface_ip)
-    
+
     # Create the datagram endpoint with our protocol
     transport = None
     try:
         transport, _ = await loop.create_datagram_endpoint(
-            lambda: MulticastProtocol(queue),
-            sock=sock
+            lambda: MulticastProtocol(queue), sock=sock
         )
-        
+
         while True:
             try:
                 # Wait for data with timeout
                 data, addr = await asyncio.wait_for(queue.get(), timeout=2.0)
                 text = data.decode("ascii", errors="ignore")
-                    
+
                 parsed = decode_status(text)
                 if parsed is not None:
                     yield parsed
-                        
-            except asyncio.TimeoutError:
+
+            except TimeoutError:
                 logger.warning(f"No multicast received for 2s on {group}:{port} (iface={iface_ip})")
                 continue
-                
+
     except Exception as e:
         logger.error(f"Error in subscribe_status: {e}", exc_info=True)
         raise

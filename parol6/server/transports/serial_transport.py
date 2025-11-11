@@ -5,38 +5,39 @@ This module handles serial port communication, frame parsing, and
 data exchange with the robot hardware.
 """
 
-import serial
 import logging
-import time
-import threading
-from typing import Optional
-import numpy as np
 import os
+import threading
+import time
 
+import numpy as np
+import serial
+
+from parol6.config import INTERVAL_S, get_com_port_with_fallback
 from parol6.protocol.wire import pack_tx_frame_into
-from parol6.config import get_com_port_with_fallback, INTERVAL_S
 
 logger = logging.getLogger(__name__)
+
 
 class SerialTransport:
     """
     Manages serial port communication with the robot.
-    
+
     This class handles:
     - Serial port connection and reconnection
     - Frame parsing and validation
     - Command transmission
     - Telemetry reception
     """
-    
+
     # Frame delimiters
-    START_BYTES = bytes([0xff, 0xff, 0xff])
+    START_BYTES = bytes([0xFF, 0xFF, 0xFF])
     END_BYTES = bytes([0x01, 0x02])
-    
-    def __init__(self, port: Optional[str] = None, baudrate: int = 2000000, timeout: float = 0):
+
+    def __init__(self, port: str | None = None, baudrate: int = 2000000, timeout: float = 0):
         """
         Initialize the serial transport.
-        
+
         Args:
             port: Serial port name (e.g., 'COM5', '/dev/ttyACM0')
             baudrate: Baud rate for serial communication
@@ -45,7 +46,7 @@ class SerialTransport:
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
-        self.serial: Optional[serial.Serial] = None
+        self.serial: serial.Serial | None = None
         self.last_reconnect_attempt = 0.0
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
 
@@ -62,55 +63,53 @@ class SerialTransport:
         self._frame_mv = memoryview(self._frame_buf)[:52]
         self._frame_version = 0
         self._frame_ts = 0.0
-        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_thread: threading.Thread | None = None
         self._reader_running = False
 
         # Preallocated TX buffer (3 start + 1 len + 52 payload = 56 bytes)
         self._tx_buf = bytearray(56)
         self._tx_mv = memoryview(self._tx_buf)
-        
+
         # Hz tracking for debug prints
         self._last_print_time = 0.0
         self._print_interval = 3.0  # seconds
         self._rx_msg_count = 0
         self._interval_msg_count = 0
-        
-    def connect(self, port: Optional[str] = None) -> bool:
+
+    def connect(self, port: str | None = None) -> bool:
         """
         Connect to the serial port.
-        
+
         Args:
             port: Optional port override. If not provided, uses stored port.
-            
+
         Returns:
             True if connection successful, False otherwise
         """
         if port:
             self.port = port
-            
+
         if not self.port:
             logger.warning("No serial port specified")
             return False
-            
+
         try:
             # Close existing connection if any
             if self.serial and self.serial.is_open:
                 self.serial.close()
-                
+
             # Create new connection
             self.serial = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=self.timeout
+                port=self.port, baudrate=self.baudrate, timeout=self.timeout
             )
-            
+
             if self.serial.is_open:
                 logger.info(f"Connected to serial port: {self.port}")
                 return True
             else:
                 logger.error(f"Failed to open serial port: {self.port}")
                 return False
-                
+
         except serial.SerialException as e:
             logger.error(f"Serial connection error: {e}")
             self.serial = None
@@ -119,7 +118,7 @@ class SerialTransport:
             logger.error(f"Unexpected error connecting to serial: {e}")
             self.serial = None
             return False
-    
+
     def disconnect(self) -> None:
         """Disconnect from the serial port."""
         if self.serial:
@@ -131,53 +130,55 @@ class SerialTransport:
                 logger.error(f"Error closing serial port: {e}")
             finally:
                 self.serial = None
-    
+
     def is_connected(self) -> bool:
         """
         Check if serial connection is active.
-        
+
         Returns:
             True if connected and open, False otherwise
         """
         return self.serial is not None and self.serial.is_open
-    
+
     def auto_reconnect(self) -> bool:
         """
         Attempt to reconnect to the serial port if disconnected.
-        
+
         This implements a rate-limited reconnection attempt.
-        
+
         Returns:
             True if reconnection successful, False otherwise
         """
         now = time.time()
-        
+
         # Rate limit reconnection attempts
         if now - self.last_reconnect_attempt < self.reconnect_interval:
             return False
-            
+
         self.last_reconnect_attempt = now
-            
+
         if self.port:
             logger.info(f"Attempting to reconnect to {self.port}...")
             return self.connect(self.port)
-        
+
         return False
-    
-    def write_frame(self, 
-                   position_out: np.ndarray,
-                   speed_out: np.ndarray,
-                   command_out: int,
-                   affected_joint_out: np.ndarray,
-                   inout_out: np.ndarray,
-                   timeout_out: int,
-                   gripper_data_out: np.ndarray) -> bool:
+
+    def write_frame(
+        self,
+        position_out: np.ndarray,
+        speed_out: np.ndarray,
+        command_out: int,
+        affected_joint_out: np.ndarray,
+        inout_out: np.ndarray,
+        timeout_out: int,
+        gripper_data_out: np.ndarray,
+    ) -> bool:
         """
         Write a command frame to the robot.
-        
+
         Optimized to accept array-like objects directly without conversion.
         Supports lists, array.array, and other sequence types.
-        
+
         Args:
             position_out: Target positions for joints
             speed_out: Speed commands for joints
@@ -186,13 +187,13 @@ class SerialTransport:
             inout_out: I/O commands
             timeout_out: Timeout value
             gripper_data_out: Gripper commands
-            
+
         Returns:
             True if write successful, False otherwise
         """
         if not self.is_connected():
             return False
-            
+
         try:
             # Write to serial using preallocated buffer and zero-alloc pack
             ser = self.serial
@@ -207,11 +208,11 @@ class SerialTransport:
                 affected_joint_out,
                 inout_out,
                 timeout_out,
-                gripper_data_out
+                gripper_data_out,
             )
             ser.write(self._tx_mv)
             return True
-            
+
         except serial.SerialException as e:
             logger.error(f"Serial write error: {e}")
             # Mark connection as lost
@@ -220,9 +221,6 @@ class SerialTransport:
         except Exception as e:
             logger.error(f"Unexpected error writing frame: {e}")
             return False
-    
-    
-    
 
     # ================================
     # Latest-frame API (reduced-copy)
@@ -263,12 +261,12 @@ class SerialTransport:
                     try:
                         # Check if data is available to avoid empty read syscalls
                         iw = ser.in_waiting
-                        
+
                         if iw <= 0:
                             # No data available, short sleep and continue
                             time.sleep(min(INTERVAL_S, 0.0015))
                             continue
-                        
+
                         # Read up to available bytes into preallocated scratch buffer
                         k = min(iw, len(self._scratch))
                         n = ser.readinto(self._scratch_mv[:k])
@@ -278,7 +276,9 @@ class SerialTransport:
                         break
                     except (OSError, TypeError, ValueError, AttributeError):
                         # fd likely closed during disconnect; stop quietly
-                        logger.info("Serial reader stopping due to disconnect/closed FD", exc_info=False)
+                        logger.info(
+                            "Serial reader stopping due to disconnect/closed FD", exc_info=False
+                        )
                         try:
                             self.disconnect()
                         except Exception:
@@ -308,7 +308,7 @@ class SerialTransport:
 
                     # Batch copy into ring buffer using slices
                     first = min(n, cap - head)
-                    rb[head:head + first] = src[:first]
+                    rb[head : head + first] = src[:first]
                     remain = n - first
                     if remain:
                         rb[0:remain] = src[first:n]
@@ -375,16 +375,16 @@ class SerialTransport:
             payload_len = 52 if length >= 52 else length
             start = (tail + 4) % cap
             if start + payload_len <= cap:
-                self._frame_buf[:payload_len] = rb[start:start + payload_len]
+                self._frame_buf[:payload_len] = rb[start : start + payload_len]
             else:
                 first = cap - start
                 self._frame_buf[:first] = rb[start:cap]
-                self._frame_buf[first:payload_len] = rb[0:payload_len - first]
+                self._frame_buf[first:payload_len] = rb[0 : payload_len - first]
 
             if payload_len >= 52:
                 self._frame_version += 1
                 self._frame_ts = time.time()
-                
+
                 # Update Hz tracking if enabled
                 self._update_hz_tracking()
 
@@ -394,51 +394,51 @@ class SerialTransport:
         # Publish updated tail
         self._r_tail = tail
 
-    def get_latest_frame_view(self) -> tuple[Optional[memoryview], int, float]:
+    def get_latest_frame_view(self) -> tuple[memoryview | None, int, float]:
         """
         Return a tuple of (memoryview|None, version:int, timestamp:float).
         The memoryview points to a stable 52-byte buffer which is updated by the reader.
         """
         mv = self._frame_mv if self._frame_version > 0 else None
         return (mv, self._frame_version, self._frame_ts)
-    
+
     def get_info(self) -> dict:
         """
         Get information about the current serial connection.
-        
+
         Returns:
             Dictionary with connection information
         """
         info = {
-            'port': self.port,
-            'baudrate': self.baudrate,
-            'connected': self.is_connected(),
-            'timeout': self.timeout
+            "port": self.port,
+            "baudrate": self.baudrate,
+            "connected": self.is_connected(),
+            "timeout": self.timeout,
         }
-        
+
         if self.serial and self.serial.is_open:
             try:
-                info['in_waiting'] = self.serial.in_waiting
-                info['out_waiting'] = self.serial.out_waiting
+                info["in_waiting"] = self.serial.in_waiting
+                info["out_waiting"] = self.serial.out_waiting
             except:
                 pass
-                
+
         return info
-    
+
     def _update_hz_tracking(self) -> None:
         """
         Update EMA Hz tracking and print debug info periodically.
-        
+
         This method calculates the instantaneous Hz based on time between messages,
         updates the EMA (Exponential Moving Average), tracks min/max values,
         and prints debug info every few seconds.
         """
         current_time = time.perf_counter()
-        
+
         # Increment message counters
         self._rx_msg_count += 1
         self._interval_msg_count += 1
-        
+
         # Check if it's time to print debug info
         if self._last_print_time == 0.0:
             self._last_print_time = current_time
@@ -446,30 +446,32 @@ class SerialTransport:
             # Print debug information
             if self._interval_msg_count > 0:
                 avg_hz = self._interval_msg_count / (current_time - self._last_print_time)
-                logger.debug(f"Serial RX Stats - Avg Hz: {avg_hz:.2f} (Total: {self._rx_msg_count})"
+                logger.debug(
+                    f"Serial RX Stats - Avg Hz: {avg_hz:.2f} (Total: {self._rx_msg_count})"
                 )
             else:
-                logger.debug(f"Serial RX Stats - No messages received in last {self._print_interval:.1f}s")
-            
+                logger.debug(
+                    f"Serial RX Stats - No messages received in last {self._print_interval:.1f}s"
+                )
+
             # Reset interval statistics
             self._last_print_time = current_time
             self._interval_msg_count = 0
 
 
-def create_serial_transport(port: Optional[str] = None, 
-                          baudrate: int = 2000000) -> SerialTransport:
+def create_serial_transport(port: str | None = None, baudrate: int = 2000000) -> SerialTransport:
     """
     Factory function to create and optionally connect a serial transport.
-    
+
     Args:
         port: Optional serial port to connect to
         baudrate: Baud rate for communication
-        
+
     Returns:
         SerialTransport instance (may or may not be connected)
     """
     transport = SerialTransport(port=port, baudrate=baudrate)
-    
+
     # Try to connect if port provided
     if port:
         transport.connect(port)
@@ -478,5 +480,5 @@ def create_serial_transport(port: Optional[str] = None,
         saved_port = get_com_port_with_fallback()
         if saved_port:
             transport.connect(saved_port)
-            
+
     return transport

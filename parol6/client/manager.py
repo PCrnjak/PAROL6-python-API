@@ -7,8 +7,8 @@ Provides lifecycle management and automatic spawning of the controller process.
 import asyncio
 import contextlib
 import logging
-import re
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -16,12 +16,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 # Precompiled regex patterns for server log normalization
 _SIMPLE_FORMAT_RE = re.compile(
-    r'^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|TRACE)\s+([A-Za-z0-9_.-]+):\s+(.*)$'
+    r"^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|TRACE)\s+([A-Za-z0-9_.-]+):\s+(.*)$"
 )
+
 
 @dataclass
 class ServerOptions:
@@ -45,7 +45,7 @@ class ServerManager:
     def __init__(self, controller_path: str | None = None, normalize_logs: bool = False) -> None:
         """
         Initialize the ServerManager.
-        
+
         Args:
             controller_path: Optional path to controller script. If None, uses bundled controller.
             normalize_logs: If True, parse and normalize controller log output to avoid duplicate
@@ -54,13 +54,11 @@ class ServerManager:
         if controller_path:
             self.controller_path = Path(controller_path).resolve()
             if not self.controller_path.exists():
-                raise FileNotFoundError(
-                    f"Controller script not found: {self.controller_path}"
-                )
+                raise FileNotFoundError(f"Controller script not found: {self.controller_path}")
         else:
             # Use the package's bundled commander
             self.controller_path = Path(__file__).parent / "controller.py"
-            
+
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
@@ -105,18 +103,18 @@ class ServerManager:
 
         # Launch the controller as a module to ensure package imports resolve
         args = [sys.executable, "-u", "-m", "parol6.server.controller"]
-        
+
         level_name = logging.getLevelName(logging.getLogger().level)
         args.append(f"--log-level={level_name}")
         if com_port:
             args.append(f"--serial={com_port}")
-            
+
         try:
             self._proc = subprocess.Popen(
                 args,
                 cwd=str(cwd),
                 env=env,
-                stdout=subprocess.PIPE,  
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,  # line-buffered
@@ -253,19 +251,19 @@ class ServerManager:
 
 
 async def ensure_server(
-    host: str = "127.0.0.1", 
-    port: int = 5001, 
-    manage: bool = False, 
-    com_port: str | None = None, 
+    host: str = "127.0.0.1",
+    port: int = 5001,
+    manage: bool = False,
+    com_port: str | None = None,
     extra_env: dict | None = None,
-    normalize_logs: bool = False
-) -> Optional[ServerManager]:
+    normalize_logs: bool = False,
+) -> ServerManager | None:
     """
     Ensure a PAROL6 server is running and accessible.
-    
+
     Args:
         host: Server host to check/connect to
-        port: Server port to check/connect to  
+        port: Server port to check/connect to
         manage: If True, automatically spawn controller if ping fails
         com_port: COM port for spawned controller
         extra_env: Additional environment variables for spawned controller
@@ -274,31 +272,32 @@ async def ensure_server(
 
     Returns:
         ServerManager instance if manage=True and server was spawned, None otherwise
-        
+
     Usage:
         # Just check if server is running
         await ensure_server()
-        
+
         # Auto-spawn if not running
         mgr = await ensure_server(manage=True, com_port="/dev/ttyACM0")
     """
     # Test if server is already running
     try:
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(1.0)
             sock.sendto(b"PING", (host, port))
             data, _ = sock.recvfrom(256)
-            if data.decode('ascii').startswith("PONG"):
+            if data.decode("ascii").startswith("PONG"):
                 logging.info(f"Server already running at {host}:{port}")
                 return None
     except Exception:
         pass
-    
+
     if not manage:
         logging.warning(f"Server not responding at {host}:{port} and manage=False")
         return None
-    
+
     # Spawn controller
     logging.info(f"Server not responding at {host}:{port}, starting controller...")
     # Prepare environment for child controller bind tuple

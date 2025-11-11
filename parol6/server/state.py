@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple, Any, Union, Sequence
-from collections import deque
-import threading
-import time
 import logging
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, cast
+
 import numpy as np
-from parol6.protocol.wire import CommandCode
+from spatialmath import SE3
+
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.protocol.wire import CommandCode
 
 
 @dataclass
 class GripperModeResetTracker:
     """Tracks gripper mode for auto-reset functionality."""
+
     calibration_sent: bool = False  # Flag for calibration mode
     error_clear_sent: bool = False  # Flag for error clear mode
 
@@ -25,6 +28,7 @@ class ControllerState:
 
     Buffers use preallocated NumPy ndarrays for zero-copy, in-place operations.
     """
+
     # Serial/transport
     ser: Any = None
     last_reconnect_attempt: float = 0.0
@@ -35,7 +39,7 @@ class ControllerState:
     disabled_reason: str = ""
     e_stop_active: bool = False
     stream_mode: bool = False
-    
+
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
 
@@ -46,7 +50,7 @@ class ControllerState:
     start_cond3: int = 0
     good_start: int = 0
     data_len: int = 0
-    data_buffer: List[bytes] = field(default_factory=lambda: [b""] * 255)
+    data_buffer: list[bytes] = field(default_factory=lambda: [b""] * 255)
     data_counter: int = 0
 
     # Robot telemetry and command buffers - using ndarray for efficiency
@@ -74,18 +78,18 @@ class ControllerState:
     XTR_data: int = 0
 
     # Command queueing and tracking
-    command_queue: Deque[Any] = field(default_factory=deque)
-    incoming_command_buffer: Deque[Tuple[str, Tuple[str, int]]] = field(default_factory=deque)
-    command_id_map: Dict[Any, Tuple[str, Tuple[str, int]]] = field(default_factory=dict)
+    command_queue: deque[Any] = field(default_factory=deque)
+    incoming_command_buffer: deque[tuple[str, tuple[str, int]]] = field(default_factory=deque)
+    command_id_map: dict[Any, tuple[str, tuple[str, int]]] = field(default_factory=dict)
     active_command: Any = None
-    active_command_id: Optional[str] = None
+    active_command_id: str | None = None
     last_command_time: float = 0.0
-    
+
     # Action tracking for status broadcast and queries
     action_current: str = ""
     action_state: str = "IDLE"  # IDLE, EXECUTING, COMPLETED, FAILED
     action_next: str = ""
-    queue_nonstreamable: List[str] = field(default_factory=list)
+    queue_nonstreamable: list[str] = field(default_factory=list)
 
     # Network setup and uptime
     ip: str = "127.0.0.1"
@@ -99,25 +103,25 @@ class ControllerState:
     overrun_count: int = 0
     last_period_s: float = 0.0
     ema_period_s: float = 0.0
-    
+
     # Command frequency metrics
     command_count: int = 0
     last_command_period_s: float = 0.0
     ema_command_period_s: float = 0.0
-    command_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
-    
+    command_timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+
     # Forward kinematics cache (invalidated when Position_in or current_tool changes)
     _fkine_last_pos_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     _fkine_last_tool: str = ""
     _fkine_se3: Any = None  # SE3 instance from spatialmath
     _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
     _fkine_flat_mm: np.ndarray = field(default_factory=lambda: np.zeros((16,), dtype=np.float64))
-    
+
     @property
     def current_tool(self) -> str:
         """Get the current tool name."""
         return self._current_tool
-    
+
     @current_tool.setter
     def current_tool(self, tool_name: str) -> None:
         """Set the current tool and apply it to the robot model."""
@@ -141,9 +145,9 @@ class StateManager:
     convenience methods for common state operations.
     """
 
-    _instance: Optional[StateManager] = None
+    _instance: StateManager | None = None
     _lock: threading.Lock = threading.Lock()
-    _state: Optional[ControllerState] = None
+    _state: ControllerState | None = None
 
     def __new__(cls) -> StateManager:
         """Ensure singleton pattern with thread safety."""
@@ -156,7 +160,7 @@ class StateManager:
 
     def __init__(self):
         """Initialize the state manager (only runs once due to singleton)."""
-        if not hasattr(self, '_initialized'):
+        if not hasattr(self, "_initialized"):
             self._state = ControllerState()
             self._state_lock = threading.RLock()  # Use RLock for re-entrant locking
             self._initialized = True
@@ -189,8 +193,9 @@ class StateManager:
             self._state = ControllerState()
             logger.info("Controller state reset")
 
+
 # Global singleton instance accessor
-_state_manager: Optional[StateManager] = None
+_state_manager: StateManager | None = None
 
 
 def get_instance() -> StateManager:
@@ -214,6 +219,7 @@ def get_state() -> ControllerState:
 # Forward kinematics cache management
 # -----------------------------
 
+
 def invalidate_fkine_cache() -> None:
     """
     Invalidate the fkine cache, forcing recomputation on next access.
@@ -229,9 +235,9 @@ def ensure_fkine_updated(state: ControllerState) -> None:
     """
     Ensure the fkine cache is up to date with current Position_in and tool.
     If Position_in or current_tool has changed, recalculate fkine and update cache.
-    
+
     This function is thread-safe when called with state from get_state().
-    
+
     Parameters
     ----------
     state : ControllerState
@@ -240,36 +246,37 @@ def ensure_fkine_updated(state: ControllerState) -> None:
     # Check if cache is valid
     pos_changed = not np.array_equal(state.Position_in, state._fkine_last_pos_in)
     tool_changed = state.current_tool != state._fkine_last_tool
-    
+
     if pos_changed or tool_changed or state._fkine_se3 is None:
         # Recompute fkine
         q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        T = PAROL6_ROBOT.robot.fkine(q)  # type: ignore[attr-defined]
-        
+        assert PAROL6_ROBOT.robot is not None
+        T = cast(SE3, cast(Any, PAROL6_ROBOT.robot).fkine(q))
+
         # Cache SE3 object
         state._fkine_se3 = T
-        
+
         # Cache as 4x4 matrix
-        mat = T.A.copy()
+        mat = np.asarray(T.A, dtype=np.float64).copy()
         np.copyto(state._fkine_mat, mat)
-        
+
         # Cache as flattened 16-vector with mm translation
         flat = mat.reshape(-1).copy()
-        flat[3] *= 1000.0   # X translation to mm
-        flat[7] *= 1000.0   # Y translation to mm
+        flat[3] *= 1000.0  # X translation to mm
+        flat[7] *= 1000.0  # Y translation to mm
         flat[11] *= 1000.0  # Z translation to mm
         np.copyto(state._fkine_flat_mm, flat)
-        
+
         # Update cache tracking
         np.copyto(state._fkine_last_pos_in, state.Position_in)
         state._fkine_last_tool = state.current_tool
 
 
-def get_fkine_se3(state: ControllerState | None = None):
+def get_fkine_se3(state: ControllerState | None = None) -> SE3:
     """
     Get the current end-effector pose as an SE3 object.
     Automatically updates cache if needed.
-    
+
     Returns
     -------
     SE3
@@ -286,7 +293,7 @@ def get_fkine_matrix(state: ControllerState | None = None) -> np.ndarray:
     Get the current end-effector pose as a 4x4 homogeneous transformation matrix.
     Automatically updates cache if needed.
     Translation is in meters.
-    
+
     Returns
     -------
     np.ndarray
@@ -303,7 +310,7 @@ def get_fkine_flat_mm(state: ControllerState | None = None) -> np.ndarray:
     Get the current end-effector pose as a flattened 16-element array.
     Automatically updates cache if needed.
     Translation components (indices 3, 7, 11) are in millimeters for compatibility.
-    
+
     Returns
     -------
     np.ndarray

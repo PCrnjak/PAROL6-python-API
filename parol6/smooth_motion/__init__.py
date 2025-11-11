@@ -1,9 +1,9 @@
+from .advanced import AdvancedMotionBlender
 from .circle import CircularMotion
 from .helix import HelixMotion
+from .motion_blender import MotionBlender
 from .spline import SplineMotion
 from .waypoints import WaypointTrajectoryPlanner
-from .motion_blender import MotionBlender
-from .advanced import AdvancedMotionBlender
 
 __all__ = [
     "CircularMotion",
@@ -11,5 +11,5 @@ __all__ = [
     "HelixMotion",
     "WaypointTrajectoryPlanner",
     "MotionBlender",
-    "AdvancedMotionBlender"
+    "AdvancedMotionBlender",
 ]
