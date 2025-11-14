@@ -59,8 +59,9 @@ class AsyncRobotClient:
         timeout: float = 2.0,
         retries: int = 1,
     ) -> None:
-        self.host = host
-        self.port = port
+        # Endpoint configuration (host/port immutable after endpoint creation)
+        self._host = host
+        self._port = port
         self.timeout = timeout
         self.retries = retries
 
@@ -84,6 +85,28 @@ class AsyncRobotClient:
 
         # Lifecycle flag
         self._closed: bool = False
+
+    # --------------- Endpoint configuration properties ---------------
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @host.setter
+    def host(self, value: str) -> None:
+        if self._transport is not None:
+            raise RuntimeError("AsyncRobotClient.host is read-only after endpoint creation")
+        self._host = value
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @port.setter
+    def port(self, value: int) -> None:
+        if self._transport is not None:
+            raise RuntimeError("AsyncRobotClient.port is read-only after endpoint creation")
+        self._port = value
 
     # --------------- Internal helpers ---------------
 
