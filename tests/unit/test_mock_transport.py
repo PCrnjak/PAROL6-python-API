@@ -277,12 +277,12 @@ class TestMockSerialTransport:
         info = transport.get_info()
         assert info["port"] == "TEST_PORT"
         assert info["baudrate"] == 115200
-        assert info["connected"] == False
+        assert not info["connected"]
         assert info["mode"] == "MOCK_SERIAL"
 
         transport.connect()
         info = transport.get_info()
-        assert info["connected"] == True
+        assert info["connected"]
         assert "frames_sent" in info
         assert "frames_received" in info
         assert "simulation_rate_hz" in info

@@ -8,7 +8,6 @@ Uses stub UDP transport and minimal state objects to test command logic in isola
 import json
 from types import SimpleNamespace
 
-import pytest
 from parol6.commands.base import CommandContext
 from parol6.commands.query_commands import GetCurrentActionCommand, GetQueueCommand
 

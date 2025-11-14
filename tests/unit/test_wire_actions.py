@@ -4,7 +4,6 @@ Unit tests for wire protocol action field parsing.
 Tests that decode_status correctly parses ACTION_CURRENT, ACTION_STATE, and ACTION_NEXT fields.
 """
 
-import pytest
 from parol6.protocol import wire
 
 

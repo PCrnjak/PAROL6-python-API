@@ -279,7 +279,7 @@ def find_available_ports(start_port: int = 5001, count: int = 2) -> list[int]:
     Returns:
         List of available port numbers
     """
-    available_ports = []
+    available_ports: list[int] = []
     current_port = start_port
 
     while len(available_ports) < count:

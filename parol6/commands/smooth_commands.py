@@ -276,6 +276,8 @@ class BaseSmoothMotionCommand(MotionCommand):
 
             # Generate trajectory from where we ACTUALLY are
             self.trajectory = self.generate_main_trajectory(actual_current_pose)
+            if self.trajectory is None:
+                raise RuntimeError("Smooth trajectory generator returned None")
             self.trajectory_command = SmoothTrajectoryCommand(self.trajectory, self.description)
 
             # Quick validation of first point only
@@ -585,9 +587,10 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             self.center = transformed["center"]
             self.normal_vector = transformed.get("normal_vector")
 
-            logger.info(
-                f"  -> TRF Circle: center {self.center[:3].tolist()} (WRF), normal {self.normal_vector}"
-            )
+            if self.center is not None:
+                logger.info(
+                    f"  -> TRF Circle: center {self.center[:3].tolist()} (WRF), normal {self.normal_vector}"
+                )
 
             # Transform start_pose if specified - convert array to list for the API
             if self.specified_start_pose is not None:
@@ -1198,7 +1201,7 @@ class SmoothHelixCommand(BaseSmoothMotionCommand):
             entry_duration = float(min(2.0, max(0.5, float(distance_from_perimeter) / 50.0)))
 
             # Generate entry trajectory to helix start position
-            motion_gen = CircularMotion()
+            CircularMotion()
 
             # Calculate the target position on the helix perimeter
             if dist_to_center > 0.001:
@@ -1478,7 +1481,7 @@ class SmoothBlendCommand(BaseSmoothMotionCommand):
         # New wire format: SMOOTH_BLEND|num_segments|blend_time|frame|start_pose|timing|SEG1||SEG2||...
         if parts[1].isdigit():
             try:
-                num_segments = int(parts[1])
+                int(parts[1])
                 self.blend_time = float(parts[2])
                 self.frame = parts[3].upper()
                 if self.frame not in ["WRF", "TRF"]:

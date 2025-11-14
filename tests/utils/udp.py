@@ -105,7 +105,7 @@ class AckListener:
         self.running = False
 
         # Storage for received acknowledgments
-        self.ack_queue = queue.Queue()
+        self.ack_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.ack_history: list[dict[str, Any]] = []
 
     def start(self) -> bool:
@@ -341,7 +341,7 @@ def parse_server_response(response: str) -> dict[str, Any]:
     parts = response.split("|", 1)
     response_type = parts[0]
 
-    parsed = {"type": response_type, "raw": response}
+    parsed: dict[str, Any] = {"type": response_type, "raw": response}
 
     if len(parts) > 1:
         data = parts[1]

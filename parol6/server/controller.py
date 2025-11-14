@@ -387,7 +387,7 @@ class Controller:
                     and self.first_frame_received
                 ):
                     if state.InOut_in[4] == 0:  # E-stop pressed (0 = pressed, 1 = released)
-                        if self.estop_active != True:  # Not already in E-stop state
+                        if not self.estop_active:  # Not already in E-stop state
                             logger.warning("E-STOP activated")
                             self.estop_active = True
                             # Cancel active command
@@ -399,7 +399,7 @@ class Controller:
                             state.Command_out = CommandCode.DISABLE
                             state.Speed_out.fill(0)
                     elif state.InOut_in[4] == 1:  # E-stop released (1 = released)
-                        if self.estop_active == True:  # Was in E-stop state
+                        if self.estop_active:  # Was in E-stop state
                             # E-stop was released - automatic recovery
                             logger.info("E-STOP released - automatic recovery")
                             self.estop_active = False
@@ -410,7 +410,7 @@ class Controller:
                             state.Speed_out.fill(0)
 
                 # 3. Execute commands if not in E-stop (or E-stop state unknown)
-                if self.estop_active != True:  # Execute if E-stop is False or None (unknown)
+                if not self.estop_active:  # Execute if E-stop is False or None (unknown)
                     # Execute active command
                     if self.active_command or self.command_queue:
                         self._execute_active_command()

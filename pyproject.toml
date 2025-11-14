@@ -103,6 +103,10 @@ filterwarnings = [
 module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*", "serial"]
+ignore_missing_imports = true
+
 [tool.setuptools]
 include-package-data = true
 
