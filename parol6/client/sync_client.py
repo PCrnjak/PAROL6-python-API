@@ -77,6 +77,12 @@ class RobotClient:
     """
     Synchronous wrapper around AsyncRobotClient.
     All methods return concrete results (never coroutines).
+
+    Can be used as a context manager to ensure proper cleanup:
+
+        with RobotClient() as client:
+            client.enable()
+            ...
     """
 
     # ---------- lifecycle ----------
@@ -89,6 +95,16 @@ class RobotClient:
         retries: int = 1,
     ) -> None:
         self._inner = AsyncRobotClient(host=host, port=port, timeout=timeout, retries=retries)
+
+    def close(self) -> None:
+        """Close underlying AsyncRobotClient and release resources."""
+        _run(self._inner.close())
+
+    def __enter__(self) -> "RobotClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     @property
     def async_client(self) -> AsyncRobotClient:

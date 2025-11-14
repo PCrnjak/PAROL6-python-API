@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -249,61 +250,45 @@ class ServerManager:
 
         return False
 
-
-async def ensure_server(
+async def is_server_running(
     host: str = "127.0.0.1",
     port: int = 5001,
-    manage: bool = False,
+    timeout: float = 1.0,
+) -> bool:
+    """Return True if a PAROL6 controller responds to UDP PING at host:port."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            sock.sendto(b"PING", (host, port))
+            data, _ = sock.recvfrom(256)
+            return data.decode("ascii", errors="ignore").startswith("PONG")
+    except Exception:
+        return False
+
+
+async def manage_server(
+    host: str = "127.0.0.1",
+    port: int = 5001,
     com_port: str | None = None,
     extra_env: dict | None = None,
     normalize_logs: bool = False,
-) -> ServerManager | None:
+) -> ServerManager:
+    """Start a PAROL6 controller at host:port.
+
+    Fast-fails if a server is already running there.
+
+    Returns a ServerManager that owns the spawned controller.
     """
-    Ensure a PAROL6 server is running and accessible.
+    if await is_server_running(host=host, port=port):
+        raise RuntimeError(f"Server already running at {host}:{port}")
 
-    Args:
-        host: Server host to check/connect to
-        port: Server port to check/connect to
-        manage: If True, automatically spawn controller if ping fails
-        com_port: COM port for spawned controller
-        extra_env: Additional environment variables for spawned controller
-        normalize_logs: If True, parse and normalize controller log output to avoid duplicate
-                          timestamp/level/module info. Set to True when used from web GUI.
-
-    Returns:
-        ServerManager instance if manage=True and server was spawned, None otherwise
-
-    Usage:
-        # Just check if server is running
-        await ensure_server()
-
-        # Auto-spawn if not running
-        mgr = await ensure_server(manage=True, com_port="/dev/ttyACM0")
-    """
-    # Test if server is already running
-    try:
-        import socket
-
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(1.0)
-            sock.sendto(b"PING", (host, port))
-            data, _ = sock.recvfrom(256)
-            if data.decode("ascii").startswith("PONG"):
-                logging.info(f"Server already running at {host}:{port}")
-                return None
-    except Exception:
-        pass
-
-    if not manage:
-        logging.warning(f"Server not responding at {host}:{port} and manage=False")
-        return None
-
-    # Spawn controller
     logging.info(f"Server not responding at {host}:{port}, starting controller...")
+
     # Prepare environment for child controller bind tuple
     env_to_pass = dict(extra_env) if extra_env else {}
     env_to_pass["PAROL6_CONTROLLER_IP"] = host
     env_to_pass["PAROL6_CONTROLLER_PORT"] = str(port)
+
     manager = ServerManager(normalize_logs=normalize_logs)
     await manager.start_controller(
         com_port=com_port,
@@ -315,10 +300,10 @@ async def ensure_server(
 
     # Wait for readiness within a short window
     ok = await manager.await_ready(host=host, port=port, timeout=5.0)
-    if ok:
-        logging.info(f"Successfully started server at {host}:{port}")
-        return manager
+    if not ok:
+        logging.error("Server spawn failed or not responding after startup")
+        await manager.stop_controller()
+        raise RuntimeError("Failed to start PAROL6 controller")
 
-    logging.error("Server spawn failed or not responding after startup")
-    await manager.stop_controller()
-    return None
+    logging.info(f"Successfully started server at {host}:{port}")
+    return manager

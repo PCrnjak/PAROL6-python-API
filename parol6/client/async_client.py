@@ -3,6 +3,7 @@ Async UDP client for PAROL6 robot control.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -81,13 +82,20 @@ class AsyncRobotClient:
         self._multicast_task: asyncio.Task | None = None
         self._status_queue: asyncio.Queue[StatusAggregate] = asyncio.Queue(maxsize=100)
 
+        # Lifecycle flag
+        self._closed: bool = False
+
     # --------------- Internal helpers ---------------
 
     async def _ensure_endpoint(self) -> None:
         """Lazily create a persistent asyncio UDP datagram endpoint."""
+        if self._closed:
+            raise RuntimeError("AsyncRobotClient is closed")
         if self._transport is not None:
             return
         async with self._ep_lock:
+            if self._closed:
+                raise RuntimeError("AsyncRobotClient is closed")
             if self._transport is not None:
                 return
             loop = asyncio.get_running_loop()
@@ -141,6 +149,47 @@ class AsyncRobotClient:
 
         # Start listener task
         self._multicast_task = asyncio.create_task(_listener())
+
+    # --------------- Lifecycle / context management ---------------
+
+    async def close(self) -> None:
+        """Release UDP transport and background tasks.
+
+        Safe to call multiple times.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        # Stop multicast listener
+        if self._multicast_task is not None:
+            self._multicast_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._multicast_task
+            self._multicast_task = None
+
+        # Close UDP transport
+        if self._transport is not None:
+            with contextlib.suppress(Exception):
+                self._transport.close()
+            self._transport = None
+            self._protocol = None
+
+        # Best-effort queue drain to free memory
+        for q in (self._rx_queue, self._status_queue):
+            try:
+                while not q.empty():
+                    q.get_nowait()
+            except Exception:
+                pass
+
+    async def __aenter__(self) -> "AsyncRobotClient":
+        if self._closed:
+            raise RuntimeError("AsyncRobotClient is closed")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
 
     async def status_stream(self) -> AsyncIterator[StatusAggregate]:
         """

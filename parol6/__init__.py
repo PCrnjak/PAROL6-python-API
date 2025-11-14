@@ -8,13 +8,14 @@ Key components:
 - AsyncRobotClient: Async UDP client for robot operations
 - RobotClient: Sync wrapper with automatic event loop handling
 - ServerManager: Manages headless controller process lifecycle
-- ensure_server: Convenience function to auto-start controller when needed
+- manage_server: Convenience function to start a controller process
+- is_server_running: Helper to probe for an existing controller
 """
 
 from . import PAROL6_ROBOT
 from ._version import __version__
 from .client.async_client import AsyncRobotClient
-from .client.manager import ServerManager, ensure_server
+from .client.manager import ServerManager, is_server_running, manage_server
 from .client.sync_client import RobotClient
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "AsyncRobotClient",
     "RobotClient",
     "ServerManager",
-    "ensure_server",
+    "manage_server",
+    "is_server_running",
     "PAROL6_ROBOT",
 ]

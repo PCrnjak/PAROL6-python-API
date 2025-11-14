@@ -165,6 +165,10 @@ async def subscribe_status(
                 logger.warning(f"No multicast received for 2s on {group}:{port} (iface={iface_ip})")
                 continue
 
+    except asyncio.CancelledError:
+        # Normal shutdown path when consumer task is cancelled
+        logger.info("subscribe_status cancelled")
+        raise
     except Exception as e:
         logger.error(f"Error in subscribe_status: {e}", exc_info=True)
         raise
