@@ -26,8 +26,8 @@ dependencies = [
     "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp311-cp311-win_amd64.whl ; python_version == '3.11' and platform_system == 'Windows' and platform_machine == 'AMD64'",
 
     # Linux x86_64
-    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 
     # Linux aarch64 (ARM64)
     "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.2/roboticstoolbox_python-1.2.2-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'aarch64'",
