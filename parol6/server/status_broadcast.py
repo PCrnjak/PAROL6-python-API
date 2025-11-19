@@ -14,13 +14,21 @@ logger = logging.getLogger(__name__)
 
 class StatusBroadcaster(threading.Thread):
     """
-    Broadcasts ASCII STATUS frames via UDP multicast.
+    Broadcasts ASCII STATUS frames via UDP.
 
-    Config:
+    Transport:
+      - cfg.STATUS_TRANSPORT: "MULTICAST" (default) or "UNICAST"
+
+    Multicast Config (used when STATUS_TRANSPORT == MULTICAST):
       - cfg.MCAST_GROUP (default "239.255.0.101")
-      - cfg.MCAST_PORT (default 50510)
-      - cfg.MCAST_TTL  (default 1)
-      - cfg.MCAST_IF   (default "127.0.0.1")
+      - cfg.MCAST_PORT  (default 50510)
+      - cfg.MCAST_TTL   (default 1)
+      - cfg.MCAST_IF    (default "127.0.0.1")
+
+    Unicast Config (used when STATUS_TRANSPORT == UNICAST):
+      - cfg.STATUS_UNICAST_HOST (default "127.0.0.1")
+
+    General:
       - cfg.STATUS_RATE_HZ (default 50)
       - cfg.STATUS_STALE_S (default 0.2) -> skip broadcast if cache is stale
     """
@@ -44,56 +52,103 @@ class StatusBroadcaster(threading.Thread):
         self._period = 1.0 / max(rate_hz, 1.0)
         self._stale_s = stale_s
 
+        # Negotiated transport (can be forced via env or auto-fallback at runtime)
+        self._use_unicast: bool = (cfg.STATUS_TRANSPORT == "UNICAST")
+
         self._sock: socket.socket | None = None
         self._running = threading.Event()
         self._running.set()
 
-        # EMA rate tracking for multicast TX
+        # EMA rate tracking for TX
         self._tx_count = 0
         self._tx_last_time = time.monotonic()
         self._tx_ema_period = 1.0 / rate_hz  # Initialize with expected period
         self._tx_last_log_time = time.monotonic()  # For 3-second logging interval
 
+    def _detect_primary_ip(self) -> str:
+        tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            tmp.connect(("1.1.1.1", 80))
+            return tmp.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+        finally:
+            try:
+                tmp.close()
+            except Exception:
+                pass
+
     def _setup_socket(self) -> None:
+        # UNICAST: simple UDP socket without multicast options
+        if self._use_unicast:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            self._sock = sock
+            logger.info(
+                f"StatusBroadcaster (UNICAST) -> dest={cfg.STATUS_UNICAST_HOST}:{self.port}"
+            )
+            return
+
+        # MULTICAST: configure multicast TTL/IF with verification and fallback
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-
-        # Prefer loopback interface for multicast; if that fails, fall back to primary NIC IP
-        def _detect_primary_ip() -> str:
-            tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                tmp.connect(("1.1.1.1", 80))
-                return tmp.getsockname()[0]
-            except Exception:
-                return "127.0.0.1"
-            finally:
-                try:
-                    tmp.close()
-                except Exception:
-                    pass
 
         try:
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.iface_ip)
             )
-        except Exception:
+            # Verify interface actually routes by sending a tiny dummy datagram
             try:
-                primary_ip = _detect_primary_ip()
+                sock.sendto(b"\0", (self.group, self.port))
+            except OSError as e:
+                raise RuntimeError(
+                    f"Initial multicast send failed on iface {self.iface_ip}: {e}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"StatusBroadcaster: interface {self.iface_ip} failed verification: {e}"
+            )
+            try:
+                primary_ip = self._detect_primary_ip()
                 sock.setsockopt(
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(primary_ip)
                 )
                 logger.info(f"StatusBroadcaster: fallback IP_MULTICAST_IF to {primary_ip}")
-            except Exception as e:
-                logger.warning(f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e}")
+                # Verify fallback
+                sock.sendto(b"\0", (self.group, self.port))
+            except Exception as e2:
+                logger.warning(f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e2}")
+                # As a last resort, switch to UNICAST
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self._use_unicast = True
+                usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                usock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+                self._sock = usock
+                logger.info(
+                    f"StatusBroadcaster (UNICAST-FALLBACK) -> dest={cfg.STATUS_UNICAST_HOST}:{self.port}"
+                )
+                return
 
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
         self._sock = sock
+        logger.info(
+            f"StatusBroadcaster (MULTICAST) -> group={self.group} port={self.port} iface={self.iface_ip} ttl={self.ttl}"
+        )
 
     def run(self) -> None:
         self._setup_socket()
         cache = get_cache()
-        dest = (self.group, self.port)
+
+        # Destination based on negotiated transport
+        if self._use_unicast:
+            dest = (cfg.STATUS_UNICAST_HOST, self.port)
+        else:
+            dest = (self.group, self.port)
+
         sock = self._sock
         if sock is None:
             logger.error("StatusBroadcaster socket not initialized")
@@ -113,24 +168,30 @@ class StatusBroadcaster(threading.Thread):
             # Skip broadcast if cache is stale (e.g., serial disconnected)
             if cache.age_s() <= self._stale_s:
                 payload = cache.to_ascii().encode("ascii", errors="ignore")
-                # memoryview avoids an extra copy in some implementations
-                sock.sendto(memoryview(payload), dest)
+                try:
+                    sock.sendto(memoryview(payload), dest)
+                except OSError as e:
+                    # Log occasionally to avoid flooding
+                    if time.monotonic() - self._tx_last_log_time >= 5.0:
+                        logger.warning(f"StatusBroadcaster send failed: {e}")
+                        self._tx_last_log_time = time.monotonic()
+                    # Do not stop thread; continue trying
+                else:
+                    # Track TX rate with EMA
+                    now = time.monotonic()
+                    if self._tx_count > 0:  # Skip first sample for period calculation
+                        period = now - self._tx_last_time
+                        if period > 0:
+                            # EMA update: 0.1 * new + 0.9 * old
+                            self._tx_ema_period = 0.1 * period + 0.9 * self._tx_ema_period
+                    self._tx_last_time = now
+                    self._tx_count += 1
 
-                # Track multicast TX rate with EMA
-                now = time.monotonic()
-                if self._tx_count > 0:  # Skip first sample for period calculation
-                    period = now - self._tx_last_time
-                    if period > 0:
-                        # EMA update: 0.1 * new + 0.9 * old
-                        self._tx_ema_period = 0.1 * period + 0.9 * self._tx_ema_period
-                self._tx_last_time = now
-                self._tx_count += 1
-
-                # Log rate every 3 seconds
-                if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
-                    tx_hz = 1.0 / self._tx_ema_period
-                    logger.debug(f"Multicast TX: {tx_hz:.1f} Hz (count={self._tx_count})")
-                    self._tx_last_log_time = now
+                    # Log rate every 3 seconds
+                    if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
+                        tx_hz = 1.0 / self._tx_ema_period
+                        logger.debug(f"Status TX: {tx_hz:.1f} Hz (count={self._tx_count})")
+                        self._tx_last_log_time = now
 
             # Sleep until next deadline (compensates for work time)
             sleep_time = next_deadline - time.monotonic()

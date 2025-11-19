@@ -13,8 +13,8 @@ from parol6.protocol.wire import decode_status
 logger = logging.getLogger(__name__)
 
 
-class MulticastProtocol(asyncio.DatagramProtocol):
-    """Protocol handler for multicast UDP datagrams that works with uvloop."""
+class UDPProtocol(asyncio.DatagramProtocol):
+    """Protocol handler for UDP datagrams (multicast or unicast)."""
 
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
@@ -22,17 +22,17 @@ class MulticastProtocol(asyncio.DatagramProtocol):
         self.receive_count = 0
         self.last_log_time = time.time()
 
-        # EMA rate tracking for multicast RX
+        # EMA rate tracking for RX
         self._rx_count = 0
         self._rx_last_time = time.monotonic()
-        self._rx_ema_period = 0.05  # Initialize with 20 Hz expected
+        self._rx_ema_period = 0.05  # Initialize with ~20 Hz expected
         self._rx_last_log_time = time.monotonic()
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        # Track multicast RX rate with EMA
+        # Track RX rate with EMA
         now = time.monotonic()
         if self._rx_count > 0:  # Skip first sample for period calculation
             period = now - self._rx_last_time
@@ -45,7 +45,7 @@ class MulticastProtocol(asyncio.DatagramProtocol):
         # Log rate every 3 seconds
         if now - self._rx_last_log_time >= 3.0 and self._rx_ema_period > 0:
             rx_hz = 1.0 / self._rx_ema_period
-            logger.debug(f"Multicast RX: {rx_hz:.1f} Hz (count={self._rx_count})")
+            logger.debug(f"Status RX: {rx_hz:.1f} Hz (count={self._rx_count})")
             self._rx_last_log_time = now
 
         try:
@@ -55,7 +55,7 @@ class MulticastProtocol(asyncio.DatagramProtocol):
             try:
                 self.queue.get_nowait()
                 self.queue.put_nowait((data, addr))
-            except:
+            except Exception:
                 pass
 
     def error_received(self, exc):
@@ -115,18 +115,34 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
     return sock
 
 
+def _create_unicast_socket(port: int, host: str) -> socket.socket:
+    """Create and configure a plain UDP socket for unicast reception.
+
+    Binds to the provided host (default 127.0.0.1) and port with large RCVBUF.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except Exception:
+        pass
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        # Fallback to wildcard
+        sock.bind(("", port))
+    sock.setblocking(False)
+    return sock
+
+
 async def subscribe_status(
     group: str | None = None, port: int | None = None, iface_ip: str | None = None
 ) -> AsyncIterator[StatusAggregate]:
     """
-    Async generator that yields decoded STATUS dicts from the UDP multicast broadcaster.
+    Async generator that yields decoded STATUS dicts from the UDP broadcaster.
 
     Uses create_datagram_endpoint for uvloop compatibility.
-
-    Usage:
-        async for status in subscribe_status():
-            # status is a dict with keys pose, angles, io, gripper (or None on parse failure)
-            ...
 
     Notes:
     - Uses loopback multicast by default (cfg.MCAST_* values).
@@ -136,19 +152,25 @@ async def subscribe_status(
     port = port or cfg.MCAST_PORT
     iface_ip = iface_ip or cfg.MCAST_IF
 
-    logger.info(f"subscribe_status starting: group={group}, port={port}, iface_ip={iface_ip}")
+    logger.info(
+        f"subscribe_status starting: transport={cfg.STATUS_TRANSPORT} group={group}, port={port}, iface_ip={iface_ip}"
+    )
 
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue(maxsize=100)  # type: ignore
 
-    # Create the socket with multicast configuration
-    sock = _create_multicast_socket(group, port, iface_ip)
+    # Create the socket based on configured transport
+    if cfg.STATUS_TRANSPORT == "UNICAST":
+        sock = _create_unicast_socket(port, cfg.STATUS_UNICAST_HOST)
+    else:
+        # Multicast socket bound to ("", port) will also receive unicast datagrams to that port
+        sock = _create_multicast_socket(group, port, iface_ip)
 
     # Create the datagram endpoint with our protocol
     transport = None
     try:
         transport, _ = await loop.create_datagram_endpoint(
-            lambda: MulticastProtocol(queue), sock=sock
+            lambda: UDPProtocol(queue), sock=sock
         )
 
         while True:
@@ -162,7 +184,9 @@ async def subscribe_status(
                     yield parsed
 
             except TimeoutError:
-                logger.warning(f"No multicast received for 2s on {group}:{port} (iface={iface_ip})")
+                logger.warning(
+                    f"No status received for 2s on {('unicast' if cfg.STATUS_TRANSPORT=='UNICAST' else 'multicast')} {group}:{port} (iface={iface_ip})"
+                )
                 continue
 
     except asyncio.CancelledError:
@@ -178,5 +202,5 @@ async def subscribe_status(
             transport.close()
         try:
             sock.close()
-        except:
+        except Exception:
             pass
