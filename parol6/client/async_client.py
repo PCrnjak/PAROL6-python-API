@@ -22,6 +22,10 @@ from ..protocol.types import Axis, Frame, StatusAggregate
 
 logger = logging.getLogger(__name__)
 
+# Sentinel used to signal status_stream termination
+_STATUS_SENTINEL = cast(StatusAggregate, object())
+
+
 
 class _UDPClientProtocol(asyncio.DatagramProtocol):
     def __init__(self, rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]]):
@@ -56,7 +60,7 @@ class AsyncRobotClient:
         self,
         host: str = "127.0.0.1",
         port: int = 5001,
-        timeout: float = 2.0,
+        timeout: float = 1.0,
         retries: int = 1,
     ) -> None:
         # Endpoint configuration (host/port immutable after endpoint creation)
@@ -156,6 +160,10 @@ class AsyncRobotClient:
             """Consume status broadcasts and queue them."""
             try:
                 async for status in subscribe_status():
+                    # Exit promptly if the client is closing
+                    if self._closed:
+                        break
+
                     # Put in queue, drop old if full
                     if self._status_queue.full():
                         try:
@@ -166,8 +174,12 @@ class AsyncRobotClient:
                         self._status_queue.put_nowait(status)
                     except asyncio.QueueFull:
                         pass
+            except asyncio.CancelledError:
+                # Normal shutdown path; propagate cancellation so the task
+                # is marked as cancelled and can be awaited cleanly.
+                raise
             except Exception:
-                # Subscriber ended, could retry but for now just exit
+                # Subscriber ended unexpectedly, could retry but for now just exit
                 pass
 
         # Start listener task
@@ -182,7 +194,10 @@ class AsyncRobotClient:
         """
         if self._closed:
             return
+        logging.debug("Closing Client...")
         self._closed = True
+
+        # status_stream consumers will be signaled via sentinel after stopping the multicast listener.
 
         # Stop multicast listener
         if self._multicast_task is not None:
@@ -191,6 +206,13 @@ class AsyncRobotClient:
                 await self._multicast_task
             self._multicast_task = None
 
+        # Wake status_stream consumer(s) promptly: clear queue then enqueue sentinel so it's next
+        with contextlib.suppress(Exception):
+            while not self._status_queue.empty():
+                self._status_queue.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._status_queue.put_nowait(_STATUS_SENTINEL)
+
         # Close UDP transport
         if self._transport is not None:
             with contextlib.suppress(Exception):
@@ -198,13 +220,11 @@ class AsyncRobotClient:
             self._transport = None
             self._protocol = None
 
-        # Best-effort queue drain to free memory
-        for q in (self._rx_queue, self._status_queue):
-            try:
-                while not q.empty():
-                    q.get_nowait()
-            except Exception:
-                pass
+        # Best-effort drain for RX queue to free memory.
+        # Do not drain status_queue here to ensure sentinel reaches consumers.
+        with contextlib.suppress(Exception):
+            while not self._rx_queue.empty():
+                self._rx_queue.get_nowait()
 
     async def __aenter__(self) -> "AsyncRobotClient":
         if self._closed:
@@ -215,17 +235,22 @@ class AsyncRobotClient:
         await self.close()
 
     async def status_stream(self) -> AsyncIterator[StatusAggregate]:
-        """
-        Async generator that yields status updates from multicast broadcasts.
+        """Async generator that yields status updates from multicast broadcasts.
 
         Usage:
             async for status in client.status_stream():
                 print(f"Speeds: {status.get('speeds')}")
+
+        This generator terminates automatically when :meth:`close` is
+        called on the client, so callers do not need to manually cancel
+        their consumer tasks.
         """
         await self._ensure_endpoint()
         while True:
-            status = await self._status_queue.get()
-            yield status
+            item = await self._status_queue.get()
+            if item is _STATUS_SENTINEL:
+                break
+            yield item
 
     async def _send(self, message: str) -> bool:
         """

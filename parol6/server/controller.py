@@ -1214,6 +1214,11 @@ def main():
     args = parser.parse_args()
 
     # Determine log level
+    # Precedence:
+    #   1) Explicit --log-level
+    #   2) Verbose / quiet flags
+    #   3) Environment-driven TRACE (PAROL_TRACE=1 via TRACE_ENABLED)
+    #   4) Default INFO
     if args.log_level:
         if args.log_level == "TRACE":
             log_level = TRACE
@@ -1229,6 +1234,9 @@ def main():
         log_level = logging.INFO
     elif args.quiet:
         log_level = logging.WARNING
+    elif TRACE_ENABLED:
+        # Enable TRACE when PAROL_TRACE=1 and no CLI override is given
+        log_level = TRACE
     else:
         log_level = logging.INFO
 

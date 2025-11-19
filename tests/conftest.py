@@ -197,7 +197,7 @@ def server_proc(request, ports: TestPorts, robot_api_env):
 
     async def start_and_wait():
         # Start the controller process
-        await manager.start_controller(
+        manager.start_controller(
             no_autohome=True,
             extra_env={
                 "PAROL6_FAKE_SERIAL": "1",
@@ -237,11 +237,7 @@ def server_proc(request, ports: TestPorts, robot_api_env):
     finally:
         if not keep_running:
             logger.info("Stopping test server")
-
-            async def stop_server():
-                await manager.stop_controller()
-
-            asyncio.run(stop_server())
+            manager.stop_controller()
         else:
             logger.info("Leaving test server running (--keep-server-running)")
 

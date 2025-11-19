@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,7 +73,7 @@ class ServerManager:
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    async def start_controller(
+    def start_controller(
         self,
         com_port: str | None = None,
         no_autohome: bool = True,
@@ -105,7 +106,24 @@ class ServerManager:
         # Launch the controller as a module to ensure package imports resolve
         args = [sys.executable, "-u", "-m", "parol6.server.controller"]
 
-        level_name = logging.getLevelName(logging.getLogger().level)
+        # Decide controller log level:
+        # - If PAROL_TRACE is set in the environment, prefer TRACE for the child
+        # - Otherwise, inherit the current root logger level name
+        root_logger = logging.getLogger()
+        root_level = root_logger.level
+
+        parol_trace_flag = str(env.get("PAROL_TRACE", "0")).strip().lower()
+        if parol_trace_flag in ("1", "true", "yes", "on"):
+            level_name = "TRACE"
+        else:
+            level_name = logging.getLevelName(root_level)
+            # Normalize custom/unnamed levels (e.g. "Level 5")
+            if isinstance(level_name, str) and level_name.upper().startswith("LEVEL"):
+                if root_level == 5:
+                    level_name = "TRACE"
+                else:
+                    level_name = "INFO"
+
         args.append(f"--log-level={level_name}")
         if com_port:
             args.append(f"--serial={com_port}")
@@ -178,44 +196,36 @@ class ServerManager:
         except Exception as e:
             logging.warning("ServerManager: output reader stopped: %s", e)
 
-    async def stop_controller(self, timeout: float = 5.0) -> None:
-        """Stop the controller process if running."""
-        if not self.is_running():
-            self._proc = None
-            return
+    def stop_controller(self, timeout: float = 2.0) -> None:
+        """Stop the controller process if running.
 
-        proc = self._proc
-        assert proc is not None
-
-        try:
-            if os.name == "nt":
-                proc.terminate()
-            else:
-                proc.send_signal(signal.SIGTERM)
-        except Exception:
-            # Fall back to kill below
-            pass
-
-        # Wait for graceful exit
-        t0 = time.time()
-        while proc.poll() is None and (time.time() - t0) < timeout:
-            await asyncio.sleep(0.1)
-
-        if proc.poll() is None:
-            with contextlib.suppress(Exception):
-                proc.kill()
-
-        # Stop and join background reader thread
-        with contextlib.suppress(Exception):
-            self._stop_reader.set()
-            if proc.stdout:
-                proc.stdout.close()
+        This method attempts a graceful shutdown first using SIGTERM (or terminate() on Windows)
+        and then escalates to a forced kill if the process does not exit within ``timeout``.
+        After sending SIGKILL it will wait up to ``kill_timeout`` seconds for the process to
+        actually exit before giving up.
+        """
+        self._stop_reader.set()
         if self._reader_thread and self._reader_thread.is_alive():
-            with contextlib.suppress(Exception):
-                self._reader_thread.join(timeout=1.0)
+            self._reader_thread.join(timeout=timeout)
         self._reader_thread = None
+        if self._proc and self._proc.poll() is None:
+            logging.debug("Stopping Controller...")
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=timeout)
+            except Exception as e:
+                logging.warning("stop_controller: terminate/wait failed: %s", e)
 
-        self._proc = None
+            # Step 2: escalate to forced kill if still running
+            if self._proc and self._proc.poll() is None:
+                logging.warning("Controller did not exit after SIGTERM within %.1fs, sending SIGKILL", timeout)
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=timeout)
+                except Exception as e:
+                    logging.warning("stop_controller: kill/wait failed: %s", e)
+            # Clear reference
+            self._proc = None
 
     async def await_ready(
         self,
@@ -225,32 +235,51 @@ class ServerManager:
         poll_interval: float = 0.2,
     ) -> bool:
         """
-        Wait until the controller responds to PING.
+        Wait until the controller responds to PING over UDP, asynchronously.
 
         Returns:
             True if the server becomes ready within timeout, else False.
         """
-        import socket as _socket
-        import time as _time
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        addr: Tuple[str, int] = (host, port)
 
-        deadline = _time.time() + max(0.0, float(timeout))
-        while _time.time() < deadline:
-            # Try a simple PING
-            try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(min(0.5, poll_interval))
-                    sock.sendto(b"PING", (host, port))
-                    data, _ = sock.recvfrom(256)
-                    if data.decode("ascii").startswith("PONG"):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+
+        try:
+            while True:
+                now = loop.time()
+                if now >= deadline:
+                    return False
+
+                # Try a PING and wait up to poll_interval (or remaining time)
+                recv_timeout = min(poll_interval, deadline - now)
+
+                try:
+                    # send PING
+                    await loop.sock_sendto(sock, b"PING", addr)
+
+                    # wait for PONG with a timeout
+                    data, _ = await asyncio.wait_for(
+                        loop.sock_recvfrom(sock, 256),
+                        timeout=recv_timeout,
+                    )
+                    if data.decode("ascii", errors="ignore").startswith("PONG"):
                         return True
-            except Exception:
-                pass
+                except (asyncio.TimeoutError, OSError):
+                    # Timeout or send/recv error -> just try again until deadline
+                    pass
 
-            await asyncio.sleep(poll_interval)
+                # Optional extra delay to avoid tight loop; keep within deadline
+                remain = deadline - loop.time()
+                if remain <= 0:
+                    return False
+                await asyncio.sleep(min(poll_interval, remain))
+        finally:
+            sock.close()
 
-        return False
-
-async def is_server_running(
+def is_server_running(
     host: str = "127.0.0.1",
     port: int = 5001,
     timeout: float = 1.0,
@@ -266,20 +295,20 @@ async def is_server_running(
         return False
 
 
-async def manage_server(
+def manage_server(
     host: str = "127.0.0.1",
     port: int = 5001,
     com_port: str | None = None,
     extra_env: dict | None = None,
     normalize_logs: bool = False,
 ) -> ServerManager:
-    """Start a PAROL6 controller at host:port.
+    """Synchronously start a PAROL6 controller at host:port and block until ready.
 
     Fast-fails if a server is already running there.
 
     Returns a ServerManager that owns the spawned controller.
     """
-    if await is_server_running(host=host, port=port):
+    if is_server_running(host=host, port=port):
         raise RuntimeError(f"Server already running at {host}:{port}")
 
     logging.info(f"Server not responding at {host}:{port}, starting controller...")
@@ -290,7 +319,7 @@ async def manage_server(
     env_to_pass["PAROL6_CONTROLLER_PORT"] = str(port)
 
     manager = ServerManager(normalize_logs=normalize_logs)
-    await manager.start_controller(
+    manager.start_controller(
         com_port=com_port,
         no_autohome=True,
         extra_env=env_to_pass,
@@ -298,12 +327,44 @@ async def manage_server(
         server_port=port,
     )
 
-    # Wait for readiness within a short window
-    ok = await manager.await_ready(host=host, port=port, timeout=5.0)
-    if not ok:
-        logging.error("Server spawn failed or not responding after startup")
-        await manager.stop_controller()
-        raise RuntimeError("Failed to start PAROL6 controller")
+    # Block until PING responds or timeout
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            if is_server_running(host=host, port=port, timeout=0.2):
+                logging.info(f"Successfully started server at {host}:{port}")
+                return manager
+        except Exception:
+            pass
+        time.sleep(0.05)
 
-    logging.info(f"Successfully started server at {host}:{port}")
-    return manager
+    logging.error("Server spawn failed or not responding after startup")
+    manager.stop_controller()
+    raise RuntimeError("Failed to start PAROL6 controller")
+
+
+@contextlib.contextmanager
+def managed_server(
+    host: str = "127.0.0.1",
+    port: int = 5001,
+    com_port: str | None = None,
+    extra_env: dict | None = None,
+    normalize_logs: bool = False,
+):
+    """Synchronous context manager that ensures the controller is stopped on exit.
+
+    Usage:
+        with managed_server(host, port) as mgr:
+            ...
+    """
+    mgr = manage_server(
+        host=host,
+        port=port,
+        com_port=com_port,
+        extra_env=extra_env,
+        normalize_logs=normalize_logs,
+    )
+    try:
+        yield mgr
+    finally:
+        mgr.stop_controller()
