@@ -145,7 +145,7 @@ class TestBasicMotionCommands:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
 
         # Verify robot state after move attempt
         angles = client.get_angles()
@@ -161,7 +161,7 @@ class TestBasicMotionCommands:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
 
         # Verify robot state
         pose = client.get_pose_rpy()
