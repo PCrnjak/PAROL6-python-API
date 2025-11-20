@@ -24,7 +24,6 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
-from parol6.config import *
 from parol6.gcode import GcodeInterpreter
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.server.command_registry import create_command_from_parts, discover_commands
@@ -35,6 +34,8 @@ from parol6.server.transports import create_and_connect_transport, is_simulation
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.serial_transport import SerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
+import parol6.config as cfg
+from parol6.config import TRACE, INTERVAL_S, MCAST_GROUP, MCAST_PORT, MCAST_IF, MCAST_TTL, STATUS_RATE_HZ, STATUS_STALE_S, get_com_port_with_fallback
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -1183,7 +1184,6 @@ class Controller:
 
 
 def main():
-    global TRACE_ENABLED
     """Main entry point for the controller."""
     # Parse arguments first to get logging level
     parser = argparse.ArgumentParser(description="PAROL6 Robot Controller")
@@ -1222,19 +1222,19 @@ def main():
     if args.log_level:
         if args.log_level == "TRACE":
             log_level = TRACE
-            TRACE_ENABLED = True
+            cfg.TRACE_ENABLED = True
         else:
             log_level = getattr(logging, args.log_level)
     elif args.verbose >= 3:
         log_level = TRACE
-        TRACE_ENABLED = True
+        cfg.TRACE_ENABLED = True
     elif args.verbose >= 2:
         log_level = logging.DEBUG
     elif args.verbose == 1:
         log_level = logging.INFO
     elif args.quiet:
         log_level = logging.WARNING
-    elif TRACE_ENABLED:
+    elif cfg.TRACE_ENABLED:
         # Enable TRACE when PAROL_TRACE=1 and no CLI override is given
         log_level = TRACE
     else:

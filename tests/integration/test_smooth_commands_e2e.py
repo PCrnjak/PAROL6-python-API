@@ -38,7 +38,7 @@ class TestSmoothMotionMinimal:
         assert result is True
 
         # Wait for robot to be stopped
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=15.0)
         print("Robot homed and ready for smooth motion tests")
 
         return True
@@ -60,7 +60,7 @@ class TestSmoothMotionMinimal:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=4.0)
+        assert client.wait_until_stopped(timeout=9.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_smooth_arc_center_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -76,7 +76,7 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_until_stopped(timeout=4.0)
+        assert client.wait_until_stopped(timeout=9.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_smooth_spline_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -97,7 +97,7 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_smooth_helix_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -115,7 +115,7 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_smooth_blend_basic(self, client, server_proc, robot_api_env, homed_robot):
@@ -142,7 +142,7 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
 

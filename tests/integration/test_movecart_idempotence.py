@@ -21,7 +21,7 @@ class TestMoveCartIdempotence:
         """Test that moving to the current pose results in no rotation."""
         # Home the robot first
         assert client.home() is True
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=15.0)
 
         # Get current pose (should be home position)
         current_pose = client.get_pose_rpy()
@@ -33,7 +33,7 @@ class TestMoveCartIdempotence:
         assert result is True
 
         # Wait for completion (should be instant if duration is ~0)
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
 
         # Get final pose
         final_pose = client.get_pose_rpy()

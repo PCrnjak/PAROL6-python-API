@@ -170,8 +170,8 @@ class UDPTransport:
             try:
                 if original_timeout is not None:
                     self.socket.settimeout(original_timeout)
-            except:
-                pass
+            except Exception as e2:
+                logger.debug("Failed to restore UDP socket timeout: %s", e2)
 
         return drained_count
 
@@ -250,8 +250,8 @@ class UDPTransport:
             try:
                 sockname = self.socket.getsockname()
                 info["bound_address"] = sockname
-            except:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get UDP sockname: %s", e)
 
         return info
 

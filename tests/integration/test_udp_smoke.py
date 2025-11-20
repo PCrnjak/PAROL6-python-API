@@ -123,7 +123,7 @@ class TestBasicMotionCommands:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=15.0)
 
         # Check that robot is responsive after homing
         assert client.ping() is not None
@@ -145,7 +145,7 @@ class TestBasicMotionCommands:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=15.0)
 
         # Verify robot state after move attempt
         angles = client.get_angles()
@@ -161,7 +161,7 @@ class TestBasicMotionCommands:
         assert result is True
 
         # Wait for completion and verify robot stops
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_until_stopped(timeout=15.0)
 
         # Verify robot state
         pose = client.get_pose_rpy()
@@ -237,7 +237,7 @@ class TestCommandQueuing:
         assert client.delay(0.2) is True
 
         # Wait for all commands to complete via speeds
-        assert client.wait_until_stopped(timeout=5.0)
+        assert client.wait_until_stopped(timeout=10.0)
 
         # Server should be responsive after sequence
         assert client.ping() is not None

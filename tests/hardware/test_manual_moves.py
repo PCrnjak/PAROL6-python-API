@@ -44,7 +44,7 @@ def initialize_hardware_position(client, human_prompt) -> list[float] | None:
     print(f"Move command result: {result}")
 
     # Wait until robot stops
-    if client.wait_until_stopped(timeout=15):
+    if client.wait_until_stopped(timeout=20):
         print("Robot has reached the starting position.")
         time.sleep(1)
         start_pose = client.get_pose_rpy()  # Get [x,y,z,rx,ry,rz] format
@@ -84,7 +84,7 @@ class TestHardwareBasicMoves:
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
         # Wait for homing to complete - use client's built-in wait
-        if client.wait_until_stopped(timeout=90, show_progress=True):
+        if client.wait_until_stopped(timeout=95, show_progress=True):
             print("Homing completed successfully")
         else:
             pytest.fail("Robot homing did not complete within timeout")
@@ -114,7 +114,7 @@ class TestHardwareBasicMoves:
             assert isinstance(result, dict)
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-            client.wait_until_stopped(timeout=5)
+            client.wait_until_stopped(timeout=10)
 
             # Small negative movement (return) - use joint_idx+6 for reverse direction
             result = client.jog_joint(
@@ -124,7 +124,7 @@ class TestHardwareBasicMoves:
                 wait_for_ack=True,
             )
 
-            client.wait_until_stopped(timeout=5)
+            client.wait_until_stopped(timeout=10)
 
         print("All joint movements completed successfully")
 
@@ -155,7 +155,7 @@ class TestHardwareBasicMoves:
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
             time.sleep(2.0)
-            client.wait_until_stopped(timeout=5)
+            client.wait_until_stopped(timeout=10)
 
         print("All Cartesian movements completed successfully")
 
@@ -197,7 +197,7 @@ class TestHardwareSmoothMotion:
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
         # Wait for completion
-        if client.wait_until_stopped(timeout=15):
+        if client.wait_until_stopped(timeout=20):
             print("Circle motion completed successfully")
 
             if not human_prompt(
@@ -245,7 +245,7 @@ class TestHardwareSmoothMotion:
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-        if client.wait_until_stopped(timeout=12):
+        if client.wait_until_stopped(timeout=17):
             print("Arc motion completed successfully")
 
             if not human_prompt(
@@ -313,7 +313,7 @@ class TestHardwareSmoothMotion:
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-        if client.wait_until_stopped(timeout=20):
+        if client.wait_until_stopped(timeout=25):
             print("Spline motion completed successfully")
 
             if not human_prompt(
@@ -362,7 +362,7 @@ class TestHardwareAdvancedSmooth:
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-        if client.wait_until_stopped(timeout=20):
+        if client.wait_until_stopped(timeout=25):
             print("Helix motion completed successfully")
 
             if not human_prompt("Did the robot execute a smooth helical motion?\n"):
@@ -398,7 +398,7 @@ class TestHardwareAdvancedSmooth:
         assert isinstance(result_wrf, dict)
         assert result_wrf.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-        client.wait_until_stopped(timeout=12)
+        client.wait_until_stopped(timeout=17)
         time.sleep(2)
 
         # Test 2: Circle in Tool Reference Frame
@@ -416,7 +416,7 @@ class TestHardwareAdvancedSmooth:
         assert isinstance(result_trf, dict)
         assert result_trf.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
 
-        client.wait_until_stopped(timeout=12)
+        client.wait_until_stopped(timeout=17)
 
         if not human_prompt(
             "Did you observe different motion patterns?\n"

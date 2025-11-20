@@ -420,8 +420,8 @@ class SerialTransport:
             try:
                 info["in_waiting"] = self.serial.in_waiting
                 info["out_waiting"] = self.serial.out_waiting
-            except:
-                pass
+            except Exception as e:
+                logger.debug("Failed to read serial wait counts: %s", e)
 
         return info
 

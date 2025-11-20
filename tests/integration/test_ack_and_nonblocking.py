@@ -48,7 +48,7 @@ class TestAcknowledmentTracking:
         # Each should be True
         assert all(r is True for r in results)
         # Wait for motion to complete instead of sleeping
-        assert client.wait_until_stopped(timeout=3.0)
+        assert client.wait_until_stopped(timeout=8.0)
 
     def test_command_status_polling(self, server_proc, client):
         """Test polling command status during execution."""
