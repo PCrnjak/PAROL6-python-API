@@ -65,6 +65,10 @@ class StatusBroadcaster(threading.Thread):
         self._tx_ema_period = 1.0 / rate_hz  # Initialize with expected period
         self._tx_last_log_time = time.monotonic()  # For 3-second logging interval
 
+        # Failure tracking for runtime fallback
+        self._send_failures = 0
+        self._max_send_failures = 3
+
     def _detect_primary_ip(self) -> str:
         tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -77,6 +81,56 @@ class StatusBroadcaster(threading.Thread):
                 tmp.close()
             except Exception:
                 pass
+
+    def _verify_multicast_reachable(self, sock: socket.socket, timeout: float = 0.1) -> bool:
+        """
+        Attempt a loopback reachability check for multicast by joining the group on a
+        temporary receiver and sending a probe. Returns True if the probe is received.
+        """
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except Exception:
+                pass
+            recv_sock.bind(("", self.port))
+            mreq = socket.inet_aton(self.group) + socket.inet_aton(self.iface_ip)
+            recv_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            recv_sock.settimeout(timeout)
+
+            token = b"PAROL6_MCAST_PROBE"
+            try:
+                sock.sendto(token, (self.group, self.port))
+            except OSError as e:
+                logger.debug(f"Multicast probe send failed: {e}")
+                return False
+            try:
+                data, _ = recv_sock.recvfrom(2048)
+                return data == token
+            except Exception:
+                return False
+        finally:
+            try:
+                recv_sock.close()
+            except Exception:
+                pass
+
+    def _switch_to_unicast(self) -> None:
+        """Close current socket and switch to unicast transport."""
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception as e:
+            logger.debug(f"Error closing multicast socket during fallback: {e}")
+        usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        usock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+        self._sock = usock
+        self._use_unicast = True
+        self._send_failures = 0
+        logger.info(
+            f"StatusBroadcaster (UNICAST-FALLBACK) -> dest={cfg.STATUS_UNICAST_HOST}:{self.port}"
+        )
 
     def _setup_socket(self) -> None:
         # UNICAST: simple UDP socket without multicast options
@@ -98,12 +152,9 @@ class StatusBroadcaster(threading.Thread):
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.iface_ip)
             )
-            # Verify interface actually routes by sending a tiny dummy datagram
-            try:
-                sock.sendto(b"\0", (self.group, self.port))
-            except OSError as e:
+            if not self._verify_multicast_reachable(sock):
                 raise RuntimeError(
-                    f"Initial multicast send failed on iface {self.iface_ip}: {e}"
+                    f"Initial multicast reachability check failed on iface {self.iface_ip}"
                 )
         except Exception as e:
             logger.warning(
@@ -115,8 +166,8 @@ class StatusBroadcaster(threading.Thread):
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(primary_ip)
                 )
                 logger.info(f"StatusBroadcaster: fallback IP_MULTICAST_IF to {primary_ip}")
-                # Verify fallback
-                sock.sendto(b"\0", (self.group, self.port))
+                if not self._verify_multicast_reachable(sock):
+                    raise RuntimeError("Fallback multicast reachability failed")
             except Exception as e2:
                 logger.warning(f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e2}")
                 # As a last resort, switch to UNICAST
@@ -124,13 +175,7 @@ class StatusBroadcaster(threading.Thread):
                     sock.close()
                 except Exception:
                     pass
-                self._use_unicast = True
-                usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                usock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-                self._sock = usock
-                logger.info(
-                    f"StatusBroadcaster (UNICAST-FALLBACK) -> dest={cfg.STATUS_UNICAST_HOST}:{self.port}"
-                )
+                self._switch_to_unicast()
                 return
 
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
@@ -143,14 +188,8 @@ class StatusBroadcaster(threading.Thread):
         self._setup_socket()
         cache = get_cache()
 
-        # Destination based on negotiated transport
-        if self._use_unicast:
-            dest = (cfg.STATUS_UNICAST_HOST, self.port)
-        else:
-            dest = (self.group, self.port)
-
-        sock = self._sock
-        if sock is None:
+        # Validate socket exists
+        if self._sock is None:
             logger.error("StatusBroadcaster socket not initialized")
             return
 
@@ -168,15 +207,30 @@ class StatusBroadcaster(threading.Thread):
             # Skip broadcast if cache is stale (e.g., serial disconnected)
             if cache.age_s() <= self._stale_s:
                 payload = cache.to_ascii().encode("ascii", errors="ignore")
+                # Refresh socket and destination each loop in case we switched transports
+                sock = self._sock
+                if sock is None:
+                    # Socket disappeared unexpectedly; try to switch to unicast and continue
+                    self._switch_to_unicast()
+                    sock = self._sock
+                dest = (cfg.STATUS_UNICAST_HOST, self.port) if self._use_unicast else (self.group, self.port)
                 try:
-                    sock.sendto(memoryview(payload), dest)
+                    sock.sendto(memoryview(payload), dest)  # type: ignore[arg-type]
                 except OSError as e:
+                    self._send_failures += 1
                     # Log occasionally to avoid flooding
                     if time.monotonic() - self._tx_last_log_time >= 5.0:
                         logger.warning(f"StatusBroadcaster send failed: {e}")
                         self._tx_last_log_time = time.monotonic()
-                    # Do not stop thread; continue trying
+                    # If too many failures and we are on multicast, fall back to unicast
+                    if not self._use_unicast and self._send_failures >= self._max_send_failures:
+                        logger.info(
+                            f"StatusBroadcaster: {self._send_failures} consecutive send errors; switching to UNICAST"
+                        )
+                        self._switch_to_unicast()
                 else:
+                    # Reset failure count on success
+                    self._send_failures = 0
                     # Track TX rate with EMA
                     now = time.monotonic()
                     if self._tx_count > 0:  # Skip first sample for period calculation
