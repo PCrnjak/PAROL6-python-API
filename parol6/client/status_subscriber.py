@@ -185,7 +185,7 @@ async def subscribe_status(
                 if parsed is not None:
                     yield parsed
 
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 logger.warning(
                     f"No status received for 2s on {('unicast' if cfg.STATUS_TRANSPORT == 'UNICAST' else 'multicast')} {group}:{port} (iface={iface_ip})"
                 )

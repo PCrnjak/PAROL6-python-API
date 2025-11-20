@@ -297,7 +297,7 @@ class AsyncRobotClient:
                         self._rx_queue.get(), timeout=self.timeout
                     )
                     return data.decode("ascii", errors="ignore")
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 if attempt < self.retries:
                     backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
                     await asyncio.sleep(backoff)
@@ -328,7 +328,7 @@ class AsyncRobotClient:
                     if text.startswith("ERROR|"):
                         raise RuntimeError(text)
                     # Ignore unrelated datagrams
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     break
                 except Exception:
                     break
@@ -648,7 +648,7 @@ class AsyncRobotClient:
                 status = await asyncio.wait_for(
                     self._status_queue.get(), timeout=remaining
                 )
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 break
             try:
                 if predicate(status):
@@ -674,7 +674,7 @@ class AsyncRobotClient:
                     self._rx_queue.get(), timeout=timeout
                 )
                 return data.decode("ascii", errors="ignore")
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return None
         except Exception:
             return None
