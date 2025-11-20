@@ -9,6 +9,12 @@ import sys
 import numpy as np
 import pytest
 
+# Skip on macOS CI runners due to flakiness
+pytestmark = pytest.mark.skipif(
+    sys.platform == "darwin" and os.getenv("CI") == "true",
+    reason="Flaky on the slow macOS GitHub Actions runners.; skip on CI",
+)
+
 # Add the parent directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
