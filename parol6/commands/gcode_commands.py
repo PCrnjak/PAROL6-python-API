@@ -19,7 +19,12 @@ if TYPE_CHECKING:
 class GcodeCommand(CommandBase):
     """Execute a single GCODE line."""
 
-    __slots__ = ("gcode_line", "interpreter", "generated_commands", "current_command_index")
+    __slots__ = (
+        "gcode_line",
+        "interpreter",
+        "generated_commands",
+        "current_command_index",
+    )
     gcode_line: str
     interpreter: GcodeInterpreter | None
     generated_commands: list[str]
@@ -36,13 +41,19 @@ class GcodeCommand(CommandBase):
     def do_setup(self, state: "ControllerState") -> None:
         """Set up GCODE interpreter and parse the line."""
         # Use injected interpreter or create one
-        self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
+        self.interpreter = (
+            self.gcode_interpreter or self.interpreter or GcodeInterpreter()
+        )
         assert self.interpreter is not None
         # Update interpreter position with current robot position
         current_pose_matrix = get_fkine_matrix()
         current_xyz = current_pose_matrix[:3, 3]
         self.interpreter.state.update_position(
-            {"X": current_xyz[0] * 1000, "Y": current_xyz[1] * 1000, "Z": current_xyz[2] * 1000}
+            {
+                "X": current_xyz[0] * 1000,
+                "Y": current_xyz[1] * 1000,
+                "Z": current_xyz[2] * 1000,
+            }
         )
         # Parse and store generated robot commands (strings)
         self.generated_commands = self.interpreter.parse_line(self.gcode_line) or []
@@ -85,7 +96,9 @@ class GcodeProgramCommand(CommandBase):
     def do_setup(self, state: ControllerState) -> None:
         """Load the GCODE program using the interpreter."""
         # Use injected interpreter or create one
-        self.interpreter = self.gcode_interpreter or self.interpreter or GcodeInterpreter()
+        self.interpreter = (
+            self.gcode_interpreter or self.interpreter or GcodeInterpreter()
+        )
         assert self.interpreter is not None
         if self.program_type == "FILE":
             if not self.interpreter.load_file(self.program_data):

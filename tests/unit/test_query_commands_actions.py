@@ -50,7 +50,9 @@ def test_get_current_action_replies_json():
 
     # Create minimal state with action tracking fields
     state = SimpleNamespace(
-        action_current="MovePoseCommand", action_state="EXECUTING", action_next="HomeCommand"
+        action_current="MovePoseCommand",
+        action_state="EXECUTING",
+        action_next="HomeCommand",
     )
 
     # Execute command
@@ -149,7 +151,11 @@ def test_get_queue_replies_json():
     json_str = message.split("|", 1)[1]
     payload = json.loads(json_str)
 
-    assert payload["non_streamable"] == ["MovePoseCommand", "HomeCommand", "MoveJointCommand"]
+    assert payload["non_streamable"] == [
+        "MovePoseCommand",
+        "HomeCommand",
+        "MoveJointCommand",
+    ]
     assert payload["size"] == 3
 
     # Verify command completed

@@ -103,7 +103,9 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
         # Retry using primary NIC IP
         try:
             primary_ip = _detect_primary_ip()
-            mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton(primary_ip))
+            mreq = struct.pack(
+                "=4s4s", socket.inet_aton(group), socket.inet_aton(primary_ip)
+            )
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except Exception:
             # Final fallback: INADDR_ANY variant
@@ -185,7 +187,7 @@ async def subscribe_status(
 
             except TimeoutError:
                 logger.warning(
-                    f"No status received for 2s on {('unicast' if cfg.STATUS_TRANSPORT=='UNICAST' else 'multicast')} {group}:{port} (iface={iface_ip})"
+                    f"No status received for 2s on {('unicast' if cfg.STATUS_TRANSPORT == 'UNICAST' else 'multicast')} {group}:{port} (iface={iface_ip})"
                 )
                 continue
 

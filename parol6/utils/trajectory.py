@@ -158,7 +158,12 @@ def plan_trapezoid_position_1d(
                 pos[i] = (0.5 * a_max * t_a**2) + v_max * (ti - t_a)
             else:
                 td = ti - (t_a + t_c)
-                pos[i] = (0.5 * a_max * t_a**2) + v_max * t_c + v_peak * td - 0.5 * a_max * td**2
+                pos[i] = (
+                    (0.5 * a_max * t_a**2)
+                    + v_max * t_c
+                    + v_peak * td
+                    - 0.5 * a_max * td**2
+                )
 
     # Clamp last sample to exact L to avoid drift
     pos[-1] = L

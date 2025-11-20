@@ -132,7 +132,9 @@ def solve_ik(
         if np.any(recovery_violations):
             idx = np.argmax(recovery_violations)
             success = False
-            violations = f"J{idx + 1} moving further into danger zone (recovery blocked)"
+            violations = (
+                f"J{idx + 1} moving further into danger zone (recovery blocked)"
+            )
             logger.warning(violations)
         elif np.any(safety_violations):
             idx = np.argmax(safety_violations)

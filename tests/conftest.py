@@ -397,11 +397,15 @@ def pytest_configure(config):
         "hardware: Hardware tests that require actual robot hardware and human confirmation",
     )
     config.addinivalue_line(
-        "markers", "slow: Slow-running tests (typically hardware or complex integration tests)"
+        "markers",
+        "slow: Slow-running tests (typically hardware or complex integration tests)",
     )
-    config.addinivalue_line("markers", "e2e: End-to-end tests that exercise complete workflows")
     config.addinivalue_line(
-        "markers", "gcode: Tests specifically for GCODE parsing and interpretation functionality"
+        "markers", "e2e: End-to-end tests that exercise complete workflows"
+    )
+    config.addinivalue_line(
+        "markers",
+        "gcode: Tests specifically for GCODE parsing and interpretation functionality",
     )
 
 
@@ -459,4 +463,6 @@ def client(ports: TestPorts):
 
 def pytest_sessionfinish(session, exitstatus):
     """Called after whole test run finished."""
-    logger.info(f"PAROL6 Python API test session finished with exit status: {exitstatus}")
+    logger.info(
+        f"PAROL6 Python API test session finished with exit status: {exitstatus}"
+    )

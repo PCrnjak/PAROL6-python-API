@@ -34,7 +34,8 @@ class MotionConstraints:
         max_acc_rad = float(PAROL6_ROBOT.joint.acc.max_rad)
         steps_per_rad_base = 1.0 / float(PAROL6_ROBOT.conv.radian_per_step)
         self.max_acceleration = [
-            max_acc_rad * steps_per_rad_base * float(ratio) for ratio in PAROL6_ROBOT.joint.ratio
+            max_acc_rad * steps_per_rad_base * float(ratio)
+            for ratio in PAROL6_ROBOT.joint.ratio
         ]
 
     def get_joint_constraints(self, joint_idx: int) -> dict[str, float] | None:
@@ -91,10 +92,16 @@ class MotionConstraints:
 
         validation: dict[str, float | bool] = {
             "velocity_ok": bool(np.all(np.abs(velocities) <= constraints["v_max"])),
-            "acceleration_ok": bool(np.all(np.abs(accelerations) <= constraints["a_max"])),
+            "acceleration_ok": bool(
+                np.all(np.abs(accelerations) <= constraints["a_max"])
+            ),
             "jerk_ok": bool(np.all(np.abs(jerks) <= constraints["j_max"])),
-            "max_velocity": float(np.max(np.abs(velocities))) if velocities.size else 0.0,
-            "max_acceleration": float(np.max(np.abs(accelerations))) if accelerations.size else 0.0,
+            "max_velocity": float(np.max(np.abs(velocities)))
+            if velocities.size
+            else 0.0,
+            "max_acceleration": float(np.max(np.abs(accelerations)))
+            if accelerations.size
+            else 0.0,
             "max_jerk": float(np.max(np.abs(jerks))) if jerks.size else 0.0,
         }
 

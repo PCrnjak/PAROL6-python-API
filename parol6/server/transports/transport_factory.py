@@ -29,7 +29,10 @@ def is_simulation_mode() -> bool:
 
 
 def create_transport(
-    transport_type: str | None = None, port: str | None = None, baudrate: int = 2000000, **kwargs: Any
+    transport_type: str | None = None,
+    port: str | None = None,
+    baudrate: int = 2000000,
+    **kwargs: Any,
 ) -> SerialTransport | MockSerialTransport:
     """
     Create an appropriate transport instance based on configuration.

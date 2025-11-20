@@ -305,7 +305,14 @@ class WorkCoordinateSystem:
         else:
             # Reset all systems
             for system in self.offsets:
-                self.offsets[system] = {"X": 0.0, "Y": 0.0, "Z": 0.0, "A": 0.0, "B": 0.0, "C": 0.0}
+                self.offsets[system] = {
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "A": 0.0,
+                    "B": 0.0,
+                    "C": 0.0,
+                }
 
         self.save_offsets()
 

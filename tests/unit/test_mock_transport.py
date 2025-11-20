@@ -18,10 +18,15 @@ import pytest
 from parol6.config import HOME_ANGLES_DEG
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.server.transports import create_transport, is_simulation_mode
-from parol6.server.transports.mock_serial_transport import MockRobotState, MockSerialTransport
+from parol6.server.transports.mock_serial_transport import (
+    MockRobotState,
+    MockSerialTransport,
+)
 
 
-def _wait_for_latest_frame_and_decode(transport: MockSerialTransport, timeout_s: float = 0.5):
+def _wait_for_latest_frame_and_decode(
+    transport: MockSerialTransport, timeout_s: float = 0.5
+):
     """
     Helper: wait for a latest frame publication and decode into numpy arrays.
     Returns dict-like with arrays or None on timeout.
@@ -116,7 +121,13 @@ class TestMockSerialTransport:
 
         # Write should succeed when connected
         success = transport.write_frame(
-            position_out, speed_out, command_out, affected_joint, inout, timeout, gripper_data
+            position_out,
+            speed_out,
+            command_out,
+            affected_joint,
+            inout,
+            timeout,
+            gripper_data,
         )
         assert success
 
@@ -128,7 +139,13 @@ class TestMockSerialTransport:
         # Disconnect and try again - should fail
         transport.disconnect()
         success = transport.write_frame(
-            position_out, speed_out, command_out, affected_joint, inout, timeout, gripper_data
+            position_out,
+            speed_out,
+            command_out,
+            affected_joint,
+            inout,
+            timeout,
+            gripper_data,
         )
         assert not success
 
@@ -238,7 +255,10 @@ class TestMockSerialTransport:
             if homing_started and all(h == 1 for h in homed_bits):
                 # Verify positions near configured home posture
                 pos_list = decoded["pos"].tolist()
-                if all(abs(int(pos_list[i]) - expected_steps[i]) < tol_steps for i in range(6)):
+                if all(
+                    abs(int(pos_list[i]) - expected_steps[i]) < tol_steps
+                    for i in range(6)
+                ):
                     homing_completed = True
                     break
             last_homed_bits = homed_bits
@@ -257,7 +277,9 @@ class TestMockSerialTransport:
 
         # Test calibration mode
         gripper_data = [100, 150, 500, 0, 1, 42]  # mode=1 for calibration, id=42
-        transport.write_frame([0] * 6, [0] * 6, CommandCode.IDLE, [0] * 8, [0] * 8, 0, gripper_data)
+        transport.write_frame(
+            [0] * 6, [0] * 6, CommandCode.IDLE, [0] * 8, [0] * 8, 0, gripper_data
+        )
 
         # Check gripper state updated
         assert transport._state.gripper_data_in[0] == 42  # Device ID set
@@ -265,7 +287,9 @@ class TestMockSerialTransport:
 
         # Test error clear mode
         gripper_data[4] = 2  # mode=2 for error clear
-        transport.write_frame([0] * 6, [0] * 6, CommandCode.IDLE, [0] * 8, [0] * 8, 0, gripper_data)
+        transport.write_frame(
+            [0] * 6, [0] * 6, CommandCode.IDLE, [0] * 8, [0] * 8, 0, gripper_data
+        )
 
         # Error bit should be cleared
         assert transport._state.gripper_data_in[4] & 0x20 == 0

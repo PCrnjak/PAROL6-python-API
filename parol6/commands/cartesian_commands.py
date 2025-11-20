@@ -71,7 +71,10 @@ class CartesianJogCommand(MotionCommand):
             Tuple of (can_handle, error_message)
         """
         if len(parts) != 5:
-            return (False, "CARTJOG requires 4 parameters: frame, axis, speed, duration")
+            return (
+                False,
+                "CARTJOG requires 4 parameters: frame, axis, speed, duration",
+            )
 
         # Parse parameters
         self.frame = parts[1].upper()
@@ -102,7 +105,9 @@ class CartesianJogCommand(MotionCommand):
         # --- A. Check for completion ---
         if self._t_end is None:
             # Initialize timer if missing (stream update or late init)
-            self.start_timer(max(0.1, self.duration if self.duration is not None else 0.1))
+            self.start_timer(
+                max(0.1, self.duration if self.duration is not None else 0.1)
+            )
         if self.timer_expired():
             self.is_finished = True
             self.stop_and_idle(state)
@@ -111,7 +116,9 @@ class CartesianJogCommand(MotionCommand):
         # --- B. Calculate Target Pose using clean vector math ---
         state.Command_out = CommandCode.JOG
 
-        q_current = np.asarray(PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float)
+        q_current = np.asarray(
+            PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
+        )
         T_current = get_fkine_se3()
 
         if not isinstance(T_current, SE3):
@@ -219,7 +226,10 @@ class MovePoseCommand(MotionCommand):
             Tuple of (can_handle, error_message)
         """
         if len(parts) != 9:
-            return (False, "MOVEPOSE requires 8 parameters: x, y, z, rx, ry, rz, duration, speed")
+            return (
+                False,
+                "MOVEPOSE requires 8 parameters: x, y, z, rx, ry, rz, duration, speed",
+            )
 
         # Parse pose (6 values)
         self.pose = [float(parts[i]) for i in range(1, 7)]
@@ -236,7 +246,9 @@ class MovePoseCommand(MotionCommand):
         """Calculates the full trajectory just-in-time before execution."""
         self.log_trace("  -> Preparing trajectory for MovePose to %s...", self.pose)
 
-        initial_pos_rad = np.asarray(PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float)
+        initial_pos_rad = np.asarray(
+            PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
+        )
         pose = cast(list[float], self.pose)
         target_pose = SE3.RPY(pose[3:6], unit="deg", order="xyz")
         target_pose.t = np.array(pose[:3]) / 1000.0
@@ -246,7 +258,9 @@ class MovePoseCommand(MotionCommand):
         if not ik_solution.success:
             error_str = "An intermediate point on the path is unreachable."
             if ik_solution.violations:
-                error_str += f" Reason: Path violates joint limits: {ik_solution.violations}"
+                error_str += (
+                    f" Reason: Path violates joint limits: {ik_solution.violations}"
+                )
             raise IKError(error_str)
 
         target_pos_rad = ik_solution.q
@@ -296,8 +310,12 @@ class MovePoseCommand(MotionCommand):
             )
 
         if len(self.trajectory_steps) == 0:
-            raise IKError("Trajectory calculation resulted in no steps. Command is invalid.")
-        logger.log(TRACE, " -> Trajectory prepared with %s steps.", len(self.trajectory_steps))
+            raise IKError(
+                "Trajectory calculation resulted in no steps. Command is invalid."
+            )
+        logger.log(
+            TRACE, " -> Trajectory prepared with %s steps.", len(self.trajectory_steps)
+        )
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         if self.command_step >= len(self.trajectory_steps):
@@ -359,7 +377,10 @@ class MoveCartCommand(MotionCommand):
             Tuple of (can_handle, error_message)
         """
         if len(parts) != 9:
-            return (False, "MOVECART requires 8 parameters: x, y, z, rx, ry, rz, duration, speed")
+            return (
+                False,
+                "MOVECART requires 8 parameters: x, y, z, rx, ry, rz, duration, speed",
+            )
 
         # Parse pose (6 values)
         self.pose = [float(parts[i]) for i in range(1, 7)]
@@ -373,7 +394,9 @@ class MoveCartCommand(MotionCommand):
             return (False, "MOVECART requires either duration or velocity_percent")
 
         if self.duration is not None and self.velocity_percent is not None:
-            logger.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
+            logger.info(
+                "  -> INFO: Both duration and velocity_percent provided. Using duration."
+            )
             self.velocity_percent = None  # Prioritize duration
 
         self.log_debug("Parsed MoveCart: %s", self.pose)
@@ -387,7 +410,9 @@ class MoveCartCommand(MotionCommand):
 
         # Construct pose: rotation first, then set translation (xyz convention)
         self.target_pose = SE3.RPY(pose[3:6], unit="deg", order="xyz")
-        self.target_pose.t = np.array(pose[:3]) / 1000.0  # Vectorized translation assignment
+        self.target_pose.t = (
+            np.array(pose[:3]) / 1000.0
+        )  # Vectorized translation assignment
 
         if self.velocity_percent is not None:
             # Calculate the total distance for translation and rotation
@@ -400,11 +425,15 @@ class MoveCartCommand(MotionCommand):
                 self.velocity_percent, self.CART_LIN_JOG_MIN, self.CART_LIN_JOG_MAX
             )
             target_angular_speed_rad = np.deg2rad(
-                self.linmap_pct(self.velocity_percent, self.CART_ANG_JOG_MIN, self.CART_ANG_JOG_MAX)
+                self.linmap_pct(
+                    self.velocity_percent, self.CART_ANG_JOG_MIN, self.CART_ANG_JOG_MAX
+                )
             )
 
             # Calculate time required for each component of the movement
-            time_linear = linear_distance / target_linear_speed if target_linear_speed > 0 else 0
+            time_linear = (
+                linear_distance / target_linear_speed if target_linear_speed > 0 else 0
+            )
             time_angular = (
                 angular_distance_rad / target_angular_speed_rad
                 if target_angular_speed_rad > 0
@@ -415,7 +444,9 @@ class MoveCartCommand(MotionCommand):
             calculated_duration = max(time_linear, time_angular)
 
             if calculated_duration <= 0:
-                logger.info("  -> INFO: MoveCart has zero duration. Marking as finished.")
+                logger.info(
+                    "  -> INFO: MoveCart has zero duration. Marking as finished."
+                )
                 self.is_finished = True
                 self.is_valid = True  # It's valid, just already done.
                 return
@@ -437,18 +468,24 @@ class MoveCartCommand(MotionCommand):
         s_scaled = quintic_scaling(float(s))
 
         assert self.initial_pose is not None and self.target_pose is not None
-        _ctp = cast(SE3, self.initial_pose).interp(cast(SE3, self.target_pose), s_scaled)
+        _ctp = cast(SE3, self.initial_pose).interp(
+            cast(SE3, self.target_pose), s_scaled
+        )
         if not isinstance(_ctp, SE3):
             return ExecutionStatus.executing("Waiting for pose interpolation")
         current_target_pose = cast(SE3, _ctp)
 
-        current_q_rad = np.asarray(PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float)
+        current_q_rad = np.asarray(
+            PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
+        )
         ik_solution = solve_ik(PAROL6_ROBOT.robot, current_target_pose, current_q_rad)
 
         if not ik_solution.success:
             error_str = "An intermediate point on the path is unreachable."
             if ik_solution.violations:
-                error_str += f" Reason: Path violates joint limits: {ik_solution.violations}"
+                error_str += (
+                    f" Reason: Path violates joint limits: {ik_solution.violations}"
+                )
             raise IKError(error_str)
 
         current_pos_rad = ik_solution.q
@@ -459,7 +496,9 @@ class MoveCartCommand(MotionCommand):
         self.set_move_position(state, np.asarray(steps))
 
         if s >= 1.0:
-            actual_elapsed = (time.perf_counter() - self._t0) if self._t0 is not None else dur
+            actual_elapsed = (
+                (time.perf_counter() - self._t0) if self._t0 is not None else dur
+            )
             self.log_info("MoveCart finished in ~%.2fs.", actual_elapsed)
             self.is_finished = True
             return ExecutionStatus.completed("MOVECART complete")

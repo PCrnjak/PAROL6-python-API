@@ -16,7 +16,9 @@ async def test_multicast_listener_shuts_down_on_close(ports, server_proc):
     test ports.
     """
 
-    client = AsyncRobotClient(host=ports.server_ip, port=ports.server_port, timeout=1.0, retries=0)
+    client = AsyncRobotClient(
+        host=ports.server_ip, port=ports.server_port, timeout=1.0, retries=0
+    )
 
     try:
         # Ensure the controller is responsive before starting the multicast listener
@@ -29,13 +31,17 @@ async def test_multicast_listener_shuts_down_on_close(ports, server_proc):
         task = client._multicast_task
 
         assert task is not None, "Multicast listener task should be created"
-        assert not task.done(), "Multicast listener task should be running before close()"
+        assert not task.done(), (
+            "Multicast listener task should be running before close()"
+        )
 
         # Invoke graceful shutdown
         await client.close()
 
         # After close(), the task should be finished and cleared
-        assert client._multicast_task is None, "Multicast listener reference should be cleared after close()"
+        assert client._multicast_task is None, (
+            "Multicast listener reference should be cleared after close()"
+        )
         assert task.done(), "Multicast listener task should be completed after close()"
     finally:
         # close() is idempotent; ensure cleanup even if assertions fail earlier
@@ -52,7 +58,9 @@ async def test_status_stream_terminates_on_close(ports, server_proc):
     unblocked and finished by the time close() completes.
     """
 
-    client = AsyncRobotClient(host=ports.server_ip, port=ports.server_port, timeout=1.0, retries=0)
+    client = AsyncRobotClient(
+        host=ports.server_ip, port=ports.server_port, timeout=1.0, retries=0
+    )
 
     async def consumer() -> None:
         # Consume a few status messages until the client is closed.
@@ -77,7 +85,9 @@ async def test_status_stream_terminates_on_close(ports, server_proc):
         # The consumer task should complete promptly after close()
         await asyncio.wait_for(consumer_task, timeout=5.0)
 
-        assert consumer_task.done(), "status_stream consumer should be finished after close()"
+        assert consumer_task.done(), (
+            "status_stream consumer should be finished after close()"
+        )
     finally:
         # Ensure cleanup even if assertions fail earlier
         await client.close()

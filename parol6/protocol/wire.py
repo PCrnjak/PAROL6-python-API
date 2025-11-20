@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 # Precomputed bit-unpack lookup table for 0..255 (MSB..LSB)
 # Using NumPy ensures fast vectorized selection without per-call allocations.
-_BIT_UNPACK = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big")
+_BIT_UNPACK = np.unpackbits(
+    np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big"
+)
 START = b"\xff\xff\xff"
 END = b"\x01\x02"
 PAYLOAD_LEN = 52  # matches existing firmware expectation
@@ -233,7 +235,9 @@ def unpack_rx_frame_into(
     """
     try:
         if len(data) < 52:
-            logger.warning(f"unpack_rx_frame_into: payload too short ({len(data)} bytes)")
+            logger.warning(
+                f"unpack_rx_frame_into: payload too short ({len(data)} bytes)"
+            )
             return False
 
         mv = memoryview(data)
@@ -436,7 +440,9 @@ def decode_simple(
     Returns list[float] or list[int] depending on the expected_prefix.
     """
     if not resp:
-        logger.debug(f"decode_simple: Empty response for expected prefix '{expected_prefix}'")
+        logger.debug(
+            f"decode_simple: Empty response for expected prefix '{expected_prefix}'"
+        )
         return None
     parts = resp.strip().split("|", 1)
     if len(parts) != 2 or parts[0] != expected_prefix:

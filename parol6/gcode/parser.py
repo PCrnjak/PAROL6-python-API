@@ -117,7 +117,9 @@ class GcodeParser:
                 param_value = float(match.group(2))
                 # Validate feed rate
                 if param_letter == "F" and param_value <= 0:
-                    self.errors.append(f"Line {self.line_count}: Invalid feed rate: {param_value}")
+                    self.errors.append(
+                        f"Line {self.line_count}: Invalid feed rate: {param_value}"
+                    )
                     continue
                 # Validate spindle speed
                 if param_letter == "S" and param_value < 0:
@@ -164,7 +166,20 @@ class GcodeParser:
                         parameters={
                             k: v
                             for k, v in parameters.items()
-                            if k not in ["X", "Y", "Z", "A", "B", "C", "I", "J", "K", "R", "F"]
+                            if k
+                            not in [
+                                "X",
+                                "Y",
+                                "Z",
+                                "A",
+                                "B",
+                                "C",
+                                "I",
+                                "J",
+                                "K",
+                                "R",
+                                "F",
+                            ]
                         },
                         comment=comment,
                         line_number=line_number,
@@ -214,20 +229,32 @@ class GcodeParser:
 
             # Validate required parameters for motion commands
             if token.code_number in [0, 1]:  # Linear motion
-                if not any(k in token.parameters for k in ["X", "Y", "Z", "A", "B", "C"]):
-                    return False, f"G{token.code_number} requires at least one coordinate"
+                if not any(
+                    k in token.parameters for k in ["X", "Y", "Z", "A", "B", "C"]
+                ):
+                    return (
+                        False,
+                        f"G{token.code_number} requires at least one coordinate",
+                    )
 
             elif token.code_number in [2, 3]:  # Arc motion
                 if not any(k in token.parameters for k in ["X", "Y", "Z"]):
                     return False, f"G{token.code_number} requires endpoint coordinates"
                 if not (
-                    ("I" in token.parameters or "J" in token.parameters) or "R" in token.parameters
+                    ("I" in token.parameters or "J" in token.parameters)
+                    or "R" in token.parameters
                 ):
-                    return False, f"G{token.code_number} requires either IJK offsets or R radius"
+                    return (
+                        False,
+                        f"G{token.code_number} requires either IJK offsets or R radius",
+                    )
 
             elif token.code_number == 4:  # Dwell
                 if "P" not in token.parameters and "S" not in token.parameters:
-                    return False, "G4 dwell requires P (milliseconds) or S (seconds) parameter"
+                    return (
+                        False,
+                        "G4 dwell requires P (milliseconds) or S (seconds) parameter",
+                    )
 
         elif token.code_type == "M":
             if token.code_number not in self.SUPPORTED_M_CODES:

@@ -54,7 +54,9 @@ class TestMoveCartAccuracy:
         # Position tolerance: 1mm
         pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target[:3]))
         print(f"Position error: {pos_error:.3f} mm")
-        assert pos_error < 1.0, f"Position error {pos_error:.3f}mm exceeds 1mm tolerance"
+        assert pos_error < 1.0, (
+            f"Position error {pos_error:.3f}mm exceeds 1mm tolerance"
+        )
 
         # Orientation tolerance: 1 degree per axis
         # Note: Need to handle angle wrapping for comparison
@@ -66,7 +68,9 @@ class TestMoveCartAccuracy:
         for i, axis in enumerate(["RX", "RY", "RZ"]):
             ori_error = angle_diff(final_pose[3 + i], target[3 + i])
             print(f"{axis} error: {ori_error:.3f} deg")
-            assert ori_error < 1.0, f"{axis} error {ori_error:.3f}° exceeds 1 degree tolerance"
+            assert ori_error < 1.0, (
+                f"{axis} error {ori_error:.3f}° exceeds 1 degree tolerance"
+            )
 
         print("✓ MoveCart pose accuracy test passed!")
 

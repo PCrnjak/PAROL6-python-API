@@ -153,9 +153,13 @@ class CommandRegistry:
                 logger.error(f"Error loading {full_module_name}: {e}")
 
         self._discovered = True
-        logger.info(f"Command discovery complete. {len(self._commands)} commands registered.")
+        logger.info(
+            f"Command discovery complete. {len(self._commands)} commands registered."
+        )
 
-    def create_command_from_parts(self, parts: list[str]) -> tuple[CommandBase | None, str | None]:
+    def create_command_from_parts(
+        self, parts: list[str]
+    ) -> tuple[CommandBase | None, str | None]:
         """
         Create a command instance from pre-split message parts.
 
@@ -200,14 +204,20 @@ class CommandRegistry:
             elif error:
                 dur_ms = (time.perf_counter() - start_t) * 1000.0
                 logger.log(
-                    TRACE, "match_error name=%s dur_ms=%.2f err=%s", command_name, dur_ms, error
+                    TRACE,
+                    "match_error name=%s dur_ms=%.2f err=%s",
+                    command_name,
+                    dur_ms,
+                    error,
                 )
                 logger.warning(f"Command '{command_name}' rejected: {error}")
                 return None, error
 
         except Exception as e:
             dur_ms = (time.perf_counter() - start_t) * 1000.0
-            logger.log(TRACE, "match_error name=%s dur_ms=%.2f exc=%s", command_name, dur_ms, e)
+            logger.log(
+                TRACE, "match_error name=%s dur_ms=%.2f exc=%s", command_name, dur_ms, e
+            )
             logger.error(f"Error creating command '{command_name}': {e}")
             return None, str(e)
 

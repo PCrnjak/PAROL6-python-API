@@ -22,7 +22,11 @@ TOOL_CONFIGS: dict[str, dict[str, Any]] = {
         "description": "Pneumatic gripper assembly",
         "transform": (SE3(-0.04525, 0, 0) @ SE3.Rx(np.pi)).A,
         "stl_files": [
-            {"file": "pneumatic_gripper_assembly.STL", "origin": [0, 0, 0], "rpy": [0, 0, 0]}
+            {
+                "file": "pneumatic_gripper_assembly.STL",
+                "origin": [0, 0, 0],
+                "rpy": [0, 0, 0],
+            }
         ],
     },
 }

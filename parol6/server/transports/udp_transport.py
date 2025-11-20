@@ -25,7 +25,9 @@ class UDPTransport:
     - Connection management
     """
 
-    def __init__(self, ip: str = "127.0.0.1", port: int = 5001, buffer_size: int = 1024):
+    def __init__(
+        self, ip: str = "127.0.0.1", port: int = 5001, buffer_size: int = 1024
+    ):
         """
         Initialize the UDP transport.
 
@@ -118,7 +120,10 @@ class UDPTransport:
             try:
                 # Decode ASCII payload and trim only CR/LF to avoid extra copies
                 message_str = (
-                    self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore").rstrip("\r\n")
+                    self._rxv[:nbytes]
+                    .tobytes()
+                    .decode("ascii", errors="ignore")
+                    .rstrip("\r\n")
                 )
             except Exception:
                 logger.warning(f"Failed to decode UDP datagram from {address}")
@@ -256,7 +261,9 @@ class UDPTransport:
         return info
 
 
-def create_udp_transport(ip: str = "127.0.0.1", port: int = 5001) -> UDPTransport | None:
+def create_udp_transport(
+    ip: str = "127.0.0.1", port: int = 5001
+) -> UDPTransport | None:
     """
     Factory function to create and initialize a UDP transport.
 

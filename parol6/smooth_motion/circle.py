@@ -130,7 +130,9 @@ class CircularMotion(TrajectoryGenerator):
         """
         if trajectory_type == "cubic":
             # Use existing cubic implementation
-            return self.generate_arc_3d(start_pose, end_pose, center, normal, clockwise, duration)
+            return self.generate_arc_3d(
+                start_pose, end_pose, center, normal, clockwise, duration
+            )
 
         # Convert to numpy arrays
         start_pos = np.array(start_pose[:3])
@@ -240,7 +242,9 @@ class CircularMotion(TrajectoryGenerator):
 
             if dist_in_plane < 0.001:
                 # Center start point - undefined angle
-                print("    WARNING: Start point is at circle center, using default position")
+                print(
+                    "    WARNING: Start point is at circle center, using default position"
+                )
                 start_angle = 0
                 actual_start = center_np + radius * u
             else:
@@ -273,7 +277,9 @@ class CircularMotion(TrajectoryGenerator):
                 pos = actual_start
             else:
                 # Generate circle points
-                angle = float(start_angle if start_angle is not None else 0.0) + (2 * np.pi * t / duration)
+                angle = float(start_angle if start_angle is not None else 0.0) + (
+                    2 * np.pi * t / duration
+                )
                 pos = center_np + radius * (np.cos(angle) * u + np.sin(angle) * v)
 
             # Placeholder orientation (will be overridden)
@@ -345,7 +351,13 @@ class CircularMotion(TrajectoryGenerator):
                 )
             elif trajectory_type == "s_curve":
                 result = self.generate_scurve_circle(
-                    center, radius, normal, duration, jerk_limit, start_angle, start_point
+                    center,
+                    radius,
+                    normal,
+                    duration,
+                    jerk_limit,
+                    start_angle,
+                    start_point,
                 )
             else:
                 raise ValueError(f"Unknown trajectory type: {trajectory_type}")
@@ -559,14 +571,18 @@ class CircularMotion(TrajectoryGenerator):
 
         return np.array(trajectory)
 
-    def _rotation_matrix_from_axis_angle(self, axis: np.ndarray, angle: float) -> np.ndarray:
+    def _rotation_matrix_from_axis_angle(
+        self, axis: np.ndarray, angle: float
+    ) -> np.ndarray:
         """Generate rotation matrix using Rodrigues' formula"""
         axis = axis / np.linalg.norm(axis)
         cos_a = np.cos(angle)
         sin_a = np.sin(angle)
 
         # Cross-product matrix
-        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        K = np.array(
+            [[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]]
+        )
 
         # Rodrigues' formula
         R = np.eye(3) + sin_a * K + (1 - cos_a) * K @ K
@@ -583,7 +599,10 @@ class CircularMotion(TrajectoryGenerator):
             return cross / np.linalg.norm(cross)
 
     def _slerp_orientation(
-        self, start_orient: NDArray[np.floating], end_orient: NDArray[np.floating], t: float
+        self,
+        start_orient: NDArray[np.floating],
+        end_orient: NDArray[np.floating],
+        t: float,
     ) -> np.ndarray:
         """Spherical linear interpolation for orientation"""
         # Convert to quaternions

@@ -36,14 +36,13 @@ def point_trf_to_wrf_mm(point_mm: Sequence[float], tool_pose: SE3) -> list[float
 
 def pose6_trf_to_wrf(pose6_mm_deg: Sequence[float], tool_pose: SE3) -> list[float]:
     """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    pose_trf = (
-        SE3(pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0)
-        * SE3.RPY(
-            pose6_mm_deg[3:], unit="deg", order="xyz"
-        )
-    )
+    pose_trf = SE3(
+        pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0
+    ) * SE3.RPY(pose6_mm_deg[3:], unit="deg", order="xyz")
     pose_wrf = cast(SE3, tool_pose * pose_trf)
-    return np.concatenate([pose_wrf.t * 1000.0, pose_wrf.rpy(unit="deg", order="xyz")]).tolist()
+    return np.concatenate(
+        [pose_wrf.t * 1000.0, pose_wrf.rpy(unit="deg", order="xyz")]
+    ).tolist()
 
 
 def se3_to_pose6_mm_deg(T: SE3) -> list[float]:
@@ -56,7 +55,9 @@ def transform_center_trf_to_wrf(
 ) -> None:
     """Transform 'center' parameter from TRF (mm) to WRF (mm) using tool_pose."""
     center_trf = SE3(
-        params["center"][0] / 1000.0, params["center"][1] / 1000.0, params["center"][2] / 1000.0
+        params["center"][0] / 1000.0,
+        params["center"][1] / 1000.0,
+        params["center"][2] / 1000.0,
     )
     center_wrf = cast(SE3, tool_pose * center_trf)
     transformed["center"] = (center_wrf.t * 1000.0).tolist()
@@ -69,11 +70,16 @@ def transform_start_pose_if_needed(
     if frame == "TRF" and start_pose:
         tool_pose = get_fkine_se3()
         return pose6_trf_to_wrf(start_pose, tool_pose)
-    return np.asarray(start_pose, dtype=float).tolist() if start_pose is not None else None
+    return (
+        np.asarray(start_pose, dtype=float).tolist() if start_pose is not None else None
+    )
 
 
 def transform_command_params_to_wrf(
-    command_type: str, params: dict[str, Any], frame: str, current_position_in: np.ndarray
+    command_type: str,
+    params: dict[str, Any],
+    frame: str,
+    current_position_in: np.ndarray,
 ) -> dict[str, Any]:
     """
     Transform command parameters from TRF to WRF.
@@ -166,7 +172,9 @@ def transform_command_params_to_wrf(
                     if "center" in seg:
                         # Create a temporary params dict to use the helper
                         seg_params = {"center": seg["center"]}
-                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
+                        transform_center_trf_to_wrf(
+                            seg_params, tool_pose, seg_transformed
+                        )
 
                     # Transform plane normal if specified
                     if "plane" in seg:
@@ -178,7 +186,9 @@ def transform_command_params_to_wrf(
                     if "center" in seg:
                         # Create a temporary params dict to use the helper
                         seg_params = {"center": seg["center"]}
-                        transform_center_trf_to_wrf(seg_params, tool_pose, seg_transformed)
+                        transform_center_trf_to_wrf(
+                            seg_params, tool_pose, seg_transformed
+                        )
 
                     if "plane" in seg:
                         normal_trf = PLANE_NORMALS_TRF[seg["plane"]]

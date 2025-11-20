@@ -65,11 +65,15 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
     try:
         # Give broadcaster a tiny moment to initialize
         await asyncio.sleep(0.05)
-        assert broadcaster._use_unicast is True, "Broadcaster did not fall back to unicast"
+        assert broadcaster._use_unicast is True, (
+            "Broadcaster did not fall back to unicast"
+        )
 
         async def _consume_one(timeout: float = 3.0) -> bool:
             deadline = time.time() + timeout
-            async for status in subscribe_status(group=group, port=port, iface_ip=iface):
+            async for status in subscribe_status(
+                group=group, port=port, iface_ip=iface
+            ):
                 assert isinstance(status, dict)
                 assert "angles" in status
                 return True
@@ -114,7 +118,9 @@ async def test_subscriber_multicast_socket_receives_unicast(monkeypatch):
         # Start sender in background
         sender = asyncio.create_task(_send_once())
         try:
-            async for status in subscribe_status(group=group, port=port, iface_ip=iface):
+            async for status in subscribe_status(
+                group=group, port=port, iface_ip=iface
+            ):
                 assert isinstance(status, dict)
                 assert "io" in status
                 return True
@@ -135,7 +141,9 @@ def _raise_sendto(*args, **kwargs):  # helper for monkeypatching socket.sendto
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_not(monkeypatch):
+async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_not(
+    monkeypatch,
+):
     """
     Demonstrate the bug: if multicast setup succeeds but subsequent send() calls fail,
     the broadcaster should fall back to UNICAST. Current implementation does not,
@@ -149,7 +157,9 @@ async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_no
     cache.mark_serial_observed()
 
     state_mgr = StateManager()
-    broadcaster = StatusBroadcaster(state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", rate_hz=20.0, stale_s=2.0)
+    broadcaster = StatusBroadcaster(
+        state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", rate_hz=20.0, stale_s=2.0
+    )
     broadcaster.start()
     try:
         # Allow setup to complete and at least one send to work
@@ -163,7 +173,9 @@ async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_no
 
         # The desired behavior would be to switch to unicast after persistent errors.
         # Current code does not, so this assertion should FAIL, making the problem visible.
-        assert broadcaster._use_unicast is True, "Broadcaster did not fall back to unicast on repeated send errors"
+        assert broadcaster._use_unicast is True, (
+            "Broadcaster did not fall back to unicast on repeated send errors"
+        )
     finally:
         broadcaster.stop()
         with contextlib.suppress(Exception):

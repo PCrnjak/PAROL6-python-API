@@ -134,10 +134,14 @@ class WaypointTrajectoryPlanner:
             return 0.0
 
         # Distance to previous waypoint
-        dist_prev = np.linalg.norm(self.waypoints[idx][:3] - self.waypoints[idx - 1][:3])
+        dist_prev = np.linalg.norm(
+            self.waypoints[idx][:3] - self.waypoints[idx - 1][:3]
+        )
 
         # Distance to next waypoint
-        dist_next = np.linalg.norm(self.waypoints[idx + 1][:3] - self.waypoints[idx][:3])
+        dist_next = np.linalg.norm(
+            self.waypoints[idx + 1][:3] - self.waypoints[idx][:3]
+        )
 
         # Maximum radius is 40% of shortest segment
         max_radius = 0.4 * min(dist_prev, dist_next)
@@ -156,7 +160,9 @@ class WaypointTrajectoryPlanner:
                 self.blend_radii.append(0.0)
             else:
                 # Estimate approach velocity
-                segment_length = np.linalg.norm(self.waypoints[i][:3] - self.waypoints[i - 1][:3])
+                segment_length = np.linalg.norm(
+                    self.waypoints[i][:3] - self.waypoints[i - 1][:3]
+                )
 
                 # Simple velocity estimation
                 if segment_length > 0:
@@ -171,7 +177,9 @@ class WaypointTrajectoryPlanner:
                 radius = self.calculate_safe_blend_radius(i, approach_velocity)
                 self.blend_radii.append(radius)
 
-    def compute_blend_points(self, idx: int, blend_radius: float) -> tuple[np.ndarray, np.ndarray]:
+    def compute_blend_points(
+        self, idx: int, blend_radius: float
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Calculate blend entry and exit points for a waypoint.
 
@@ -257,16 +265,24 @@ class WaypointTrajectoryPlanner:
         delta_v_mag = np.linalg.norm(delta_v[:3])
 
         # Minimum blend time from acceleration constraint
-        min_blend_time = float(delta_v_mag / (self.constraints["max_acceleration"] + 1e-9))
+        min_blend_time = float(
+            delta_v_mag / (self.constraints["max_acceleration"] + 1e-9)
+        )
 
         # Calculate blend time if not specified
         if blend_time is None:
-            v_avg = (float(np.linalg.norm(v_entry[:3])) + float(np.linalg.norm(v_exit[:3]))) / 2.0
+            v_avg = (
+                float(np.linalg.norm(v_entry[:3])) + float(np.linalg.norm(v_exit[:3]))
+            ) / 2.0
             if v_avg > 0.0:
                 time_from_velocity = float(distance) / v_avg
             else:
                 time_from_velocity = float(
-                    np.sqrt(2.0 * float(distance) / (self.constraints["max_acceleration"] + 1e-9))
+                    np.sqrt(
+                        2.0
+                        * float(distance)
+                        / (self.constraints["max_acceleration"] + 1e-9)
+                    )
                 )
             blend_time = max(min_blend_time, time_from_velocity)
         else:
@@ -299,7 +315,12 @@ class WaypointTrajectoryPlanner:
 
             # Interpolate position using hermite spline
             # Scale velocities by blend_time to get tangents
-            pos = h00 * entry_point + h10 * (v_entry * bt) + h01 * exit_point + h11 * (v_exit * bt)
+            pos = (
+                h00 * entry_point
+                + h10 * (v_entry * bt)
+                + h01 * exit_point
+                + h11 * (v_exit * bt)
+            )
 
             blend_traj.append(pos)
 
@@ -425,13 +446,20 @@ class WaypointTrajectoryPlanner:
         # Calculate segment velocities
         self.segment_velocities = []
         for i in range(self.num_waypoints - 1):
-            segment_length = np.linalg.norm(self.waypoints[i + 1][:3] - self.waypoints[i][:3])
+            segment_length = np.linalg.norm(
+                self.waypoints[i + 1][:3] - self.waypoints[i][:3]
+            )
             # Simple velocity planning
             if self.via_modes[i] == "stop" or self.via_modes[i + 1] == "stop":
                 # Trapezoid profile with acceleration
                 v_max = min(
                     float(self.constraints["max_velocity"]),
-                    float(np.sqrt(float(self.constraints["max_acceleration"]) * float(segment_length))),
+                    float(
+                        np.sqrt(
+                            float(self.constraints["max_acceleration"])
+                            * float(segment_length)
+                        )
+                    ),
                 )
             else:
                 v_max = float(self.constraints["max_velocity"])
@@ -451,7 +479,9 @@ class WaypointTrajectoryPlanner:
             else:
                 # Check for blend at current waypoint
                 blend_region_prev = (
-                    self.blend_regions[i - 1] if i - 1 < len(self.blend_regions) else None
+                    self.blend_regions[i - 1]
+                    if i - 1 < len(self.blend_regions)
+                    else None
                 )
                 if blend_region_prev is not None:
                     segment_start = blend_region_prev["exit"]
@@ -460,7 +490,9 @@ class WaypointTrajectoryPlanner:
 
             if i < self.num_waypoints - 2:
                 # Check for blend at next waypoint
-                blend_region_next = self.blend_regions[i] if i < len(self.blend_regions) else None
+                blend_region_next = (
+                    self.blend_regions[i] if i < len(self.blend_regions) else None
+                )
                 if blend_region_next is not None:
                     segment_end = blend_region_next["entry"]
                 else:
@@ -504,7 +536,10 @@ class WaypointTrajectoryPlanner:
         return trajectory_array
 
     def apply_velocity_profile(
-        self, trajectory: np.ndarray, profile_type: str = "quintic", jerk_limit: float | None = None
+        self,
+        trajectory: np.ndarray,
+        profile_type: str = "quintic",
+        jerk_limit: float | None = None,
     ) -> np.ndarray:
         """
         Apply velocity profile to existing trajectory points.
@@ -574,7 +609,9 @@ class WaypointTrajectoryPlanner:
                         alpha = 0.0
 
                     # Linear interpolation between points
-                    new_trajectory[i] = (1 - alpha) * trajectory[j] + alpha * trajectory[j + 1]
+                    new_trajectory[i] = (1 - alpha) * trajectory[
+                        j
+                    ] + alpha * trajectory[j + 1]
                     break
             else:
                 # If we didn't find it (shouldn't happen), use the last point
@@ -621,9 +658,13 @@ class WaypointTrajectoryPlanner:
         # Velocity - use all relevant dimensions
         velocities = np.diff(trajectory[:, :n_dims], axis=0) / dt
         velocity_magnitudes = (
-            np.linalg.norm(velocities[:, :3], axis=1) if velocities.shape[0] else np.array([0.0])
+            np.linalg.norm(velocities[:, :3], axis=1)
+            if velocities.shape[0]
+            else np.array([0.0])
         )
-        max_vel = float(np.max(velocity_magnitudes)) if velocity_magnitudes.size else 0.0
+        max_vel = (
+            float(np.max(velocity_magnitudes)) if velocity_magnitudes.size else 0.0
+        )
         results["max_velocity"] = max_vel
         results["velocity_ok"] = max_vel <= self.constraints["max_velocity"] * 1.1
 
@@ -635,13 +676,19 @@ class WaypointTrajectoryPlanner:
                 else np.zeros((0, 3))
             )
             acceleration_magnitudes = (
-                np.linalg.norm(accelerations, axis=1) if accelerations.shape[0] else np.array([0.0])
+                np.linalg.norm(accelerations, axis=1)
+                if accelerations.shape[0]
+                else np.array([0.0])
             )
             max_acc = (
-                float(np.max(acceleration_magnitudes)) if acceleration_magnitudes.size else 0.0
+                float(np.max(acceleration_magnitudes))
+                if acceleration_magnitudes.size
+                else 0.0
             )
             results["max_acceleration"] = max_acc
-            results["acceleration_ok"] = max_acc <= self.constraints["max_acceleration"] * 1.2
+            results["acceleration_ok"] = (
+                max_acc <= self.constraints["max_acceleration"] * 1.2
+            )
 
             # Jerk
             if len(trajectory) > 3:
@@ -653,7 +700,9 @@ class WaypointTrajectoryPlanner:
                 jerk_magnitudes = (
                     np.linalg.norm(jerks, axis=1) if jerks.shape[0] else np.array([0.0])
                 )
-                max_jerk = float(np.max(jerk_magnitudes)) if jerk_magnitudes.size else 0.0
+                max_jerk = (
+                    float(np.max(jerk_magnitudes)) if jerk_magnitudes.size else 0.0
+                )
                 results["max_jerk"] = max_jerk
                 results["jerk_ok"] = max_jerk <= self.constraints["max_jerk"] * 1.5
 

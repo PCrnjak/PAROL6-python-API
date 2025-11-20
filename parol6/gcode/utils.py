@@ -204,7 +204,10 @@ def radius_to_center(
 
 
 def validate_arc(
-    start: dict[str, float], end: dict[str, float], center: dict[str, float], plane: str = "G17"
+    start: dict[str, float],
+    end: dict[str, float],
+    center: dict[str, float],
+    plane: str = "G17",
 ) -> bool:
     """
     Validate arc parameters
@@ -242,7 +245,10 @@ def validate_arc(
 
 
 def estimate_motion_time(
-    start: dict[str, float], end: dict[str, float], feed_rate: float, is_rapid: bool = False
+    start: dict[str, float],
+    end: dict[str, float],
+    feed_rate: float,
+    is_rapid: bool = False,
 ) -> float:
     """
     Estimate time for a motion command

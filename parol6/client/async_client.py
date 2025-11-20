@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 _STATUS_SENTINEL = cast(StatusAggregate, object())
 
 
-
 class _UDPClientProtocol(asyncio.DatagramProtocol):
     def __init__(self, rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]]):
         self.rx_queue = rx_queue
@@ -72,7 +71,9 @@ class AsyncRobotClient:
         # Persistent asyncio datagram endpoint
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _UDPClientProtocol | None = None
-        self._rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(maxsize=256)
+        self._rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(
+            maxsize=256
+        )
         self._ep_lock = asyncio.Lock()
 
         # Serialize request/response
@@ -99,7 +100,9 @@ class AsyncRobotClient:
     @host.setter
     def host(self, value: str) -> None:
         if self._transport is not None:
-            raise RuntimeError("AsyncRobotClient.host is read-only after endpoint creation")
+            raise RuntimeError(
+                "AsyncRobotClient.host is read-only after endpoint creation"
+            )
         self._host = value
 
     @property
@@ -109,7 +112,9 @@ class AsyncRobotClient:
     @port.setter
     def port(self, value: int) -> None:
         if self._transport is not None:
-            raise RuntimeError("AsyncRobotClient.port is read-only after endpoint creation")
+            raise RuntimeError(
+                "AsyncRobotClient.port is read-only after endpoint creation"
+            )
         self._port = value
 
     # --------------- Internal helpers ---------------
@@ -288,7 +293,9 @@ class AsyncRobotClient:
             try:
                 async with self._req_lock:
                     self._transport.sendto(message.encode("ascii"))
-                    data, _addr = await asyncio.wait_for(self._rx_queue.get(), timeout=self.timeout)
+                    data, _addr = await asyncio.wait_for(
+                        self._rx_queue.get(), timeout=self.timeout
+                    )
                     return data.decode("ascii", errors="ignore")
             except TimeoutError:
                 if attempt < self.retries:
@@ -398,7 +405,9 @@ class AsyncRobotClient:
         vals = wire.decode_simple(resp, "SPEEDS")
         return cast(list[float] | None, vals)
 
-    async def get_pose(self, frame: Literal["WRF", "TRF"] = "WRF") -> list[float] | None:
+    async def get_pose(
+        self, frame: Literal["WRF", "TRF"] = "WRF"
+    ) -> list[float] | None:
         """
         Returns 16-element transformation matrix (flattened) with translation in mm.
 
@@ -593,7 +602,8 @@ class AsyncRobotClient:
                 if angles and not speeds:
                     if last_angles is not None:
                         max_change = max(
-                            abs(a - b) for a, b in zip(angles, last_angles, strict=False)
+                            abs(a - b)
+                            for a, b in zip(angles, last_angles, strict=False)
                         )
                         if max_change < angle_threshold:
                             if settle_start is None:
@@ -614,7 +624,9 @@ class AsyncRobotClient:
 
     # --------------- Additional waits and utilities ---------------
 
-    async def wait_for_server_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
+    async def wait_for_server_ready(
+        self, timeout: float = 5.0, interval: float = 0.05
+    ) -> bool:
         """Poll ping() until server responds or timeout."""
         end_time = time.time() + timeout
         while time.time() < end_time:
@@ -633,7 +645,9 @@ class AsyncRobotClient:
         while time.time() < end_time:
             remaining = max(0.0, end_time - time.time())
             try:
-                status = await asyncio.wait_for(self._status_queue.get(), timeout=remaining)
+                status = await asyncio.wait_for(
+                    self._status_queue.get(), timeout=remaining
+                )
             except TimeoutError:
                 break
             try:
@@ -656,7 +670,9 @@ class AsyncRobotClient:
                 return True
             async with self._req_lock:
                 self._transport.sendto(message.encode("ascii"))
-                data, _addr = await asyncio.wait_for(self._rx_queue.get(), timeout=timeout)
+                data, _addr = await asyncio.wait_for(
+                    self._rx_queue.get(), timeout=timeout
+                )
                 return data.decode("ascii", errors="ignore")
         except TimeoutError:
             return None
@@ -675,7 +691,9 @@ class AsyncRobotClient:
         tracking: str | None = None,  # accepted but not sent
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_joint(joint_angles, duration, speed_percentage)
         return await self._send(message)
 
@@ -689,7 +707,9 @@ class AsyncRobotClient:
         tracking: str | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_pose(pose, duration, speed_percentage)
         return await self._send(message)
 
@@ -703,7 +723,9 @@ class AsyncRobotClient:
         tracking: str | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_cartesian(pose, duration, speed_percentage)
         return await self._send(message)
 
@@ -721,7 +743,9 @@ class AsyncRobotClient:
         Provide either duration or speed_percentage (1..100).
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_cartesian_rel_trf(
             deltas, duration, speed_percentage, accel_percentage, profile, tracking
         )
@@ -739,8 +763,12 @@ class AsyncRobotClient:
         duration and distance_deg are optional; at least one should be provided for one-shot jog.
         """
         if duration is None and distance_deg is None:
-            raise RuntimeError("Error: You must provide either a duration or a distance_deg.")
-        message = wire.encode_jog_joint(joint_index, speed_percentage, duration, distance_deg)
+            raise RuntimeError(
+                "Error: You must provide either a duration or a distance_deg."
+            )
+        message = wire.encode_jog_joint(
+            joint_index, speed_percentage, duration, distance_deg
+        )
         return await self._send(message)
 
     async def jog_cartesian(
@@ -766,7 +794,9 @@ class AsyncRobotClient:
         Send a MULTIJOG command to jog multiple joints simultaneously for 'duration' seconds.
         """
         if len(joints) != len(speeds):
-            raise ValueError("Error: The number of joints must match the number of speeds.")
+            raise ValueError(
+                "Error: The number of joints must match the number of speeds."
+            )
         joints_str = ",".join(str(j) for j in joints)
         speeds_str = ",".join(str(s) for s in speeds)
         message = f"MULTIJOG|{joints_str}|{speeds_str}|{duration}"
@@ -914,11 +944,17 @@ class AsyncRobotClient:
             jerk_limit: Optional jerk limit for s_curve trajectory
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -958,12 +994,18 @@ class AsyncRobotClient:
             jerk_limit: Optional jerk limit for s_curve trajectory
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         end_str = ",".join(map(str, end_pose))
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -992,10 +1034,16 @@ class AsyncRobotClient:
         Execute a smooth arc motion defined parametrically (radius and angle).
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         end_str = ",".join(map(str, end_pose))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         parts = [
             "SMOOTH_ARC_PARAM",
             end_str,
@@ -1038,14 +1086,27 @@ class AsyncRobotClient:
             non_blocking: Return immediately with command ID
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         num_waypoints = len(waypoints)
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         waypoint_strs: list[str] = []
         for wp in waypoints:
             waypoint_strs.extend(map(str, wp))
-        parts = ["SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str, trajectory_type]
+        parts = [
+            "SMOOTH_SPLINE",
+            str(num_waypoints),
+            frame,
+            start_str,
+            timing_str,
+            trajectory_type,
+        ]
         if trajectory_type == "s_curve" and jerk_limit is not None:
             parts.append(str(jerk_limit))
         elif trajectory_type == "s_curve":
@@ -1084,11 +1145,17 @@ class AsyncRobotClient:
             clockwise: Direction of motion
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -1148,10 +1215,10 @@ class AsyncRobotClient:
                 clockwise_str = "1" if seg.get("clockwise", False) else "0"
                 seg_str = f"ARC|{end_str}|{center_str}|{seg.get('duration', 2.0)}|{clockwise_str}"
             elif seg_type == "SPLINE":
-                waypoints_str = ";".join([",".join(map(str, wp)) for wp in seg["waypoints"]])
-                seg_str = (
-                    f"SPLINE|{len(seg['waypoints'])}|{waypoints_str}|{seg.get('duration', 3.0)}"
+                waypoints_str = ";".join(
+                    [",".join(map(str, wp)) for wp in seg["waypoints"]]
                 )
+                seg_str = f"SPLINE|{len(seg['waypoints'])}|{waypoints_str}|{seg.get('duration', 3.0)}"
             else:
                 continue
             segment_strs.append(seg_str)
@@ -1184,7 +1251,9 @@ class AsyncRobotClient:
             radii_str = "AUTO"
         else:
             if len(blend_radii) != max(0, len(waypoints) - 2):
-                raise ValueError(f"Blend radii count must be {max(0, len(waypoints) - 2)}")
+                raise ValueError(
+                    f"Blend radii count must be {max(0, len(waypoints) - 2)}"
+                )
             radii_str = ",".join(map(str, blend_radii))
         if via_modes is None:
             via_modes_list: list[str] = ["via"] * len(waypoints)

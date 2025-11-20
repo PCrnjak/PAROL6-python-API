@@ -214,7 +214,9 @@ class AckListener:
             except queue.Empty:
                 continue
 
-        logger.debug(f"Timeout waiting for ACK: cmd_id={cmd_id}, expected_status={expected_status}")
+        logger.debug(
+            f"Timeout waiting for ACK: cmd_id={cmd_id}, expected_status={expected_status}"
+        )
         return None
 
     def get_all_acks_for_command(self, cmd_id: str) -> list[dict[str, Any]]:
@@ -294,7 +296,11 @@ def send_command_with_ack(
         # This is a simplified version - in practice, you'd extract the actual command ID
         # from the command string if it contains one
         parts = command.split("|", 1)
-        if len(parts) > 1 and len(parts[0]) == 8 and parts[0].replace("-", "").isalnum():
+        if (
+            len(parts) > 1
+            and len(parts[0]) == 8
+            and parts[0].replace("-", "").isalnum()
+        ):
             cmd_id = parts[0]
             ack_info = ack_listener.wait_for_ack(cmd_id, timeout)
             return response, ack_info

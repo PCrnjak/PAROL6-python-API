@@ -97,7 +97,9 @@ class GripperCommand(MotionCommand):
             self.state_to_set = 1 if self.action == "open" else 0
             self.port_index = 2 if output_port == 1 else 3
 
-            self.log_debug("Parsed PNEUMATICGRIPPER: action=%s, port=%s", self.action, output_port)
+            self.log_debug(
+                "Parsed PNEUMATICGRIPPER: action=%s, port=%s", self.action, output_port
+            )
             self.is_valid = True
             return (True, None)
 
@@ -112,7 +114,9 @@ class GripperCommand(MotionCommand):
 
             # Parse action
             action_token = parts[1].upper()
-            self.action = "move" if action_token in ("NONE", "MOVE") else parts[1].lower()
+            self.action = (
+                "move" if action_token in ("NONE", "MOVE") else parts[1].lower()
+            )
 
             # Parse numeric parameters
             position = int(parts[2])
@@ -202,7 +206,9 @@ class GripperCommand(MotionCommand):
                     val = (val << 1) | int(b)
                 state.Gripper_data_out[3] = val
 
-                object_detection = state.Gripper_data_in[5] if len(state.Gripper_data_in) > 5 else 0
+                object_detection = (
+                    state.Gripper_data_in[5] if len(state.Gripper_data_in) > 5 else 0
+                )
                 logger.debug(
                     f" -> Gripper moving to {self.target_position} (current: {state.Gripper_data_in[1]}), object detected: {object_detection}"
                 )
@@ -225,19 +231,27 @@ class GripperCommand(MotionCommand):
 
                 # Check for object detection after debouncing
                 if object_detected:
-                    if (object_detection == 1) and (self.target_position > current_position):
+                    if (object_detection == 1) and (
+                        self.target_position > current_position
+                    ):
                         logger.info(
                             "  -> Gripper move holding position due to object detection when closing."
                         )
                         self.is_finished = True
-                        return ExecutionStatus.completed("Object detected while closing - hold")
+                        return ExecutionStatus.completed(
+                            "Object detected while closing - hold"
+                        )
 
-                    if (object_detection == 2) and (self.target_position < current_position):
+                    if (object_detection == 2) and (
+                        self.target_position < current_position
+                    ):
                         logger.info(
                             "  -> Gripper move holding position due to object detection when opening."
                         )
                         self.is_finished = True
-                        return ExecutionStatus.completed("Object detected while opening - hold")
+                        return ExecutionStatus.completed(
+                            "Object detected while opening - hold"
+                        )
 
                 return ExecutionStatus.executing("Moving gripper")
 

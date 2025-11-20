@@ -148,7 +148,9 @@ class SetIOCommand(SystemCommand):
         state.InOut_out[self.port_index] = self.port_value
 
         self.finish()
-        return ExecutionStatus.completed(f"Port {self.port_index} set to {self.port_value}")
+        return ExecutionStatus.completed(
+            f"Port {self.port_index} set to {self.port_value}"
+        )
 
 
 @register_command("SET_PORT")
@@ -260,7 +262,16 @@ class SimulatorCommand(SystemCommand):
             return False, "SIMULATOR requires 1 parameter: on/off"
 
         self.mode_on = parse_bool(parts[1])
-        if parts[1].lower() not in ("on", "off", "1", "0", "true", "false", "yes", "no"):
+        if parts[1].lower() not in (
+            "on",
+            "off",
+            "1",
+            "0",
+            "true",
+            "false",
+            "yes",
+            "no",
+        ):
             return False, "SIMULATOR parameter must be 'on' or 'off'"
 
         logger.info(f"Parsed SIMULATOR: mode_on={self.mode_on}")

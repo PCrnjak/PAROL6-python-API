@@ -68,7 +68,9 @@ class G0Command(GcodeCommand):
         # Format: MOVEPOSE|X|Y|Z|RX|RY|RZ|duration|speed
         # Where duration="None" for speed-based, speed="None" for duration-based
         x, y, z = self.robot_position[0:3]
-        rx, ry, rz = self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
+        rx, ry, rz = (
+            self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
+        )
 
         # G0 uses rapid speed (100%)
         speed_percentage = 100
@@ -117,7 +119,9 @@ class G1Command(GcodeCommand):
         """
         # Format: MOVECART|X|Y|Z|RX|RY|RZ|duration|speed
         x, y, z = self.robot_position[0:3]
-        rx, ry, rz = self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
+        rx, ry, rz = (
+            self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
+        )
 
         # Convert feed rate (mm/min) to speed percentage
         # Import robot speed limits from configuration
@@ -126,7 +130,9 @@ class G1Command(GcodeCommand):
         min_speed_mm_min = cart.vel.linear.min * 1000 * 60  # m/s to mm/min
 
         # Map feed rate to percentage (0-100)
-        speed_percentage = np.interp(self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100])
+        speed_percentage = np.interp(
+            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        )
         speed_percentage = np.clip(speed_percentage, 0, 100)
 
         duration = "None"  # Speed-based movement
@@ -182,7 +188,9 @@ class G2Command(GcodeCommand):
             self.center = ijk_to_center(self.start_position, ijk, plane=state.plane)
 
         # Validate arc
-        if not validate_arc(self.start_position, target_position, self.center, state.plane):
+        if not validate_arc(
+            self.start_position, target_position, self.center, state.plane
+        ):
             self.is_valid = False
             self.error_message = "Invalid arc: start and end radii don't match"
 
@@ -209,7 +217,9 @@ class G2Command(GcodeCommand):
 
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
-        end_rx, end_ry, end_rz = self.robot_end[3:6] if len(self.robot_end) >= 6 else [0, 0, 0]
+        end_rx, end_ry, end_rz = (
+            self.robot_end[3:6] if len(self.robot_end) >= 6 else [0, 0, 0]
+        )
 
         center_x, center_y, center_z = self.robot_center[0:3]
 
@@ -222,7 +232,9 @@ class G2Command(GcodeCommand):
         max_speed_mm_min = cart.vel.linear.max * 1000 * 60
         min_speed_mm_min = cart.vel.linear.min * 1000 * 60
 
-        speed_percentage = np.interp(self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100])
+        speed_percentage = np.interp(
+            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        )
         speed_percentage = np.clip(speed_percentage, 0, 100)
 
         # Build command string
@@ -286,7 +298,9 @@ class G3Command(GcodeCommand):
             self.center = ijk_to_center(self.start_position, ijk, plane=state.plane)
 
         # Validate arc
-        if not validate_arc(self.start_position, target_position, self.center, state.plane):
+        if not validate_arc(
+            self.start_position, target_position, self.center, state.plane
+        ):
             self.is_valid = False
             self.error_message = "Invalid arc: start and end radii don't match"
 
@@ -313,7 +327,9 @@ class G3Command(GcodeCommand):
 
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
-        end_rx, end_ry, end_rz = self.robot_end[3:6] if len(self.robot_end) >= 6 else [0, 0, 0]
+        end_rx, end_ry, end_rz = (
+            self.robot_end[3:6] if len(self.robot_end) >= 6 else [0, 0, 0]
+        )
 
         center_x, center_y, center_z = self.robot_center[0:3]
 
@@ -326,7 +342,9 @@ class G3Command(GcodeCommand):
         max_speed_mm_min = cart.vel.linear.max * 1000 * 60
         min_speed_mm_min = cart.vel.linear.min * 1000 * 60
 
-        speed_percentage = np.interp(self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100])
+        speed_percentage = np.interp(
+            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        )
         speed_percentage = np.clip(speed_percentage, 0, 100)
 
         # Build command string

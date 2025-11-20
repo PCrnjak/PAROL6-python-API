@@ -191,7 +191,9 @@ class TestErrorHandling:
         client = RobotClient(ports.server_ip, ports.server_port)
 
         # Send malformed command and consume server error response
-        reply = client.send_raw("INVALID_COMMAND|BAD|PARAMS", await_reply=True, timeout=1.0)
+        reply = client.send_raw(
+            "INVALID_COMMAND|BAD|PARAMS", await_reply=True, timeout=1.0
+        )
         assert isinstance(reply, str) and reply.startswith("ERROR|")
 
         # Server should remain responsive after handling the error

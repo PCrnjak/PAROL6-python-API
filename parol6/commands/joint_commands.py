@@ -61,10 +61,15 @@ class MoveJointCommand(MotionCommand):
             Tuple of (can_handle, error_message)
         """
         if len(parts) != 9:
-            return (False, "MOVEJOINT requires 8 parameters: 6 joint angles, duration, speed")
+            return (
+                False,
+                "MOVEJOINT requires 8 parameters: 6 joint angles, duration, speed",
+            )
 
         # Parse joint angles
-        self.target_angles = np.asarray([float(parts[i]) for i in range(1, 7)], dtype=float)
+        self.target_angles = np.asarray(
+            [float(parts[i]) for i in range(1, 7)], dtype=float
+        )
 
         # Parse duration and speed
         self.duration = None if parts[7].upper() == "NONE" else float(parts[7])
@@ -86,7 +91,9 @@ class MoveJointCommand(MotionCommand):
 
     def do_setup(self, state: "ControllerState") -> None:
         """Calculates the trajectory just before execution begins."""
-        self.log_trace("Preparing trajectory for MoveJoint to %s...", self.target_angles)
+        self.log_trace(
+            "Preparing trajectory for MoveJoint to %s...", self.target_angles
+        )
 
         if self.duration and self.duration > 0:
             if self.velocity_percent is not None:
@@ -134,8 +141,12 @@ class MoveJointCommand(MotionCommand):
             )
 
         if len(self.trajectory_steps) == 0:
-            raise ValueError("Trajectory calculation resulted in no steps. Command is invalid.")
-        self.log_trace(" -> Trajectory prepared with %s steps.", len(self.trajectory_steps))
+            raise ValueError(
+                "Trajectory calculation resulted in no steps. Command is invalid."
+            )
+        self.log_trace(
+            " -> Trajectory prepared with %s steps.", len(self.trajectory_steps)
+        )
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         if self.is_finished or not self.is_valid:

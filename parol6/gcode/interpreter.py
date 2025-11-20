@@ -33,7 +33,9 @@ class GcodeInterpreter:
         if state_file is None:
             state_file = os.path.join(os.path.dirname(__file__), "gcode_state.json")
         if coord_file is None:
-            coord_file = os.path.join(os.path.dirname(__file__), "work_coordinates.json")
+            coord_file = os.path.join(
+                os.path.dirname(__file__), "work_coordinates.json"
+            )
 
         self.state = GcodeState(state_file)
         self.coord_system = WorkCoordinateSystem(coord_file)
@@ -80,7 +82,14 @@ class GcodeInterpreter:
             self.state.update_from_token(token)
 
             # Handle work coordinate changes
-            if token.code_type == "G" and int(token.code_number) in [54, 55, 56, 57, 58, 59]:
+            if token.code_type == "G" and int(token.code_number) in [
+                54,
+                55,
+                56,
+                57,
+                58,
+                59,
+            ]:
                 self.coord_system.set_active_system(f"G{int(token.code_number)}")
 
             # Create command object
@@ -164,7 +173,9 @@ class GcodeInterpreter:
             for token in tokens:
                 is_valid, error_msg = self.parser.validate_token(token)
                 if not is_valid:
-                    self.errors.append(f"Line {line_num}: {error_msg or 'Invalid token'}")
+                    self.errors.append(
+                        f"Line {line_num}: {error_msg or 'Invalid token'}"
+                    )
 
         return len(self.errors) == 0
 

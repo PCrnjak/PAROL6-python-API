@@ -58,7 +58,9 @@ MCAST_TTL: int = int(os.getenv("PAROL6_MCAST_TTL", "1"))
 MCAST_IF: str = os.getenv("PAROL6_MCAST_IF", "127.0.0.1")
 
 # Transport selection for status updates. Default MULTICAST; set to UNICAST on CI if multicast is not available.
-STATUS_TRANSPORT: str = os.getenv("PAROL6_STATUS_TRANSPORT", "MULTICAST").strip().upper()
+STATUS_TRANSPORT: str = (
+    os.getenv("PAROL6_STATUS_TRANSPORT", "MULTICAST").strip().upper()
+)
 # Host to use for unicast fallback (defaults to loopback)
 STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
 

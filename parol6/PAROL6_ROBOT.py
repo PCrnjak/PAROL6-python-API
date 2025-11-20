@@ -128,11 +128,15 @@ _joint_ratio: NDArray[np.float64] = np.array(
 )
 
 # Joint speeds (steps/s)
-_joint_max_speed: Vec6i = np.array([6500, 18000, 20000, 20000, 22000, 22000], dtype=np.int32)
+_joint_max_speed: Vec6i = np.array(
+    [6500, 18000, 20000, 20000, 22000, 22000], dtype=np.int32
+)
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
 # Jog speeds (steps/s)
-_joint_max_jog_speed: Vec6i = np.array([1500, 3000, 3600, 7000, 7000, 18000], dtype=np.int32)
+_joint_max_jog_speed: Vec6i = np.array(
+    [1500, 3000, 3600, 7000, 7000, 18000], dtype=np.int32
+)
 _joint_min_jog_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
 # Joint accelerations (rad/s^2) - scalar limits applied per joint
@@ -184,7 +188,9 @@ def deg_to_steps(deg: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.
     return steps_f.astype(np.int32, copy=False)
 
 
-def steps_to_deg(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def steps_to_deg(
+    steps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Steps to degrees (gear ratio aware). Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
         return np.float64((steps * degree_per_step_constant) / _joint_ratio[idx])  # type: ignore
@@ -202,7 +208,9 @@ def rad_to_steps(rad: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.
     return deg_to_steps(deg_arr, idx)
 
 
-def steps_to_rad(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def steps_to_rad(
+    steps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Steps to radians. Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
         return np.float64((steps * radian_per_step_constant) / _joint_ratio[idx])  # type: ignore
@@ -210,7 +218,9 @@ def steps_to_rad(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray
     return np.deg2rad(deg_arr)
 
 
-def speed_steps_to_deg(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def speed_steps_to_deg(
+    sps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Speed: steps/s to deg/s. Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
         return np.float64((sps * degree_per_step_constant) / _joint_ratio[idx])  # type: ignore
@@ -219,7 +229,9 @@ def speed_steps_to_deg(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDA
     return (sps_arr * degree_per_step_constant) / ratio
 
 
-def speed_deg_to_steps(dps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+def speed_deg_to_steps(
+    dps: ArrayLike, idx: IndexArg = None
+) -> np.int32 | NDArray[np.int32]:
     """Speed: deg/s to steps/s. Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(dps):
         return np.int32((dps / degree_per_step_constant) * _joint_ratio[idx])  # type: ignore
@@ -228,7 +240,9 @@ def speed_deg_to_steps(dps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArr
     return stepsps.astype(np.int32, copy=False)
 
 
-def speed_steps_to_rad(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def speed_steps_to_rad(
+    sps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Speed: steps/s to rad/s. Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
         return np.float64((sps * radian_per_step_constant) / _joint_ratio[idx])  # type: ignore
@@ -237,7 +251,9 @@ def speed_steps_to_rad(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDA
     return (sps_arr * radian_per_step_constant) / ratio
 
 
-def speed_rad_to_steps(rps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+def speed_rad_to_steps(
+    rps: ArrayLike, idx: IndexArg = None
+) -> np.int32 | NDArray[np.int32]:
     """Speed: rad/s to steps/s. Fast scalar path when idx is int."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(rps):
         return np.int32((rps / radian_per_step_constant) * _joint_ratio[idx])  # type: ignore
@@ -249,7 +265,9 @@ def speed_rad_to_steps(rps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArr
 def clip_speed_to_joint_limits(sps: ArrayLike) -> NDArray[np.int32]:
     """Clip steps/s vector to per-joint limits (int32)."""
     sps_arr = np.asarray(sps, dtype=np.int32)
-    return np.clip(sps_arr, -_joint_max_speed, _joint_max_speed).astype(np.int32, copy=False)
+    return np.clip(sps_arr, -_joint_max_speed, _joint_max_speed).astype(
+        np.int32, copy=False
+    )
 
 
 def clamp_steps_delta(
@@ -275,11 +293,16 @@ def clamp_steps_delta(
 # -----------------------------
 _joint_limits_steps_list: list[list[int]] = []
 for j in range(6):
-    mn_deg, mx_deg = float(_joint_limits_degree[j, 0]), float(_joint_limits_degree[j, 1])
+    mn_deg, mx_deg = (
+        float(_joint_limits_degree[j, 0]),
+        float(_joint_limits_degree[j, 1]),
+    )
     mn_steps = int(deg_to_steps(mn_deg, idx=j))
     mx_steps = int(deg_to_steps(mx_deg, idx=j))
     _joint_limits_steps_list.append([mn_steps, mx_steps])
-_joint_limits_steps: NDArray[np.int32] = np.array(_joint_limits_steps_list, dtype=np.int32)  # (6,2)
+_joint_limits_steps: NDArray[np.int32] = np.array(
+    _joint_limits_steps_list, dtype=np.int32
+)  # (6,2)
 
 
 # -----------------------------
@@ -410,7 +433,9 @@ joint: Final[Joint] = Joint(
 cart: Final[Cart] = Cart(
     vel=CartVel(
         linear=RangeF(min=_cart_linear_velocity_min, max=_cart_linear_velocity_max),
-        jog=RangeF(min=_cart_linear_velocity_min_JOG, max=_cart_linear_velocity_max_JOG),
+        jog=RangeF(
+            min=_cart_linear_velocity_min_JOG, max=_cart_linear_velocity_max_JOG
+        ),
         angular=RangeF(min=_cart_angular_velocity_min, max=_cart_angular_velocity_max),
     ),
     acc=CartAcc(
@@ -493,7 +518,9 @@ def check_limits(
         any_viol = bool(np.any(viol))
 
         # Edge-triggered violation logs
-        if any_viol and (np.any(viol != _last_violation_mask) or not _last_any_violation):
+        if any_viol and (
+            np.any(viol != _last_violation_mask) or not _last_any_violation
+        ):
             idxs = np.where(viol)[0]
             tokens = []
             for i in idxs:

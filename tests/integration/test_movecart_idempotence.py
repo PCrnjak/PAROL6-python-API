@@ -41,9 +41,13 @@ class TestMoveCartIdempotence:
 
         # Verify pose hasn't changed significantly
         # Position tolerance: 0.1mm (very strict since we didn't move)
-        pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(current_pose[:3]))
+        pos_error = np.linalg.norm(
+            np.array(final_pose[:3]) - np.array(current_pose[:3])
+        )
         print(f"Position error: {pos_error:.4f} mm")
-        assert pos_error < 0.1, f"Position changed by {pos_error:.4f}mm when moving to same pose"
+        assert pos_error < 0.1, (
+            f"Position changed by {pos_error:.4f}mm when moving to same pose"
+        )
 
         # Orientation tolerance: 0.5 degrees per axis (accounting for numerical precision)
         def angle_diff(a, b):
@@ -54,7 +58,9 @@ class TestMoveCartIdempotence:
         for i, axis in enumerate(["RX", "RY", "RZ"]):
             ori_error = angle_diff(final_pose[3 + i], current_pose[3 + i])
             print(f"{axis} error: {ori_error:.4f} deg")
-            assert ori_error < 0.5, f"{axis} changed by {ori_error:.4f}° when moving to same pose"
+            assert ori_error < 0.5, (
+                f"{axis} changed by {ori_error:.4f}° when moving to same pose"
+            )
 
         print("✓ MoveCart idempotence test passed - no unwanted rotation!")
 

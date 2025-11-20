@@ -15,7 +15,14 @@ from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
 from parol6.tools import TOOL_CONFIGS, list_tools
 
-from .base import ExecutionStatus, MotionCommand, csv_floats, csv_ints, parse_float, parse_int
+from .base import (
+    ExecutionStatus,
+    MotionCommand,
+    csv_floats,
+    csv_ints,
+    parse_float,
+    parse_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +67,9 @@ class HomeCommand(MotionCommand):
         # --- State: START ---
         # On the first few executions, continuously send the 'home' (100) command.
         if self.state == "START":
-            logger.debug(f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}")
+            logger.debug(
+                f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}"
+            )
             state.Command_out = CommandCode.HOME
             self.start_cmd_counter -= 1
             if self.start_cmd_counter <= 0:
@@ -80,7 +89,9 @@ class HomeCommand(MotionCommand):
             # Homing timeout protection
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                raise TimeoutError("Timeout waiting for robot to start homing sequence.")
+                raise TimeoutError(
+                    "Timeout waiting for robot to start homing sequence."
+                )
             return ExecutionStatus.executing("Homing: waiting for unhomed")
 
         # --- State: WAITING_FOR_HOMED ---
@@ -157,7 +168,10 @@ class JogCommand(MotionCommand):
             Tuple of (can_handle, error_message)
         """
         if len(parts) != 5:
-            return (False, "JOG requires 4 parameters: joint, speed, duration, distance")
+            return (
+                False,
+                "JOG requires 4 parameters: joint, speed, duration, distance",
+            )
 
         # Parse parameters using utilities
         self.joint = parse_int(parts[1])
@@ -214,14 +228,18 @@ class JogCommand(MotionCommand):
 
         distance_steps = 0
         if self.distance_deg is not None:
-            distance_steps = int(PAROL6_ROBOT.ops.deg_to_steps(abs(self.distance_deg), self.joint_index))
+            distance_steps = int(
+                PAROL6_ROBOT.ops.deg_to_steps(abs(self.distance_deg), self.joint_index)
+            )
             self.target_position = state.Position_in[self.joint_index] + (
                 distance_steps * self.direction
             )
 
             if not (min_limit <= self.target_position <= max_limit):
                 # Convert to degrees for clearer error message
-                target_deg = PAROL6_ROBOT.ops.steps_to_deg(self.target_position, self.joint_index)
+                target_deg = PAROL6_ROBOT.ops.steps_to_deg(
+                    self.target_position, self.joint_index
+                )
                 min_deg = PAROL6_ROBOT.ops.steps_to_deg(min_limit, self.joint_index)
                 max_deg = PAROL6_ROBOT.ops.steps_to_deg(max_limit, self.joint_index)
                 raise ValueError(
@@ -233,7 +251,9 @@ class JogCommand(MotionCommand):
         jog_max = self.JOG_MAX[self.joint_index]
 
         if self.mode == "distance" and self.duration:
-            speed_steps_per_sec = int(distance_steps / self.duration) if self.duration > 0 else 0
+            speed_steps_per_sec = (
+                int(distance_steps / self.duration) if self.duration > 0 else 0
+            )
             if speed_steps_per_sec > jog_max:
                 raise ValueError(
                     f"Required speed ({speed_steps_per_sec} steps/s) exceeds joint's max jog speed ({jog_max} steps/s)."
@@ -246,7 +266,9 @@ class JogCommand(MotionCommand):
                 raise ValueError(
                     "'speed_percentage' must be provided if not calculating automatically."
                 )
-            speed_steps_per_sec = int(self.linmap_pct(abs(self.speed_percentage), jog_min, jog_max))
+            speed_steps_per_sec = int(
+                self.linmap_pct(abs(self.speed_percentage), jog_min, jog_max)
+            )
 
         self.speed_out = speed_steps_per_sec * self.direction
 
@@ -404,7 +426,11 @@ class MultiJogCommand(MotionCommand):
         pct = np.clip(np.abs(speeds_pct) / 100.0, 0.0, 1.0)
         for i, idx in enumerate(joint_index):
             self.speeds_out[idx] = (
-                int(self.linmap_pct(pct[i] * 100.0, self.JOG_MIN[idx], self.JOG_MAX[idx]))
+                int(
+                    self.linmap_pct(
+                        pct[i] * 100.0, self.JOG_MIN[idx], self.JOG_MAX[idx]
+                    )
+                )
                 * direction[i]
             )
 

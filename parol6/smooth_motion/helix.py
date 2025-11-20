@@ -62,7 +62,15 @@ class HelixMotion(TrajectoryGenerator):
             )
         if trajectory_type == "s_curve":
             return self.generate_scurve_helix(
-                center, radius, pitch, height, axis, duration, jerk_limit, start_point, clockwise
+                center,
+                radius,
+                pitch,
+                height,
+                axis,
+                duration,
+                jerk_limit,
+                start_point,
+                clockwise,
             )
 
         raise ValueError(f"Unknown trajectory type: {trajectory_type}")
@@ -125,7 +133,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate 3D position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis_np
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Placeholder orientation (could be enhanced)
             orient = [0, 0, 0] if start_point is None else start_point[3:6]
@@ -192,7 +204,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis_np
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Orientation
             orient = [0, 0, 0] if start_point is None else start_point[3:6]
@@ -265,7 +281,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis_np
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Orientation
             orient = [0, 0, 0] if start_point is None else start_point[3:6]

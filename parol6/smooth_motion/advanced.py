@@ -74,9 +74,9 @@ class AdvancedMotionBlender:
             v2 = (trajectory[-1] - trajectory[-2]) / self.dt
             acc = (v2 - v1) / self.dt
         else:
-            acc = (trajectory[index + 1] - 2 * trajectory[index] + trajectory[index - 1]) / (
-                self.dt**2
-            )
+            acc = (
+                trajectory[index + 1] - 2 * trajectory[index] + trajectory[index - 1]
+            ) / (self.dt**2)
 
         return pos, vel, acc
 
@@ -168,7 +168,12 @@ class AdvancedMotionBlender:
             + 4 * coeffs[4] * t**3
             + 5 * coeffs[5] * t**4
         )
-        acc = 2 * coeffs[2] + 6 * coeffs[3] * t + 12 * coeffs[4] * t**2 + 20 * coeffs[5] * t**3
+        acc = (
+            2 * coeffs[2]
+            + 6 * coeffs[3] * t
+            + 12 * coeffs[4] * t**2
+            + 20 * coeffs[5] * t**3
+        )
         return pos, vel, acc
 
     def _blend_quintic(
@@ -193,7 +198,9 @@ class AdvancedMotionBlender:
 
         return np.array(blend_traj)
 
-    def _blend_scurve(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_scurve(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Generate S-curve blend with jerk limiting.
         """
@@ -219,7 +226,9 @@ class AdvancedMotionBlender:
                 pose[:6] = points["position"][i]
                 if len(p0) > 6:
                     alpha = (
-                        i / (len(points["position"]) - 1) if len(points["position"]) > 1 else 1.0
+                        i / (len(points["position"]) - 1)
+                        if len(points["position"]) > 1
+                        else 1.0
                     )
                     pose[6:] = p0[6:] * (1 - alpha) + pf[6:] * alpha
                 blend_traj.append(pose)
@@ -265,7 +274,9 @@ class AdvancedMotionBlender:
 
         return np.array(blend_traj)
 
-    def _blend_cubic(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_cubic(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Cubic spline blend with C1 continuity.
         """

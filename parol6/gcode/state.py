@@ -215,7 +215,9 @@ class GcodeState:
 
         return work_coords
 
-    def calculate_target_position(self, parameters: dict[str, float]) -> dict[str, float]:
+    def calculate_target_position(
+        self, parameters: dict[str, float]
+    ) -> dict[str, float]:
         """
         Calculate target position based on positioning mode and parameters
 
@@ -305,10 +307,14 @@ class GcodeState:
                 # Load complete modal state
                 self.work_offsets = state_dict.get("work_offsets", self.work_offsets)
                 self.units = state_dict.get("units", self.units)
-                self.work_coordinate = state_dict.get("work_coordinate", self.work_coordinate)
+                self.work_coordinate = state_dict.get(
+                    "work_coordinate", self.work_coordinate
+                )
                 self.tool_length_offset = state_dict.get("tool_length_offset", 0.0)
                 self.motion_mode = state_dict.get("motion_mode", self.motion_mode)
-                self.positioning_mode = state_dict.get("positioning_mode", self.positioning_mode)
+                self.positioning_mode = state_dict.get(
+                    "positioning_mode", self.positioning_mode
+                )
                 self.plane = state_dict.get("plane", self.plane)
                 self.feed_rate = state_dict.get("feed_rate", self.feed_rate)
                 self.spindle_speed = state_dict.get("spindle_speed", self.spindle_speed)

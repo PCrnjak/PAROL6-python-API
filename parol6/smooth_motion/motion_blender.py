@@ -30,7 +30,9 @@ class MotionBlender:
         overlap_end = min(len(traj2), blend_samples // 3)
 
         # Extract blend region
-        blend_start_pose = traj1[overlap_start] if overlap_start < len(traj1) else traj1[-1]
+        blend_start_pose = (
+            traj1[overlap_start] if overlap_start < len(traj1) else traj1[-1]
+        )
         blend_end_pose = traj2[overlap_end] if overlap_end < len(traj2) else traj2[0]
 
         # Generate smooth transition using S-curve
@@ -48,12 +50,16 @@ class MotionBlender:
             r2 = Rotation.from_euler("xyz", blend_end_pose[3:], degrees=True)
             key_rots = Rotation.from_quat(np.stack([r1.as_quat(), r2.as_quat()]))
             slerp = Slerp(np.array([0.0, 1.0], dtype=float), key_rots)
-            orient_blend = slerp(np.array([float(s)], dtype=float)).as_euler("xyz", degrees=True)[0]
+            orient_blend = slerp(np.array([float(s)], dtype=float)).as_euler(
+                "xyz", degrees=True
+            )[0]
 
             pos_blend[3:] = orient_blend
             blended.append(pos_blend)
 
         # Combine with better overlap handling
-        result = np.vstack([traj1[:overlap_start], np.array(blended), traj2[overlap_end:]])
+        result = np.vstack(
+            [traj1[:overlap_start], np.array(blended), traj2[overlap_end:]]
+        )
 
         return result

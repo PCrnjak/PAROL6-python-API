@@ -46,7 +46,10 @@ def _ensure_sync_loop() -> None:
     if _SYNC_LOOP is None:
         _SYNC_LOOP = asyncio.new_event_loop()
         _SYNC_THREAD = threading.Thread(
-            target=_loop_worker, args=(_SYNC_LOOP,), name="parol6-sync-loop", daemon=True
+            target=_loop_worker,
+            args=(_SYNC_LOOP,),
+            name="parol6-sync-loop",
+            daemon=True,
         )
         _SYNC_THREAD.start()
         _SYNC_LOOP_READY.wait(timeout=1.0)
@@ -94,7 +97,9 @@ class RobotClient:
         timeout: float = 2.0,
         retries: int = 1,
     ) -> None:
-        self._inner = AsyncRobotClient(host=host, port=port, timeout=timeout, retries=retries)
+        self._inner = AsyncRobotClient(
+            host=host, port=port, timeout=timeout, retries=retries
+        )
 
     def close(self) -> None:
         """Close underlying AsyncRobotClient and release resources."""
@@ -254,11 +259,17 @@ class RobotClient:
 
     # ---------- responsive waits / raw send ----------
 
-    def wait_for_server_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
+    def wait_for_server_ready(
+        self, timeout: float = 5.0, interval: float = 0.05
+    ) -> bool:
         """Poll ping() until server responds or timeout."""
-        return _run(self._inner.wait_for_server_ready(timeout=timeout, interval=interval))
+        return _run(
+            self._inner.wait_for_server_ready(timeout=timeout, interval=interval)
+        )
 
-    def wait_for_status(self, predicate: Callable[[StatusAggregate], bool], timeout: float = 5.0) -> bool:
+    def wait_for_status(
+        self, predicate: Callable[[StatusAggregate], bool], timeout: float = 5.0
+    ) -> bool:
         """
         Wait until a multicast status satisfies predicate(status) within timeout.
         Note: predicate is executed in the client's event loop thread.
@@ -272,7 +283,9 @@ class RobotClient:
         Send a raw UDP message; optionally await a single reply and return its text.
         Returns True on fire-and-forget send, str on reply, or None on timeout/error when awaiting.
         """
-        return _run(self._inner.send_raw(message, await_reply=await_reply, timeout=timeout))
+        return _run(
+            self._inner.send_raw(message, await_reply=await_reply, timeout=timeout)
+        )
 
     # ---------- extended controls / motion ----------
 
@@ -413,7 +426,9 @@ class RobotClient:
         speed: int | None = 150,
         current: int | None = 500,
     ) -> bool:
-        return _run(self._inner.control_electric_gripper(action, position, speed, current))
+        return _run(
+            self._inner.control_electric_gripper(action, position, speed, current)
+        )
 
     # ---------- GCODE ----------
 

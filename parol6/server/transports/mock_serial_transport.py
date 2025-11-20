@@ -27,9 +27,13 @@ class MockRobotState:
     """Internal state of the simulated robot."""
 
     # Joint positions (in steps)
-    position_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    position_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
     # Floating accumulator for high-fidelity integration (steps, float)
-    position_f: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.float64))
+    position_f: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.float64)
+    )
     # Joint speeds (in steps/sec)
     speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Homed status per joint
@@ -39,12 +43,20 @@ class MockRobotState:
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )  # E-stop released
     # Error states
-    temperature_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
-    position_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
+    temperature_error_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
+    position_error_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
     # Gripper state
-    gripper_data_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    gripper_data_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
     # Timing data
-    timing_data_in: np.ndarray = field(default_factory=lambda: np.zeros((1,), dtype=np.int32))
+    timing_data_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((1,), dtype=np.int32)
+    )
 
     # Simulation parameters
     update_rate: float = cfg.INTERVAL_S  # match control loop cadence
@@ -53,8 +65,12 @@ class MockRobotState:
 
     # Command state from controller
     command_out: int = CommandCode.IDLE
-    position_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
-    speed_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    position_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
+    speed_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
 
     def __post_init__(self):
         """Initialize robot to standby position."""
@@ -80,7 +96,9 @@ class MockSerialTransport:
     it completely transparent to the controller.
     """
 
-    def __init__(self, port: str | None = None, baudrate: int = 2000000, timeout: float = 0):
+    def __init__(
+        self, port: str | None = None, baudrate: int = 2000000, timeout: float = 0
+    ):
         """
         Initialize the mock serial transport.
 
@@ -170,7 +188,9 @@ class MockSerialTransport:
             self._state.command_out = CommandCode.IDLE
             logger.info("MockSerialTransport: state synchronized from controller")
         except Exception as e:
-            logger.warning("MockSerialTransport: failed to sync from controller state: %s", e)
+            logger.warning(
+                "MockSerialTransport: failed to sync from controller state: %s", e
+            )
 
     def disconnect(self) -> None:
         """Simulate serial port disconnection."""
@@ -299,7 +319,9 @@ class MockSerialTransport:
 
             # Clip commanded speeds to joint limits
             v_cmd = np.clip(
-                state.speed_out.astype(np.float64, copy=False), -self._vmax_f, self._vmax_f
+                state.speed_out.astype(np.float64, copy=False),
+                -self._vmax_f,
+                self._vmax_f,
             )
 
             # Integrate position
@@ -310,7 +332,9 @@ class MockSerialTransport:
 
             # Report actual velocity based on realized motion
             if dt > 0:
-                realized_v = np.rint((state.position_f - self._prev_pos_f) / dt).astype(np.int32)
+                realized_v = np.rint((state.position_f - self._prev_pos_f) / dt).astype(
+                    np.int32
+                )
                 np.clip(realized_v, -self._vmax_i32, self._vmax_i32, out=state.speed_in)
             else:
                 state.speed_in.fill(0)
@@ -348,7 +372,9 @@ class MockSerialTransport:
 
             # Report actual velocity based on realized motion
             if dt > 0:
-                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(np.int32)
+                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(
+                    np.int32
+                )
             else:
                 realized_v = np.zeros(6, dtype=np.int32)
             vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)

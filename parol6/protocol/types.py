@@ -21,7 +21,9 @@ class StreamModeState(Enum):
 Frame = Literal["WRF", "TRF"]
 
 # Axis literals
-Axis = Literal["X+", "X-", "Y+", "Y-", "Z+", "Z-", "RX+", "RX-", "RY+", "RY-", "RZ+", "RZ-"]
+Axis = Literal[
+    "X+", "X-", "Y+", "Y-", "Z+", "Z-", "RX+", "RX-", "RY+", "RY-", "RZ+", "RZ-"
+]
 
 # Acknowledgment status literals
 AckStatus = Literal[

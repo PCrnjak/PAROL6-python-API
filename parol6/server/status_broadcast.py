@@ -53,7 +53,7 @@ class StatusBroadcaster(threading.Thread):
         self._stale_s = stale_s
 
         # Negotiated transport (can be forced via env or auto-fallback at runtime)
-        self._use_unicast: bool = (cfg.STATUS_TRANSPORT == "UNICAST")
+        self._use_unicast: bool = cfg.STATUS_TRANSPORT == "UNICAST"
 
         self._sock: socket.socket | None = None
         self._running = threading.Event()
@@ -82,7 +82,9 @@ class StatusBroadcaster(threading.Thread):
             except Exception:
                 pass
 
-    def _verify_multicast_reachable(self, sock: socket.socket, timeout: float = 0.1) -> bool:
+    def _verify_multicast_reachable(
+        self, sock: socket.socket, timeout: float = 0.1
+    ) -> bool:
         """
         Attempt a loopback reachability check for multicast by joining the group on a
         temporary receiver and sending a probe. Returns True if the probe is received.
@@ -150,7 +152,9 @@ class StatusBroadcaster(threading.Thread):
 
         try:
             sock.setsockopt(
-                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.iface_ip)
+                socket.IPPROTO_IP,
+                socket.IP_MULTICAST_IF,
+                socket.inet_aton(self.iface_ip),
             )
             if not self._verify_multicast_reachable(sock):
                 raise RuntimeError(
@@ -163,13 +167,19 @@ class StatusBroadcaster(threading.Thread):
             try:
                 primary_ip = self._detect_primary_ip()
                 sock.setsockopt(
-                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(primary_ip)
+                    socket.IPPROTO_IP,
+                    socket.IP_MULTICAST_IF,
+                    socket.inet_aton(primary_ip),
                 )
-                logger.info(f"StatusBroadcaster: fallback IP_MULTICAST_IF to {primary_ip}")
+                logger.info(
+                    f"StatusBroadcaster: fallback IP_MULTICAST_IF to {primary_ip}"
+                )
                 if not self._verify_multicast_reachable(sock):
                     raise RuntimeError("Fallback multicast reachability failed")
             except Exception as e2:
-                logger.warning(f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e2}")
+                logger.warning(
+                    f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e2}"
+                )
                 # As a last resort, switch to UNICAST
                 try:
                     sock.close()
@@ -213,7 +223,11 @@ class StatusBroadcaster(threading.Thread):
                     # Socket disappeared unexpectedly; try to switch to unicast and continue
                     self._switch_to_unicast()
                     sock = self._sock
-                dest = (cfg.STATUS_UNICAST_HOST, self.port) if self._use_unicast else (self.group, self.port)
+                dest = (
+                    (cfg.STATUS_UNICAST_HOST, self.port)
+                    if self._use_unicast
+                    else (self.group, self.port)
+                )
                 try:
                     sock.sendto(memoryview(payload), dest)  # type: ignore[arg-type]
                 except OSError as e:
@@ -223,7 +237,10 @@ class StatusBroadcaster(threading.Thread):
                         logger.warning(f"StatusBroadcaster send failed: {e}")
                         self._tx_last_log_time = time.monotonic()
                     # If too many failures and we are on multicast, fall back to unicast
-                    if not self._use_unicast and self._send_failures >= self._max_send_failures:
+                    if (
+                        not self._use_unicast
+                        and self._send_failures >= self._max_send_failures
+                    ):
                         logger.info(
                             f"StatusBroadcaster: {self._send_failures} consecutive send errors; switching to UNICAST"
                         )
@@ -237,14 +254,18 @@ class StatusBroadcaster(threading.Thread):
                         period = now - self._tx_last_time
                         if period > 0:
                             # EMA update: 0.1 * new + 0.9 * old
-                            self._tx_ema_period = 0.1 * period + 0.9 * self._tx_ema_period
+                            self._tx_ema_period = (
+                                0.1 * period + 0.9 * self._tx_ema_period
+                            )
                     self._tx_last_time = now
                     self._tx_count += 1
 
                     # Log rate every 3 seconds
                     if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
                         tx_hz = 1.0 / self._tx_ema_period
-                        logger.debug(f"Status TX: {tx_hz:.1f} Hz (count={self._tx_count})")
+                        logger.debug(
+                            f"Status TX: {tx_hz:.1f} Hz (count={self._tx_count})"
+                        )
                         self._tx_last_log_time = now
 
             # Sleep until next deadline (compensates for work time)

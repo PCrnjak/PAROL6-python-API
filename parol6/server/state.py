@@ -57,29 +57,51 @@ class ControllerState:
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
 
     # int32 joint buffers
-    Position_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
-    Speed_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
-    Gripper_data_out: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    Position_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
+    Speed_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
+    Gripper_data_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
 
-    Position_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    Position_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
     Speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
-    Timing_data_in: np.ndarray = field(default_factory=lambda: np.zeros((1,), dtype=np.int32))
-    Gripper_data_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    Timing_data_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((1,), dtype=np.int32)
+    )
+    Gripper_data_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
 
     # uint8 flag/bitfield buffers
-    Affected_joint_out: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
-    InOut_out: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
+    Affected_joint_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
+    InOut_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
     InOut_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
     Homed_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
-    Temperature_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
-    Position_error_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
+    Temperature_error_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
+    Position_error_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )
 
     Timeout_out: int = 0
     XTR_data: int = 0
 
     # Command queueing and tracking
     command_queue: deque[Any] = field(default_factory=deque)
-    incoming_command_buffer: deque[tuple[str, tuple[str, int]]] = field(default_factory=deque)
+    incoming_command_buffer: deque[tuple[str, tuple[str, int]]] = field(
+        default_factory=deque
+    )
     command_id_map: dict[Any, tuple[str, tuple[str, int]]] = field(default_factory=dict)
     active_command: Any = None
     active_command_id: str | None = None
@@ -96,7 +118,9 @@ class ControllerState:
     port: int = 5001
     start_time: float = 0.0
 
-    gripper_mode_tracker: GripperModeResetTracker = field(default_factory=GripperModeResetTracker)
+    gripper_mode_tracker: GripperModeResetTracker = field(
+        default_factory=GripperModeResetTracker
+    )
 
     # Control loop runtime metrics (used by benchmarks/monitoring)
     loop_count: int = 0
@@ -111,11 +135,15 @@ class ControllerState:
     command_timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=10))
 
     # Forward kinematics cache (invalidated when Position_in or current_tool changes)
-    _fkine_last_pos_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
+    _fkine_last_pos_in: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.int32)
+    )
     _fkine_last_tool: str = ""
     _fkine_se3: Any = None  # SE3 instance from spatialmath
     _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
-    _fkine_flat_mm: np.ndarray = field(default_factory=lambda: np.zeros((16,), dtype=np.float64))
+    _fkine_flat_mm: np.ndarray = field(
+        default_factory=lambda: np.zeros((16,), dtype=np.float64)
+    )
 
     @property
     def current_tool(self) -> str:

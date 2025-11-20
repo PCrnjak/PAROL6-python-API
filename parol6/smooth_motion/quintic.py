@@ -48,7 +48,14 @@ class QuinticPolynomial:
         self.qf = qf
 
         # Store boundary conditions
-        self.boundary_conditions = {"q0": q0, "qf": qf, "v0": v0, "vf": vf, "a0": a0, "af": af}
+        self.boundary_conditions = {
+            "q0": q0,
+            "qf": qf,
+            "v0": v0,
+            "vf": vf,
+            "a0": a0,
+            "af": af,
+        }
 
         # Solve for polynomial coefficients using analytical method
         self.coeffs = self._solve_coefficients_analytical(q0, qf, v0, vf, a0, af, T)
@@ -80,11 +87,18 @@ class QuinticPolynomial:
         a2_ = a0_norm / 2.0
 
         a3_ = 10 * (qf - q0) - 6 * v0_norm - 4 * vf_norm - (3 * a0_norm - af_norm) / 2.0
-        a4_ = -15 * (qf - q0) + 8 * v0_norm + 7 * vf_norm + (3 * a0_norm - 2 * af_norm) / 2.0
+        a4_ = (
+            -15 * (qf - q0)
+            + 8 * v0_norm
+            + 7 * vf_norm
+            + (3 * a0_norm - 2 * af_norm) / 2.0
+        )
         a5_ = 6 * (qf - q0) - 3 * (v0_norm + vf_norm) - (a0_norm - af_norm) / 2.0
 
         # Convert back to actual time domain
-        coeffs = np.array([a0_, a1_ / T, a2_ / T**2, a3_ / T**3, a4_ / T**4, a5_ / T**5])
+        coeffs = np.array(
+            [a0_, a1_ / T, a2_ / T**2, a3_ / T**3, a4_ / T**4, a5_ / T**5]
+        )
         return coeffs
 
     def _prepare_derivative_coeffs(self):
@@ -99,9 +113,16 @@ class QuinticPolynomial:
             ]
         )
         self.acc_coeffs = np.array(
-            [2 * self.coeffs[2], 6 * self.coeffs[3], 12 * self.coeffs[4], 20 * self.coeffs[5]]
+            [
+                2 * self.coeffs[2],
+                6 * self.coeffs[3],
+                12 * self.coeffs[4],
+                20 * self.coeffs[5],
+            ]
         )
-        self.jerk_coeffs = np.array([6 * self.coeffs[3], 24 * self.coeffs[4], 60 * self.coeffs[5]])
+        self.jerk_coeffs = np.array(
+            [6 * self.coeffs[3], 24 * self.coeffs[4], 60 * self.coeffs[5]]
+        )
 
     def position(self, t: float) -> float:
         """Evaluate position at time t using Horner's method."""
@@ -186,11 +207,15 @@ class QuinticPolynomial:
         """
         validation = {
             "q0": abs(self.position(0) - self.boundary_conditions["q0"]) < tolerance,
-            "qf": abs(self.position(self.T) - self.boundary_conditions["qf"]) < tolerance,
+            "qf": abs(self.position(self.T) - self.boundary_conditions["qf"])
+            < tolerance,
             "v0": abs(self.velocity(0) - self.boundary_conditions["v0"]) < tolerance,
-            "vf": abs(self.velocity(self.T) - self.boundary_conditions["vf"]) < tolerance,
-            "a0": abs(self.acceleration(0) - self.boundary_conditions["a0"]) < tolerance,
-            "af": abs(self.acceleration(self.T) - self.boundary_conditions["af"]) < tolerance,
+            "vf": abs(self.velocity(self.T) - self.boundary_conditions["vf"])
+            < tolerance,
+            "a0": abs(self.acceleration(0) - self.boundary_conditions["a0"])
+            < tolerance,
+            "af": abs(self.acceleration(self.T) - self.boundary_conditions["af"])
+            < tolerance,
         }
         return validation
 
@@ -209,7 +234,9 @@ class QuinticPolynomial:
             metrics["time_distance_ratio"] = time_distance_ratio
             if time_distance_ratio > 100:
                 is_stable = False
-                warnings.append(f"Poor conditioning: T/d ratio = {time_distance_ratio:.1f}")
+                warnings.append(
+                    f"Poor conditioning: T/d ratio = {time_distance_ratio:.1f}"
+                )
 
         # Check coefficient magnitudes
         coeff_magnitudes = [abs(c) for c in self.coeffs]
@@ -224,7 +251,9 @@ class QuinticPolynomial:
                 warnings.append(f"Large coefficient ratio: {coeff_ratio:.2e}")
 
         if self.T < 0.001:
-            warnings.append(f"Very small duration T={self.T} may cause numerical issues")
+            warnings.append(
+                f"Very small duration T={self.T} may cause numerical issues"
+            )
 
         max_jerk = max(abs(self.jerk(t)) for t in np.linspace(0, self.T, 10))
         if max_jerk > 1e6:
@@ -274,7 +303,11 @@ class MultiAxisQuinticTrajectory:
         af = af if af is not None else [0.0] * self.num_axes
 
         # Determine duration as a concrete float
-        T_val: float = T if T is not None else self._calculate_minimum_time(q0, qf, v0, vf, constraints)
+        T_val: float = (
+            T
+            if T is not None
+            else self._calculate_minimum_time(q0, qf, v0, vf, constraints)
+        )
         self.T: float = T_val
 
         # Generate quintic polynomial for each axis

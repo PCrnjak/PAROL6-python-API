@@ -40,7 +40,9 @@ def initialize_hardware_position(client, human_prompt) -> list[float] | None:
     print(f"Moving to safe starting position: {SAFE_SMOOTH_START_JOINTS}")
 
     # Move to the joint position
-    result = client.move_joints(SAFE_SMOOTH_START_JOINTS, duration=4, wait_for_ack=True, timeout=15)
+    result = client.move_joints(
+        SAFE_SMOOTH_START_JOINTS, duration=4, wait_for_ack=True, timeout=15
+    )
     print(f"Move command result: {result}")
 
     # Wait until robot stops
@@ -148,7 +150,11 @@ class TestHardwareBasicMoves:
             print(f"Testing Cartesian jog in {axis} direction...")
 
             result = client.jog_cartesian(
-                frame="WRF", axis=axis, speed_percentage=20, duration=1.0, wait_for_ack=True
+                frame="WRF",
+                axis=axis,
+                speed_percentage=20,
+                duration=1.0,
+                wait_for_ack=True,
             )
 
             assert isinstance(result, dict)
@@ -307,7 +313,11 @@ class TestHardwareSmoothMotion:
 
         print(f"Executing spline through {len(waypoints)} waypoints")
         result = client.smooth_spline(
-            waypoints=waypoints, duration=6.0, frame="WRF", wait_for_ack=True, timeout=20
+            waypoints=waypoints,
+            duration=6.0,
+            frame="WRF",
+            wait_for_ack=True,
+            timeout=20,
         )
 
         assert isinstance(result, dict)
@@ -442,7 +452,14 @@ class TestHardwareSafety:
             pytest.skip("User declined joint limit test")
 
         # Try to move to a potentially extreme position (should be rejected or limited)
-        extreme_joints = [180.0, -180.0, 180.0, -180.0, 180.0, -180.0]  # Extreme angles as floats
+        extreme_joints = [
+            180.0,
+            -180.0,
+            180.0,
+            -180.0,
+            180.0,
+            -180.0,
+        ]  # Extreme angles as floats
 
         print("Testing extreme joint angles (should be rejected or limited)...")
         result = client.move_joints(
@@ -493,14 +510,21 @@ class TestHardwareLegacySequence:
 
         # Electric gripper calibration and moves
         print("Calibrating electric gripper...")
-        result = client.control_electric_gripper(action="calibrate", wait_for_ack=True, timeout=10)
+        result = client.control_electric_gripper(
+            action="calibrate", wait_for_ack=True, timeout=10
+        )
         if isinstance(result, dict):
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
         time.sleep(2)
 
         print("Moving electric gripper to position 100...")
         result = client.control_electric_gripper(
-            action="move", position=100, speed=150, current=200, wait_for_ack=True, timeout=10
+            action="move",
+            position=100,
+            speed=150,
+            current=200,
+            wait_for_ack=True,
+            timeout=10,
         )
         if isinstance(result, dict):
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
@@ -508,7 +532,12 @@ class TestHardwareLegacySequence:
 
         print("Moving electric gripper to position 200...")
         result = client.control_electric_gripper(
-            action="move", position=200, speed=150, current=200, wait_for_ack=True, timeout=10
+            action="move",
+            position=200,
+            speed=150,
+            current=200,
+            wait_for_ack=True,
+            timeout=10,
         )
         if isinstance(result, dict):
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
@@ -571,7 +600,10 @@ class TestHardwareLegacySequence:
         # Cartesian movement (exact waypoint from test_script.py)
         print("Moving cartesian to: [7, 250, 150, -100, 0, -90]...")
         result = client.move_cartesian(
-            [7, 250, 150, -100, 0, -90], speed_percentage=50, wait_for_ack=True, timeout=15
+            [7, 250, 150, -100, 0, -90],
+            speed_percentage=50,
+            wait_for_ack=True,
+            timeout=15,
         )
         if isinstance(result, dict):
             assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
@@ -613,7 +645,9 @@ class TestHardwareGripper:
 
         # Test gripper open
         print("Opening pneumatic gripper...")
-        result = client.control_pneumatic_gripper("open", 1, wait_for_ack=True, timeout=5)
+        result = client.control_pneumatic_gripper(
+            "open", 1, wait_for_ack=True, timeout=5
+        )
 
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
@@ -625,7 +659,9 @@ class TestHardwareGripper:
 
         # Test gripper close
         print("Closing pneumatic gripper...")
-        result = client.control_pneumatic_gripper("close", 1, wait_for_ack=True, timeout=5)
+        result = client.control_pneumatic_gripper(
+            "close", 1, wait_for_ack=True, timeout=5
+        )
 
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]
@@ -653,7 +689,9 @@ class TestHardwareGripper:
 
         # Test gripper calibration (from legacy test_script.py)
         print("Calibrating electric gripper...")
-        result = client.control_electric_gripper(action="calibrate", wait_for_ack=True, timeout=10)
+        result = client.control_electric_gripper(
+            action="calibrate", wait_for_ack=True, timeout=10
+        )
 
         assert isinstance(result, dict)
         assert result.get("status") in ["COMPLETED", "QUEUED", "EXECUTING"]

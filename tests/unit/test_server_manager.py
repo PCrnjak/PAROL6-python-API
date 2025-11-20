@@ -1,4 +1,3 @@
-
 import pytest
 
 from parol6.client.manager import ServerManager, is_server_running, manage_server
@@ -21,7 +20,9 @@ async def test_manage_server_starts_and_reports_running(monkeypatch):
 
     manager: ServerManager | None = None
     try:
-        manager = manage_server(host=host, port=port, com_port=None, extra_env=None, normalize_logs=False)
+        manager = manage_server(
+            host=host, port=port, com_port=None, extra_env=None, normalize_logs=False
+        )
         assert isinstance(manager, ServerManager)
 
         # After manage_server, the UDP endpoint should respond to PING
@@ -42,12 +43,20 @@ async def test_manage_server_fast_fails_when_already_running(monkeypatch):
     manager: ServerManager | None = None
     try:
         # First start a server
-        manager = manage_server(host=host, port=port, com_port=None, extra_env=None, normalize_logs=False)
+        manager = manage_server(
+            host=host, port=port, com_port=None, extra_env=None, normalize_logs=False
+        )
         assert is_server_running(host=host, port=port, timeout=1.0)
 
         # Second attempt should raise RuntimeError because the port is taken by an existing server
         with pytest.raises(RuntimeError):
-            manage_server(host=host, port=port, com_port=None, extra_env=None, normalize_logs=False)
+            manage_server(
+                host=host,
+                port=port,
+                com_port=None,
+                extra_env=None,
+                normalize_logs=False,
+            )
     finally:
         if manager is not None:
             manager.stop_controller()

@@ -34,7 +34,9 @@ class SerialTransport:
     START_BYTES = bytes([0xFF, 0xFF, 0xFF])
     END_BYTES = bytes([0x01, 0x02])
 
-    def __init__(self, port: str | None = None, baudrate: int = 2000000, timeout: float = 0):
+    def __init__(
+        self, port: str | None = None, baudrate: int = 2000000, timeout: float = 0
+    ):
         """
         Initialize the serial transport.
 
@@ -233,7 +235,9 @@ class SerialTransport:
         Returns the started Thread object. If already running, returns the existing one.
         """
         if not self.is_connected():
-            raise RuntimeError("SerialTransport.start_reader: serial port not connected")
+            raise RuntimeError(
+                "SerialTransport.start_reader: serial port not connected"
+            )
 
         if self._reader_thread and self._reader_thread.is_alive():
             return self._reader_thread
@@ -277,7 +281,8 @@ class SerialTransport:
                     except (OSError, TypeError, ValueError, AttributeError):
                         # fd likely closed during disconnect; stop quietly
                         logger.info(
-                            "Serial reader stopping due to disconnect/closed FD", exc_info=False
+                            "Serial reader stopping due to disconnect/closed FD",
+                            exc_info=False,
                         )
                         try:
                             self.disconnect()
@@ -301,7 +306,9 @@ class SerialTransport:
 
                     # Calculate overflow and adjust tail if needed
                     avail = (head - tail + cap) % cap
-                    free = cap - 1 - avail  # keep one slot empty to disambiguate full/empty
+                    free = (
+                        cap - 1 - avail
+                    )  # keep one slot empty to disambiguate full/empty
                     over = max(0, n - free)
                     if over:
                         tail = (tail + over) % cap
@@ -445,7 +452,9 @@ class SerialTransport:
         elif current_time - self._last_print_time >= self._print_interval:
             # Print debug information
             if self._interval_msg_count > 0:
-                avg_hz = self._interval_msg_count / (current_time - self._last_print_time)
+                avg_hz = self._interval_msg_count / (
+                    current_time - self._last_print_time
+                )
                 logger.debug(
                     f"Serial RX Stats - Avg Hz: {avg_hz:.2f} (Total: {self._rx_msg_count})"
                 )
@@ -459,7 +468,9 @@ class SerialTransport:
             self._interval_msg_count = 0
 
 
-def create_serial_transport(port: str | None = None, baudrate: int = 2000000) -> SerialTransport:
+def create_serial_transport(
+    port: str | None = None, baudrate: int = 2000000
+) -> SerialTransport:
     """
     Factory function to create and optionally connect a serial transport.
 

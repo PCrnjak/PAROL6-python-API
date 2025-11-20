@@ -58,10 +58,19 @@ class ExecutionStatus:
 
     @classmethod
     def failed(
-        cls, message: str, error: Exception | None = None, details: dict[str, Any] | None = None
+        cls,
+        message: str,
+        error: Exception | None = None,
+        details: dict[str, Any] | None = None,
     ) -> "ExecutionStatus":
         et = type(error).__name__ if error is not None else None
-        return cls(ExecutionStatusCode.FAILED, message, error=error, details=details, error_type=et)
+        return cls(
+            ExecutionStatusCode.FAILED,
+            message,
+            error=error,
+            details=details,
+            error_type=et,
+        )
 
 
 # ----- Shared context and small utilities -----
@@ -129,7 +138,9 @@ def expect_len(parts: list[str], n: int, cmd: str) -> None:
 def at_least_len(parts: list[str], n: int, cmd: str) -> None:
     """Ensure parts list has at least n elements."""
     if len(parts) < n:
-        raise ValueError(f"{cmd} requires at least {n - 1} parameters, got {len(parts) - 1}")
+        raise ValueError(
+            f"{cmd} requires at least {n - 1} parameters, got {len(parts) - 1}"
+        )
 
 
 def parse_frame(token: Any) -> str:
@@ -449,7 +460,9 @@ class MotionCommand(CommandBase):
 
     def joint_amax_steps(self, accel_percent: float) -> np.ndarray:
         a_rad = self.linmap_pct(accel_percent, self.ACC_MIN_RAD, self.ACC_MAX_RAD)
-        return np.asarray(PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float)
+        return np.asarray(
+            PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float
+        )
 
     # ---- speed scaling & limits ----
     def scale_speeds_to_joint_max(self, speeds: np.ndarray) -> np.ndarray:
@@ -539,7 +552,9 @@ class MotionProfile:
         n = max(2, int(np.ceil(dur / max(1e-9, dt))))
         tgrid = np.linspace(0.0, dur, n, dtype=float)
         q, _qd = MotionCommand.plan_trapezoids(
-            np.asarray(start_steps, dtype=float), np.asarray(target_steps, dtype=float), tgrid
+            np.asarray(start_steps, dtype=float),
+            np.asarray(target_steps, dtype=float),
+            tgrid,
         )
         return cast(np.ndarray, q.astype(np.int32, copy=False))
 
@@ -560,7 +575,9 @@ class MotionProfile:
         # Per-joint vmax and amax (steps/s and steps/s^2)
         jmin = MotionCommand.J_MIN
         jmax = MotionCommand.J_MAX
-        v_max_joint = jmin + (jmax - jmin) * (max(0.0, min(100.0, velocity_percent)) / 100.0)
+        v_max_joint = jmin + (jmax - jmin) * (
+            max(0.0, min(100.0, velocity_percent)) / 100.0
+        )
 
         # Compute accel steps without instantiating MotionCommand
         a_rad = MotionCommand.linmap_pct(
@@ -585,10 +602,14 @@ class MotionProfile:
         t_accel_adj[mask_safe] = np.sqrt(path[mask_safe] / a_steps_vec[mask_safe])
 
         # Per-joint total time, then horizon
-        joint_time = np.where(short_path, 2.0 * t_accel_adj, path / v_max_joint + t_accel)
+        joint_time = np.where(
+            short_path, 2.0 * t_accel_adj, path / v_max_joint + t_accel
+        )
         total_time = float(np.max(joint_time))
         if total_time <= 0.0:
-            return cast(np.ndarray, np.asarray(start_steps, dtype=np.int32).reshape(1, -1))
+            return cast(
+                np.ndarray, np.asarray(start_steps, dtype=np.int32).reshape(1, -1)
+            )
         if total_time < (2 * dt):
             total_time = 2 * dt
 

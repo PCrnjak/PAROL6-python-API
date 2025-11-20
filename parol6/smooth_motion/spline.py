@@ -88,18 +88,23 @@ class SplineMotion(TrajectoryGenerator):
                 else:
                     next_direction = waypoints[i + 2] - waypoints[i + 1]
                     next_segment_time = (
-                        segment_times[i + 1] if (i + 1) < len(segment_times) else segment_times[i]
+                        segment_times[i + 1]
+                        if (i + 1) < len(segment_times)
+                        else segment_times[i]
                     )
                     current_direction = waypoints[i + 1] - waypoints[i]
                     avg_direction = (
-                        current_direction / segment_times[i] + next_direction / next_segment_time
+                        current_direction / segment_times[i]
+                        + next_direction / next_segment_time
                     ) * 0.5
                     vf = list(avg_direction[:6] * 0.7)  # Scale factor for stability
 
                 prev_vf = vf
 
             # Create multi-axis quintic trajectory
-            segment_traj = MultiAxisQuinticTrajectory(list(start_pose), list(end_pose), v0, vf, T=T)
+            segment_traj = MultiAxisQuinticTrajectory(
+                list(start_pose), list(end_pose), v0, vf, T=T
+            )
 
             # Sample the segment
             segment_points = segment_traj.get_trajectory_points(self.dt)
@@ -112,7 +117,9 @@ class SplineMotion(TrajectoryGenerator):
 
         return np.array(full_trajectory)
 
-    def _generate_scurve_waypoints(self, waypoints, behavior, optimization, jerk_limit=None):
+    def _generate_scurve_waypoints(
+        self, waypoints, behavior, optimization, jerk_limit=None
+    ):
         """Generate S-curve trajectories between waypoints."""
         waypoints = np.array(waypoints)
         num_waypoints = len(waypoints)
@@ -146,7 +153,9 @@ class SplineMotion(TrajectoryGenerator):
                 j_max = jerk_limit if jerk_limit is not None else constraints["j_max"]
 
                 # Create S-curve profile
-                scurve = SCurveProfile(distance, constraints["v_max"], constraints["a_max"], j_max)
+                scurve = SCurveProfile(
+                    distance, constraints["v_max"], constraints["a_max"], j_max
+                )
 
                 max_time = max(max_time, scurve.get_total_time())
                 segment_trajectories.append(scurve)
@@ -227,13 +236,17 @@ class SplineMotion(TrajectoryGenerator):
             pos_splines.append(spline)
 
         # Orientation trajectory splines
-        rotations = [Rotation.from_euler("xyz", wp[3:], degrees=True) for wp in waypoints]
+        rotations = [
+            Rotation.from_euler("xyz", wp[3:], degrees=True) for wp in waypoints
+        ]
         quats = np.array([r.as_quat() for r in rotations])
         key_rots = Rotation.from_quat(quats)
         slerp = Slerp(timestamps_arr, key_rots)
 
         # Generate dense trajectory
-        t_eval = self.generate_timestamps(float(timestamps_arr[-1] if len(timestamps_arr) else 0.0))
+        t_eval = self.generate_timestamps(
+            float(timestamps_arr[-1] if len(timestamps_arr) else 0.0)
+        )
         trajectory: list[list[float]] = []
 
         for t in t_eval:
@@ -289,7 +302,8 @@ class SplineMotion(TrajectoryGenerator):
         path_length = 0.0
         for i in range(1, len(basic_trajectory)):
             segment_length = np.linalg.norm(
-                np.array(basic_trajectory[i][:3]) - np.array(basic_trajectory[i - 1][:3])
+                np.array(basic_trajectory[i][:3])
+                - np.array(basic_trajectory[i - 1][:3])
             )
             path_length += float(segment_length)
 

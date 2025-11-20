@@ -113,7 +113,9 @@ class HeadlessCommanderProc:
 
             # Wait for process to be ready
             if self.wait_ready(timeout):
-                logger.info(f"Headless commander started successfully (PID: {self.process.pid})")
+                logger.info(
+                    f"Headless commander started successfully (PID: {self.process.pid})"
+                )
                 return True
             else:
                 logger.error("Process failed to become ready within timeout")
@@ -144,10 +146,14 @@ class HeadlessCommanderProc:
                 logger.debug(f"Output capture error: {e}")
 
         self._output_thread = threading.Thread(
-            target=capture_output, args=(self.process.stdout, self._output_lines), daemon=True
+            target=capture_output,
+            args=(self.process.stdout, self._output_lines),
+            daemon=True,
         )
         self._error_thread = threading.Thread(
-            target=capture_output, args=(self.process.stderr, self._error_lines), daemon=True
+            target=capture_output,
+            args=(self.process.stderr, self._error_lines),
+            daemon=True,
         )
 
         self._output_thread.start()
@@ -208,9 +214,13 @@ class HeadlessCommanderProc:
 
             try:
                 self.process.wait(timeout=5.0)
-                logger.info(f"Process terminated gracefully (exit code: {self.process.returncode})")
+                logger.info(
+                    f"Process terminated gracefully (exit code: {self.process.returncode})"
+                )
             except subprocess.TimeoutExpired:
-                logger.warning("Process did not terminate gracefully, forcing shutdown...")
+                logger.warning(
+                    "Process did not terminate gracefully, forcing shutdown..."
+                )
                 self.process.kill()
                 self.process.wait()
                 logger.info(f"Process killed (exit code: {self.process.returncode})")

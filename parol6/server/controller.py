@@ -35,7 +35,17 @@ from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.serial_transport import SerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
 import parol6.config as cfg
-from parol6.config import TRACE, INTERVAL_S, MCAST_GROUP, MCAST_PORT, MCAST_IF, MCAST_TTL, STATUS_RATE_HZ, STATUS_STALE_S, get_com_port_with_fallback
+from parol6.config import (
+    TRACE,
+    INTERVAL_S,
+    MCAST_GROUP,
+    MCAST_PORT,
+    MCAST_IF,
+    MCAST_TTL,
+    STATUS_RATE_HZ,
+    STATUS_STALE_S,
+    get_com_port_with_fallback,
+)
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -121,7 +131,9 @@ class Controller:
         self.command_id_map: dict[str, Any] = {}
 
         # E-stop recovery
-        self.estop_active: bool | None = None  # None = unknown, True = active, False = released
+        self.estop_active: bool | None = (
+            None  # None = unknown, True = active, False = released
+        )
         self.first_frame_received = False  # Track if we've received data from robot
         self._serial_last_version = 0  # Version of last decoded serial frame
 
@@ -142,7 +154,9 @@ class Controller:
         # Initialize components on construction
         self._initialize_components()
 
-    def _send_ack(self, cmd_id: str, status: str, details: str, addr: tuple[str, int]) -> None:
+    def _send_ack(
+        self, cmd_id: str, status: str, details: str, addr: tuple[str, int]
+    ) -> None:
         """
         Send an acknowledgment message.
 
@@ -157,7 +171,12 @@ class Controller:
 
         # Debug/Trace log all outgoing ACKs
         logger.log(
-            TRACE, "ack_send id=%s status=%s details=%s addr=%s", cmd_id, status, details, addr
+            TRACE,
+            "ack_send id=%s status=%s details=%s addr=%s",
+            cmd_id,
+            status,
+            details,
+            addr,
         )
 
         message = f"ACK|{cmd_id}|{status}|{details}".encode("ascii")
@@ -179,8 +198,12 @@ class Controller:
             discover_commands()
 
             # Initialize UDP transport
-            logger.info(f"Starting UDP server on {self.config.udp_host}:{self.config.udp_port}")
-            self.udp_transport = UDPTransport(self.config.udp_host, self.config.udp_port)
+            logger.info(
+                f"Starting UDP server on {self.config.udp_host}:{self.config.udp_port}"
+            )
+            self.udp_transport = UDPTransport(
+                self.config.udp_host, self.config.udp_port
+            )
             if not self.udp_transport.create_socket():
                 raise RuntimeError("Failed to create UDP socket")
 
@@ -205,7 +228,9 @@ class Controller:
                 if self.serial_transport:
                     # Only announce connected and start reader if actually connected
                     if self.serial_transport.is_connected():
-                        logger.info("Connected to transport: %s", self.serial_transport.port)
+                        logger.info(
+                            "Connected to transport: %s", self.serial_transport.port
+                        )
                         try:
                             self.serial_transport.start_reader(self.shutdown_event)
                             logger.info("Serial reader thread started")
@@ -377,9 +402,13 @@ class Controller:
                             # Reset TX keepalive to force prompt write after reconnect
                             if self._last_tx is not None:
                                 self._last_tx["last_sent"] = 0.0
-                            logger.info("Serial reader thread started (after reconnect)")
+                            logger.info(
+                                "Serial reader thread started (after reconnect)"
+                            )
                         except Exception as e:
-                            logger.warning("Failed to start serial reader after reconnect: %s", e)
+                            logger.warning(
+                                "Failed to start serial reader after reconnect: %s", e
+                            )
 
                 # 2. Handle E-stop (only check when connected to robot and received first frame)
                 if (
@@ -387,7 +416,9 @@ class Controller:
                     and self.serial_transport.is_connected()
                     and self.first_frame_received
                 ):
-                    if state.InOut_in[4] == 0:  # E-stop pressed (0 = pressed, 1 = released)
+                    if (
+                        state.InOut_in[4] == 0
+                    ):  # E-stop pressed (0 = pressed, 1 = released)
                         if not self.estop_active:  # Not already in E-stop state
                             logger.warning("E-STOP activated")
                             self.estop_active = True
@@ -411,7 +442,9 @@ class Controller:
                             state.Speed_out.fill(0)
 
                 # 3. Execute commands if not in E-stop (or E-stop state unknown)
-                if not self.estop_active:  # Execute if E-stop is False or None (unknown)
+                if (
+                    not self.estop_active
+                ):  # Execute if E-stop is False or None (unknown)
                     # Execute active command
                     if self.active_command or self.command_queue:
                         self._execute_active_command()
@@ -434,16 +467,28 @@ class Controller:
                     now = time.perf_counter()
                     dirty = (
                         (state.Command_out.value != self._last_tx["cmd"])
-                        or (not np.array_equal(state.Position_out, self._last_tx["pos"]))
+                        or (
+                            not np.array_equal(state.Position_out, self._last_tx["pos"])
+                        )
                         or (not np.array_equal(state.Speed_out, self._last_tx["spd"]))
-                        or (not np.array_equal(state.Affected_joint_out, self._last_tx["aff"]))
+                        or (
+                            not np.array_equal(
+                                state.Affected_joint_out, self._last_tx["aff"]
+                            )
+                        )
                         or (not np.array_equal(state.InOut_out, self._last_tx["io"]))
                         or (int(state.Timeout_out) != int(self._last_tx["tout"]))
-                        or (not np.array_equal(state.Gripper_data_out, self._last_tx["grip"]))
+                        or (
+                            not np.array_equal(
+                                state.Gripper_data_out, self._last_tx["grip"]
+                            )
+                        )
                     )
 
                     # Write if dirty or keepalive timeout reached
-                    if dirty or (now - self._last_tx["last_sent"] >= self._tx_keepalive_s):
+                    if dirty or (
+                        now - self._last_tx["last_sent"] >= self._tx_keepalive_s
+                    ):
                         ok = self.serial_transport.write_frame(
                             state.Position_out,
                             state.Speed_out,
@@ -479,7 +524,9 @@ class Controller:
                     state.ema_period_s = float(period)
                 else:
                     # EMA with alpha=0.1
-                    state.ema_period_s = 0.1 * float(period) + 0.9 * float(state.ema_period_s)
+                    state.ema_period_s = 0.1 * float(period) + 0.9 * float(
+                        state.ema_period_s
+                    )
 
                 next_t += tick
                 sleep = next_t - time.perf_counter()
@@ -507,9 +554,13 @@ class Controller:
                     short_term_cmd_hz = 0.0
                     if len(state.command_timestamps) >= 2:
                         # Calculate rate from first and last timestamp in window
-                        time_span = state.command_timestamps[-1] - state.command_timestamps[0]
+                        time_span = (
+                            state.command_timestamps[-1] - state.command_timestamps[0]
+                        )
                         if time_span > 0:
-                            short_term_cmd_hz = (len(state.command_timestamps) - 1) / time_span
+                            short_term_cmd_hz = (
+                                len(state.command_timestamps) - 1
+                            ) / time_span
 
                     logger.debug(
                         f"loop_count: {state.loop_count}, "
@@ -539,7 +590,11 @@ class Controller:
                     continue
                 cmd_str, addr = tup
                 try:
-                    _n = cmd_str.split("|", 1)[0].upper() if isinstance(cmd_str, str) else "UNKNOWN"
+                    _n = (
+                        cmd_str.split("|", 1)[0].upper()
+                        if isinstance(cmd_str, str)
+                        else "UNKNOWN"
+                    )
                 except Exception:
                     _n = "UNKNOWN"
                 logger.log(TRACE, "cmd_received name=%s from=%s", _n, addr)
@@ -556,7 +611,9 @@ class Controller:
                     if state.ema_command_period_s <= 0.0:
                         state.ema_command_period_s = period
                     else:
-                        state.ema_command_period_s = 0.1 * period + 0.9 * state.ema_command_period_s
+                        state.ema_command_period_s = (
+                            0.1 * period + 0.9 * state.ema_command_period_s
+                        )
 
                 state.last_command_time = now
                 state.command_count += 1
@@ -577,7 +634,10 @@ class Controller:
                         cmd_name,
                     )
                     active_inst = self.active_command.command
-                    if isinstance(active_inst, MotionCommand) and active_inst.streamable:
+                    if (
+                        isinstance(active_inst, MotionCommand)
+                        and active_inst.streamable
+                    ):
                         active_name = active_inst._registered_name
                         if active_name == cmd_name:
                             can_handle, match_err = active_inst.match(cmd_parts)
@@ -594,17 +654,25 @@ class Controller:
                                     active_inst.setup(state)
                                 except Exception as _e:
                                     logger.error(
-                                        "Stream fast-path setup failed for %s: %s", active_name, _e
+                                        "Stream fast-path setup failed for %s: %s",
+                                        active_name,
+                                        _e,
                                     )
                                 else:
                                     logger.log(
-                                        TRACE, "stream_fast_path_applied name=%s", active_name
+                                        TRACE,
+                                        "stream_fast_path_applied name=%s",
+                                        active_name,
                                     )
                                     continue
                             else:
                                 if match_err:
-                                    if self.udp_transport and policy.requires_ack(cmd_str):
-                                        self.udp_transport.send_response(f"ERROR|{match_err}", addr)
+                                    if self.udp_transport and policy.requires_ack(
+                                        cmd_str
+                                    ):
+                                        self.udp_transport.send_response(
+                                            f"ERROR|{match_err}", addr
+                                        )
                                     logger.log(
                                         TRACE,
                                         "Stream fast-path match failed for %s: %s",
@@ -617,14 +685,18 @@ class Controller:
                 if not command:
                     if error:
                         # Known command but invalid parameters
-                        logger.warning(f"Command validation failed: {cmd_str} - {error}")
+                        logger.warning(
+                            f"Command validation failed: {cmd_str} - {error}"
+                        )
                         if self.udp_transport:
                             self.udp_transport.send_response(f"ERROR|{error}", addr)
                     else:
                         # Unknown command
                         logger.warning(f"Unknown command: {cmd_str}")
                         if self.udp_transport:
-                            self.udp_transport.send_response("ERROR|Unknown command", addr)
+                            self.udp_transport.send_response(
+                                "ERROR|Unknown command", addr
+                            )
                     continue
 
                 # Handle system commands (they can execute regardless of enable state)
@@ -638,7 +710,9 @@ class Controller:
                             dt=self.config.loop_interval,
                         )
                     )
-                    logger.log(TRACE, "syscmd_execute_start name=%s", type(command).__name__)
+                    logger.log(
+                        TRACE, "syscmd_execute_start name=%s", type(command).__name__
+                    )
                     command.setup(state)
                     status = command.tick(state)
                     logger.log(
@@ -662,22 +736,30 @@ class Controller:
                                 self.config.serial_port = port
                                 try:
                                     # (Re)connect transport immediately using provided port
-                                    self.serial_transport = create_and_connect_transport(
-                                        port=port,
-                                        baudrate=self.config.serial_baudrate,
-                                        auto_find_port=False,
+                                    self.serial_transport = (
+                                        create_and_connect_transport(
+                                            port=port,
+                                            baudrate=self.config.serial_baudrate,
+                                            auto_find_port=False,
+                                        )
                                     )
                                     if self.serial_transport and hasattr(
                                         self.serial_transport, "start_reader"
                                     ):
-                                        self.serial_transport.start_reader(self.shutdown_event)
+                                        self.serial_transport.start_reader(
+                                            self.shutdown_event
+                                        )
                                         self.first_frame_received = False
                                         # Reset TX keepalive to force prompt write after reconnect
                                         if self._last_tx is not None:
                                             self._last_tx["last_sent"] = 0.0
-                                        logger.info("Serial reader thread started (after SET_PORT)")
+                                        logger.info(
+                                            "Serial reader thread started (after SET_PORT)"
+                                        )
                                 except Exception as e:
-                                    logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
+                                    logger.warning(
+                                        f"Failed to (re)connect serial on SET_PORT: {e}"
+                                    )
 
                         # Handle SIMULATOR toggle
                         if (
@@ -703,7 +785,8 @@ class Controller:
                                     self._clear_queue("Simulator mode toggle")
                                 except Exception as _e:
                                     logger.debug(
-                                        "Simulator toggle pre-switch safety failed: %s", _e
+                                        "Simulator toggle pre-switch safety failed: %s",
+                                        _e,
                                     )
 
                                 # Disconnect any existing transport
@@ -720,17 +803,27 @@ class Controller:
                                 )
                                 # If enabled, sync simulator to last known controller state so pose continuity is preserved
                                 try:
-                                    if mode in ("on", "1", "true", "yes") and isinstance(
+                                    if mode in (
+                                        "on",
+                                        "1",
+                                        "true",
+                                        "yes",
+                                    ) and isinstance(
                                         self.serial_transport, MockSerialTransport
                                     ):
-                                        self.serial_transport.sync_from_controller_state(state)
+                                        self.serial_transport.sync_from_controller_state(
+                                            state
+                                        )
                                 except Exception as _e:
                                     logger.warning(
-                                        "Failed to sync simulator from controller state: %s", _e
+                                        "Failed to sync simulator from controller state: %s",
+                                        _e,
                                     )
 
                                 if self.serial_transport:
-                                    self.serial_transport.start_reader(self.shutdown_event)
+                                    self.serial_transport.start_reader(
+                                        self.shutdown_event
+                                    )
                                     self.first_frame_received = False
                                     # Reset TX keepalive to force prompt write after transport switch
                                     if self._last_tx is not None:
@@ -760,7 +853,9 @@ class Controller:
                     if self.udp_transport and policy.requires_ack(cmd_str):
                         reason = state.disabled_reason or "Controller disabled"
                         self.udp_transport.send_response(f"ERROR|{reason}", addr)
-                    logger.warning(f"Motion command rejected - controller disabled: {cmd_name}")
+                    logger.warning(
+                        f"Motion command rejected - controller disabled: {cmd_name}"
+                    )
                     continue
 
                 # Query commands execute immediately (bypass queue)
@@ -780,7 +875,11 @@ class Controller:
                     continue
 
                 # Apply stream mode logic for streamable motion commands
-                if state.stream_mode and isinstance(command, MotionCommand) and command.streamable:
+                if (
+                    state.stream_mode
+                    and isinstance(command, MotionCommand)
+                    and command.streamable
+                ):
                     # Drain UDP buffer to discard stale commands before processing new one
                     if self.udp_transport:
                         drained = self.udp_transport.drain_buffer()
@@ -808,7 +907,9 @@ class Controller:
 
                 # Queue the command
                 status = self._queue_command(addr, command, None)
-                logger.log(TRACE, "Command %s queued with status: %s", cmd_name, status.code)
+                logger.log(
+                    TRACE, "Command %s queued with status: %s", cmd_name, status.code
+                )
 
                 # For motion commands: ACK acceptance only if policy requires ACK
                 if isinstance(command, MotionCommand) and self.udp_transport:
@@ -826,7 +927,10 @@ class Controller:
                 logger.error(f"Error in command processing: {e}", exc_info=True)
 
     def _queue_command(
-        self, address: tuple[str, int] | None, command: CommandBase, command_id: str | None = None
+        self,
+        address: tuple[str, int] | None,
+        command: CommandBase,
+        command_id: str | None = None,
     ) -> ExecutionStatus:
         """
         Add a command to the execution queue.
@@ -848,7 +952,9 @@ class Controller:
             return ExecutionStatus.failed("Queue full")
 
         # Create queued command
-        queued_cmd = QueuedCommand(command=command, command_id=command_id, address=address)
+        queued_cmd = QueuedCommand(
+            command=command, command_id=command_id, address=address
+        )
 
         # Bind dynamic context so the command can reply/inspect interpreter when executed
         command.bind(
@@ -868,7 +974,8 @@ class Controller:
             type(qc.command).__name__
             for qc in self.command_queue
             if not (
-                isinstance(qc.command, MotionCommand) and getattr(qc.command, "streamable", False)
+                isinstance(qc.command, MotionCommand)
+                and getattr(qc.command, "streamable", False)
             )
         ]
 
@@ -881,9 +988,13 @@ class Controller:
         # Send acknowledgment
         if command_id and address:
             queue_pos = len(self.command_queue)
-            self._send_ack(command_id, "QUEUED", f"Position {queue_pos} in queue", address)
+            self._send_ack(
+                command_id, "QUEUED", f"Position {queue_pos} in queue", address
+            )
 
-        logger.log(TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id)
+        logger.log(
+            TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id
+        )
 
         return ExecutionStatus(
             code=ExecutionStatusCode.QUEUED,
@@ -943,7 +1054,8 @@ class Controller:
                     # Cancel command due to disabled controller
                     self._cancel_active_command("Controller disabled")
                     return ExecutionStatus(
-                        code=ExecutionStatusCode.CANCELLED, message="Controller disabled"
+                        code=ExecutionStatusCode.CANCELLED,
+                        message="Controller disabled",
                     )
 
                 # Execute command step
@@ -960,7 +1072,9 @@ class Controller:
                 ):
                     try:
                         for robot_cmd_str in status.details["enqueue"]:
-                            cmd_obj, _ = create_command_from_parts(robot_cmd_str.split("|"))
+                            cmd_obj, _ = create_command_from_parts(
+                                robot_cmd_str.split("|")
+                            )
                             if cmd_obj:
                                 # Queue without address/id for generated commands
                                 self._queue_command(("127.0.0.1", 0), cmd_obj, None)
@@ -973,7 +1087,11 @@ class Controller:
                     name = type(ac.command).__name__
                     cid, addr = ac.command_id, ac.address
                     logger.log(
-                        TRACE, "Command completed: %s (id=%s) at t=%f", name, cid, time.time()
+                        TRACE,
+                        "Command completed: %s (id=%s) at t=%f",
+                        name,
+                        cid,
+                        time.time(),
                     )
 
                     # Send completion acknowledgment
@@ -994,7 +1112,9 @@ class Controller:
                         )
                     ]
                     state.action_next = (
-                        state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
+                        state.queue_nonstreamable[0]
+                        if state.queue_nonstreamable
+                        else ""
                     )
 
                     # Record and clear
@@ -1039,7 +1159,9 @@ class Controller:
                         )
                     ]
                     state.action_next = (
-                        state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
+                        state.queue_nonstreamable[0]
+                        if state.queue_nonstreamable
+                        else ""
                     )
 
                     self.active_command = None
@@ -1078,7 +1200,10 @@ class Controller:
         # Send cancellation acknowledgment
         if self.active_command.command_id and self.active_command.address:
             self._send_ack(
-                self.active_command.command_id, "CANCELLED", reason, self.active_command.address
+                self.active_command.command_id,
+                "CANCELLED",
+                reason,
+                self.active_command.address,
             )
 
         # Update action tracking to idle
@@ -1089,7 +1214,9 @@ class Controller:
         # Record and clear
         self.active_command = None
 
-    def _clear_queue(self, reason: str = "Queue cleared") -> list[tuple[str, ExecutionStatus]]:
+    def _clear_queue(
+        self, reason: str = "Queue cleared"
+    ) -> list[tuple[str, ExecutionStatus]]:
         """
         Clear all queued commands.
 
@@ -1106,11 +1233,15 @@ class Controller:
 
             # Send cancellation acknowledgment
             if queued_cmd.command_id and queued_cmd.address:
-                self._send_ack(queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address)
+                self._send_ack(
+                    queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
+                )
 
             # Record cleared command
             if queued_cmd.command_id:
-                status = ExecutionStatus(code=ExecutionStatusCode.CANCELLED, message=reason)
+                status = ExecutionStatus(
+                    code=ExecutionStatusCode.CANCELLED, message=reason
+                )
                 cleared.append((queued_cmd.command_id, status))
 
         logger.info(f"Cleared {len(cleared)} commands from queue: {reason}")
@@ -1122,7 +1253,9 @@ class Controller:
 
         return cleared
 
-    def _clear_streamable_commands(self, reason: str = "Streamable commands cleared") -> int:
+    def _clear_streamable_commands(
+        self, reason: str = "Streamable commands cleared"
+    ) -> int:
         """
         Clear all queued streamable motion commands.
 
@@ -1147,10 +1280,14 @@ class Controller:
 
                 # Send cancellation acknowledgment (though streamable commands typically don't have IDs)
                 if queued_cmd.command_id and queued_cmd.address:
-                    self._send_ack(queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address)
+                    self._send_ack(
+                        queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
+                    )
 
         if removed_count > 0:
-            logger.debug(f"Cleared {removed_count} streamable commands from queue: {reason}")
+            logger.debug(
+                f"Cleared {removed_count} streamable commands from queue: {reason}"
+            )
 
         return removed_count
 
@@ -1174,7 +1311,11 @@ class Controller:
             if command_obj:
                 # Queue without address/id for GCODE commands
                 self._queue_command(("127.0.0.1", 0), command_obj, None)
-                cmd_name = next_gcode_cmd.split("|")[0] if "|" in next_gcode_cmd else next_gcode_cmd
+                cmd_name = (
+                    next_gcode_cmd.split("|")[0]
+                    if "|" in next_gcode_cmd
+                    else next_gcode_cmd
+                )
                 logger.debug(f"Queued GCODE command: {cmd_name}")
             else:
                 logger.warning(f"Unknown GCODE command generated: {next_gcode_cmd}")
@@ -1204,7 +1345,10 @@ def main():
         help="Increase verbosity; -v=INFO, -vv=DEBUG, -vvv=TRACE",
     )
     parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Enable quiet logging (WARNING level)"
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Enable quiet logging (WARNING level)",
     )
     parser.add_argument(
         "--log-level",

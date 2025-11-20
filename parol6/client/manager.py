@@ -43,7 +43,9 @@ class ServerManager:
     - Can be used with a custom controller script path or defaults to the package's bundled controller.
     """
 
-    def __init__(self, controller_path: str | None = None, normalize_logs: bool = False) -> None:
+    def __init__(
+        self, controller_path: str | None = None, normalize_logs: bool = False
+    ) -> None:
         """
         Initialize the ServerManager.
 
@@ -55,7 +57,9 @@ class ServerManager:
         if controller_path:
             self.controller_path = Path(controller_path).resolve()
             if not self.controller_path.exists():
-                raise FileNotFoundError(f"Controller script not found: {self.controller_path}")
+                raise FileNotFoundError(
+                    f"Controller script not found: {self.controller_path}"
+                )
         else:
             # Use the package's bundled commander
             self.controller_path = Path(__file__).parent / "controller.py"
@@ -85,7 +89,9 @@ class ServerManager:
             return
         # Working directory should be the PAROL6-python-API repo root to find dependencies
         # Use a more direct approach to find the package root
-        cwd = Path(__file__).resolve().parents[2]  # parol6/server/manager.py -> repo root
+        cwd = (
+            Path(__file__).resolve().parents[2]
+        )  # parol6/server/manager.py -> repo root
 
         env = os.environ.copy()
         # Disable autohome unless explicitly overridden
@@ -100,7 +106,9 @@ class ServerManager:
             env["PAROL6_CONTROLLER_PORT"] = str(server_port)
         # Ensure the subprocess can import the local 'parol6' package
         existing_py_path = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{cwd}{os.pathsep}{existing_py_path}" if existing_py_path else str(cwd)
+        env["PYTHONPATH"] = (
+            f"{cwd}{os.pathsep}{existing_py_path}" if existing_py_path else str(cwd)
+        )
 
         # Launch the controller as a module to ensure package imports resolve
         args = [sys.executable, "-u", "-m", "parol6.server.controller"]
@@ -176,7 +184,9 @@ class ServerManager:
                         _, level_name, logger_name, actual_message = s.groups()
                         logger_name = (logger_name or "").strip()
                         msg = actual_message
-                        level = getattr(logging, (level_name or "INFO").upper(), logging.INFO)
+                        level = getattr(
+                            logging, (level_name or "INFO").upper(), logging.INFO
+                        )
                     elif line.startswith("Traceback"):
                         # Traceback and continuation lines -> keep last context, escalate on Traceback
                         level = logging.ERROR
@@ -217,7 +227,10 @@ class ServerManager:
 
             # Step 2: escalate to forced kill if still running
             if self._proc and self._proc.poll() is None:
-                logging.warning("Controller did not exit after SIGTERM within %.1fs, sending SIGKILL", timeout)
+                logging.warning(
+                    "Controller did not exit after SIGTERM within %.1fs, sending SIGKILL",
+                    timeout,
+                )
                 try:
                     self._proc.kill()
                     self._proc.wait(timeout=timeout)
@@ -277,6 +290,7 @@ class ServerManager:
                 await asyncio.sleep(min(poll_interval, remain))
         finally:
             sock.close()
+
 
 def is_server_running(
     host: str = "127.0.0.1",

@@ -63,7 +63,9 @@ class TestSmoothMotionMinimal:
         assert client.wait_until_stopped(timeout=9.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_smooth_arc_center_basic(self, client, server_proc, robot_api_env, homed_robot):
+    def test_smooth_arc_center_basic(
+        self, client, server_proc, robot_api_env, homed_robot
+    ):
         """Test basic arc motion defined by center point."""
         result = client.smooth_arc_center(
             end_pose=[100, 100, 150, 0, 0, 90],
@@ -121,7 +123,11 @@ class TestSmoothMotionMinimal:
     def test_smooth_blend_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic blended motion through segments."""
         segments = [
-            {"type": "LINE", "end": [120.0, 80.0, 140.0, 0.0, 0.0, 30.0], "duration": 1.0},
+            {
+                "type": "LINE",
+                "end": [120.0, 80.0, 140.0, 0.0, 0.0, 30.0],
+                "duration": 1.0,
+            },
             {
                 "type": "CIRCLE",
                 "center": [120, 120, 140],

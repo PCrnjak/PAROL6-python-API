@@ -109,7 +109,9 @@ class SCurveProfile:
             # Case 1: Reduced acceleration profile (never reach a_max)
             profile_type = "reduced"
             a_reached = (
-                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3)
+                if self.j_max > 0
+                else 0.0
             )
             T_j_actual = a_reached / self.j_max if self.j_max > 0 else 0.0
 
@@ -208,7 +210,9 @@ class SCurveProfile:
         T_j = self.a_max / self.j_max if self.j_max > 0 else 0.0
 
         if self.v_start < self.v_max and self.v_end < self.v_max:
-            v_peak = min(self.v_max, v_avg + np.sqrt(max(self.distance * self.a_max, 0.0)))
+            v_peak = min(
+                self.v_max, v_avg + np.sqrt(max(self.distance * self.a_max, 0.0))
+            )
 
             T_accel = (v_peak - self.v_start) / self.a_max if self.a_max > 0 else 0.0
             T_a = max(0.0, T_accel - 2 * T_j)
@@ -216,7 +220,9 @@ class SCurveProfile:
             T_decel = (v_peak - self.v_end) / self.a_max if self.a_max > 0 else 0.0
             T_d = max(0.0, T_decel - 2 * T_j)
 
-            d_accel = self.v_start * (T_a + 2 * T_j) + 0.5 * self.a_max * (T_a + T_j) ** 2
+            d_accel = (
+                self.v_start * (T_a + 2 * T_j) + 0.5 * self.a_max * (T_a + T_j) ** 2
+            )
             d_decel = self.v_end * (T_d + 2 * T_j) + 0.5 * self.a_max * (T_d + T_j) ** 2
             d_cruise = self.distance - d_accel - d_decel
 
@@ -225,7 +231,15 @@ class SCurveProfile:
             else:
                 T_v = 0.0
                 v_peak = np.sqrt(
-                    max((2 * self.distance * self.a_max + self.v_start**2 + self.v_end**2) / 2, 0.0)
+                    max(
+                        (
+                            2 * self.distance * self.a_max
+                            + self.v_start**2
+                            + self.v_end**2
+                        )
+                        / 2,
+                        0.0,
+                    )
                 )
         else:
             # Simple case - just decelerate
@@ -269,7 +283,9 @@ class SCurveProfile:
 
         if self.distance < 2 * d_min_jerk:
             achievable_a = (
-                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3) if self.j_max > 0 else 0.0
+                (abs(self.distance) * self.j_max**2 / 2) ** (1 / 3)
+                if self.j_max > 0
+                else 0.0
             )
             feasibility["status"] = "reduced_acceleration"
             feasibility["achievable_a"] = achievable_a
@@ -277,7 +293,9 @@ class SCurveProfile:
                 f"Distance too short to reach full acceleration. Max achievable: {achievable_a:.2f}"
             )
         elif self.distance < 2 * d_min_vel:
-            achievable_v = np.sqrt(self.distance * self.a_max) if self.a_max > 0 else 0.0
+            achievable_v = (
+                np.sqrt(self.distance * self.a_max) if self.a_max > 0 else 0.0
+            )
             feasibility["status"] = "triangular_velocity"
             feasibility["achievable_v"] = achievable_v
             feasibility["warnings"].append(
@@ -497,7 +515,12 @@ class SCurveProfile:
             Dictionary with position, velocity, acceleration, jerk
         """
         if t <= 0:
-            return {"position": 0.0, "velocity": self.v_start, "acceleration": 0.0, "jerk": 0.0}
+            return {
+                "position": 0.0,
+                "velocity": self.v_start,
+                "acceleration": 0.0,
+                "jerk": 0.0,
+            }
 
         if t >= self.segments["T_total"]:
             if self.segment_boundaries:
@@ -524,9 +547,16 @@ class SCurveProfile:
             cumulative_time += seg["duration"]
 
         # Fallback
-        return {"position": self.distance, "velocity": self.v_end, "acceleration": 0.0, "jerk": 0.0}
+        return {
+            "position": self.distance,
+            "velocity": self.v_end,
+            "acceleration": 0.0,
+            "jerk": 0.0,
+        }
 
-    def _evaluate_in_segment(self, segment: dict[str, float], t: float) -> dict[str, float]:
+    def _evaluate_in_segment(
+        self, segment: dict[str, float], t: float
+    ) -> dict[str, float]:
         """
         Evaluate motion within a specific segment using proper kinematics.
         """
@@ -577,10 +607,14 @@ class MultiAxisSCurveTrajectory:
         self.num_axes = len(start_pose)
 
         self.v0 = (
-            np.array(v0, dtype=float) if v0 is not None else np.zeros(self.num_axes, dtype=float)
+            np.array(v0, dtype=float)
+            if v0 is not None
+            else np.zeros(self.num_axes, dtype=float)
         )
         self.vf = (
-            np.array(vf, dtype=float) if vf is not None else np.zeros(self.num_axes, dtype=float)
+            np.array(vf, dtype=float)
+            if vf is not None
+            else np.zeros(self.num_axes, dtype=float)
         )
 
         self.constraints = MotionConstraints()
@@ -680,10 +714,16 @@ class MultiAxisSCurveTrajectory:
                 velocity[axis] = 0.0
                 acceleration[axis] = 0.0
             else:
-                t_scaled = min(t * self.time_scales[axis], axis_profile.get_total_time())
+                t_scaled = min(
+                    t * self.time_scales[axis], axis_profile.get_total_time()
+                )
                 values = axis_profile.evaluate_at_time(t_scaled)
                 position[axis] = self.start_pose[axis] + values["position"]
                 velocity[axis] = values["velocity"]
                 acceleration[axis] = values["acceleration"]
 
-        return {"position": position, "velocity": velocity, "acceleration": acceleration}
+        return {
+            "position": position,
+            "velocity": velocity,
+            "acceleration": acceleration,
+        }
