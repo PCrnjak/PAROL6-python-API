@@ -493,6 +493,9 @@ def decode_status(resp: str) -> StatusAggregate | None:
         "gripper": None,
         "action_current": None,
         "action_state": None,
+        "joint_en": None,
+        "cart_en_wrf": None,
+        "cart_en_trf": None,
     }
     for sec in sections:
         if sec.startswith("POSE="):
@@ -514,6 +517,15 @@ def decode_status(resp: str) -> StatusAggregate | None:
             result["action_current"] = sec[len("ACTION_CURRENT=") :]
         elif sec.startswith("ACTION_STATE="):
             result["action_state"] = sec[len("ACTION_STATE=") :]
+        elif sec.startswith("JOINT_EN="):
+            vals = [int(x) for x in sec[len("JOINT_EN=") :].split(",") if x]
+            result["joint_en"] = vals
+        elif sec.startswith("CART_EN_WRF="):
+            vals = [int(x) for x in sec[len("CART_EN_WRF=") :].split(",") if x]
+            result["cart_en_wrf"] = vals
+        elif sec.startswith("CART_EN_TRF="):
+            vals = [int(x) for x in sec[len("CART_EN_TRF=") :].split(",") if x]
+            result["cart_en_trf"] = vals
 
     # Basic validation: accept if at least one of the core groups is present
     if (

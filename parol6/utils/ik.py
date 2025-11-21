@@ -65,6 +65,7 @@ def solve_ik(
     current_q: Sequence[float] | NDArray[np.float64],
     jogging: bool = False,
     safety_margin_rad: float = 0.03,
+    quiet_logging: bool = False,
 ) -> IKResult:
     """
     IK solver
@@ -135,12 +136,14 @@ def solve_ik(
             violations = (
                 f"J{idx + 1} moving further into danger zone (recovery blocked)"
             )
-            logger.warning(violations)
+            if not quiet_logging:
+                logger.warning(violations)
         elif np.any(safety_violations):
             idx = np.argmax(safety_violations)
             success = False
             violations = f"J{idx + 1} would leave safe zone (buffer violated)"
-            logger.warning(violations)
+            if not quiet_logging:
+                logger.warning(violations)
 
     if success:
         # Valid solution - apply unwrapping to minimize joint motion
@@ -148,7 +151,7 @@ def solve_ik(
 
         # Verify unwrapped solution still within actual limits
         within_limits = PAROL6_ROBOT.check_limits(
-            current_q, q_unwrapped, allow_recovery=True, log=True
+            current_q, q_unwrapped, allow_recovery=True, log=not quiet_logging
         )
 
         if within_limits:

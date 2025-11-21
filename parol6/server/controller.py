@@ -563,11 +563,13 @@ class Controller:
                             ) / time_span
 
                     logger.debug(
-                        f"loop_count: {state.loop_count}, "
-                        f"overrun_count: {state.overrun_count}, "
-                        f"loop_hz: {((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0):.2f}, "
-                        f"cmd_count: {state.command_count}, "
-                        f"cmd_hz: {cmd_hz:.2f} (short_term: {short_term_cmd_hz:.2f})"
+                        "loop=%.2fHz cmd=%.2fHz s=%.2f/%d q=%d ov=%d",
+                        ((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0),
+                        cmd_hz,
+                        short_term_cmd_hz,
+                        max(0, len(state.command_timestamps) - 1),
+                        state.command_count,
+                        state.overrun_count,
                     )
 
             except KeyboardInterrupt:

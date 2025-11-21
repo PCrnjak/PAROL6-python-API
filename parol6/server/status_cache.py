@@ -5,7 +5,12 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.server.state import ControllerState, get_fkine_flat_mm
+from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.utils.ik import AXIS_MAP, solve_ik
+from spatialmath import SE3
+from typing import Any
+import math
 
 
 class StatusCache:
@@ -46,6 +51,14 @@ class StatusCache:
         self._action_current: str = ""
         self._action_state: str = "IDLE"
 
+        # Enablement arrays (12 ints each)
+        self.joint_en = np.ones((12,), dtype=np.uint8)
+        self.cart_en_wrf = np.ones((12,), dtype=np.uint8)
+        self.cart_en_trf = np.ones((12,), dtype=np.uint8)
+        self._joint_en_ascii: str = ",".join(str(int(v)) for v in self.joint_en)
+        self._cart_en_wrf_ascii: str = ",".join(str(int(v)) for v in self.cart_en_wrf)
+        self._cart_en_trf_ascii: str = ",".join(str(int(v)) for v in self.cart_en_trf)
+
         self._ascii_full: str = (
             f"STATUS|POSE={self._pose_ascii}"
             f"|ANGLES={self._angles_ascii}"
@@ -54,6 +67,9 @@ class StatusCache:
             f"|GRIPPER={self._gripper_ascii}"
             f"|ACTION_CURRENT={self._action_current}"
             f"|ACTION_STATE={self._action_state}"
+            f"|JOINT_EN={self._joint_en_ascii}"
+            f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
+            f"|CART_EN_TRF={self._cart_en_trf_ascii}"
         )
 
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
@@ -62,6 +78,76 @@ class StatusCache:
     def _format_csv_from_list(self, vals: ArrayLike) -> str:
         # Using str() on each value preserves prior formatting semantics
         return ",".join(str(v) for v in vals)  # type: ignore
+
+    def _compute_joint_enable(self, q_rad: np.ndarray, delta_rad: float = math.radians(0.2)) -> None:
+        """Compute per-joint +/- enable bits based on joint limits and a small delta."""
+        # Be robust to uninitialized robot in type-checked context
+        robot: Any = getattr(PAROL6_ROBOT, "robot", None)
+        if robot is None:
+            self.joint_en[:] = 1
+            return
+        qlim = getattr(robot, "qlim", None)
+        if qlim is None:
+            self.joint_en[:] = 1
+            return
+        allow_plus = (q_rad + delta_rad) <= qlim[1, :]
+        allow_minus = (q_rad - delta_rad) >= qlim[0, :]
+        # Pack into [J1+,J1-,J2+,J2-,...,J6+,J6-]
+        bits = []
+        for i in range(6):
+            bits.append(1 if allow_plus[i] else 0)
+            bits.append(1 if allow_minus[i] else 0)
+        self.joint_en[:] = np.asarray(bits, dtype=np.uint8)
+        self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
+
+    def _compute_cart_enable(self, T: SE3, frame: str, q_rad: np.ndarray,
+                             delta_mm: float = 0.5, delta_deg: float = 0.5) -> None:
+        """Compute per-axis +/- enable bits for the given frame (WRF/TRF) via small-step IK."""
+        bits = []
+        # Build small delta transforms
+        t_step_m = delta_mm / 1000.0
+        r_step_rad = math.radians(delta_deg)
+        for axis, (v_lin, v_rot) in AXIS_MAP.items():
+            # Compose delta SE3 for this axis
+            dT = SE3()
+            # Translation
+            dx = v_lin[0] * t_step_m
+            dy = v_lin[1] * t_step_m
+            dz = v_lin[2] * t_step_m
+            if abs(dx) > 0 or abs(dy) > 0 or abs(dz) > 0:
+                dT = dT * SE3(dx, dy, dz)
+            # Rotation
+            rx = v_rot[0] * r_step_rad
+            ry = v_rot[1] * r_step_rad
+            rz = v_rot[2] * r_step_rad
+            if abs(rx) > 0:
+                dT = dT * SE3.Rx(rx)
+            if abs(ry) > 0:
+                dT = dT * SE3.Ry(ry)
+            if abs(rz) > 0:
+                dT = dT * SE3.Rz(rz)
+
+            # Apply in specified frame
+            if frame == "WRF":
+                T_target = dT * T
+            else:  # TRF
+                T_target = T * dT
+
+            try:
+                ik = solve_ik(
+                    PAROL6_ROBOT.robot, T_target, q_rad, jogging=True, quiet_logging=True
+                )
+                bits.append(1 if ik.success else 0)
+            except Exception:
+                bits.append(0)
+
+        arr = np.asarray(bits, dtype=np.uint8)
+        if frame == "WRF":
+            self.cart_en_wrf[:] = arr
+            self._cart_en_wrf_ascii = self._format_csv_from_list(arr.tolist())
+        else:
+            self.cart_en_trf[:] = arr
+            self._cart_en_trf_ascii = self._format_csv_from_list(arr.tolist())
 
     def update_from_state(self, state: ControllerState) -> None:
         """
@@ -98,6 +184,21 @@ class StatusCache:
                 np.copyto(self.pose, pose_flat_mm)
                 self._pose_ascii = self._format_csv_from_list(self.pose)
                 changed_any = True
+
+                # Compute enablement arrays at 50 Hz when pose/angles change
+                try:
+                    q_rad = np.asarray(PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float)
+                except Exception:
+                    q_rad = np.zeros((6,), dtype=float)
+                try:
+                    T = get_fkine_se3(state)
+                except Exception:
+                    T = SE3()
+                # JOINT_EN
+                self._compute_joint_enable(q_rad)
+                # CART_EN for both frames
+                self._compute_cart_enable(T, "WRF", q_rad)
+                self._compute_cart_enable(T, "TRF", q_rad)
 
             # 2) IO (first 5)
             if not np.array_equal(self.io, state.InOut_in[:5]):
@@ -136,6 +237,9 @@ class StatusCache:
                     f"|GRIPPER={self._gripper_ascii}"
                     f"|ACTION_CURRENT={self._action_current}"
                     f"|ACTION_STATE={self._action_state}"
+                    f"|JOINT_EN={self._joint_en_ascii}"
+                    f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
+                    f"|CART_EN_TRF={self._cart_en_trf_ascii}"
                 )
                 self.last_update_s = now
 
