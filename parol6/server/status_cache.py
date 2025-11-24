@@ -6,7 +6,6 @@ from numpy.typing import ArrayLike
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.utils.ik import AXIS_MAP, solve_ik
 from spatialmath import SE3
 from typing import Any
@@ -79,7 +78,9 @@ class StatusCache:
         # Using str() on each value preserves prior formatting semantics
         return ",".join(str(v) for v in vals)  # type: ignore
 
-    def _compute_joint_enable(self, q_rad: np.ndarray, delta_rad: float = math.radians(0.2)) -> None:
+    def _compute_joint_enable(
+        self, q_rad: np.ndarray, delta_rad: float = math.radians(0.2)
+    ) -> None:
         """Compute per-joint +/- enable bits based on joint limits and a small delta."""
         # Be robust to uninitialized robot in type-checked context
         robot: Any = getattr(PAROL6_ROBOT, "robot", None)
@@ -100,8 +101,14 @@ class StatusCache:
         self.joint_en[:] = np.asarray(bits, dtype=np.uint8)
         self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
 
-    def _compute_cart_enable(self, T: SE3, frame: str, q_rad: np.ndarray,
-                             delta_mm: float = 0.5, delta_deg: float = 0.5) -> None:
+    def _compute_cart_enable(
+        self,
+        T: SE3,
+        frame: str,
+        q_rad: np.ndarray,
+        delta_mm: float = 0.5,
+        delta_deg: float = 0.5,
+    ) -> None:
         """Compute per-axis +/- enable bits for the given frame (WRF/TRF) via small-step IK."""
         bits = []
         # Build small delta transforms
@@ -135,7 +142,11 @@ class StatusCache:
 
             try:
                 ik = solve_ik(
-                    PAROL6_ROBOT.robot, T_target, q_rad, jogging=True, quiet_logging=True
+                    PAROL6_ROBOT.robot,
+                    T_target,
+                    q_rad,
+                    jogging=True,
+                    quiet_logging=True,
                 )
                 bits.append(1 if ik.success else 0)
             except Exception:
@@ -187,7 +198,9 @@ class StatusCache:
 
                 # Compute enablement arrays at 50 Hz when pose/angles change
                 try:
-                    q_rad = np.asarray(PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float)
+                    q_rad = np.asarray(
+                        PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
+                    )
                 except Exception:
                     q_rad = np.zeros((6,), dtype=float)
                 try:

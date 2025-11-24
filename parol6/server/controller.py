@@ -564,7 +564,11 @@ class Controller:
 
                     logger.debug(
                         "loop=%.2fHz cmd=%.2fHz s=%.2f/%d q=%d ov=%d",
-                        ((1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0),
+                        (
+                            (1.0 / state.ema_period_s)
+                            if state.ema_period_s > 0.0
+                            else 0.0
+                        ),
                         cmd_hz,
                         short_term_cmd_hz,
                         max(0, len(state.command_timestamps) - 1),
