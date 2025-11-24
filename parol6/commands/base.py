@@ -1,29 +1,30 @@
 """
 Base abstractions and helpers for command implementations.
 """
-from dataclasses import dataclass
-from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING, List, ClassVar, cast
-from abc import ABC, abstractmethod
-from enum import Enum
-import logging
-import json
-import time
 
-import roboticstoolbox as rp
+import json
+import logging
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, ClassVar, cast
+
 import numpy as np
+import roboticstoolbox as rp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.protocol.wire import CommandCode
 from parol6.config import INTERVAL_S, TRACE
-from parol6.utils.ik import AXIS_MAP
+from parol6.protocol.wire import CommandCode
 from parol6.server.state import ControllerState
-    
+from parol6.utils.ik import AXIS_MAP
 
 logger = logging.getLogger(__name__)
 
 
 class ExecutionStatusCode(Enum):
     """Enumeration for command execution status codes."""
+
     QUEUED = "QUEUED"
     EXECUTING = "EXECUTING"
     COMPLETED = "COMPLETED"
@@ -36,60 +37,79 @@ class ExecutionStatus:
     """
     Status returned from command execution steps.
     """
+
     code: ExecutionStatusCode
     message: str
-    error: Optional[Exception] = None
-    details: Optional[Dict[str, Any]] = None
-    error_type: Optional[str] = None
+    error: Exception | None = None
+    details: dict[str, Any] | None = None
+    error_type: str | None = None
 
     @classmethod
-    def executing(cls, message: str = "Executing", details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+    def executing(
+        cls, message: str = "Executing", details: dict[str, Any] | None = None
+    ) -> "ExecutionStatus":
         return cls(ExecutionStatusCode.EXECUTING, message, error=None, details=details)
 
     @classmethod
-    def completed(cls, message: str = "Completed", details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+    def completed(
+        cls, message: str = "Completed", details: dict[str, Any] | None = None
+    ) -> "ExecutionStatus":
         return cls(ExecutionStatusCode.COMPLETED, message, error=None, details=details)
 
     @classmethod
-    def failed(cls, message: str, error: Optional[Exception] = None, details: Optional[Dict[str, Any]] = None) -> "ExecutionStatus":
+    def failed(
+        cls,
+        message: str,
+        error: Exception | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> "ExecutionStatus":
         et = type(error).__name__ if error is not None else None
-        return cls(ExecutionStatusCode.FAILED, message, error=error, details=details, error_type=et)
+        return cls(
+            ExecutionStatusCode.FAILED,
+            message,
+            error=error,
+            details=details,
+            error_type=et,
+        )
 
 
 # ----- Shared context and small utilities -----
 
+
 @dataclass
 class CommandContext:
     """Shared dynamic execution context for commands."""
+
     udp_transport: Any = None
-    addr: Optional[tuple] = None
+    addr: tuple | None = None
     gcode_interpreter: Any = None
     dt: float = INTERVAL_S
 
+
 # Parsing utilities (lightweight, shared)
-def _noneify(token: Any) -> Optional[str]:
+def _noneify(token: Any) -> str | None:
     if token is None:
         return None
     t = str(token).strip()
     return None if t == "" or t.upper() in ("NONE", "NULL") else t
 
 
-def parse_int(token: Any) -> Optional[int]:
+def parse_int(token: Any) -> int | None:
     t = _noneify(token)
     return None if t is None else int(t)
 
 
-def parse_float(token: Any) -> Optional[float]:
+def parse_float(token: Any) -> float | None:
     t = _noneify(token)
     return None if t is None else float(t)
 
 
-def csv_ints(token: Any) -> List[int]:
+def csv_ints(token: Any) -> list[int]:
     t = _noneify(token)
     return [] if t is None else [int(x) for x in t.split(",") if x != ""]
 
 
-def csv_floats(token: Any) -> List[float]:
+def csv_floats(token: Any) -> list[float]:
     t = _noneify(token)
     return [] if t is None else [float(x) for x in t.split(",") if x != ""]
 
@@ -99,7 +119,7 @@ def parse_bool(token: Any) -> bool:
     return t in ("1", "true", "yes", "on")
 
 
-def typed(token: Any, type_=float):
+def typed(token: Any, type_: type[Any] = float) -> Any | None:
     """Parse token with type, supporting None/Null/empty as None."""
     t = _noneify(token)
     if t is None:
@@ -109,16 +129,18 @@ def typed(token: Any, type_=float):
     return type_(t)
 
 
-def expect_len(parts: List[str], n: int, cmd: str) -> None:
+def expect_len(parts: list[str], n: int, cmd: str) -> None:
     """Ensure parts list has exactly n elements."""
     if len(parts) != n:
-        raise ValueError(f"{cmd} requires {n-1} parameters, got {len(parts)-1}")
+        raise ValueError(f"{cmd} requires {n - 1} parameters, got {len(parts) - 1}")
 
 
-def at_least_len(parts: List[str], n: int, cmd: str) -> None:
+def at_least_len(parts: list[str], n: int, cmd: str) -> None:
     """Ensure parts list has at least n elements."""
     if len(parts) < n:
-        raise ValueError(f"{cmd} requires at least {n-1} parameters, got {len(parts)-1}")
+        raise ValueError(
+            f"{cmd} requires at least {n - 1} parameters, got {len(parts) - 1}"
+        )
 
 
 def parse_frame(token: Any) -> str:
@@ -144,9 +166,10 @@ def parse_axis(token: Any) -> str:
 
 class Countdown:
     """Simple count-down timer."""
+
     def __init__(self, count: int):
         self.count = max(0, int(count))
-    
+
     def tick(self) -> bool:
         """Decrement and return True when reaches zero."""
         if self.count > 0:
@@ -156,6 +179,7 @@ class Countdown:
 
 class Debouncer:
     """Simple count-based debouncer."""
+
     def __init__(self, count: int = 5) -> None:
         self.count_init = max(0, int(count))
         self.count = self.count_init
@@ -181,11 +205,21 @@ class CommandBase(ABC):
     """
     Reusable base for commands with shared lifecycle and safety helpers.
     """
+
     # Set by @register_command decorator; used by controller stream fast-path
     _registered_name: ClassVar[str] = ""
 
-    __slots__ = ("is_valid", "is_finished", "error_state", "error_message",
-                 "udp_transport", "addr", "gcode_interpreter", "_t0", "_t_end")
+    __slots__ = (
+        "is_valid",
+        "is_finished",
+        "error_state",
+        "error_message",
+        "udp_transport",
+        "addr",
+        "gcode_interpreter",
+        "_t0",
+        "_t_end",
+    )
 
     def __init__(self) -> None:
         self.is_valid: bool = True
@@ -195,8 +229,8 @@ class CommandBase(ABC):
         self.udp_transport: Any = None
         self.addr: Any = None
         self.gcode_interpreter: Any = None
-        self._t0: Optional[float] = None
-        self._t_end: Optional[float] = None
+        self._t0: float | None = None
+        self._t_end: float | None = None
 
     # Ensure command objects are usable as dict keys (e.g., in server command_id_map)
     def __hash__(self) -> int:
@@ -228,7 +262,7 @@ class CommandBase(ABC):
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.IDLE
 
-    def bind(self, context: CommandContext):
+    def bind(self, context: CommandContext) -> None:
         """
         Bind dynamic execution context. Controller should call this prior to setup().
         """
@@ -237,7 +271,7 @@ class CommandBase(ABC):
         self.gcode_interpreter = context.gcode_interpreter
 
     @abstractmethod
-    def do_match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
         Check if this command can handle the given message parts.
 
@@ -251,7 +285,7 @@ class CommandBase(ABC):
         """
         raise NotImplementedError
 
-    def match(self, parts: List[str]) -> Tuple[bool, Optional[str]]:
+    def match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
         Wrapper that guards subclass do_match() to avoid propagating exceptions.
         Centralizes try/except so subclasses don't repeat it.
@@ -326,6 +360,7 @@ class CommandBase(ABC):
         p = (time.perf_counter() - self._t0) / duration_s
         return 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
 
+
 class QueryCommand(CommandBase):
     """
     Base class for query commands that execute immediately and bypass the queue.
@@ -342,7 +377,7 @@ class QueryCommand(CommandBase):
             except Exception as e:
                 self.log_warning("Failed to send UDP reply: %s", e)
 
-    def reply_ascii(self, prefix_or_message: str, payload: Optional[str] = None) -> None:
+    def reply_ascii(self, prefix_or_message: str, payload: str | None = None) -> None:
         """
         Reply as 'PREFIX|payload' if payload provided; otherwise send prefix_or_message verbatim.
         """
@@ -365,7 +400,11 @@ class QueryCommand(CommandBase):
         Controllers should prefer tick() over calling execute_step() directly.
         """
         if self.is_finished or not self.is_valid:
-            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
+            return (
+                ExecutionStatus.completed("Already finished")
+                if self.is_finished
+                else ExecutionStatus.failed("Invalid command")
+            )
         if not self.udp_transport or not self.addr:
             self.fail("Missing UDP transport or address")
             return ExecutionStatus.failed("Missing UDP transport or address")
@@ -373,7 +412,7 @@ class QueryCommand(CommandBase):
             status = self.execute_step(state)
         except Exception as e:
             # Hard failure safeguards
-            self.fail(f"Unhandled exception: {e}")
+            self.fail(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status
 
@@ -385,6 +424,7 @@ class MotionCommand(CommandBase):
     Motion commands involve robot movement and require the controller to be in an enabled state.
     Some motion commands (like jog commands) can be replaced in stream mode.
     """
+
     streamable: bool = False  # Can be replaced in stream mode (only for jog commands)
 
     # Limits and kinematic constants
@@ -414,28 +454,39 @@ class MotionCommand(CommandBase):
 
     # ---- per-joint max speed/acc ----
     def joint_vmax(self, velocity_percent: float) -> np.ndarray:
-        return self.J_MIN + (self.J_MAX - self.J_MIN) * (max(0.0, min(100.0, velocity_percent)) / 100.0)
+        return self.J_MIN + (self.J_MAX - self.J_MIN) * (
+            max(0.0, min(100.0, velocity_percent)) / 100.0
+        )
 
     def joint_amax_steps(self, accel_percent: float) -> np.ndarray:
         a_rad = self.linmap_pct(accel_percent, self.ACC_MIN_RAD, self.ACC_MAX_RAD)
-        return np.asarray(PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float)
+        return np.asarray(
+            PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float
+        )
 
     # ---- speed scaling & limits ----
     def scale_speeds_to_joint_max(self, speeds: np.ndarray) -> np.ndarray:
         denom = np.where(self.J_MAX != 0.0, self.J_MAX, 1.0)
         scale = float(np.max(np.abs(speeds) / denom))
-        return np.rint(speeds / scale) if scale > 1.0 else speeds
+        if scale > 1.0:
+            return np.rint(speeds / scale).astype(np.int32)
+        else:
+            return np.asarray(speeds, dtype=np.int32)
 
     def limit_hit_mask(self, pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
-        return ((speeds > 0) & (pos_steps >= self.LIMS_STEPS[:, 1])) | ((speeds < 0) & (pos_steps <= self.LIMS_STEPS[:, 0]))
+        return ((speeds > 0) & (pos_steps >= self.LIMS_STEPS[:, 1])) | (
+            (speeds < 0) & (pos_steps <= self.LIMS_STEPS[:, 0])
+        )
 
     # ---- trapezoid batch planner for step-space ----
     @staticmethod
-    def plan_trapezoids(start_steps: np.ndarray, target_steps: np.ndarray, tgrid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def plan_trapezoids(
+        start_steps: np.ndarray, target_steps: np.ndarray, tgrid: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         n = int(tgrid.size)
         q = np.empty((n, 6), dtype=float)
         qd = np.empty((n, 6), dtype=float)
-        stationary = (target_steps == start_steps)
+        stationary = target_steps == start_steps
         if np.any(stationary):
             q[:, stationary] = start_steps[stationary]
             qd[:, stationary] = 0.0
@@ -452,7 +503,7 @@ class MotionCommand(CommandBase):
     # ---- Higher-level IO helpers for common patterns ----
     def set_move_position(self, state: ControllerState, steps: np.ndarray) -> None:
         """Set position for MOVE command (zero speeds, Command=MOVE)."""
-        np.copyto(state.Position_out, steps, casting='no')
+        np.copyto(state.Position_out, steps, casting="no")
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.MOVE
 
@@ -462,15 +513,20 @@ class MotionCommand(CommandBase):
         Controllers should prefer tick() over calling execute_step() directly.
         """
         if self.is_finished or not self.is_valid:
-            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
+            return (
+                ExecutionStatus.completed("Already finished")
+                if self.is_finished
+                else ExecutionStatus.failed("Invalid command")
+            )
         try:
             status = self.execute_step(state)
         except Exception as e:
             # Hard failure safeguards
-            self.fail_and_idle(state, f"Unhandled exception: {e}")
-            self.log_error(f"Unhandled exception: {e}")
+            self.fail_and_idle(state, str(e))
+            self.log_error(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status
+
 
 # TODO: need to get and support the other motion profiles from the original program
 class MotionProfile:
@@ -496,7 +552,9 @@ class MotionProfile:
         n = max(2, int(np.ceil(dur / max(1e-9, dt))))
         tgrid = np.linspace(0.0, dur, n, dtype=float)
         q, _qd = MotionCommand.plan_trapezoids(
-            np.asarray(start_steps, dtype=float), np.asarray(target_steps, dtype=float), tgrid
+            np.asarray(start_steps, dtype=float),
+            np.asarray(target_steps, dtype=float),
+            tgrid,
         )
         return cast(np.ndarray, q.astype(np.int32, copy=False))
 
@@ -517,11 +575,17 @@ class MotionProfile:
         # Per-joint vmax and amax (steps/s and steps/s^2)
         jmin = MotionCommand.J_MIN
         jmax = MotionCommand.J_MAX
-        v_max_joint = jmin + (jmax - jmin) * (max(0.0, min(100.0, velocity_percent)) / 100.0)
+        v_max_joint = jmin + (jmax - jmin) * (
+            max(0.0, min(100.0, velocity_percent)) / 100.0
+        )
 
         # Compute accel steps without instantiating MotionCommand
-        a_rad = MotionCommand.linmap_pct(accel_percent, MotionCommand.ACC_MIN_RAD, MotionCommand.ACC_MAX_RAD)
-        a_steps_vec = np.asarray(PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float)
+        a_rad = MotionCommand.linmap_pct(
+            accel_percent, MotionCommand.ACC_MIN_RAD, MotionCommand.ACC_MAX_RAD
+        )
+        a_steps_vec = np.asarray(
+            PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float
+        )
 
         if np.any(v_max_joint <= 0) or np.any(a_steps_vec <= 0):
             raise ValueError("Invalid speed/acceleration (must be positive).")
@@ -533,17 +597,19 @@ class MotionProfile:
         # Safe accel time for short paths
         t_accel_adj = t_accel.copy()
         mask = short_path
-        # Guard divide-by-zero
-        safe = a_steps_vec[mask] > 0
         t_accel_adj[mask] = 0.0
-        if np.any(mask):
-            t_accel_adj[mask][safe] = np.sqrt(path[mask][safe] / a_steps_vec[mask][safe])  # type: ignore[index]
+        mask_safe = mask & (a_steps_vec > 0)
+        t_accel_adj[mask_safe] = np.sqrt(path[mask_safe] / a_steps_vec[mask_safe])
 
         # Per-joint total time, then horizon
-        joint_time = np.where(short_path, 2.0 * t_accel_adj, path / v_max_joint + t_accel)
+        joint_time = np.where(
+            short_path, 2.0 * t_accel_adj, path / v_max_joint + t_accel
+        )
         total_time = float(np.max(joint_time))
         if total_time <= 0.0:
-            return cast(np.ndarray, np.asarray(start_steps, dtype=np.int32).reshape(1, -1))
+            return cast(
+                np.ndarray, np.asarray(start_steps, dtype=np.int32).reshape(1, -1)
+            )
         if total_time < (2 * dt):
             total_time = 2 * dt
 
@@ -556,7 +622,7 @@ class MotionProfile:
 class SystemCommand(CommandBase):
     """
     Base class for system control commands that can execute regardless of enable state.
-    
+
     System commands control the overall state of the robot controller (enable/disable, stop, etc.)
     and can execute even when the controller is disabled.
     """
@@ -566,11 +632,15 @@ class SystemCommand(CommandBase):
         Centralized lifecycle/error handling for system commands.
         """
         if self.is_finished or not self.is_valid:
-            return ExecutionStatus.completed("Already finished") if self.is_finished else ExecutionStatus.failed("Invalid command")
+            return (
+                ExecutionStatus.completed("Already finished")
+                if self.is_finished
+                else ExecutionStatus.failed("Invalid command")
+            )
         try:
             status = self.execute_step(state)
         except Exception as e:
-            self.fail(f"Unhandled exception: {e}")
-            self.log_error("Unhandled exception: %s", e)
+            self.fail(str(e))
+            self.log_error(str(e))
             return ExecutionStatus.failed("Execution error", error=e)
         return status

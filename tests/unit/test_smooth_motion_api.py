@@ -1,5 +1,5 @@
-import inspect
 import importlib
+import inspect
 
 
 def test_smooth_motion_reexports_exist():

@@ -2,8 +2,6 @@
 Advanced trajectory blending utilities (C2 continuity, minimum-jerk, etc.).
 """
 
-from typing import Optional, Tuple
-
 import numpy as np
 
 
@@ -34,7 +32,9 @@ class AdvancedMotionBlender:
             "cubic": self._blend_cubic,
         }
 
-    def extract_trajectory_state(self, trajectory: np.ndarray, index: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def extract_trajectory_state(
+        self, trajectory: np.ndarray, index: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Extract position, velocity, and acceleration at a trajectory point.
 
@@ -74,11 +74,15 @@ class AdvancedMotionBlender:
             v2 = (trajectory[-1] - trajectory[-2]) / self.dt
             acc = (v2 - v1) / self.dt
         else:
-            acc = (trajectory[index + 1] - 2 * trajectory[index] + trajectory[index - 1]) / (self.dt**2)
+            acc = (
+                trajectory[index + 1] - 2 * trajectory[index] + trajectory[index - 1]
+            ) / (self.dt**2)
 
         return pos, vel, acc
 
-    def calculate_blend_region_size(self, traj1: np.ndarray, traj2: np.ndarray, max_accel: float = 1000.0) -> int:
+    def calculate_blend_region_size(
+        self, traj1: np.ndarray, traj2: np.ndarray, max_accel: float = 1000.0
+    ) -> int:
         """
         Calculate optimal blend region size based on velocity mismatch.
 
@@ -106,7 +110,14 @@ class AdvancedMotionBlender:
         return blend_samples
 
     def solve_quintic_coefficients(
-        self, p0: np.ndarray, pf: np.ndarray, v0: np.ndarray, vf: np.ndarray, a0: np.ndarray, af: np.ndarray, T: float
+        self,
+        p0: np.ndarray,
+        pf: np.ndarray,
+        v0: np.ndarray,
+        vf: np.ndarray,
+        a0: np.ndarray,
+        af: np.ndarray,
+        T: float,
     ) -> np.ndarray:
         """
         Solve for quintic polynomial coefficients given boundary conditions.
@@ -134,18 +145,40 @@ class AdvancedMotionBlender:
 
         return coeffs
 
-    def evaluate_quintic(self, coeffs: np.ndarray, t: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def evaluate_quintic(
+        self, coeffs: np.ndarray, t: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Evaluate quintic polynomial at time t.
 
         Returns position, velocity, and acceleration.
         """
-        pos = coeffs[0] + coeffs[1] * t + coeffs[2] * t**2 + coeffs[3] * t**3 + coeffs[4] * t**4 + coeffs[5] * t**5
-        vel = coeffs[1] + 2 * coeffs[2] * t + 3 * coeffs[3] * t**2 + 4 * coeffs[4] * t**3 + 5 * coeffs[5] * t**4
-        acc = 2 * coeffs[2] + 6 * coeffs[3] * t + 12 * coeffs[4] * t**2 + 20 * coeffs[5] * t**3
+        pos = (
+            coeffs[0]
+            + coeffs[1] * t
+            + coeffs[2] * t**2
+            + coeffs[3] * t**3
+            + coeffs[4] * t**4
+            + coeffs[5] * t**5
+        )
+        vel = (
+            coeffs[1]
+            + 2 * coeffs[2] * t
+            + 3 * coeffs[3] * t**2
+            + 4 * coeffs[4] * t**3
+            + 5 * coeffs[5] * t**4
+        )
+        acc = (
+            2 * coeffs[2]
+            + 6 * coeffs[3] * t
+            + 12 * coeffs[4] * t**2
+            + 20 * coeffs[5] * t**3
+        )
         return pos, vel, acc
 
-    def _blend_quintic(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_quintic(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Generate quintic polynomial blend with C2 continuity.
 
@@ -165,7 +198,9 @@ class AdvancedMotionBlender:
 
         return np.array(blend_traj)
 
-    def _blend_scurve(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_scurve(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Generate S-curve blend with jerk limiting.
         """
@@ -176,12 +211,12 @@ class AdvancedMotionBlender:
             from .scurve import MultiAxisSCurveTrajectory
 
             scurve = MultiAxisSCurveTrajectory(
-                p0[:6],  # assume first 6 are XYZRPY
-                pf[:6],
-                v0=v0[:6],
-                vf=vf[:6],
-                T=blend_samples * self.dt,
-                jerk_limit=5000,
+                list(map(float, p0[:6].tolist())),  # assume first 6 are XYZRPY
+                list(map(float, pf[:6].tolist())),
+                v0=list(map(float, v0[:6].tolist())),
+                vf=list(map(float, vf[:6].tolist())),
+                T=float(blend_samples * self.dt),
+                jerk_limit=5000.0,
             )
             points = scurve.get_trajectory_points(self.dt)
 
@@ -190,7 +225,11 @@ class AdvancedMotionBlender:
                 pose = np.zeros_like(p0)
                 pose[:6] = points["position"][i]
                 if len(p0) > 6:
-                    alpha = i / (len(points["position"]) - 1) if len(points["position"]) > 1 else 1.0
+                    alpha = (
+                        i / (len(points["position"]) - 1)
+                        if len(points["position"]) > 1
+                        else 1.0
+                    )
                     pose[6:] = p0[6:] * (1 - alpha) + pf[6:] * alpha
                 blend_traj.append(pose)
 
@@ -198,7 +237,9 @@ class AdvancedMotionBlender:
         except Exception:
             return self._blend_quintic(traj1, traj2, blend_samples)
 
-    def _blend_smoothstep(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_smoothstep(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Legacy smoothstep blend for backward compatibility.
         """
@@ -214,7 +255,9 @@ class AdvancedMotionBlender:
 
         return np.array(blend_traj)
 
-    def _blend_minimum_jerk(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_minimum_jerk(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Minimum jerk trajectory blend.
 
@@ -231,7 +274,9 @@ class AdvancedMotionBlender:
 
         return np.array(blend_traj)
 
-    def _blend_cubic(self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int) -> np.ndarray:
+    def _blend_cubic(
+        self, traj1: np.ndarray, traj2: np.ndarray, blend_samples: int
+    ) -> np.ndarray:
         """
         Cubic spline blend with C1 continuity.
         """
@@ -260,7 +305,7 @@ class AdvancedMotionBlender:
         traj1: np.ndarray,
         traj2: np.ndarray,
         method: str = "quintic",
-        blend_samples: Optional[int] = None,
+        blend_samples: int | None = None,
         auto_size: bool = True,
     ) -> np.ndarray:
         """

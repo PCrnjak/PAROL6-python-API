@@ -4,19 +4,25 @@ Wire protocol helpers for UDP encoding/decoding.
 This module centralizes encoding of command strings and decoding of common
 response payloads used by the headless controller.
 """
-import logging
-from typing import List, Literal, Sequence, cast, Union
-import numpy as np
 
-from .types import Frame, Axis, StatusAggregate
+import logging
+from collections.abc import Sequence
+
 # Centralized binary wire protocol helpers (pack/unpack + codes)
 from enum import IntEnum
+from typing import Literal, cast
+
+import numpy as np
+
+from .types import Axis, Frame, StatusAggregate
 
 logger = logging.getLogger(__name__)
 
 # Precomputed bit-unpack lookup table for 0..255 (MSB..LSB)
 # Using NumPy ensures fast vectorized selection without per-call allocations.
-_BIT_UNPACK = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big")
+_BIT_UNPACK = np.unpackbits(
+    np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big"
+)
 START = b"\xff\xff\xff"
 END = b"\x01\x02"
 PAYLOAD_LEN = 52  # matches existing firmware expectation
@@ -43,6 +49,7 @@ __all__ = [
 
 class CommandCode(IntEnum):
     """Unified command codes for firmware interface."""
+
     HOME = 100
     ENABLE = 101
     DISABLE = 102
@@ -56,7 +63,7 @@ def split_bitfield(byte_val: int) -> list[int]:
     return [(byte_val >> i) & 1 for i in range(7, -1, -1)]
 
 
-def fuse_bitfield_2_bytearray(bits: Union[list[int], Sequence[int]]) -> bytes:
+def fuse_bitfield_2_bytearray(bits: list[int] | Sequence[int]) -> bytes:
     """
     Fuse a big-endian list of 8 bits (MSB..LSB) into a single byte.
     Any truthy value is treated as 1.
@@ -91,7 +98,7 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
     return val - 0x10000 if (val & 0x8000) else val
 
 
-def _get_array_value(arr: Union[np.ndarray, memoryview], index: int, default: int = 0) -> int:
+def _get_array_value(arr: np.ndarray | memoryview, index: int, default: int = 0) -> int:
     """
     Safely get value from array-like object with bounds checking.
     Optimized for zero-copy access when possible.
@@ -108,7 +115,7 @@ def pack_tx_frame_into(
     out: memoryview,
     position_out: np.ndarray,
     speed_out: np.ndarray,
-    command_code: Union[int, CommandCode],
+    command_code: int | CommandCode,
     affected_joint_out: np.ndarray,
     inout_out: np.ndarray,
     timeout_out: int,
@@ -168,7 +175,7 @@ def pack_tx_frame_into(
     bitfield_val = 0
     for i in range(8):
         if _get_array_value(affected_joint_out, i, 0):
-            bitfield_val |= (1 << (7 - i))
+            bitfield_val |= 1 << (7 - i)
     out[offset] = bitfield_val
     offset += 1
 
@@ -176,14 +183,13 @@ def pack_tx_frame_into(
     bitfield_val = 0
     for i in range(8):
         if _get_array_value(inout_out, i, 0):
-            bitfield_val |= (1 << (7 - i))
+            bitfield_val |= 1 << (7 - i)
     out[offset] = bitfield_val
     offset += 1
 
     # Timeout
     out[offset] = int(timeout_out) & 0xFF
     offset += 1
-
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
     for idx in range(3):
@@ -210,14 +216,14 @@ def pack_tx_frame_into(
 def unpack_rx_frame_into(
     data: memoryview,
     *,
-    pos_out,
-    spd_out,
-    homed_out,
-    io_out,
-    temp_out,
-    poserr_out,
-    timing_out,
-    grip_out,
+    pos_out: np.ndarray,
+    spd_out: np.ndarray,
+    homed_out: np.ndarray,
+    io_out: np.ndarray,
+    temp_out: np.ndarray,
+    poserr_out: np.ndarray,
+    timing_out: np.ndarray,
+    grip_out: np.ndarray,
 ) -> bool:
     """
     Zero-allocation decode of a 52-byte RX frame payload (memoryview) directly into numpy arrays.
@@ -229,7 +235,9 @@ def unpack_rx_frame_into(
     """
     try:
         if len(data) < 52:
-            logger.warning(f"unpack_rx_frame_into: payload too short ({len(data)} bytes)")
+            logger.warning(
+                f"unpack_rx_frame_into: payload too short ({len(data)} bytes)"
+            )
             return False
 
         mv = memoryview(data)
@@ -239,12 +247,20 @@ def unpack_rx_frame_into(
         pos3 = b[:6]
         spd3 = b[6:]
 
-        pos = (pos3[:, 0].astype(np.int32) << 16) | (pos3[:, 1].astype(np.int32) << 8) | pos3[:, 2].astype(np.int32)
-        spd = (spd3[:, 0].astype(np.int32) << 16) | (spd3[:, 1].astype(np.int32) << 8) | spd3[:, 2].astype(np.int32)
+        pos = (
+            (pos3[:, 0].astype(np.int32) << 16)
+            | (pos3[:, 1].astype(np.int32) << 8)
+            | pos3[:, 2].astype(np.int32)
+        )
+        spd = (
+            (spd3[:, 0].astype(np.int32) << 16)
+            | (spd3[:, 1].astype(np.int32) << 8)
+            | spd3[:, 2].astype(np.int32)
+        )
 
         # Sign-correct 24-bit to int32
-        pos[pos >= (1 << 23)] -= (1 << 24)
-        spd[spd >= (1 << 23)] -= (1 << 24)
+        pos[pos >= (1 << 23)] -= 1 << 24
+        spd[spd >= (1 << 23)] -= 1 << 24
 
         np.copyto(pos_out, pos, casting="no")
         np.copyto(spd_out, spd, casting="no")
@@ -297,6 +313,7 @@ def unpack_rx_frame_into(
 # =========================
 # Encoding helpers
 # =========================
+
 
 def _opt(value: object | None, none_token: str = "NONE") -> str:
     """Format an optional value as a string, using none_token for None."""
@@ -409,7 +426,9 @@ def encode_gcode_program_inline(lines: Sequence[str]) -> str:
 # =========================
 # Decoding helpers
 # =========================
-def decode_simple(resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER", "SPEEDS", "POSE"]) -> List[float] | List[int] | None:
+def decode_simple(
+    resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER", "SPEEDS", "POSE"]
+) -> list[float] | list[int] | None:
     """
     Decode simple prefixed payloads like:
       ANGLES|a0,a1,a2,a3,a4,a5
@@ -421,11 +440,15 @@ def decode_simple(resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER",
     Returns list[float] or list[int] depending on the expected_prefix.
     """
     if not resp:
-        logger.debug(f"decode_simple: Empty response for expected prefix '{expected_prefix}'")
+        logger.debug(
+            f"decode_simple: Empty response for expected prefix '{expected_prefix}'"
+        )
         return None
     parts = resp.strip().split("|", 1)
     if len(parts) != 2 or parts[0] != expected_prefix:
-        logger.warning(f"decode_simple: Invalid response format. Expected '{expected_prefix}|...' but got '{resp}'")
+        logger.warning(
+            f"decode_simple: Invalid response format. Expected '{expected_prefix}|...' but got '{resp}'"
+        )
         return None
     payload = parts[1]
     tokens = [t for t in payload.split(",") if t != ""]
@@ -435,20 +458,25 @@ def decode_simple(resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER",
         try:
             return [int(t) for t in tokens]
         except ValueError as e:
-            logger.error(f"decode_simple: Failed to parse integers for {expected_prefix}. Payload: '{payload}', Error: {e}")
+            logger.error(
+                f"decode_simple: Failed to parse integers for {expected_prefix}. Payload: '{payload}', Error: {e}"
+            )
             return None
     else:
         try:
             return [float(t) for t in tokens]
         except ValueError as e:
-            logger.error(f"decode_simple: Failed to parse floats for {expected_prefix}. Payload: '{payload}', Error: {e}")
+            logger.error(
+                f"decode_simple: Failed to parse floats for {expected_prefix}. Payload: '{payload}', Error: {e}"
+            )
             return None
 
 
 def decode_status(resp: str) -> StatusAggregate | None:
     """
     Decode aggregate status:
-      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
+      STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj|
+             ACTION_CURRENT=...|ACTION_STATE=...
 
     Returns a dict matching StatusAggregate or None on parse failure.
     """
@@ -463,26 +491,50 @@ def decode_status(resp: str) -> StatusAggregate | None:
         "speeds": None,
         "io": None,
         "gripper": None,
+        "action_current": None,
+        "action_state": None,
+        "joint_en": None,
+        "cart_en_wrf": None,
+        "cart_en_trf": None,
     }
     for sec in sections:
         if sec.startswith("POSE="):
-            vals = [float(x) for x in sec[len("POSE="):].split(",") if x]
+            vals = [float(x) for x in sec[len("POSE=") :].split(",") if x]
             result["pose"] = vals
         elif sec.startswith("ANGLES="):
-            vals = [float(x) for x in sec[len("ANGLES="):].split(",") if x]
+            vals = [float(x) for x in sec[len("ANGLES=") :].split(",") if x]
             result["angles"] = vals
         elif sec.startswith("SPEEDS="):
-            vals = [float(x) for x in sec[len("SPEEDS="):].split(",") if x]
+            vals = [float(x) for x in sec[len("SPEEDS=") :].split(",") if x]
             result["speeds"] = vals
         elif sec.startswith("IO="):
-            vals = [int(x) for x in sec[len("IO="):].split(",") if x]
+            vals = [int(x) for x in sec[len("IO=") :].split(",") if x]
             result["io"] = vals
         elif sec.startswith("GRIPPER="):
-            vals = [int(x) for x in sec[len("GRIPPER="):].split(",") if x]
+            vals = [int(x) for x in sec[len("GRIPPER=") :].split(",") if x]
             result["gripper"] = vals
+        elif sec.startswith("ACTION_CURRENT="):
+            result["action_current"] = sec[len("ACTION_CURRENT=") :]
+        elif sec.startswith("ACTION_STATE="):
+            result["action_state"] = sec[len("ACTION_STATE=") :]
+        elif sec.startswith("JOINT_EN="):
+            vals = [int(x) for x in sec[len("JOINT_EN=") :].split(",") if x]
+            result["joint_en"] = vals
+        elif sec.startswith("CART_EN_WRF="):
+            vals = [int(x) for x in sec[len("CART_EN_WRF=") :].split(",") if x]
+            result["cart_en_wrf"] = vals
+        elif sec.startswith("CART_EN_TRF="):
+            vals = [int(x) for x in sec[len("CART_EN_TRF=") :].split(",") if x]
+            result["cart_en_trf"] = vals
 
-    # Basic validation
-    if result["pose"] is None and result["angles"] is None and result["io"] is None and result["gripper"] is None:
+    # Basic validation: accept if at least one of the core groups is present
+    if (
+        result["pose"] is None
+        and result["angles"] is None
+        and result["io"] is None
+        and result["gripper"] is None
+        and result["action_current"] is None
+    ):
         return None
 
     return cast(StatusAggregate, result)

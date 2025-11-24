@@ -1,9 +1,9 @@
 import math
+
 import numpy as np
 import pytest
-
-from parol6.utils import trajectory as traj
 from parol6.config import CONTROL_RATE_HZ
+from parol6.utils import trajectory as traj
 
 
 def approx_equal(a, b, tol=1e-6):

@@ -1,21 +1,29 @@
 """
 Async UDP client for PAROL6 robot control.
 """
+
 import asyncio
+import contextlib
 import json
-import math
+import logging
 import random
 import time
-from typing import List, Dict, Optional, Literal, cast, AsyncIterator
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
+from typing import Literal, cast
 
-from ..protocol.types import Frame, Axis, StatusAggregate
-from ..protocol import wire
-from ..ack_policy import AckPolicy, SYSTEM_COMMANDS, QUERY_COMMANDS
-from ..client.status_subscriber import subscribe_status
+import numpy as np
+from spatialmath import SO3
+
 from .. import config as cfg
-import logging
+from ..ack_policy import QUERY_COMMANDS, SYSTEM_COMMANDS, AckPolicy
+from ..client.status_subscriber import subscribe_status
+from ..protocol import wire
+from ..protocol.types import Axis, Frame, StatusAggregate
+
 logger = logging.getLogger(__name__)
+
+# Sentinel used to signal status_stream termination
+_STATUS_SENTINEL = cast(StatusAggregate, object())
 
 
 class _UDPClientProtocol(asyncio.DatagramProtocol):
@@ -24,9 +32,9 @@ class _UDPClientProtocol(asyncio.DatagramProtocol):
         self.transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        self.transport = transport  # type: ignore[assignment]
+        self.transport = cast(asyncio.DatagramTransport, transport)
 
-    def datagram_received(self, data: bytes, addr) -> None:
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
             self.rx_queue.put_nowait((data, addr))
         except Exception:
@@ -51,18 +59,21 @@ class AsyncRobotClient:
         self,
         host: str = "127.0.0.1",
         port: int = 5001,
-        timeout: float = 2.0,
+        timeout: float = 1.0,
         retries: int = 1,
     ) -> None:
-        self.host = host
-        self.port = port
+        # Endpoint configuration (host/port immutable after endpoint creation)
+        self._host = host
+        self._port = port
         self.timeout = timeout
         self.retries = retries
 
         # Persistent asyncio datagram endpoint
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _UDPClientProtocol | None = None
-        self._rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(maxsize=256)
+        self._rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(
+            maxsize=256
+        )
         self._ep_lock = asyncio.Lock()
 
         # Serialize request/response
@@ -72,18 +83,51 @@ class AsyncRobotClient:
         self._stream_mode = False
         # ACK policy
         self._ack_policy = AckPolicy.from_env(lambda: self._stream_mode)
-        
+
         # Multicast listener using subscribe_status
         self._multicast_task: asyncio.Task | None = None
         self._status_queue: asyncio.Queue[StatusAggregate] = asyncio.Queue(maxsize=100)
+
+        # Lifecycle flag
+        self._closed: bool = False
+
+    # --------------- Endpoint configuration properties ---------------
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @host.setter
+    def host(self, value: str) -> None:
+        if self._transport is not None:
+            raise RuntimeError(
+                "AsyncRobotClient.host is read-only after endpoint creation"
+            )
+        self._host = value
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @port.setter
+    def port(self, value: int) -> None:
+        if self._transport is not None:
+            raise RuntimeError(
+                "AsyncRobotClient.port is read-only after endpoint creation"
+            )
+        self._port = value
 
     # --------------- Internal helpers ---------------
 
     async def _ensure_endpoint(self) -> None:
         """Lazily create a persistent asyncio UDP datagram endpoint."""
+        if self._closed:
+            raise RuntimeError("AsyncRobotClient is closed")
         if self._transport is not None:
             return
         async with self._ep_lock:
+            if self._closed:
+                raise RuntimeError("AsyncRobotClient is closed")
             if self._transport is not None:
                 return
             loop = asyncio.get_running_loop()
@@ -92,10 +136,12 @@ class AsyncRobotClient:
                 lambda: _UDPClientProtocol(self._rx_queue),
                 remote_addr=(self.host, self.port),
             )
-            self._transport = transport  # type: ignore[assignment]
-            self._protocol = protocol  # type: ignore[assignment]
-            logger.info(f"AsyncRobotClient UDP endpoint: remote={self.host}:{self.port}, timeout={self.timeout}, retries={self.retries}")
-            
+            self._transport = transport
+            self._protocol = protocol
+            logger.info(
+                f"AsyncRobotClient UDP endpoint: remote={self.host}:{self.port}, timeout={self.timeout}, retries={self.retries}"
+            )
+
             # Start multicast listener
             await self._start_multicast_listener()
 
@@ -103,17 +149,26 @@ class AsyncRobotClient:
         """Start listening for multicast status broadcasts using subscribe_status."""
         if self._multicast_task is not None and not self._multicast_task.done():
             return
-        
-        logger.info(f"Status subscriber config: group={cfg.MCAST_GROUP} port={cfg.MCAST_PORT} iface={cfg.MCAST_IF}")
+
+        logger.info(
+            f"Status subscriber config: group={cfg.MCAST_GROUP} port={cfg.MCAST_PORT} iface={cfg.MCAST_IF}"
+        )
         # Quick readiness check (no blind wait): bounded by client's own timeout
         try:
-            await self.wait_for_server_ready(timeout=min(1.0, float(self.timeout or 0.3)), interval=0.5)
+            await self.wait_for_server_ready(
+                timeout=min(1.0, float(self.timeout or 0.3)), interval=0.5
+            )
         except Exception:
             pass
+
         async def _listener():
             """Consume status broadcasts and queue them."""
             try:
                 async for status in subscribe_status():
+                    # Exit promptly if the client is closing
+                    if self._closed:
+                        break
+
                     # Put in queue, drop old if full
                     if self._status_queue.full():
                         try:
@@ -124,25 +179,83 @@ class AsyncRobotClient:
                         self._status_queue.put_nowait(status)
                     except asyncio.QueueFull:
                         pass
+            except asyncio.CancelledError:
+                # Normal shutdown path; propagate cancellation so the task
+                # is marked as cancelled and can be awaited cleanly.
+                raise
             except Exception:
-                # Subscriber ended, could retry but for now just exit
+                # Subscriber ended unexpectedly, could retry but for now just exit
                 pass
-        
+
         # Start listener task
         self._multicast_task = asyncio.create_task(_listener())
-    
-    async def status_stream(self) -> AsyncIterator[StatusAggregate]:
+
+    # --------------- Lifecycle / context management ---------------
+
+    async def close(self) -> None:
+        """Release UDP transport and background tasks.
+
+        Safe to call multiple times.
         """
-        Async generator that yields status updates from multicast broadcasts.
-        
+        if self._closed:
+            return
+        logging.debug("Closing Client...")
+        self._closed = True
+
+        # status_stream consumers will be signaled via sentinel after stopping the multicast listener.
+
+        # Stop multicast listener
+        if self._multicast_task is not None:
+            self._multicast_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._multicast_task
+            self._multicast_task = None
+
+        # Wake status_stream consumer(s) promptly: clear queue then enqueue sentinel so it's next
+        with contextlib.suppress(Exception):
+            while not self._status_queue.empty():
+                self._status_queue.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._status_queue.put_nowait(_STATUS_SENTINEL)
+
+        # Close UDP transport
+        if self._transport is not None:
+            with contextlib.suppress(Exception):
+                self._transport.close()
+            self._transport = None
+            self._protocol = None
+
+        # Best-effort drain for RX queue to free memory.
+        # Do not drain status_queue here to ensure sentinel reaches consumers.
+        with contextlib.suppress(Exception):
+            while not self._rx_queue.empty():
+                self._rx_queue.get_nowait()
+
+    async def __aenter__(self) -> "AsyncRobotClient":
+        if self._closed:
+            raise RuntimeError("AsyncRobotClient is closed")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def status_stream(self) -> AsyncIterator[StatusAggregate]:
+        """Async generator that yields status updates from multicast broadcasts.
+
         Usage:
             async for status in client.status_stream():
                 print(f"Speeds: {status.get('speeds')}")
+
+        This generator terminates automatically when :meth:`close` is
+        called on the client, so callers do not need to manually cancel
+        their consumer tasks.
         """
         await self._ensure_endpoint()
         while True:
-            status = await self._status_queue.get()
-            yield status
+            item = await self._status_queue.get()
+            if item is _STATUS_SENTINEL:
+                break
+            yield item
 
     async def _send(self, message: str) -> bool:
         """
@@ -180,11 +293,13 @@ class AsyncRobotClient:
             try:
                 async with self._req_lock:
                     self._transport.sendto(message.encode("ascii"))
-                    data, _addr = await asyncio.wait_for(self._rx_queue.get(), timeout=self.timeout)
+                    data, _addr = await asyncio.wait_for(
+                        self._rx_queue.get(), timeout=self.timeout
+                    )
                     return data.decode("ascii", errors="ignore")
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 if attempt < self.retries:
-                    backoff = min(0.5, 0.05 * (2 ** attempt)) + random.uniform(0, 0.05)
+                    backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
                     await asyncio.sleep(backoff)
                     continue
             except Exception:
@@ -213,7 +328,7 @@ class AsyncRobotClient:
                     if text.startswith("ERROR|"):
                         raise RuntimeError(text)
                     # Ignore unrelated datagrams
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     break
                 except Exception:
                     break
@@ -224,17 +339,19 @@ class AsyncRobotClient:
     async def home(self) -> bool:
         return await self._send("HOME")
 
-    async def stop(self) -> bool:
-        return await self._send("STOP")
-
     async def enable(self) -> bool:
         return await self._send("ENABLE")
 
     async def disable(self) -> bool:
         return await self._send("DISABLE")
 
-    async def clear_error(self) -> bool:
-        return await self._send("CLEAR_ERROR")
+    async def stop(self) -> bool:
+        """Alias for disable() - stops motion and disables controller."""
+        return await self.disable()
+
+    async def start(self) -> bool:
+        """Alias for enable() - enables controller."""
+        return await self.enable()
 
     async def stream_on(self) -> bool:
         self._stream_mode = True
@@ -243,7 +360,7 @@ class AsyncRobotClient:
     async def stream_off(self) -> bool:
         self._stream_mode = False
         return await self._send("STREAM|OFF")
-    
+
     async def simulator_on(self) -> bool:
         return await self._send("SIMULATOR|ON")
 
@@ -265,39 +382,47 @@ class AsyncRobotClient:
         if not resp:
             return None
         vals = wire.decode_simple(resp, "ANGLES")
-        return cast(List[float] | None, vals)
+        return cast(list[float] | None, vals)
 
     async def get_io(self) -> list[int] | None:
         resp = await self._request("GET_IO", bufsize=1024)
         if not resp:
             return None
         vals = wire.decode_simple(resp, "IO")
-        return cast(List[int] | None, vals)
+        return cast(list[int] | None, vals)
 
     async def get_gripper_status(self) -> list[int] | None:
         resp = await self._request("GET_GRIPPER", bufsize=1024)
         if not resp:
             return None
         vals = wire.decode_simple(resp, "GRIPPER")
-        return cast(List[int] | None, vals)
+        return cast(list[int] | None, vals)
 
     async def get_speeds(self) -> list[float] | None:
         resp = await self._request("GET_SPEEDS", bufsize=1024)
         if not resp:
             return None
         vals = wire.decode_simple(resp, "SPEEDS")
-        return cast(List[float] | None, vals)
+        return cast(list[float] | None, vals)
 
-    async def get_pose(self) -> list[float] | None:
+    async def get_pose(
+        self, frame: Literal["WRF", "TRF"] = "WRF"
+    ) -> list[float] | None:
         """
-        Returns 16-element transformation matrix (flattened) or None on failure.
+        Returns 16-element transformation matrix (flattened) with translation in mm.
+
+        Args:
+            frame: Reference frame - "WRF" for World Reference Frame (default),
+                   "TRF" for Tool Reference Frame
+
         Expected wire format: "POSE|p0,p1,p2,...,p15"
         """
-        resp = await self._request("GET_POSE", bufsize=2048)
+        command = f"GET_POSE {frame}" if frame != "WRF" else "GET_POSE"
+        resp = await self._request(command, bufsize=2048)
         if not resp:
             return None
         vals = wire.decode_simple(resp, "POSE")
-        return cast(List[float] | None, vals)
+        return cast(list[float] | None, vals)
 
     async def get_gripper(self) -> list[int] | None:
         """Alias for get_gripper_status for compatibility."""
@@ -308,7 +433,7 @@ class AsyncRobotClient:
         Aggregate status.
         Expected format:
           STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj
-        Returns dict with keys: pose (list[float] len=16), angles (list[float] len=6),
+        Returns dict with keys: pose (list[float] len=16 with translation in mm), angles (list[float] len=6),
                                 io (list[int] len=5), gripper (list[int] len>=6)
         """
         resp = await self._request("GET_STATUS", bufsize=4096)
@@ -324,49 +449,84 @@ class AsyncRobotClient:
         resp = await self._request("GET_LOOP_STATS", bufsize=1024)
         if not resp or not resp.startswith("LOOP_STATS|"):
             return None
-        return cast(Dict, json.loads(resp.split("|", 1)[1]))
+        return cast(dict, json.loads(resp.split("|", 1)[1]))
+
+    async def set_tool(self, tool_name: str) -> bool:
+        """
+        Set the current end-effector tool configuration.
+
+        Args:
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
+
+        Returns:
+            True if successful
+        """
+        return await self._send(f"SET_TOOL|{tool_name.upper()}")
+
+    async def get_tool(self) -> dict | None:
+        """
+        Get the current tool configuration and available tools.
+
+        Returns:
+            Dict with keys: 'tool' (current tool name), 'available' (list of available tools)
+            Expected wire format: "TOOL|{json}"
+        """
+        resp = await self._request("GET_TOOL", bufsize=1024)
+        if not resp or not resp.startswith("TOOL|"):
+            return None
+        return cast(dict, json.loads(resp.split("|", 1)[1]))
+
+    async def get_current_action(self) -> dict | None:
+        """
+        Get the current executing action/command and its state.
+
+        Returns:
+            Dict with keys: 'current' (current action name), 'state' (action state),
+                           'next' (next action if any)
+            Expected wire format: "ACTION|{json}"
+        """
+        resp = await self._request("GET_CURRENT_ACTION", bufsize=1024)
+        if not resp or not resp.startswith("ACTION|"):
+            return None
+        return cast(dict, json.loads(resp.split("|", 1)[1]))
+
+    async def get_queue(self) -> dict | None:
+        """
+        Get the list of queued non-streamable commands.
+
+        Returns:
+            Dict with keys: 'non_streamable' (list of queued commands), 'size' (queue size)
+            Expected wire format: "QUEUE|{json}"
+        """
+        resp = await self._request("GET_QUEUE", bufsize=2048)
+        if not resp or not resp.startswith("QUEUE|"):
+            return None
+        return cast(dict, json.loads(resp.split("|", 1)[1]))
 
     # --------------- Helper methods ---------------
 
     async def get_pose_rpy(self) -> list[float] | None:
         """
-        Get robot pose as [x, y, z, rx, ry, rz] in mm and degrees.
-        Converts 4x4 matrix to xyz + RPY Euler angles.
+        Get robot pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] using RPY order='xyz'.
         """
         pose_matrix = await self.get_pose()
         if not pose_matrix or len(pose_matrix) != 16:
             return None
-        
+
         try:
-            # Extract translation
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
-            
-            # Extract rotation matrix elements 
-            r11, _, _ = pose_matrix[0], pose_matrix[1], pose_matrix[2]
-            r21, r22, r23 = pose_matrix[4], pose_matrix[5], pose_matrix[6] 
-            r31, r32, r33 = pose_matrix[8], pose_matrix[9], pose_matrix[10]
-            
-            # Convert to RPY (XYZ convention) in degrees
-            # Handle gimbal lock cases
-            sy = math.sqrt(r11*r11 + r21*r21)
-            
-            if sy > 1e-6:  # Not at gimbal lock
-                rx = math.atan2(r32, r33)
-                ry = math.atan2(-r31, sy)  
-                rz = math.atan2(r21, r11)
-            else:  # Gimbal lock case
-                rx = math.atan2(-r23, r22)
-                ry = math.atan2(-r31, sy)
-                rz = 0.0
-            
-            # Convert to degrees
-            rx_deg = math.degrees(rx)
-            ry_deg = math.degrees(ry)
-            rz_deg = math.degrees(rz)
-            
-            return [x, y, z, rx_deg, ry_deg, rz_deg]
-            
-        except (ValueError, IndexError):
+            # Rotation matrix rows (row-major layout)
+            R = np.array(
+                [
+                    [pose_matrix[0], pose_matrix[1], pose_matrix[2]],
+                    [pose_matrix[4], pose_matrix[5], pose_matrix[6]],
+                    [pose_matrix[8], pose_matrix[9], pose_matrix[10]],
+                ]
+            )
+            # Use xyz convention (rx, ry, rz) - Roll-Pitch-Yaw
+            rpy_deg = SO3(R).rpy(order="xyz", unit="deg")
+            return [x, y, z, rpy_deg[0], rpy_deg[1], rpy_deg[2]]
+        except (ValueError, IndexError, ImportError):
             return None
 
     async def get_pose_xyz(self) -> list[float] | None:
@@ -384,10 +544,10 @@ class AsyncRobotClient:
     async def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
         """
         Check if robot has stopped moving.
-        
+
         Args:
             threshold_speed: Speed threshold in steps/sec
-            
+
         Returns:
             True if all joints below threshold
         """
@@ -401,22 +561,22 @@ class AsyncRobotClient:
         timeout: float = 90.0,
         settle_window: float = 1.0,
         speed_threshold: float = 2.0,
-        angle_threshold: float = 0.5
+        angle_threshold: float = 0.5,
     ) -> bool:
         """
         Wait for robot to stop moving using multicast status broadcasts.
-        
+
         Args:
             timeout: Maximum time to wait in seconds
             settle_window: How long robot must be stable to be considered stopped
             speed_threshold: Max joint speed to be considered stopped (steps/sec)
             angle_threshold: Max angle change to be considered stopped (degrees)
-            
+
         Returns:
             True if robot stopped, False if timeout
         """
         await self._ensure_endpoint()
-        
+
         last_angles = None
         settle_start = None
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
@@ -425,9 +585,9 @@ class AsyncRobotClient:
             async for status in self.status_stream():
                 if timeout_task.done():
                     return False
-                    
+
                 # Check speeds from status
-                speeds = status.get('speeds')
+                speeds = status.get("speeds")
                 if speeds and isinstance(speeds, Iterable):
                     if max(abs(s) for s in speeds) < speed_threshold:
                         if settle_start is None:
@@ -436,12 +596,15 @@ class AsyncRobotClient:
                             return True
                     else:
                         settle_start = None
-                
+
                 # Also check angles as fallback
-                angles = status.get('angles')
+                angles = status.get("angles")
                 if angles and not speeds:
                     if last_angles is not None:
-                        max_change = max(abs(a - b) for a, b in zip(angles, last_angles))
+                        max_change = max(
+                            abs(a - b)
+                            for a, b in zip(angles, last_angles, strict=False)
+                        )
                         if max_change < angle_threshold:
                             if settle_start is None:
                                 settle_start = time.time()
@@ -456,12 +619,14 @@ class AsyncRobotClient:
                 await timeout_task
             except asyncio.CancelledError:
                 pass
-            
+
         return False
 
     # --------------- Additional waits and utilities ---------------
 
-    async def wait_for_server_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
+    async def wait_for_server_ready(
+        self, timeout: float = 5.0, interval: float = 0.05
+    ) -> bool:
         """Poll ping() until server responds or timeout."""
         end_time = time.time() + timeout
         while time.time() < end_time:
@@ -471,15 +636,19 @@ class AsyncRobotClient:
             await asyncio.sleep(interval)
         return False
 
-    async def wait_for_status(self, predicate, timeout: float = 5.0) -> bool:
+    async def wait_for_status(
+        self, predicate: Callable[[StatusAggregate], bool], timeout: float = 5.0
+    ) -> bool:
         """Wait until a multicast status satisfies predicate(status) within timeout."""
         await self._ensure_endpoint()
         end_time = time.time() + timeout
         while time.time() < end_time:
             remaining = max(0.0, end_time - time.time())
             try:
-                status = await asyncio.wait_for(self._status_queue.get(), timeout=remaining)
-            except asyncio.TimeoutError:
+                status = await asyncio.wait_for(
+                    self._status_queue.get(), timeout=remaining
+                )
+            except (asyncio.TimeoutError, TimeoutError):
                 break
             try:
                 if predicate(status):
@@ -489,7 +658,9 @@ class AsyncRobotClient:
                 pass
         return False
 
-    async def send_raw(self, message: str, await_reply: bool = False, timeout: float = 2.0) -> bool | str | None:
+    async def send_raw(
+        self, message: str, await_reply: bool = False, timeout: float = 2.0
+    ) -> bool | str | None:
         """Send a raw UDP message; optionally await a single reply."""
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -499,9 +670,11 @@ class AsyncRobotClient:
                 return True
             async with self._req_lock:
                 self._transport.sendto(message.encode("ascii"))
-                data, _addr = await asyncio.wait_for(self._rx_queue.get(), timeout=timeout)
+                data, _addr = await asyncio.wait_for(
+                    self._rx_queue.get(), timeout=timeout
+                )
                 return data.decode("ascii", errors="ignore")
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return None
         except Exception:
             return None
@@ -518,7 +691,9 @@ class AsyncRobotClient:
         tracking: str | None = None,  # accepted but not sent
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_joint(joint_angles, duration, speed_percentage)
         return await self._send(message)
 
@@ -532,7 +707,9 @@ class AsyncRobotClient:
         tracking: str | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_pose(pose, duration, speed_percentage)
         return await self._send(message)
 
@@ -546,7 +723,9 @@ class AsyncRobotClient:
         tracking: str | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_cartesian(pose, duration, speed_percentage)
         return await self._send(message)
 
@@ -564,7 +743,9 @@ class AsyncRobotClient:
         Provide either duration or speed_percentage (1..100).
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         message = wire.encode_move_cartesian_rel_trf(
             deltas, duration, speed_percentage, accel_percentage, profile, tracking
         )
@@ -582,8 +763,12 @@ class AsyncRobotClient:
         duration and distance_deg are optional; at least one should be provided for one-shot jog.
         """
         if duration is None and distance_deg is None:
-            raise RuntimeError("Error: You must provide either a duration or a distance_deg.")
-        message = wire.encode_jog_joint(joint_index, speed_percentage, duration, distance_deg)
+            raise RuntimeError(
+                "Error: You must provide either a duration or a distance_deg."
+            )
+        message = wire.encode_jog_joint(
+            joint_index, speed_percentage, duration, distance_deg
+        )
         return await self._send(message)
 
     async def jog_cartesian(
@@ -609,7 +794,9 @@ class AsyncRobotClient:
         Send a MULTIJOG command to jog multiple joints simultaneously for 'duration' seconds.
         """
         if len(joints) != len(speeds):
-            raise ValueError("Error: The number of joints must match the number of speeds.")
+            raise ValueError(
+                "Error: The number of joints must match the number of speeds."
+            )
         joints_str = ",".join(str(j) for j in joints)
         speeds_str = ",".join(str(s) for s in speeds)
         message = f"MULTIJOG|{joints_str}|{speeds_str}|{duration}"
@@ -688,7 +875,7 @@ class AsyncRobotClient:
         """
         for i, line in enumerate(program_lines):
             if "|" in line:
-                raise SyntaxError(f"Line {i+1} contains invalid '|'")
+                raise SyntaxError(f"Line {i + 1} contains invalid '|'")
         message = wire.encode_gcode_program_inline(program_lines)
         return await self._send(message)
 
@@ -706,8 +893,8 @@ class AsyncRobotClient:
         resp = await self._request("GET_GCODE_STATUS", bufsize=2048)
         if not resp or not resp.startswith("GCODE_STATUS|"):
             return None
-        
-        status_json = resp.split('|', 1)[1]
+
+        status_json = resp.split("|", 1)[1]
         return json.loads(status_json)
 
     async def pause_gcode_program(self) -> bool:
@@ -726,22 +913,22 @@ class AsyncRobotClient:
 
     async def smooth_circle(
         self,
-        center: List[float],
+        center: list[float],
         radius: float,
         plane: Literal["XY", "XZ", "YZ"] = "XY",
         frame: Literal["WRF", "TRF"] = "WRF",
         center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
         entry_mode: Literal["AUTO", "TANGENT", "DIRECT", "NONE"] = "NONE",
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: Optional[float] = None,
+        jerk_limit: float | None = None,
     ) -> bool:
         """
         Execute a smooth circular motion.
-        
+
         Args:
             center: [x, y, z] center point in mm
             radius: Circle radius in mm
@@ -757,11 +944,17 @@ class AsyncRobotClient:
             jerk_limit: Optional jerk limit for s_curve trajectory
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -776,19 +969,19 @@ class AsyncRobotClient:
 
     async def smooth_arc_center(
         self,
-        end_pose: List[float],
-        center: List[float],
+        end_pose: list[float],
+        center: list[float],
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: Optional[float] = None,
+        jerk_limit: float | None = None,
     ) -> bool:
         """
         Execute a smooth arc motion defined by center point.
-        
+
         Args:
             end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
             center: [x, y, z] arc center point in mm
@@ -801,12 +994,18 @@ class AsyncRobotClient:
             jerk_limit: Optional jerk limit for s_curve trajectory
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either a duration or a speed_percentage."
+            )
         end_str = ",".join(map(str, end_pose))
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -820,25 +1019,31 @@ class AsyncRobotClient:
 
     async def smooth_arc_param(
         self,
-        end_pose: List[float],
+        end_pose: list[float],
         radius: float,
         arc_angle: float,
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: Optional[float] = None,
+        jerk_limit: float | None = None,
         clockwise: bool = False,
     ) -> bool:
         """
         Execute a smooth arc motion defined parametrically (radius and angle).
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("You must provide either a duration or a speed_percentage.")
+            raise RuntimeError(
+                "You must provide either a duration or a speed_percentage."
+            )
         end_str = ",".join(map(str, end_pose))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         parts = [
             "SMOOTH_ARC_PARAM",
             end_str,
@@ -857,17 +1062,17 @@ class AsyncRobotClient:
 
     async def smooth_spline(
         self,
-        waypoints: List[List[float]],
+        waypoints: list[list[float]],
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: Optional[float] = None,
+        jerk_limit: float | None = None,
     ) -> bool:
         """
         Execute a smooth spline motion through waypoints.
-        
+
         Args:
             waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)
             frame: Reference frame ('WRF' for World, 'TRF' for Tool)
@@ -881,14 +1086,27 @@ class AsyncRobotClient:
             non_blocking: Return immediately with command ID
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         num_waypoints = len(waypoints)
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         waypoint_strs: list[str] = []
         for wp in waypoints:
             waypoint_strs.extend(map(str, wp))
-        parts = ["SMOOTH_SPLINE", str(num_waypoints), frame, start_str, timing_str, trajectory_type]
+        parts = [
+            "SMOOTH_SPLINE",
+            str(num_waypoints),
+            frame,
+            start_str,
+            timing_str,
+            trajectory_type,
+        ]
         if trajectory_type == "s_curve" and jerk_limit is not None:
             parts.append(str(jerk_limit))
         elif trajectory_type == "s_curve":
@@ -898,21 +1116,21 @@ class AsyncRobotClient:
 
     async def smooth_helix(
         self,
-        center: List[float],
+        center: list[float],
         radius: float,
         pitch: float,
         height: float,
         frame: Literal["WRF", "TRF"] = "WRF",
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: Optional[float] = None,
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        jerk_limit: float | None = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
         clockwise: bool = False,
     ) -> bool:
         """
         Execute a smooth helical motion.
-        
+
         Args:
             center: [x, y, z] helix center point in mm
             radius: Helix radius in mm
@@ -927,11 +1145,17 @@ class AsyncRobotClient:
             clockwise: Direction of motion
         """
         if duration is None and speed_percentage is None:
-            raise RuntimeError("Error: You must provide either duration or speed_percentage.")
+            raise RuntimeError(
+                "Error: You must provide either duration or speed_percentage."
+            )
         center_str = ",".join(map(str, center))
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
         clockwise_str = "1" if clockwise else "0"
-        timing_str = f"DURATION|{duration}" if duration is not None else f"SPEED|{speed_percentage}"
+        timing_str = (
+            f"DURATION|{duration}"
+            if duration is not None
+            else f"SPEED|{speed_percentage}"
+        )
         traj_params = f"|{trajectory_type}"
         if trajectory_type == "s_curve" and jerk_limit is not None:
             traj_params += f"|{jerk_limit}"
@@ -945,16 +1169,16 @@ class AsyncRobotClient:
 
     async def smooth_blend(
         self,
-        segments: List[Dict],
+        segments: list[dict],
         blend_time: float = 0.5,
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: Optional[List[float]] = None,
-        duration: Optional[float] = None,
-        speed_percentage: Optional[float] = None,
+        start_pose: list[float] | None = None,
+        duration: float | None = None,
+        speed_percentage: float | None = None,
     ) -> bool:
         """
         Execute a blended motion through multiple segments.
-        
+
         Args:
             segments: List of segment dictionaries
             blend_time: Time to blend between segments in seconds
@@ -991,7 +1215,9 @@ class AsyncRobotClient:
                 clockwise_str = "1" if seg.get("clockwise", False) else "0"
                 seg_str = f"ARC|{end_str}|{center_str}|{seg.get('duration', 2.0)}|{clockwise_str}"
             elif seg_type == "SPLINE":
-                waypoints_str = ";".join([",".join(map(str, wp)) for wp in seg["waypoints"]])
+                waypoints_str = ";".join(
+                    [",".join(map(str, wp)) for wp in seg["waypoints"]]
+                )
                 seg_str = f"SPLINE|{len(seg['waypoints'])}|{waypoints_str}|{seg.get('duration', 3.0)}"
             else:
                 continue
@@ -1005,15 +1231,15 @@ class AsyncRobotClient:
 
     async def smooth_waypoints(
         self,
-        waypoints: List[List[float]],
-        blend_radii: Literal["AUTO"] | List[float] = "AUTO",
+        waypoints: list[list[float]],
+        blend_radii: Literal["AUTO"] | list[float] = "AUTO",
         blend_mode: Literal["parabolic", "circular", "none"] = "parabolic",
-        via_modes: Optional[List[str]] = None,
+        via_modes: list[str] | None = None,
         max_velocity: float = 100.0,
         max_acceleration: float = 500.0,
         frame: Literal["WRF", "TRF"] = "WRF",
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "quintic",
-        duration: Optional[float] = None,
+        duration: float | None = None,
     ) -> bool:
         """
         Execute a waypoint trajectory with blending.
@@ -1025,10 +1251,12 @@ class AsyncRobotClient:
             radii_str = "AUTO"
         else:
             if len(blend_radii) != max(0, len(waypoints) - 2):
-                raise ValueError(f"Blend radii count must be {max(0, len(waypoints) - 2)}")
+                raise ValueError(
+                    f"Blend radii count must be {max(0, len(waypoints) - 2)}"
+                )
             radii_str = ",".join(map(str, blend_radii))
         if via_modes is None:
-            via_modes_list: List[str] = ["via"] * len(waypoints)
+            via_modes_list: list[str] = ["via"] * len(waypoints)
         else:
             via_modes_list = list(via_modes)
         if len(via_modes_list) != len(waypoints):
@@ -1062,26 +1290,28 @@ class AsyncRobotClient:
     ) -> bool:
         """
         Set work coordinate system offsets (G54-G59).
-        
+
         Args:
             coordinate_system: Work coordinate system to set ('G54' through 'G59')
             x: X axis offset in mm (None to keep current)
             y: Y axis offset in mm (None to keep current)
             z: Z axis offset in mm (None to keep current)
-        
+
         Returns:
             Success message, command ID, or dict with status details
-        
+
         Example:
             # Set G54 origin to current position
             await client.set_work_coordinate_offset('G54', x=0, y=0, z=0)
-            
+
             # Offset G55 by 100mm in X
             await client.set_work_coordinate_offset('G55', x=100)
         """
         valid_systems = ["G54", "G55", "G56", "G57", "G58", "G59"]
         if coordinate_system not in valid_systems:
-            raise RuntimeError(f"Invalid coordinate system: {coordinate_system}. Must be one of {valid_systems}")
+            raise RuntimeError(
+                f"Invalid coordinate system: {coordinate_system}. Must be one of {valid_systems}"
+            )
 
         coord_num = int(coordinate_system[1:]) - 53  # G54=1, G55=2, etc.
         offset_params = []
@@ -1107,19 +1337,16 @@ class AsyncRobotClient:
     ) -> bool:
         """
         Set the current position as zero in the specified work coordinate system.
-        
+
         Args:
             coordinate_system: Work coordinate system to zero ('G54' through 'G59')
-        
+
         Returns:
             Success message, command ID, or dict with status details
-        
+
         Example:
             # Set current position as origin in G54
             await client.zero_work_coordinates('G54')
         """
         # This sets the current position as 0,0,0 in the work coordinate system
-        return await self.set_work_coordinate_offset(
-            coordinate_system,
-            x=0, y=0, z=0
-        )
+        return await self.set_work_coordinate_offset(coordinate_system, x=0, y=0, z=0)

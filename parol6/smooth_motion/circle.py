@@ -2,7 +2,7 @@
 Circle trajectory generator.
 """
 
-from typing import Sequence, Optional, Union
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,10 +18,10 @@ class CircularMotion(TrajectoryGenerator):
         self,
         start_pose: Sequence[float],
         end_pose: Sequence[float],
-        center: Union[Sequence[float], NDArray],
-        normal: Optional[Union[Sequence[float], NDArray]] = None,
+        center: Sequence[float] | NDArray,
+        normal: Sequence[float] | NDArray | None = None,
         clockwise: bool = True,
-        duration: Union[float, np.floating] = 2.0,
+        duration: float | np.floating = 2.0,
     ) -> np.ndarray:
         """
         Generate a 3D circular arc trajectory
@@ -51,8 +51,8 @@ class CircularMotion(TrajectoryGenerator):
             normal = np.cross(r1, r2)
             if np.linalg.norm(normal) < 1e-6:  # Points are collinear
                 normal = np.array([0, 0, 1])  # Default to XY plane
-        normal = np.array(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
+        normal_np: np.ndarray = np.array(normal, dtype=float)
+        normal_np = normal_np / np.linalg.norm(normal_np)
 
         # Arc sweep angle calculation
         r1_norm = r1 / np.linalg.norm(r1)
@@ -62,7 +62,7 @@ class CircularMotion(TrajectoryGenerator):
 
         # Arc direction validation
         cross = np.cross(r1_norm, r2_norm)
-        if np.dot(cross, normal) < 0:
+        if np.dot(cross, normal_np) < 0:
             arc_angle = 2 * np.pi - arc_angle
 
         if clockwise:
@@ -82,11 +82,15 @@ class CircularMotion(TrajectoryGenerator):
             else:
                 # Rotate radius vector
                 angle = s * arc_angle
-                rot_matrix = self._rotation_matrix_from_axis_angle(normal, angle)
+                rot_matrix = self._rotation_matrix_from_axis_angle(normal_np, angle)
                 current_pos = center_pt + rot_matrix @ r1
 
             # Interpolate orientation (SLERP)
-            current_orient = self._slerp_orientation(start_pose[3:], end_pose[3:], s)
+            current_orient = self._slerp_orientation(
+                np.asarray(start_pose[3:], dtype=float),
+                np.asarray(end_pose[3:], dtype=float),
+                float(s),
+            )
 
             # Combine position and orientation
             pose = np.concatenate([current_pos, current_orient])
@@ -98,12 +102,12 @@ class CircularMotion(TrajectoryGenerator):
         self,
         start_pose: Sequence[float],
         end_pose: Sequence[float],
-        center: Union[Sequence[float], NDArray],
-        normal: Optional[Union[Sequence[float], NDArray]] = None,
+        center: Sequence[float] | NDArray,
+        normal: Sequence[float] | NDArray | None = None,
         clockwise: bool = True,
-        duration: Union[float, np.floating] = 2.0,
+        duration: float | np.floating = 2.0,
         trajectory_type: str = "cubic",
-        jerk_limit: Optional[float] = None,
+        jerk_limit: float | None = None,
     ) -> np.ndarray:
         """
         Generate arc trajectory with specified velocity profile.
@@ -126,7 +130,9 @@ class CircularMotion(TrajectoryGenerator):
         """
         if trajectory_type == "cubic":
             # Use existing cubic implementation
-            return self.generate_arc_3d(start_pose, end_pose, center, normal, clockwise, duration)
+            return self.generate_arc_3d(
+                start_pose, end_pose, center, normal, clockwise, duration
+            )
 
         # Convert to numpy arrays
         start_pos = np.array(start_pose[:3])
@@ -142,8 +148,8 @@ class CircularMotion(TrajectoryGenerator):
             normal = np.cross(r1, r2)
             if np.linalg.norm(normal) < 1e-6:
                 normal = np.array([0, 0, 1])
-        normal = np.array(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
+        normal_np: np.ndarray = np.array(normal, dtype=float)
+        normal_np = normal_np / np.linalg.norm(normal_np)
 
         # Calculate arc angle
         r1_norm = r1 / np.linalg.norm(r1)
@@ -153,7 +159,7 @@ class CircularMotion(TrajectoryGenerator):
 
         # Determine arc direction
         cross = np.cross(r1_norm, r2_norm)
-        if np.dot(cross, normal) < 0:
+        if np.dot(cross, normal_np) < 0:
             arc_angle = 2 * np.pi - arc_angle
         if clockwise:
             arc_angle = -arc_angle
@@ -185,11 +191,15 @@ class CircularMotion(TrajectoryGenerator):
             angle = s * arc_angle
 
             # Rotation matrix for arc
-            rot_matrix = self._rotation_matrix_from_axis_angle(normal, angle)
+            rot_matrix = self._rotation_matrix_from_axis_angle(normal_np, angle)
             current_pos = center_pt + rot_matrix @ r1
 
             # Interpolate orientation (SLERP)
-            current_orient = self._slerp_orientation(start_pose[3:], end_pose[3:], s)
+            current_orient = self._slerp_orientation(
+                np.asarray(start_pose[3:], dtype=float),
+                np.asarray(end_pose[3:], dtype=float),
+                float(s),
+            )
 
             # Combine position and orientation
             pose = np.concatenate([current_pos, current_orient])
@@ -199,12 +209,12 @@ class CircularMotion(TrajectoryGenerator):
 
     def generate_circle_3d(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
-        normal: Union[Sequence[float], NDArray] = [0, 0, 1],
-        start_angle: Optional[float] = None,
-        duration: Union[float, np.floating] = 4.0,
-        start_point: Optional[Sequence[float]] = None,
+        normal: Sequence[float] | NDArray = [0, 0, 1],
+        start_angle: float | None = None,
+        duration: float | np.floating = 4.0,
+        start_point: Sequence[float] | None = None,
     ) -> np.ndarray:
         """
         Generate a complete circle trajectory that starts at start_point
@@ -213,10 +223,10 @@ class CircularMotion(TrajectoryGenerator):
         trajectory = []
 
         # Circle coordinate system
-        normal = np.array(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
-        u = self._get_perpendicular_vector(normal)
-        v = np.cross(normal, u)
+        normal_np: np.ndarray = np.array(normal, dtype=float)
+        normal_np = normal_np / np.linalg.norm(normal_np)
+        u = self._get_perpendicular_vector(normal_np)
+        v = np.cross(normal_np, u)
 
         center_np = np.array(center, dtype=float)
 
@@ -225,14 +235,16 @@ class CircularMotion(TrajectoryGenerator):
             start_pos = np.array(start_point[:3])
             # Project start point onto the circle plane
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, normal) * normal
+            to_start_plane = to_start - np.dot(to_start, normal_np) * normal_np
 
             # Get distance from center in the plane
             dist_in_plane = np.linalg.norm(to_start_plane)
 
             if dist_in_plane < 0.001:
                 # Center start point - undefined angle
-                print("    WARNING: Start point is at circle center, using default position")
+                print(
+                    "    WARNING: Start point is at circle center, using default position"
+                )
                 start_angle = 0
                 actual_start = center_np + radius * u
             else:
@@ -245,9 +257,13 @@ class CircularMotion(TrajectoryGenerator):
                 # Check if entry trajectory might be needed
                 radius_error = abs(dist_in_plane - radius)
                 if radius_error > radius * 0.05:  # More than 5% off
-                    print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
+                    print(
+                        f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)"
+                    )
                     if radius_error > radius * 0.3:  # More than 30% off
-                        print("    WARNING: Large distance from circle - consider using entry trajectory")
+                        print(
+                            "    WARNING: Large distance from circle - consider using entry trajectory"
+                        )
 
                 actual_start = start_pos
         else:
@@ -261,7 +277,9 @@ class CircularMotion(TrajectoryGenerator):
                 pos = actual_start
             else:
                 # Generate circle points
-                angle = start_angle + (2 * np.pi * t / duration)
+                angle = float(start_angle if start_angle is not None else 0.0) + (
+                    2 * np.pi * t / duration
+                )
                 pos = center_np + radius * (np.cos(angle) * u + np.sin(angle) * v)
 
             # Placeholder orientation (will be overridden)
@@ -272,14 +290,14 @@ class CircularMotion(TrajectoryGenerator):
 
     def generate_circle_with_profile(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
-        normal: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
+        normal: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
         trajectory_type: str = "cubic",
-        jerk_limit: Optional[float] = None,
-        start_angle: Optional[float] = None,
-        start_point: Optional[Sequence[float]] = None,
+        jerk_limit: float | None = None,
+        start_angle: float | None = None,
+        start_point: Sequence[float] | None = None,
     ) -> np.ndarray:
         """
         Generate circle with specified trajectory profile.
@@ -314,7 +332,9 @@ class CircularMotion(TrajectoryGenerator):
             self.control_rate = adaptive_rate
             self.dt = 1.0 / adaptive_rate
             # Use print for debug info since logger not imported here
-            print(f"    [ADAPTIVE] Using {adaptive_rate:.0f}Hz control rate for {radius:.0f}mm radius circle")
+            print(
+                f"    [ADAPTIVE] Using {adaptive_rate:.0f}Hz control rate for {radius:.0f}mm radius circle"
+            )
         else:
             original_rate = None
             original_dt = None
@@ -322,11 +342,23 @@ class CircularMotion(TrajectoryGenerator):
         try:
             if trajectory_type == "cubic":
                 # Use existing implementation
-                result = self.generate_circle_3d(center, radius, normal, start_angle, duration, start_point)
+                result = self.generate_circle_3d(
+                    center, radius, normal, start_angle, duration, start_point
+                )
             elif trajectory_type == "quintic":
-                result = self.generate_quintic_circle(center, radius, normal, duration, start_angle, start_point)
+                result = self.generate_quintic_circle(
+                    center, radius, normal, duration, start_angle, start_point
+                )
             elif trajectory_type == "s_curve":
-                result = self.generate_scurve_circle(center, radius, normal, duration, jerk_limit, start_angle, start_point)
+                result = self.generate_scurve_circle(
+                    center,
+                    radius,
+                    normal,
+                    duration,
+                    jerk_limit,
+                    start_angle,
+                    start_point,
+                )
             else:
                 raise ValueError(f"Unknown trajectory type: {trajectory_type}")
         finally:
@@ -339,12 +371,12 @@ class CircularMotion(TrajectoryGenerator):
 
     def generate_quintic_circle(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
-        normal: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
-        start_angle: Optional[float] = None,
-        start_point: Optional[Sequence[float]] = None,
+        normal: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
+        start_angle: float | None = None,
+        start_point: Sequence[float] | None = None,
     ) -> np.ndarray:
         """
         Generate circle trajectory using quintic polynomial velocity profile.
@@ -354,17 +386,17 @@ class CircularMotion(TrajectoryGenerator):
         num_points = int(duration * self.control_rate)
 
         # Setup coordinate system
-        normal = np.array(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
-        u = self._get_perpendicular_vector(normal)
-        v = np.cross(normal, u)
+        normal_np: np.ndarray = np.array(normal, dtype=float)
+        normal_np = normal_np / np.linalg.norm(normal_np)
+        u = self._get_perpendicular_vector(normal_np)
+        v = np.cross(normal_np, u)
         center_np = np.array(center, dtype=float)
 
         # Handle start point if provided
         if start_point is not None:
             start_pos = np.array(start_point[:3])
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, normal) * normal
+            to_start_plane = to_start - np.dot(to_start, normal_np) * normal_np
             dist_in_plane = np.linalg.norm(to_start_plane)
 
             if dist_in_plane < 0.001:
@@ -378,14 +410,22 @@ class CircularMotion(TrajectoryGenerator):
                 # Check if entry trajectory might be needed
                 radius_error = abs(dist_in_plane - radius)
                 if radius_error > radius * 0.05:  # More than 5% off
-                    print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
+                    print(
+                        f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)"
+                    )
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print("    WARNING: Large distance from circle - consider using entry trajectory")
+                        print(
+                            "    WARNING: Large distance from circle - consider using entry trajectory"
+                        )
         else:
             start_angle = 0 if start_angle is None else start_angle
 
         # Step 1: Generate uniformly spaced angular points
-        angles = np.linspace(start_angle, start_angle + 2 * np.pi, num_points)
+        angles = np.linspace(
+            float(start_angle if start_angle is not None else 0.0),
+            float((start_angle if start_angle is not None else 0.0) + 2 * np.pi),
+            num_points,
+        )
         uniform_positions = []
 
         for angle in angles:
@@ -427,13 +467,13 @@ class CircularMotion(TrajectoryGenerator):
 
     def generate_scurve_circle(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
-        normal: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
-        jerk_limit: Optional[float] = 5000.0,
-        start_angle: Optional[float] = None,
-        start_point: Optional[Sequence[float]] = None,
+        normal: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
+        jerk_limit: float | None = 5000.0,
+        start_angle: float | None = None,
+        start_point: Sequence[float] | None = None,
     ) -> np.ndarray:
         """
         Generate circle trajectory using S-curve velocity profile.
@@ -446,17 +486,17 @@ class CircularMotion(TrajectoryGenerator):
         num_points = int(duration * self.control_rate)
 
         # Setup coordinate system
-        normal = np.array(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
-        u = self._get_perpendicular_vector(normal)
-        v = np.cross(normal, u)
+        normal_np: np.ndarray = np.array(normal, dtype=float)
+        normal_np = normal_np / np.linalg.norm(normal_np)
+        u = self._get_perpendicular_vector(normal_np)
+        v = np.cross(normal_np, u)
         center_np = np.array(center, dtype=float)
 
         # Handle start point if provided
         if start_point is not None:
             start_pos = np.array(start_point[:3])
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, normal) * normal
+            to_start_plane = to_start - np.dot(to_start, normal_np) * normal_np
             dist_in_plane = np.linalg.norm(to_start_plane)
 
             if dist_in_plane < 0.001:
@@ -470,14 +510,22 @@ class CircularMotion(TrajectoryGenerator):
                 # Check if entry trajectory might be needed
                 radius_error = abs(dist_in_plane - radius)
                 if radius_error > radius * 0.05:  # More than 5% off
-                    print(f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)")
+                    print(
+                        f"    INFO: Starting {dist_in_plane:.1f}mm from center (radius: {radius}mm)"
+                    )
                     if radius_error > radius * 0.2:  # More than 20% off
-                        print("    WARNING: Large distance from circle - consider using entry trajectory")
+                        print(
+                            "    WARNING: Large distance from circle - consider using entry trajectory"
+                        )
         else:
             start_angle = 0 if start_angle is None else start_angle
 
         # Step 1: Generate uniformly spaced angular points
-        angles = np.linspace(start_angle, start_angle + 2 * np.pi, num_points)
+        angles = np.linspace(
+            float(start_angle if start_angle is not None else 0.0),
+            float((start_angle if start_angle is not None else 0.0) + 2 * np.pi),
+            num_points,
+        )
         uniform_positions = []
 
         for angle in angles:
@@ -523,14 +571,18 @@ class CircularMotion(TrajectoryGenerator):
 
         return np.array(trajectory)
 
-    def _rotation_matrix_from_axis_angle(self, axis: np.ndarray, angle: float) -> np.ndarray:
+    def _rotation_matrix_from_axis_angle(
+        self, axis: np.ndarray, angle: float
+    ) -> np.ndarray:
         """Generate rotation matrix using Rodrigues' formula"""
         axis = axis / np.linalg.norm(axis)
         cos_a = np.cos(angle)
         sin_a = np.sin(angle)
 
         # Cross-product matrix
-        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        K = np.array(
+            [[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]]
+        )
 
         # Rodrigues' formula
         R = np.eye(3) + sin_a * K + (1 - cos_a) * K @ K
@@ -547,7 +599,10 @@ class CircularMotion(TrajectoryGenerator):
             return cross / np.linalg.norm(cross)
 
     def _slerp_orientation(
-        self, start_orient: NDArray[np.floating], end_orient: NDArray[np.floating], t: float
+        self,
+        start_orient: NDArray[np.floating],
+        end_orient: NDArray[np.floating],
+        t: float,
     ) -> np.ndarray:
         """Spherical linear interpolation for orientation"""
         # Convert to quaternions
@@ -555,9 +610,9 @@ class CircularMotion(TrajectoryGenerator):
         r2 = Rotation.from_euler("xyz", end_orient, degrees=True)
 
         # Quaternion interpolation setup
-        key_rots = Rotation.from_quat([r1.as_quat(), r2.as_quat()])
-        slerp = Slerp([0, 1], key_rots)
+        key_rots = Rotation.from_quat(np.stack([r1.as_quat(), r2.as_quat()]))
+        slerp = Slerp(np.array([0.0, 1.0], dtype=float), key_rots)
 
-        # Interpolate
-        interp_rot = slerp(t)
-        return interp_rot.as_euler("xyz", degrees=True)
+        # Interpolate at a single time by passing a 1D array
+        interp_rot = slerp(np.array([t], dtype=float))
+        return interp_rot.as_euler("xyz", degrees=True)[0]

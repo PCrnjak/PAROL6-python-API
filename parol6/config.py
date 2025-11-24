@@ -2,28 +2,25 @@
 Central configuration for PAROL6 tunables and shared constants.
 """
 
-import os
 import logging
+import os
 from pathlib import Path
-from typing import Optional
 
 TRACE: int = 5
 logging.addLevelName(TRACE, "TRACE")
 # Add Logger.trace if missing
 if not hasattr(logging.Logger, "trace"):
+
     def _trace(self, msg, *args, **kwargs):
         if self.isEnabledFor(TRACE):
             self._log(TRACE, msg, args, **kwargs)
+
     logging.Logger.trace = _trace  # type: ignore[attr-defined]
-    logging.TRACE = TRACE # type: ignore[attr-defined]
+    logging.TRACE = TRACE  # type: ignore[attr-defined]
 
 TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes", "on")
 
 logger = logging.getLogger(__name__)
-
-# IK / motion planning
-# Iteration limit for jogging IK solves (kept conservative for speed while jogging)
-JOG_IK_ILIMIT: int = 20
 
 # Default control/sample rates (Hz)
 CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "250"))
@@ -60,9 +57,17 @@ MCAST_PORT: int = int(os.getenv("PAROL6_MCAST_PORT", "50510"))
 MCAST_TTL: int = int(os.getenv("PAROL6_MCAST_TTL", "1"))
 MCAST_IF: str = os.getenv("PAROL6_MCAST_IF", "127.0.0.1")
 
+# Transport selection for status updates. Default MULTICAST; set to UNICAST on CI if multicast is not available.
+STATUS_TRANSPORT: str = (
+    os.getenv("PAROL6_STATUS_TRANSPORT", "MULTICAST").strip().upper()
+)
+# Host to use for unicast fallback (defaults to loopback)
+STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
+
 # Status update/broadcast rates
 STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
+
 
 # Homing posture (degrees) for simulation/tests; can be overridden via env "PAROL6_HOME_ANGLES_DEG" (CSV)
 def _parse_home_angles() -> list[float]:
@@ -79,10 +84,12 @@ def _parse_home_angles() -> list[float]:
     except Exception:
         return [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 
+
 HOME_ANGLES_DEG: list[float] = _parse_home_angles()
 
+
 # Ack/Tracking policy toggles
-def _env_bool_optional(name: str) -> Optional[bool]:
+def _env_bool_optional(name: str) -> bool | None:
     raw = os.getenv(name)
     if raw is None:
         return None
@@ -93,16 +100,17 @@ def _env_bool_optional(name: str) -> Optional[bool]:
         return False
     return None
 
-FORCE_ACK: Optional[bool] = _env_bool_optional("PAROL6_FORCE_ACK")
+
+FORCE_ACK: bool | None = _env_bool_optional("PAROL6_FORCE_ACK")
 
 
 def save_com_port(port: str) -> bool:
     """
     Save COM port to persistent file.
-    
+
     Args:
         port: COM port string to save
-        
+
     Returns:
         True if successful, False otherwise
     """
@@ -117,10 +125,10 @@ def save_com_port(port: str) -> bool:
         return False
 
 
-def load_com_port() -> Optional[str]:
+def load_com_port() -> str | None:
     """
     Load saved COM port from file.
-    
+
     Returns:
         COM port string if found, None otherwise
     """

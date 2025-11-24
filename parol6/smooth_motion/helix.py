@@ -2,7 +2,7 @@
 Helix trajectory generator.
 """
 
-from typing import Sequence, Optional, Union
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,15 +23,15 @@ class HelixMotion(TrajectoryGenerator):
 
     def generate_helix_with_profile(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
         pitch: float,
         height: float,
-        axis: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
+        axis: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
         trajectory_type: str = "cubic",
-        jerk_limit: Optional[float] = None,
-        start_point: Optional[Sequence[float]] = None,
+        jerk_limit: float | None = None,
+        start_point: Sequence[float] | None = None,
         clockwise: bool = False,
     ) -> np.ndarray:
         """
@@ -62,20 +62,28 @@ class HelixMotion(TrajectoryGenerator):
             )
         if trajectory_type == "s_curve":
             return self.generate_scurve_helix(
-                center, radius, pitch, height, axis, duration, jerk_limit, start_point, clockwise
+                center,
+                radius,
+                pitch,
+                height,
+                axis,
+                duration,
+                jerk_limit,
+                start_point,
+                clockwise,
             )
 
         raise ValueError(f"Unknown trajectory type: {trajectory_type}")
 
     def generate_cubic_helix(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
         pitch: float,
         height: float,
-        axis: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
-        start_point: Optional[Sequence[float]] = None,
+        axis: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
+        start_point: Sequence[float] | None = None,
         clockwise: bool = False,
     ) -> np.ndarray:
         """
@@ -87,10 +95,10 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
 
         # Setup coordinate system
-        axis = np.array(axis, dtype=float)
-        axis = axis / np.linalg.norm(axis)
-        u = self._get_perpendicular_vector(axis)
-        v = np.cross(axis, u)
+        axis_np: np.ndarray = np.array(axis, dtype=float)
+        axis_np = axis_np / np.linalg.norm(axis_np)
+        u = self._get_perpendicular_vector(axis_np)
+        v = np.cross(axis_np, u)
         center_np = np.array(center, dtype=float)
 
         # Determine starting angle if start_point provided
@@ -98,11 +106,13 @@ class HelixMotion(TrajectoryGenerator):
         if start_point is not None:
             start_pos = np.array(start_point[:3])
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, axis) * axis
+            to_start_plane = to_start - np.dot(to_start, axis_np) * axis_np
 
             if np.linalg.norm(to_start_plane) > 0.001:
                 to_start_normalized = to_start_plane / np.linalg.norm(to_start_plane)
-                start_angle = np.arctan2(np.dot(to_start_normalized, v), np.dot(to_start_normalized, u))
+                start_angle = np.arctan2(
+                    np.dot(to_start_normalized, v), np.dot(to_start_normalized, u)
+                )
 
         # Generate trajectory points
         num_points = int(duration * self.control_rate)
@@ -123,7 +133,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate 3D position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Placeholder orientation (could be enhanced)
             orient = [0, 0, 0] if start_point is None else start_point[3:6]
@@ -134,13 +148,13 @@ class HelixMotion(TrajectoryGenerator):
 
     def generate_quintic_helix(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
         pitch: float,
         height: float,
-        axis: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
-        start_point: Optional[Sequence[float]] = None,
+        axis: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
+        start_point: Sequence[float] | None = None,
         clockwise: bool = False,
     ) -> np.ndarray:
         """
@@ -152,10 +166,10 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
 
         # Setup coordinate system
-        axis = np.array(axis, dtype=float)
-        axis = axis / np.linalg.norm(axis)
-        u = self._get_perpendicular_vector(axis)
-        v = np.cross(axis, u)
+        axis_np: np.ndarray = np.array(axis, dtype=float)
+        axis_np = axis_np / np.linalg.norm(axis_np)
+        u = self._get_perpendicular_vector(axis_np)
+        v = np.cross(axis_np, u)
         center_np = np.array(center, dtype=float)
 
         # Determine starting angle
@@ -163,11 +177,13 @@ class HelixMotion(TrajectoryGenerator):
         if start_point is not None:
             start_pos = np.array(start_point[:3])
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, axis) * axis
+            to_start_plane = to_start - np.dot(to_start, axis_np) * axis_np
 
             if np.linalg.norm(to_start_plane) > 0.001:
                 to_start_normalized = to_start_plane / np.linalg.norm(to_start_plane)
-                start_angle = np.arctan2(np.dot(to_start_normalized, v), np.dot(to_start_normalized, u))
+                start_angle = np.arctan2(
+                    np.dot(to_start_normalized, v), np.dot(to_start_normalized, u)
+                )
 
         # Generate trajectory with quintic profile
         num_points = int(duration * self.control_rate)
@@ -188,7 +204,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Orientation
             orient = [0, 0, 0] if start_point is None else start_point[3:6]
@@ -199,14 +219,14 @@ class HelixMotion(TrajectoryGenerator):
 
     def generate_scurve_helix(
         self,
-        center: Union[Sequence[float], NDArray],
+        center: Sequence[float] | NDArray,
         radius: float,
         pitch: float,
         height: float,
-        axis: Union[Sequence[float], NDArray] = [0, 0, 1],
-        duration: Union[float, np.floating] = 4.0,
-        jerk_limit: Optional[float] = None,
-        start_point: Optional[Sequence[float]] = None,
+        axis: Sequence[float] | NDArray = [0, 0, 1],
+        duration: float | np.floating = 4.0,
+        jerk_limit: float | None = None,
+        start_point: Sequence[float] | None = None,
         clockwise: bool = False,
     ) -> np.ndarray:
         """
@@ -218,10 +238,10 @@ class HelixMotion(TrajectoryGenerator):
         total_angle = 2 * np.pi * num_revolutions
 
         # Setup coordinate system
-        axis = np.array(axis, dtype=float)
-        axis = axis / np.linalg.norm(axis)
-        u = self._get_perpendicular_vector(axis)
-        v = np.cross(axis, u)
+        axis_np: np.ndarray = np.array(axis, dtype=float)
+        axis_np = axis_np / np.linalg.norm(axis_np)
+        u = self._get_perpendicular_vector(axis_np)
+        v = np.cross(axis_np, u)
         center_np = np.array(center, dtype=float)
 
         # Determine starting angle
@@ -229,11 +249,13 @@ class HelixMotion(TrajectoryGenerator):
         if start_point is not None:
             start_pos = np.array(start_point[:3])
             to_start = start_pos - center_np
-            to_start_plane = to_start - np.dot(to_start, axis) * axis
+            to_start_plane = to_start - np.dot(to_start, axis_np) * axis_np
 
             if np.linalg.norm(to_start_plane) > 0.001:
                 to_start_normalized = to_start_plane / np.linalg.norm(to_start_plane)
-                start_angle = np.arctan2(np.dot(to_start_normalized, v), np.dot(to_start_normalized, u))
+                start_angle = np.arctan2(
+                    np.dot(to_start_normalized, v), np.dot(to_start_normalized, u)
+                )
 
         # Generate trajectory with S-curve profile
         num_points = int(duration * self.control_rate)
@@ -259,7 +281,11 @@ class HelixMotion(TrajectoryGenerator):
             z_offset = height * progress
 
             # Calculate position
-            pos = center_np + radius * (np.cos(theta) * u + np.sin(theta) * v) + z_offset * axis
+            pos = (
+                center_np
+                + radius * (np.cos(theta) * u + np.sin(theta) * v)
+                + z_offset * axis_np
+            )
 
             # Orientation
             orient = [0, 0, 0] if start_point is None else start_point[3:6]

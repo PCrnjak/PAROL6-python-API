@@ -1,6 +1,4 @@
-import json
 import pytest
-
 from parol6.protocol import wire
 
 
@@ -77,7 +75,11 @@ def test_encode_gcode_program_inline():
         ("IO|1,0,1,0,1", "IO", [1, 0, 1, 0, 1]),
         ("GRIPPER|1,255,150,500,3,1", "GRIPPER", [1, 255, 150, 500, 3, 1]),
         ("SPEEDS|0,0.5,-1,2.5,3,4", "SPEEDS", [0.0, 0.5, -1.0, 2.5, 3.0, 4.0]),
-        ("POSE|1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16", "POSE", [float(i) for i in range(1, 17)]),
+        (
+            "POSE|1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16",
+            "POSE",
+            [float(i) for i in range(1, 17)],
+        ),
     ],
 )
 def test_decode_simple_success(resp, prefix, expected):

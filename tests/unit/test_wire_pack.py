@@ -1,6 +1,4 @@
-import pytest
 import numpy as np
-
 from parol6.protocol import wire
 from parol6.protocol.wire import CommandCode
 
@@ -9,7 +7,7 @@ def test_pack_tx_frame_structure_and_command_byte():
     position_out = [1, 2, 3, 4, 5, 6]
     speed_out = [10, 20, 30, 40, 50, 60]
     affected_joint_out = [1, 0, 0, 0, 0, 0, 0, 1]  # MSB..LSB
-    inout_out = [0, 1, 0, 1, 0, 1, 0, 1]           # MSB..LSB
+    inout_out = [0, 1, 0, 1, 0, 1, 0, 1]  # MSB..LSB
     timeout_out = 7
     gripper_data_out = [123, 45, 67, 3, 0, 5]  # pos, spd, cur, cmd, mode, id
 

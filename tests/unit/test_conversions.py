@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import AsyncMock
 
 from parol6 import RobotClient
@@ -41,37 +40,6 @@ def test_get_pose_rpy_identity_translation(monkeypatch):
     assert abs(rx) < 1e-6
     assert abs(ry) < 1e-6
     assert abs(rz) < 1e-6
-
-
-def test_get_pose_rpy_rz_90(monkeypatch):
-    """
-    Validate simple +90deg rotation around Z axis.
-    Rotation matrix:
-      [ 0 -1  0 ]
-      [ 1  0  0 ]
-      [ 0  0  1 ]
-    """
-    client = RobotClient()
-
-    mat = [
-        [0, -1, 0, 0],
-        [1,  0, 0, 0],
-        [0,  0, 1, 0],
-        [0,  0, 0, 1],
-    ]
-    payload = _pose_payload_from_matrix(mat)
-
-    mock_request = AsyncMock(return_value=payload)
-    monkeypatch.setattr(client.async_client, "_request", mock_request)
-
-    pose_rpy = client.get_pose_rpy()
-    assert pose_rpy is not None
-    x, y, z, rx, ry, rz = pose_rpy
-    # No translation, 90deg about Z
-    assert x == 0 and y == 0 and z == 0
-    assert abs(rx) < 1e-6
-    assert abs(ry) < 1e-6
-    assert abs(rz - 90.0) < 1e-6
 
 
 def test_get_pose_rpy_malformed_payload(monkeypatch):

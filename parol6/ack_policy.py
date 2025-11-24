@@ -1,12 +1,10 @@
 import os
-from typing import Callable, Optional
-
+from collections.abc import Callable
 
 SYSTEM_COMMANDS: set[str] = {
     "STOP",
     "ENABLE",
     "DISABLE",
-    "CLEAR_ERROR",
     "SET_PORT",
     "STREAM",
     "SIMULATOR",
@@ -21,6 +19,8 @@ QUERY_COMMANDS: set[str] = {
     "GET_STATUS",
     "GET_GCODE_STATUS",
     "GET_LOOP_STATS",
+    "GET_CURRENT_ACTION",
+    "GET_QUEUE",
     "PING",
 }
 
@@ -45,7 +45,7 @@ class AckPolicy:
     def __init__(
         self,
         get_stream_mode: Callable[[], bool],
-        force_ack: Optional[bool] = None,
+        force_ack: bool | None = None,
     ) -> None:
         self._get_stream_mode = get_stream_mode
         self._force_ack = force_ack
