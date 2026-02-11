@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from parol6.server.ik_worker_client import IKWorkerClient
+from parol6.server.status_cache import StatusCache
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 
@@ -20,12 +20,11 @@ def test_ik_worker_detects_joint_limits():
     - When near max limit: + direction disabled (0), - direction enabled (1)
     - When near min limit: + direction enabled (1), - direction disabled (0)
     """
-    client = IKWorkerClient()
-    client.start()
+    cache = StatusCache()
 
     try:
         time.sleep(0.5)  # Allow more time for subprocess startup on Windows
-        assert client.is_alive(), "IK worker failed to start"
+        assert cache._ik_process.is_alive(), "IK worker failed to start"
 
         # Start from home position and move J1 near its max limit
         from parol6.config import HOME_ANGLES_DEG
@@ -39,17 +38,17 @@ def test_ik_worker_detects_joint_limits():
         T = PAROL6_ROBOT.robot.fkine(q)
         T_matrix = T
 
-        client.submit_request(q, T_matrix)
+        cache._submit_ik_request(q, T_matrix)
 
         ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = client.get_results_if_ready()
+            ready = cache._poll_ik_results()
             if ready:
                 break
             time.sleep(0.02)
 
         assert ready, "IK worker did not return results"
-        joint_en = client.joint_en
+        joint_en = cache.joint_en
 
         # J1 near max: J1+ should be disabled, J1- should be enabled
         assert joint_en[0] == 0, (
@@ -65,17 +64,17 @@ def test_ik_worker_detects_joint_limits():
         T = PAROL6_ROBOT.robot.fkine(q)
         T_matrix = T
 
-        client.submit_request(q, T_matrix)
+        cache._submit_ik_request(q, T_matrix)
 
         ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = client.get_results_if_ready()
+            ready = cache._poll_ik_results()
             if ready:
                 break
             time.sleep(0.02)
 
         assert ready, "IK worker did not return results for min limit test"
-        joint_en = client.joint_en
+        joint_en = cache.joint_en
 
         # J1 near min: J1+ should be enabled, J1- should be disabled
         assert joint_en[0] == 1, (
@@ -86,7 +85,7 @@ def test_ik_worker_detects_joint_limits():
         )
 
     finally:
-        client.stop()
+        cache.close()
 
 
 @pytest.mark.integration
@@ -94,12 +93,11 @@ def test_ik_worker_all_enabled_in_safe_position():
     """
     Test that all directions are enabled when robot is in the true center of its limits.
     """
-    client = IKWorkerClient()
-    client.start()
+    cache = StatusCache()
 
     try:
         time.sleep(0.5)  # Allow more time for subprocess startup on Windows
-        assert client.is_alive()
+        assert cache._ik_process.is_alive()
 
         # Use home position - a known safe position
         from parol6.config import HOME_ANGLES_DEG
@@ -109,17 +107,17 @@ def test_ik_worker_all_enabled_in_safe_position():
         T = PAROL6_ROBOT.robot.fkine(q_home)
         T_matrix = T
 
-        client.submit_request(q_home, T_matrix)
+        cache._submit_ik_request(q_home, T_matrix)
 
         ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = client.get_results_if_ready()
+            ready = cache._poll_ik_results()
             if ready:
                 break
             time.sleep(0.02)
 
         assert ready, "IK worker did not return results in time"
-        joint_en = client.joint_en
+        joint_en = cache.joint_en
 
         # All joint directions should be enabled in true center position
         assert np.all(joint_en == 1), (
@@ -127,4 +125,4 @@ def test_ik_worker_all_enabled_in_safe_position():
         )
 
     finally:
-        client.stop()
+        cache.close()

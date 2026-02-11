@@ -5,21 +5,13 @@ Base abstractions and helpers for command implementations.
 import logging
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 
-from parol6.config import INTERVAL_S, LIMITS, TRACE
-from parol6.protocol.wire import (
-    CmdType,
-    Command,
-    QueryType,
-    pack_error,
-    pack_response,
-)
-from parol6.protocol.wire import CommandCode
+from parol6.config import TRACE
+from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType
 from parol6.server.state import ControllerState
 
 logger = logging.getLogger(__name__)
@@ -35,58 +27,7 @@ class ExecutionStatusCode(Enum):
     CANCELLED = auto()
 
 
-@dataclass
-class ExecutionStatus:
-    """
-    Status returned from command execution steps.
-    """
-
-    code: ExecutionStatusCode
-    message: str
-    error: Exception | None = None
-    details: dict[str, Any] | None = None
-    error_type: str | None = None
-
-    @classmethod
-    def executing(
-        cls, message: str = "Executing", details: dict[str, Any] | None = None
-    ) -> "ExecutionStatus":
-        return cls(ExecutionStatusCode.EXECUTING, message, error=None, details=details)
-
-    @classmethod
-    def completed(
-        cls, message: str = "Completed", details: dict[str, Any] | None = None
-    ) -> "ExecutionStatus":
-        return cls(ExecutionStatusCode.COMPLETED, message, error=None, details=details)
-
-    @classmethod
-    def failed(
-        cls,
-        message: str,
-        error: Exception | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> "ExecutionStatus":
-        et = type(error).__name__ if error is not None else None
-        return cls(
-            ExecutionStatusCode.FAILED,
-            message,
-            error=error,
-            details=details,
-            error_type=et,
-        )
-
-
-# ----- Shared context and small utilities -----
-
-
-@dataclass
-class CommandContext:
-    """Shared dynamic execution context for commands."""
-
-    udp_transport: Any = None
-    addr: tuple | None = None
-    gcode_interpreter: Any = None
-    dt: float = INTERVAL_S
+# ----- Small utilities -----
 
 
 class Countdown:
@@ -126,13 +67,15 @@ class Debouncer:
             return False
 
 
-class CommandBase(ABC):
+P = TypeVar("P")
+
+
+class CommandBase(ABC, Generic[P]):
     """
     Reusable base for commands with shared lifecycle and safety helpers.
 
     Commands use typed msgspec structs for parameters. The PARAMS_TYPE class
-    variable indicates which struct type this command expects. The validate()
-    method receives a pre-validated struct and performs business logic validation.
+    variable indicates which struct type this command expects.
     """
 
     # Set by @register_command decorator; used by controller stream fast-path
@@ -143,28 +86,20 @@ class CommandBase(ABC):
 
     __slots__ = (
         "p",
-        "is_valid",
         "is_finished",
         "error_state",
         "error_message",
-        "udp_transport",
-        "addr",
-        "gcode_interpreter",
         "_t0",
         "_t_end",
         "_q_rad_buf",
         "_steps_buf",
     )
 
-    def __init__(self) -> None:
-        self.p: Command | None = None  # Params struct, set by validate()
-        self.is_valid: bool = True
+    def __init__(self, p: P) -> None:
+        self.p = p
         self.is_finished: bool = False
         self.error_state: bool = False
         self.error_message: str = ""
-        self.udp_transport: Any = None
-        self.addr: Any = None
-        self.gcode_interpreter: Any = None
         self._t0: float | None = None
         self._t_end: float | None = None
         # Pre-allocated buffers for zero-allocation unit conversions
@@ -201,26 +136,14 @@ class CommandBase(ABC):
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.IDLE
 
-    def bind(self, context: CommandContext) -> None:
-        """
-        Bind dynamic execution context. Controller should call this prior to setup().
-        """
-        self.udp_transport = context.udp_transport
-        self.addr = context.addr
-        self.gcode_interpreter = context.gcode_interpreter
-
     def assign_params(self, params: Command) -> None:
         """
         Assign pre-validated params struct.
 
         Called AFTER msgspec has decoded and validated the struct
         (via constraints and __post_init__). No validation here.
-
-        Args:
-            params: Pre-validated typed struct from msgspec decode
         """
         self.p = params
-        self.is_valid = True
 
     def do_setup(self, state: ControllerState) -> None:
         """Subclass hook for preparation; override in subclasses."""
@@ -238,20 +161,35 @@ class CommandBase(ABC):
             self.log_error("Setup error: %s", e)
             raise
 
-    @abstractmethod
-    def tick(self, state: ControllerState) -> ExecutionStatus:
-        """
-        Template-method wrapper that centralizes lifecycle/error handling and calls do_execute().
-        Controllers should prefer tick() over calling execute_step() directly.
-        """
-        raise NotImplementedError
+    def tick(self, state: ControllerState) -> ExecutionStatusCode:
+        """Template method: guards + execute_step + error handling."""
+        if self.is_finished:
+            return (
+                ExecutionStatusCode.FAILED
+                if self.error_state
+                else ExecutionStatusCode.COMPLETED
+            )
+        try:
+            return self.execute_step(state)
+        except Exception as e:
+            self._on_tick_error(state, e)
+            return ExecutionStatusCode.FAILED
+
+    def _on_tick_error(self, state: ControllerState, error: Exception) -> None:
+        """Error-path cleanup. Override in subclasses for specialized behavior."""
+        self.fail(str(error))
+        self.log_error(str(error))
 
     @abstractmethod
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+    def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """
-        Execute one control-loop step and return an ExecutionStatus.
+        Execute one control-loop step.
 
-        Commands MUST interact with state.* arrays/buffers directly (Position_in/out, Speed_out, Command_out, etc.).
+        Returns ExecutionStatusCode.EXECUTING while in progress,
+        COMPLETED when done, or FAILED on error.
+
+        Commands MUST interact with state.* arrays/buffers directly
+        (Position_in/out, Speed_out, Command_out, etc.).
         """
         raise NotImplementedError
 
@@ -262,8 +200,7 @@ class CommandBase(ABC):
         self.is_finished = True
 
     def fail(self, message: str) -> None:
-        """Mark command as invalid/failed with an error message."""
-        self.is_valid = False
+        """Mark command as failed with an error message."""
         self.error_state = True
         self.error_message = message
         self.is_finished = True
@@ -287,54 +224,29 @@ class CommandBase(ABC):
         return 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
 
 
-class QueryCommand(CommandBase):
+class QueryCommand(CommandBase[P]):
     """
     Base class for query commands that execute immediately and bypass the queue.
 
-    Query commands are read-only operations that return information about the robot state.
-    They execute immediately without waiting in the command queue.
+    Query commands compute a result, pack it as a wire response, and return
+    the bytes. The controller calls compute() and sends the result directly.
+    Subclasses set QUERY_TYPE and implement compute().
     """
 
-    def reply(self, query_type: QueryType, value: Any) -> None:
-        """Send a query response: [RESPONSE, query_type, value]."""
-        if self.udp_transport and self.addr:
-            try:
-                self.udp_transport.send(pack_response(query_type, value), self.addr)
-            except Exception as e:
-                self.log_warning("Failed to send reply: %s", e)
+    QUERY_TYPE: ClassVar[QueryType]
 
-    def reply_error(self, message: str) -> None:
-        """Send an error response: [ERROR, message]."""
-        if self.udp_transport and self.addr:
-            try:
-                self.udp_transport.send(pack_error(message), self.addr)
-            except Exception as e:
-                self.log_warning("Failed to send error reply: %s", e)
+    @abstractmethod
+    def compute(self, state: ControllerState) -> bytes:
+        """Compute the query result, pack it, and return response bytes."""
+        ...
 
-    def tick(self, state: ControllerState) -> ExecutionStatus:
-        """
-        Template-method wrapper that centralizes lifecycle/error handling and calls do_execute().
-        Controllers should prefer tick() over calling execute_step() directly.
-        """
-        if self.is_finished or not self.is_valid:
-            return (
-                ExecutionStatus.completed("Already finished")
-                if self.is_finished
-                else ExecutionStatus.failed("Invalid command")
-            )
-        if not self.udp_transport or not self.addr:
-            self.fail("Missing UDP transport or address")
-            return ExecutionStatus.failed("Missing UDP transport or address")
-        try:
-            status = self.execute_step(state)
-        except Exception as e:
-            # Hard failure safeguards
-            self.fail(str(e))
-            return ExecutionStatus.failed("Execution error", error=e)
-        return status
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        # Queries are dispatched via compute() by the controller.
+        # This exists only to satisfy the abstract method.
+        raise NotImplementedError("Queries use compute(), not execute_step()")
 
 
-class MotionCommand(CommandBase):
+class MotionCommand(CommandBase[P]):
     """
     Base class for motion commands that require the controller to be enabled.
 
@@ -344,56 +256,23 @@ class MotionCommand(CommandBase):
 
     streamable: bool = False
 
-    def __init__(self) -> None:
-        super().__init__()
-
-    # ---- mapping ----
-    @staticmethod
-    def linmap_pct(pct: float, lo: float, hi: float) -> float:
-        if pct < 0.0:
-            pct = 0.0
-        elif pct > 100.0:
-            pct = 100.0
-        return lo + (hi - lo) * (pct / 100.0)
-
-    @staticmethod
-    def limit_hit_mask(pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
-        return ((speeds > 0) & (pos_steps >= LIMITS.joint.position.steps[:, 1])) | (
-            (speeds < 0) & (pos_steps <= LIMITS.joint.position.steps[:, 0])
-        )
-
     def fail_and_idle(self, state: ControllerState, message: str) -> None:
         self.fail(message)
         self.stop_and_idle(state)
 
     def set_move_position(self, state: ControllerState, steps: np.ndarray) -> None:
         """Set position for MOVE command (zero speeds, Command=MOVE)."""
-        np.copyto(state.Position_out, steps, casting="no")
+        state.Position_out[:] = steps
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.MOVE
 
-    def tick(self, state: ControllerState) -> ExecutionStatus:
-        """
-        Template-method wrapper that centralizes lifecycle/error handling and calls do_execute().
-        Controllers should prefer tick() over calling execute_step() directly.
-        """
-        if self.is_finished or not self.is_valid:
-            return (
-                ExecutionStatus.completed("Already finished")
-                if self.is_finished
-                else ExecutionStatus.failed("Invalid command")
-            )
-        try:
-            status = self.execute_step(state)
-        except Exception as e:
-            # Hard failure safeguards
-            self.fail_and_idle(state, str(e))
-            self.log_error(str(e))
-            return ExecutionStatus.failed("Execution error", error=e)
-        return status
+    def _on_tick_error(self, state: ControllerState, error: Exception) -> None:
+        """Zero speeds and set IDLE on error."""
+        self.fail_and_idle(state, str(error))
+        self.log_error(str(error))
 
 
-class TrajectoryMoveCommandBase(MotionCommand):
+class TrajectoryMoveCommandBase(MotionCommand[P]):
     """
     Base class for commands that execute pre-computed trajectories.
 
@@ -402,51 +281,67 @@ class TrajectoryMoveCommandBase(MotionCommand):
     so execute_step() simply outputs waypoints tick-by-tick.
     """
 
-    __slots__ = ("trajectory_steps", "command_step")
+    __slots__ = ("trajectory_steps", "command_step", "_duration")
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, p: P):
+        super().__init__(p)
         self.trajectory_steps: np.ndarray = np.empty((0, 6), dtype=np.int32)
         self.command_step = 0
+        self._duration: float = 0.0
 
-    def execute_step(self, state: ControllerState) -> ExecutionStatus:
+    @property
+    def blend_radius(self) -> float:
+        """Blend radius in mm. Default 0 (stop at target). Read from params.r if present."""
+        return float(getattr(self.p, "r", 0.0))
+
+    def do_setup_with_blend(
+        self,
+        state: ControllerState,
+        next_cmds: "list[TrajectoryMoveCommandBase]",
+    ) -> int:
+        """Set up trajectory with blend through N next commands.
+
+        Subclasses that support blending (MoveLCommand, JointMoveCommandBase)
+        override this method. The default falls back to single-command setup.
+
+        Returns:
+            Number of *next_cmds* consumed (0 = no blending).
+        """
+        self.do_setup(state)
+        return 0
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         """Execute trajectory by outputting pre-computed waypoints."""
         if self.command_step >= len(self.trajectory_steps):
             self.log_info("%s finished.", self.__class__.__name__)
-            self.is_finished = True
+            self.finish()
             self.stop_and_idle(state)
-            return ExecutionStatus.completed(f"{self.__class__.__name__} complete")
+            return ExecutionStatusCode.COMPLETED
 
         target = self.trajectory_steps[self.command_step]
-        np.copyto(state.Position_out, target)
+        state.Position_out[:] = target
         state.Command_out = CommandCode.MOVE
         self.command_step += 1
 
-        return ExecutionStatus.executing(self.__class__.__name__)
+        return ExecutionStatusCode.EXECUTING
 
 
-class SystemCommand(CommandBase):
+class SystemCommand(CommandBase[P]):
     """
     Base class for system control commands that can execute regardless of enable state.
 
     System commands control the overall state of the robot controller (enable/disable, stop, etc.)
     and can execute even when the controller is disabled.
+
+    Side-effect signaling: commands that need infrastructure changes (simulator toggle,
+    port switch, mock sync) set the corresponding attribute. The controller reads these
+    after tick() and orchestrates the actual change.
     """
 
-    def tick(self, state: "ControllerState") -> ExecutionStatus:
-        """
-        Centralized lifecycle/error handling for system commands.
-        """
-        if self.is_finished or not self.is_valid:
-            return (
-                ExecutionStatus.completed("Already finished")
-                if self.is_finished
-                else ExecutionStatus.failed("Invalid command")
-            )
-        try:
-            status = self.execute_step(state)
-        except Exception as e:
-            self.fail(str(e))
-            self.log_error(str(e))
-            return ExecutionStatus.failed("Execution error", error=e)
-        return status
+    __slots__ = ("_switch_simulator", "_switch_port", "_sync_mock")
+
+    def __init__(self, p: P) -> None:
+        super().__init__(p)
+        self._switch_simulator: bool | None = None
+        self._switch_port: str | None = None
+        self._sync_mock: bool = False

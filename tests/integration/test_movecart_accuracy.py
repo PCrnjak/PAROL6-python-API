@@ -1,6 +1,6 @@
 """
-Integration test for MoveCart pose accuracy.
-Verifies that movecart commands reach the correct final pose.
+Integration test for MoveL pose accuracy.
+Verifies that moveL commands reach the correct final pose.
 """
 
 import numpy as np
@@ -8,15 +8,15 @@ import pytest
 
 
 @pytest.mark.integration
-class TestMoveCartAccuracy:
-    """Test that MoveCart commands reach correct final poses."""
+class TestMoveLAccuracy:
+    """Test that MoveL commands reach correct final poses."""
 
-    def test_movecart_from_home(self, client, server_proc):
-        """Test MoveCart accuracy starting from home position."""
+    def test_moveL_from_home(self, client, server_proc):
+        """Test MoveL accuracy starting from home position."""
         # Ensure controller is enabled before motion
-        assert client.enable() is True
+        assert client.resume() is True
         # Home the robot first
-        assert client.home() is True
+        assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
         # Get home pose for reference
@@ -27,8 +27,8 @@ class TestMoveCartAccuracy:
         target = [0.000, 263, 242, 90, 0, 90]
 
         # Execute movecart
-        result = client.move_cartesian(target, speed=50)
-        assert result is True
+        result = client.moveL(target, speed=0.5)
+        assert result >= 0
 
         # Wait for completion
         assert client.wait_motion_complete(timeout=15.0)
@@ -62,12 +62,12 @@ class TestMoveCartAccuracy:
 
         print("✓ MoveCart pose accuracy test passed!")
 
-    def test_movecart_multiple_targets(self, client, server_proc):
-        """Test MoveCart accuracy with multiple sequential targets."""
+    def test_moveL_multiple_targets(self, client, server_proc):
+        """Test MoveL accuracy with multiple sequential targets."""
         # Ensure controller is enabled before motion
-        assert client.enable() is True
+        assert client.resume() is True
         # Home first
-        assert client.home() is True
+        assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
         # Define multiple targets to test
@@ -82,8 +82,8 @@ class TestMoveCartAccuracy:
             print(f"Moving to: {target}")
 
             # Execute movecart
-            result = client.move_cartesian(target, speed=30)
-            assert result is True
+            result = client.moveL(target, speed=0.3)
+            assert result >= 0
 
             # Wait for completion
             assert client.wait_motion_complete(timeout=15.0)

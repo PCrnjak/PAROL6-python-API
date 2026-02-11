@@ -51,8 +51,8 @@ class TestProfileMotionBehavior:
 
             # Set profile and execute move
             assert client.set_profile(profile) is True
-            result = client.move_joints(target_angles, duration=2.0)
-            assert result is True
+            result = client.moveJ(target_angles, duration=2.0)
+            assert result >= 0
             assert client.wait_motion_complete(timeout=10.0)
 
             # Verify we reached target (within tolerance)
@@ -92,8 +92,8 @@ class TestProfileMotionBehavior:
 
             # Set profile and execute move
             assert client.set_profile(profile) is True
-            result = client.move_cartesian(target_pose, duration=2.0)
-            assert result is True
+            result = client.moveL(target_pose, duration=2.0)
+            assert result >= 0
             assert client.wait_motion_complete(timeout=10.0)
 
             # Verify position reached (within tolerance)
@@ -106,20 +106,16 @@ class TestProfileMotionBehavior:
 
 
 @pytest.mark.integration
-class TestProfileStreamingMode:
-    """Test profile behavior in streaming mode."""
+class TestServoCartesian:
+    """Test servo Cartesian motion (replaces old streaming mode tests)."""
 
-    def test_streaming_cartesian(self, client, server_proc):
-        """Test streaming Cartesian moves."""
+    def test_servoL_sequential(self, client, server_proc):
+        """Test sequential servoL moves."""
         client.home(wait=True)
         start_pose = client.get_pose_rpy()
         assert start_pose is not None
 
-        # Reset
-        client.home(wait=True)
-        assert client.stream_on() is True
-
-        # Send a sequence of streaming Cartesian commands
+        # Send a sequence of servo Cartesian commands (fire-and-forget)
         for i in range(5):
             target = [
                 start_pose[0] + (i * 5),
@@ -129,11 +125,10 @@ class TestProfileStreamingMode:
                 start_pose[4],
                 start_pose[5],
             ]
-            result = client.move_cartesian(target, duration=0.5)
+            result = client.servoL(target, speed=0.5)
             assert result is True
             time.sleep(0.1)
 
-        assert client.stream_off() is True
         assert client.wait_motion_complete(timeout=10.0)
 
         # Verify robot completed motion
@@ -186,8 +181,8 @@ class TestCartesianPrecision:
         ]
 
         for target in moves:
-            result = client.move_cartesian(target, duration=2.0)
-            assert result is True
+            result = client.moveL(target, duration=2.0)
+            assert result >= 0
             assert client.wait_motion_complete(timeout=15.0)
 
         # Verify final pose
@@ -303,8 +298,8 @@ class TestTCPPathAccuracy:
         sampler.start()
 
         # Execute move
-        result = client.move_cartesian(target_pose, duration=2.0)
-        assert result is True
+        result = client.moveL(target_pose, duration=2.0)
+        assert result >= 0
         assert client.wait_motion_complete(timeout=10.0)
 
         # Stop sampling

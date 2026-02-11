@@ -6,12 +6,20 @@ Contains commands for electric and pneumatic gripper control
 import logging
 from enum import Enum
 
-from parol6.commands.base import Debouncer, ExecutionStatus, MotionCommand
+from parol6.commands.base import Debouncer, ExecutionStatusCode, MotionCommand
 from parol6.protocol.wire import CmdType, ElectricGripperCmd, PneumaticGripperCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
 
 logger = logging.getLogger(__name__)
+
+
+def _pack_gripper_bits(bits: list[int]) -> int:
+    """Pack a list of 8 bit values into a single byte (MSB-first)."""
+    val = 0
+    for b in bits:
+        val = (val << 1) | int(b)
+    return val
 
 
 class GripperState(Enum):
@@ -22,7 +30,7 @@ class GripperState(Enum):
 
 
 @register_command(CmdType.PNEUMATICGRIPPER)
-class PneumaticGripperCommand(MotionCommand):
+class PneumaticGripperCommand(MotionCommand[PneumaticGripperCmd]):
     """Control pneumatic gripper (open/close)."""
 
     PARAMS_TYPE = PneumaticGripperCmd
@@ -34,8 +42,8 @@ class PneumaticGripperCommand(MotionCommand):
         "_port_index",
     )
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, p: PneumaticGripperCmd):
+        super().__init__(p)
         self.state = GripperState.START
         self.timeout_counter = 1000
         self._state_to_set: int = 0
@@ -43,14 +51,11 @@ class PneumaticGripperCommand(MotionCommand):
 
     def do_setup(self, state: "ControllerState") -> None:
         """Compute port index and state to set from params."""
-        assert self.p is not None
-
-        # open=True means set to 1, open=False means set to 0
-        self._state_to_set = 1 if self.p.open else 0
+        self._state_to_set = 1 if self.p.action == "open" else 0
         # port 1 -> index 2, port 2 -> index 3
         self._port_index = 2 if self.p.port == 1 else 3
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+    def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute pneumatic gripper command."""
         self.timeout_counter -= 1
         if self.timeout_counter <= 0:
@@ -58,12 +63,12 @@ class PneumaticGripperCommand(MotionCommand):
 
         state.InOut_out[self._port_index] = self._state_to_set
         logger.info("  -> Pneumatic gripper command sent.")
-        self.is_finished = True
-        return ExecutionStatus.completed("Pneumatic gripper toggled")
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
 
 
 @register_command(CmdType.ELECTRICGRIPPER)
-class ElectricGripperCommand(MotionCommand):
+class ElectricGripperCommand(MotionCommand[ElectricGripperCmd]):
     """Control electric gripper (move/calibrate)."""
 
     PARAMS_TYPE = ElectricGripperCmd
@@ -73,31 +78,34 @@ class ElectricGripperCommand(MotionCommand):
         "timeout_counter",
         "object_debouncer",
         "wait_counter",
+        "_hw_position",
+        "_hw_speed",
     )
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, p: ElectricGripperCmd):
+        super().__init__(p)
         self.state = GripperState.START
         self.timeout_counter = 1000
         self.object_debouncer = Debouncer(5)
         self.wait_counter = 0
+        self._hw_position = 0
+        self._hw_speed = 1
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Initialize wait counter for calibration mode."""
-        assert self.p is not None
-        if self.p.calibrate:
+        """Scale normalized 0-1 values to hardware 0-255 range."""
+        self._hw_position = int(round(self.p.position * 255))
+        self._hw_speed = max(1, int(round(self.p.speed * 255)))
+        if self.p.action == "calibrate":
             self.wait_counter = 200
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+    def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """State-based execution for electric gripper."""
-        assert self.p is not None
-
         self.timeout_counter -= 1
         if self.timeout_counter <= 0:
             raise TimeoutError(f"Gripper command timed out in state {self.state}.")
 
         if self.state == GripperState.START:
-            if self.p.calibrate:
+            if self.p.action == "calibrate":
                 self.state = GripperState.SEND_CALIBRATE
             else:
                 self.state = GripperState.WAIT_FOR_POSITION
@@ -106,68 +114,61 @@ class ElectricGripperCommand(MotionCommand):
             logger.debug("  -> Sending one-shot calibrate command...")
             state.Gripper_data_out[4] = 1
             self.state = GripperState.WAITING_CALIBRATION
-            return ExecutionStatus.executing("Calibrating")
+            return ExecutionStatusCode.EXECUTING
 
         if self.state == GripperState.WAITING_CALIBRATION:
             self.wait_counter -= 1
             if self.wait_counter <= 0:
                 logger.info("  -> Calibration delay finished.")
                 state.Gripper_data_out[4] = 0
-                self.is_finished = True
-                return ExecutionStatus.completed("Calibration complete")
-            return ExecutionStatus.executing("Calibrating")
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
+            return ExecutionStatusCode.EXECUTING
 
         if self.state == GripperState.WAIT_FOR_POSITION:
-            state.Gripper_data_out[0] = self.p.position
-            state.Gripper_data_out[1] = self.p.speed
+            state.Gripper_data_out[0] = self._hw_position
+            state.Gripper_data_out[1] = self._hw_speed
             state.Gripper_data_out[2] = self.p.current
             state.Gripper_data_out[4] = 0
 
-            bits = [1, 1, int(not state.InOut_in[4]), 1, 0, 0, 0, 0]
-            val = 0
-            for b in bits:
-                val = (val << 1) | int(b)
-            state.Gripper_data_out[3] = val
+            state.Gripper_data_out[3] = _pack_gripper_bits(
+                [1, 1, int(not state.InOut_in[4]), 1, 0, 0, 0, 0]
+            )
 
             object_detection = (
                 state.Gripper_data_in[5] if len(state.Gripper_data_in) > 5 else 0
             )
             logger.debug(
-                f" -> Gripper moving to {self.p.position} (current: {state.Gripper_data_in[1]}), object detected: {object_detection}"
+                f" -> Gripper moving to {self._hw_position} (current: {state.Gripper_data_in[1]}), object detected: {object_detection}"
             )
 
             object_detected = self.object_debouncer.tick(object_detection != 0)
 
             current_position = state.Gripper_data_in[1]
-            if abs(current_position - self.p.position) <= 5:
+            if abs(current_position - self._hw_position) <= 5:
                 logger.info("  -> Gripper move complete.")
-                self.is_finished = True
-                bits = [1, 0, int(not state.InOut_in[4]), 1, 0, 0, 0, 0]
-                val = 0
-                for b in bits:
-                    val = (val << 1) | int(b)
-                state.Gripper_data_out[3] = val
-                return ExecutionStatus.completed("Gripper move complete")
+                self.finish()
+                state.Gripper_data_out[3] = _pack_gripper_bits(
+                    [1, 0, int(not state.InOut_in[4]), 1, 0, 0, 0, 0]
+                )
+                return ExecutionStatusCode.COMPLETED
 
             if object_detected:
-                if (object_detection == 1) and (self.p.position > current_position):
+                if (object_detection == 1) and (self._hw_position > current_position):
                     logger.info(
                         "  -> Gripper move holding position due to object detection when closing."
                     )
-                    self.is_finished = True
-                    return ExecutionStatus.completed(
-                        "Object detected while closing - hold"
-                    )
+                    self.finish()
+                    return ExecutionStatusCode.COMPLETED
 
-                if (object_detection == 2) and (self.p.position < current_position):
+                if (object_detection == 2) and (self._hw_position < current_position):
                     logger.info(
                         "  -> Gripper move holding position due to object detection when opening."
                     )
-                    self.is_finished = True
-                    return ExecutionStatus.completed(
-                        "Object detected while opening - hold"
-                    )
+                    self.finish()
+                    return ExecutionStatusCode.COMPLETED
 
-            return ExecutionStatus.executing("Moving gripper")
+            return ExecutionStatusCode.EXECUTING
 
-        return ExecutionStatus.failed("Unknown gripper state")
+        self.fail("Unknown gripper state")
+        return ExecutionStatusCode.FAILED

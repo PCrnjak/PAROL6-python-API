@@ -332,7 +332,6 @@ class MockSerialTransport:
 
         # Precompute motion simulation constants from LIMITS
         self._vmax_f = LIMITS.joint.hard.velocity_steps.astype(np.float64, copy=False)
-        self._vmax_i32 = LIMITS.joint.hard.velocity_steps.copy()
         lims = np.asarray(LIMITS.joint.position.steps, dtype=np.int64)
         self._jmin_f = lims[:, 0].astype(np.float64, copy=False)
         self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
@@ -539,16 +538,3 @@ class MockSerialTransport:
                 "command": self._state.command_out,
             },
         }
-
-
-def create_mock_serial_transport() -> MockSerialTransport:
-    """
-    Factory function to create a mock serial transport.
-
-    Returns:
-        Configured MockSerialTransport instance
-    """
-    transport = MockSerialTransport()
-    transport.connect()
-    logger.info("Mock serial transport created and connected")
-    return transport

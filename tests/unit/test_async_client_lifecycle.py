@@ -21,7 +21,7 @@ async def test_status_listener_shuts_down_on_close(ports, server_proc):
 
     try:
         # Ensure the controller is responsive before starting the status listener
-        await client.wait_for_server_ready(timeout=5.0)
+        await client.wait_ready(timeout=5.0)
 
         # Force endpoint and status listener creation
         await client._ensure_endpoint()
@@ -64,7 +64,7 @@ async def test_status_stream_terminates_on_close(ports, server_proc):
 
     try:
         # Ensure the controller is responsive before starting the status listener
-        await client.wait_for_server_ready(timeout=5.0)
+        await client.wait_ready(timeout=5.0)
 
         # Start the consumer task; this will internally trigger _ensure_endpoint()
         consumer_task = asyncio.create_task(consumer())

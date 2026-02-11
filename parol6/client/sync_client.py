@@ -9,13 +9,15 @@ import asyncio
 import atexit
 import threading
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal, TypeVar
+from typing import Any, TypeVar, overload
 
 from ..protocol.types import Axis, Frame, PingResult
 from ..protocol.wire import (
     CurrentActionResultStruct,
-    GcodeStatusResultStruct,
+    LoopStatsResultStruct,
     StatusBuffer,
+    StatusResultStruct,
+    ToolResultStruct,
 )
 from .async_client import AsyncRobotClient
 
@@ -107,7 +109,7 @@ class RobotClient:
     Can be used as a context manager to ensure proper cleanup:
 
         with RobotClient() as client:
-            client.enable()
+            client.resume()
             ...
     """
 
@@ -150,59 +152,34 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def home(self, wait: bool = False, **wait_kwargs) -> bool:
+    def home(self, wait: bool = False, **wait_kwargs) -> int:
         """Home the robot to its home position.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if the command was acknowledged successfully.
         """
         return _run(self._inner.home(wait=wait, **wait_kwargs))
 
-    def enable(self) -> bool:
-        """Enable the robot controller, allowing motion commands.
+    def resume(self) -> int:
+        """Re-enable the robot controller, allowing motion commands.
 
         Returns:
             True if the command was acknowledged successfully.
         """
-        return _run(self._inner.enable())
+        return _run(self._inner.resume())
 
-    def disable(self) -> bool:
-        """Disable the robot controller, stopping all motion.
-
-        Returns:
-            True if the command was acknowledged successfully.
-        """
-        return _run(self._inner.disable())
-
-    def stop(self) -> bool:
-        """Alias for disable() - stops motion and disables controller."""
-        return self.disable()
-
-    def start(self) -> bool:
-        """Alias for enable() - enables controller."""
-        return self.enable()
-
-    def stream_on(self) -> bool:
-        """Enable streaming mode for high-frequency motion commands.
+    def halt(self) -> int:
+        """Halt the robot — stop all motion and disable.
 
         Returns:
             True if the command was acknowledged successfully.
         """
-        return _run(self._inner.stream_on())
+        return _run(self._inner.halt())
 
-    def stream_off(self) -> bool:
-        """Disable streaming mode.
-
-        Returns:
-            True if the command was acknowledged successfully.
-        """
-        return _run(self._inner.stream_off())
-
-    def simulator_on(self) -> bool:
+    def simulator_on(self) -> int:
         """Enable simulator mode (no physical robot hardware required).
 
         Returns:
@@ -210,7 +187,7 @@ class RobotClient:
         """
         return _run(self._inner.simulator_on())
 
-    def simulator_off(self) -> bool:
+    def simulator_off(self) -> int:
         """Disable simulator mode, switching to real hardware.
 
         Returns:
@@ -218,7 +195,7 @@ class RobotClient:
         """
         return _run(self._inner.simulator_off())
 
-    def set_serial_port(self, port_str: str) -> bool:
+    def set_serial_port(self, port_str: str) -> int:
         """Set the serial port for robot hardware communication.
 
         Args:
@@ -229,7 +206,7 @@ class RobotClient:
         """
         return _run(self._inner.set_serial_port(port_str))
 
-    def reset(self) -> bool:
+    def reset(self) -> int:
         """Reset controller state to initial values."""
         return _run(self._inner.reset())
 
@@ -288,7 +265,7 @@ class RobotClient:
         """Alias for get_gripper_status()."""
         return _run(self._inner.get_gripper())
 
-    def get_status(self):
+    def get_status(self) -> StatusResultStruct | None:
         """Get aggregate robot status.
 
         Returns:
@@ -296,7 +273,7 @@ class RobotClient:
         """
         return _run(self._inner.get_status())
 
-    def get_loop_stats(self):
+    def get_loop_stats(self) -> LoopStatsResultStruct | None:
         """Get control loop runtime statistics.
 
         Returns:
@@ -304,7 +281,11 @@ class RobotClient:
         """
         return _run(self._inner.get_loop_stats())
 
-    def get_tool(self):
+    def reset_loop_stats(self) -> int:
+        """Reset control-loop min/max metrics and overrun count."""
+        return _run(self._inner.reset_loop_stats())
+
+    def get_tool(self) -> ToolResultStruct | None:
         """
         Get the current tool configuration and available tools.
 
@@ -313,7 +294,7 @@ class RobotClient:
         """
         return _run(self._inner.get_tool())
 
-    def set_tool(self, tool_name: str) -> bool:
+    def set_tool(self, tool_name: str) -> int:
         """
         Set the current end-effector tool configuration.
 
@@ -325,7 +306,7 @@ class RobotClient:
         """
         return _run(self._inner.set_tool(tool_name))
 
-    def set_profile(self, profile: str) -> bool:
+    def set_profile(self, profile: str) -> int:
         """
         Set the motion profile for all moves.
 
@@ -408,6 +389,7 @@ class RobotClient:
         settle_window: float = 0.25,
         speed_threshold: float = 2.0,
         angle_threshold: float = 0.5,
+        motion_start_timeout: float = 1.0,
     ) -> bool:
         """Wait for robot to stop moving.
 
@@ -416,6 +398,7 @@ class RobotClient:
             settle_window: How long robot must be stable.
             speed_threshold: Max joint speed to be considered stopped.
             angle_threshold: Max angle change to be considered stopped.
+            motion_start_timeout: Max time to wait for motion to start.
 
         Returns:
             True if robot stopped, False if timeout.
@@ -426,18 +409,15 @@ class RobotClient:
                 settle_window=settle_window,
                 speed_threshold=speed_threshold,
                 angle_threshold=angle_threshold,
+                motion_start_timeout=motion_start_timeout,
             )
         )
 
     # ---------- responsive waits / raw send ----------
 
-    def wait_for_server_ready(
-        self, timeout: float = 5.0, interval: float = 0.05
-    ) -> bool:
+    def wait_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
         """Poll ping() until server responds or timeout."""
-        return _run(
-            self._inner.wait_for_server_ready(timeout=timeout, interval=interval)
-        )
+        return _run(self._inner.wait_ready(timeout=timeout, interval=interval))
 
     def wait_for_status(
         self, predicate: Callable[[StatusBuffer], bool], timeout: float = 5.0
@@ -448,207 +428,322 @@ class RobotClient:
         """
         return _run(self._inner.wait_for_status(predicate, timeout=timeout))
 
-    # ---------- extended controls / motion ----------
+    # ---------- motion ----------
 
-    def move_joints(
+    @overload
+    def moveJ(
         self,
-        joint_angles: list[float],
-        duration: float | None = None,
-        speed: int | None = None,
-        accel: int | None = None,
-        wait: bool = False,
+        target: list[float],
+        *,
+        duration: float = ...,
+        speed: float = ...,
+        accel: float = ...,
+        r: float = ...,
+        rel: bool = ...,
+        wait: bool = ...,
         **wait_kwargs,
-    ) -> bool:
-        """Move to specified joint angles.
+    ) -> int: ...
 
-        Args:
-            joint_angles: Target joint angles in degrees [J1-J6].
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
-            accel: Acceleration as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
+    @overload
+    def moveJ(
+        self,
+        target: list[float] | None = ...,
+        *,
+        pose: list[float],
+        duration: float = ...,
+        speed: float = ...,
+        accel: float = ...,
+        r: float = ...,
+        wait: bool = ...,
+        **wait_kwargs,
+    ) -> int: ...
 
-        Returns:
-            True if command sent successfully.
-        """
+    def moveJ(
+        self,
+        target: list[float] | None = None,
+        *,
+        pose: list[float] | None = None,
+        duration: float = 0.0,
+        speed: float = 0.0,
+        accel: float = 1.0,
+        r: float = 0.0,
+        rel: bool = False,
+        wait: bool = True,
+        **wait_kwargs,
+    ) -> int:
+        if pose is not None:
+            return _run(
+                self._inner.moveJ(
+                    target or [],
+                    pose=pose,
+                    duration=duration,
+                    speed=speed,
+                    accel=accel,
+                    r=r,
+                    wait=wait,
+                    **wait_kwargs,
+                )
+            )
+        if target is None:
+            raise ValueError("moveJ requires target or pose")
         return _run(
-            self._inner.move_joints(
-                joint_angles,
-                duration,
-                speed,
-                accel,
+            self._inner.moveJ(
+                target,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                r=r,
+                rel=rel,
                 wait=wait,
                 **wait_kwargs,
             )
         )
 
-    def move_pose(
+    def moveL(
         self,
         pose: list[float],
-        duration: float | None = None,
-        speed: int | None = None,
-        accel: int | None = None,
-        wait: bool = False,
+        *,
+        frame: Frame = "WRF",
+        duration: float = 0.0,
+        speed: float = 0.0,
+        accel: float = 1.0,
+        r: float = 0.0,
+        rel: bool = False,
+        wait: bool = True,
         **wait_kwargs,
-    ) -> bool:
-        """Move to specified pose using joint-space interpolation.
-
-        Args:
-            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees.
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
-            accel: Acceleration as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
+    ) -> int:
         return _run(
-            self._inner.move_pose(
+            self._inner.moveL(
                 pose,
-                duration,
-                speed,
-                accel,
+                frame=frame,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                r=r,
+                rel=rel,
                 wait=wait,
                 **wait_kwargs,
             )
         )
 
-    def move_cartesian(
+    def moveC(
+        self,
+        via: list[float],
+        end: list[float],
+        *,
+        frame: Frame = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        r: float = 0.0,
+        wait: bool = True,
+        **wait_kwargs,
+    ) -> int:
+        return _run(
+            self._inner.moveC(
+                via,
+                end,
+                frame=frame,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                r=r,
+                wait=wait,
+                **wait_kwargs,
+            )
+        )
+
+    def moveS(
+        self,
+        waypoints: list[list[float]],
+        *,
+        frame: Frame = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        wait: bool = True,
+        **wait_kwargs,
+    ) -> int:
+        return _run(
+            self._inner.moveS(
+                waypoints,
+                frame=frame,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                wait=wait,
+                **wait_kwargs,
+            )
+        )
+
+    def moveP(
+        self,
+        waypoints: list[list[float]],
+        *,
+        frame: Frame = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        wait: bool = True,
+        **wait_kwargs,
+    ) -> int:
+        return _run(
+            self._inner.moveP(
+                waypoints,
+                frame=frame,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                wait=wait,
+                **wait_kwargs,
+            )
+        )
+
+    @overload
+    def servoJ(
+        self,
+        target: list[float],
+        *,
+        speed: float = ...,
+        accel: float = ...,
+    ) -> int: ...
+
+    @overload
+    def servoJ(
+        self,
+        target: list[float] | None = ...,
+        *,
+        pose: list[float],
+        speed: float = ...,
+        accel: float = ...,
+    ) -> int: ...
+
+    def servoJ(
+        self,
+        target: list[float] | None = None,
+        *,
+        pose: list[float] | None = None,
+        speed: float = 1.0,
+        accel: float = 1.0,
+    ) -> int:
+        if pose is not None:
+            return _run(
+                self._inner.servoJ(target or [], pose=pose, speed=speed, accel=accel)
+            )
+        if target is None:
+            raise ValueError("servoJ requires target or pose")
+        return _run(self._inner.servoJ(target, speed=speed, accel=accel))
+
+    def servoL(
         self,
         pose: list[float],
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: int | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Move to specified pose using Cartesian-space interpolation.
+        *,
+        speed: float = 1.0,
+        accel: float = 1.0,
+    ) -> int:
+        return _run(self._inner.servoL(pose, speed=speed, accel=accel))
 
-        Args:
-            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees.
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
-            accel: Acceleration as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.move_cartesian(
-                pose,
-                duration,
-                speed,
-                accel,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def move_cartesian_rel_trf(
+    @overload
+    def jogJ(
         self,
-        deltas: list[float],
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: int | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Move relative to current pose in Tool Reference Frame.
+        joint: int,
+        speed: float,
+        duration: float = ...,
+        *,
+        accel: float = ...,
+    ) -> int: ...
 
-        Args:
-            deltas: Relative movement [dx, dy, dz, rx, ry, rz] in mm and degrees.
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
-            accel: Acceleration as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.move_cartesian_rel_trf(
-                deltas,
-                duration,
-                speed,
-                accel,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def jog_joint(
+    @overload
+    def jogJ(
         self,
-        joint_index: int,
-        speed: int,
-        duration: float,
-    ) -> bool:
-        """Jog a single joint at a specified speed.
+        *,
+        joints: list[int],
+        speeds: list[float],
+        duration: float = ...,
+        accel: float = ...,
+    ) -> int: ...
 
-        Args:
-            joint_index: Joint to jog (0-5 positive, 6-11 negative direction).
-            speed: Speed as percentage (1-100).
-            duration: Time to jog in seconds.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.jog_joint(
-                joint_index,
-                speed,
-                duration,
+    def jogJ(
+        self,
+        joint: int | None = None,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        joints: list[int] | None = None,
+        speeds: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> int:
+        if joints is not None and speeds is not None:
+            return _run(
+                self._inner.jogJ(
+                    joints=joints, speeds=speeds, duration=duration, accel=accel
+                )
             )
-        )
+        if joint is not None:
+            return _run(self._inner.jogJ(joint, speed, duration, accel=accel))
+        raise ValueError("jogJ requires either joint or joints/speeds")
 
-    def jog_cartesian(
+    @overload
+    def jogL(
         self,
         frame: Frame,
         axis: Axis,
-        speed: int,
-        duration: float,
-    ) -> bool:
-        """Jog the robot in Cartesian space along a specified axis.
+        speed: float,
+        duration: float = ...,
+        *,
+        accel: float = ...,
+    ) -> int: ...
 
-        Args:
-            frame: Reference frame ('TRF' for Tool, 'WRF' for World).
-            axis: Axis and direction to jog (e.g., 'X+', 'Y-', 'RZ+').
-            speed: Speed as percentage (1-100).
-            duration: Time to jog in seconds.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.jog_cartesian(frame, axis, speed, duration))
-
-    def jog_multiple(
+    @overload
+    def jogL(
         self,
-        joints: list[int],
-        speeds: list[float],
-        duration: float,
-    ) -> bool:
-        """Jog multiple joints simultaneously.
+        frame: Frame,
+        *,
+        axes: list[Axis],
+        speeds_list: list[float],
+        duration: float = ...,
+        accel: float = ...,
+    ) -> int: ...
 
-        Args:
-            joints: List of joint indices to jog (0-5).
-            speeds: List of speeds for each joint (can be negative).
-            duration: Time to jog in seconds.
+    def jogL(
+        self,
+        frame: Frame,
+        axis: Axis | None = None,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        axes: list[Axis] | None = None,
+        speeds_list: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> int:
+        if axes is not None and speeds_list is not None:
+            return _run(
+                self._inner.jogL(
+                    frame,
+                    axes=axes,
+                    speeds_list=speeds_list,
+                    duration=duration,
+                    accel=accel,
+                )
+            )
+        if axis is not None:
+            return _run(self._inner.jogL(frame, axis, speed, duration, accel=accel))
+        raise ValueError("jogL requires either axis or axes/speeds_list")
 
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.jog_multiple(joints, speeds, duration))
+    def checkpoint(self, label: str) -> int:
+        return _run(self._inner.checkpoint(label))
 
-    def set_io(self, index: int, value: int) -> bool:
+    def wait_for_command(self, index: int, timeout: float = 30.0) -> bool:
+        return _run(self._inner.wait_for_command(index, timeout=timeout))
+
+    def wait_for_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
+        return _run(self._inner.wait_for_checkpoint(label, timeout=timeout))
+
+    def set_io(self, index: int, value: int) -> int:
         """Set digital I/O bit (0..7) to 0 or 1."""
         return _run(self._inner.set_io(index, value))
 
-    def delay(self, seconds: float) -> bool:
+    def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue."""
         return _run(self._inner.delay(seconds))
 
@@ -660,7 +755,7 @@ class RobotClient:
         port: int,
         wait: bool = False,
         **wait_kwargs,
-    ) -> bool:
+    ) -> int:
         """Control pneumatic gripper via digital outputs.
 
         Args:
@@ -681,18 +776,18 @@ class RobotClient:
     def control_electric_gripper(
         self,
         action: str,
-        position: int | None = 255,
-        speed: int | None = 150,
-        current: int | None = 500,
+        position: float = 0.0,
+        speed: float = 0.5,
+        current: int = 500,
         wait: bool = False,
         **wait_kwargs,
-    ) -> bool:
+    ) -> int:
         """Control electric gripper.
 
         Args:
             action: 'move' or 'calibrate'.
-            position: Target position (0-255).
-            speed: Movement speed (0-255).
+            position: 0.0-1.0 (0=open, 1=closed).
+            speed: 0.0-1.0 fraction of max speed.
             current: Current limit in mA (100-1000).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
@@ -703,309 +798,5 @@ class RobotClient:
         return _run(
             self._inner.control_electric_gripper(
                 action, position, speed, current, wait=wait, **wait_kwargs
-            )
-        )
-
-    # ---------- GCODE ----------
-
-    def execute_gcode(
-        self,
-        gcode_line: str,
-    ) -> bool:
-        """Execute a single G-code line.
-
-        Args:
-            gcode_line: G-code command to execute (e.g., 'G0 X100').
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.execute_gcode(gcode_line))
-
-    def execute_gcode_program(
-        self,
-        program_lines: list[str],
-    ) -> bool:
-        """Execute a G-code program from a list of lines.
-
-        Args:
-            program_lines: List of G-code lines to execute.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.execute_gcode_program(program_lines))
-
-    def load_gcode_file(
-        self,
-        filepath: str,
-    ) -> bool:
-        """Load and execute a G-code program from a file.
-
-        Args:
-            filepath: Path to the G-code file.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.load_gcode_file(filepath))
-
-    def get_gcode_status(self) -> GcodeStatusResultStruct | None:
-        """Get the current status of the G-code interpreter.
-
-        Returns:
-            Struct with interpreter state, or None on timeout.
-        """
-        return _run(self._inner.get_gcode_status())
-
-    def pause_gcode_program(self) -> bool:
-        """Pause the currently running G-code program.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.pause_gcode_program())
-
-    def resume_gcode_program(self) -> bool:
-        """Resume a paused G-code program.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.resume_gcode_program())
-
-    def stop_gcode_program(self) -> bool:
-        """Stop the currently running G-code program.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(self._inner.stop_gcode_program())
-
-    # ---------- smooth motion ----------
-
-    def smooth_circle(
-        self,
-        center: list[float],
-        radius: float,
-        plane: Literal["XY", "XZ", "YZ"] = "XY",
-        frame: Literal["WRF", "TRF"] = "WRF",
-        center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth circular motion.
-
-        Uses Cartesian motion profile (set via set_cartesian_profile()).
-
-        Args:
-            center: Circle center [x, y, z] in mm.
-            radius: Circle radius in mm.
-            plane: Plane of the circle ('XY', 'XZ', 'YZ').
-            frame: Reference frame ('WRF' or 'TRF').
-            center_mode: How to interpret center point.
-            duration: Time to complete motion in seconds (overrides velocity).
-            velocity_percent: Speed as percentage (1-100), ignored if duration set.
-            accel_percent: Acceleration as percentage (1-100).
-            clockwise: Direction of motion.
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_circle(
-                center=center,
-                radius=radius,
-                plane=plane,
-                frame=frame,
-                center_mode=center_mode,
-                duration=duration,
-                velocity_percent=velocity_percent,
-                accel_percent=accel_percent,
-                clockwise=clockwise,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_arc_center(
-        self,
-        end_pose: list[float],
-        center: list[float],
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth arc motion defined by center point.
-
-        Uses Cartesian motion profile (set via set_cartesian_profile()).
-
-        Args:
-            end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
-            center: Arc center [x, y, z] in mm.
-            frame: Reference frame ('WRF' or 'TRF').
-            duration: Time to complete motion in seconds (overrides velocity).
-            velocity_percent: Speed as percentage (1-100), ignored if duration set.
-            accel_percent: Acceleration as percentage (1-100).
-            clockwise: Direction of motion.
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_arc_center(
-                end_pose=end_pose,
-                center=center,
-                frame=frame,
-                duration=duration,
-                velocity_percent=velocity_percent,
-                accel_percent=accel_percent,
-                clockwise=clockwise,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_arc_param(
-        self,
-        end_pose: list[float],
-        radius: float,
-        arc_angle: float,
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth arc motion defined parametrically.
-
-        Uses Cartesian motion profile (set via set_cartesian_profile()).
-
-        Args:
-            end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
-            radius: Arc radius in mm.
-            arc_angle: Arc angle in degrees.
-            frame: Reference frame ('WRF' or 'TRF').
-            duration: Time to complete motion in seconds (overrides velocity).
-            velocity_percent: Speed as percentage (1-100), ignored if duration set.
-            accel_percent: Acceleration as percentage (1-100).
-            clockwise: Direction of motion.
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_arc_param(
-                end_pose=end_pose,
-                radius=radius,
-                arc_angle=arc_angle,
-                frame=frame,
-                duration=duration,
-                velocity_percent=velocity_percent,
-                accel_percent=accel_percent,
-                clockwise=clockwise,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_spline(
-        self,
-        waypoints: list[list[float]],
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth spline motion through waypoints.
-
-        Uses Cartesian motion profile (set via set_cartesian_profile()).
-
-        Args:
-            waypoints: List of poses [x, y, z, rx, ry, rz] in mm and degrees.
-            frame: Reference frame ('WRF' or 'TRF').
-            duration: Total time for motion in seconds (overrides velocity).
-            velocity_percent: Speed as percentage (1-100), ignored if duration set.
-            accel_percent: Acceleration as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_spline(
-                waypoints=waypoints,
-                frame=frame,
-                duration=duration,
-                velocity_percent=velocity_percent,
-                accel_percent=accel_percent,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    # ---------- work coordinate helpers ----------
-
-    def set_work_coordinate_offset(
-        self,
-        coordinate_system: str,
-        x: float | None = None,
-        y: float | None = None,
-        z: float | None = None,
-    ) -> bool:
-        """Set work coordinate system offsets (G54-G59).
-
-        Args:
-            coordinate_system: Work coordinate system ('G54' through 'G59').
-            x: X axis offset in mm (None to keep current).
-            y: Y axis offset in mm (None to keep current).
-            z: Z axis offset in mm (None to keep current).
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.set_work_coordinate_offset(
-                coordinate_system=coordinate_system,
-                x=x,
-                y=y,
-                z=z,
-            )
-        )
-
-    def zero_work_coordinates(
-        self,
-        coordinate_system: str = "G54",
-    ) -> bool:
-        """Set the current position as zero in the specified work coordinate system.
-
-        Args:
-            coordinate_system: Work coordinate system ('G54' through 'G59').
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.zero_work_coordinates(
-                coordinate_system=coordinate_system,
             )
         )

@@ -28,8 +28,8 @@ from parol6.protocol.wire import (
 class CommandCategory(Enum):
     """Category of command, determining execution semantics."""
 
-    SYSTEM = "system"  # Execute immediately, controller sends response
-    QUERY = "query"  # Execute immediately, command sends own response
+    SYSTEM = "system"  # Execute immediately, controller sends OK/error
+    QUERY = "query"  # Execute immediately, controller sends query response
     MOTION = "motion"  # Queue for execution in control loop
 
 
@@ -48,11 +48,11 @@ class CommandRegistry:
     """
 
     _instance: CommandRegistry | None = None
-    _commands: dict[CmdType, type[CommandBase]] = {}
-    _class_to_type: dict[type[CommandBase], CmdType] = {}
-    _struct_to_command: dict[type[Command], type[CommandBase]] = {}
-    _class_to_category: dict[type[CommandBase], CommandCategory] = {}
-    _discovered: bool = False
+    _commands: dict[CmdType, type[CommandBase]]
+    _class_to_type: dict[type[CommandBase], CmdType]
+    _struct_to_command: dict[type[Command], type[CommandBase]]
+    _class_to_category: dict[type[CommandBase], CommandCategory]
+    _discovered: bool
 
     def __new__(cls) -> CommandRegistry:
         """Ensure singleton pattern."""
@@ -201,6 +201,24 @@ class CommandRegistry:
             f"Command discovery complete. {len(self._commands)} commands registered."
         )
 
+    def get_command_for_struct(
+        self, struct_type: type[Command]
+    ) -> type[CommandBase] | None:
+        """Return the command class registered for a given struct type.
+
+        Unlike create_command_from_struct(), this does not instantiate the
+        command or assign parameters — it just returns the class.
+        """
+        if not self._discovered:
+            self.discover_commands()
+        return self._struct_to_command.get(struct_type)
+
+    def get_category(self, command_class: type[CommandBase]) -> CommandCategory:
+        """Return the category for a registered command class."""
+        if not self._discovered:
+            self.discover_commands()
+        return self._class_to_category.get(command_class, CommandCategory.MOTION)
+
     def create_command(
         self, data: bytes
     ) -> tuple[CommandBase | None, CommandCategory | None, str | None]:
@@ -249,8 +267,7 @@ class CommandRegistry:
             logger.log(TRACE, "no_handler struct=%s", struct_type.__name__)
             return None, None, f"No handler for {struct_type.__name__}"
 
-        command = command_class()
-        command.assign_params(cmd_struct)
+        command = command_class(cmd_struct)
         category = self._class_to_category.get(command_class, CommandCategory.MOTION)
 
         return command, category, None
@@ -281,7 +298,7 @@ def register_command(
 
     Usage:
         @register_command(CmdType.MOVEJOINT)
-        class MoveJointCommand(CommandBase):
+        class MoveJCommand(CommandBase):
             ...
 
     Args:
@@ -315,3 +332,4 @@ clear_registry = _registry.clear
 create_command = _registry.create_command
 create_command_from_struct = _registry.create_command_from_struct
 get_type_for_class = _registry.get_type_for_class
+get_command_for_struct = _registry.get_command_for_struct

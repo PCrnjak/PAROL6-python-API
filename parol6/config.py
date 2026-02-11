@@ -23,6 +23,7 @@ logging.addLevelName(TRACE, "TRACE")
 
 # Command queue limits
 MAX_COMMAND_QUEUE_SIZE: int = 100
+MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "3"))
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
 
 # Serial transport defaults
@@ -589,7 +590,6 @@ def compute_cart_velocity_limited_joints(
     """
     v_max_rad = LIMITS.joint.hard.velocity
 
-    assert PAROL6_ROBOT.robot is not None
     PAROL6_ROBOT.robot.jacob0_into(q_current, _jacob0_buf)
     J_lin = _jacob0_buf[:3, :]
     cart_vel_per_scale = np.linalg.norm(J_lin @ dq)

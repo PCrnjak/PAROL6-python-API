@@ -129,6 +129,7 @@ class UDPTransport:
         self, max_count: int = 10
     ) -> list[tuple[bytes, tuple[str, int]]]:
         """Non-blocking batch receive up to max_count. Reuses internal buffer."""
+        # Returns the internal list directly; caller must consume before next call.
         self._recv_all_buf.clear()
         for _ in range(max_count):
             msg = self.poll_receive()
@@ -221,24 +222,3 @@ class UDPTransport:
                 logger.debug("Failed to get UDP sockname: %s", e)
 
         return info
-
-
-def create_udp_transport(
-    ip: str = "127.0.0.1", port: int = 5001
-) -> UDPTransport | None:
-    """
-    Factory function to create and initialize a UDP transport.
-
-    Args:
-        ip: IP address to bind to
-        port: Port number to listen on
-
-    Returns:
-        Initialized UDPTransport instance, or None if initialization failed
-    """
-    transport = UDPTransport(ip, port)
-
-    if transport.create_socket():
-        return transport
-    else:
-        return None

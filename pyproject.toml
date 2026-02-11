@@ -10,31 +10,31 @@ description = "Python library for controlling PAROL6 robot arms"
 requires-python = ">=3.11"
 dependencies = [
     # pinokin: Pinocchio-based FK/IK bindings
-    # https://github.com/Jepson2k/pinokin/releases/tag/v0.1.1
+    # https://github.com/Jepson2k/pinokin/releases/tag/v0.1.3
 
     # macOS ARM64 (Apple Silicon)
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp311-cp311-macosx_15_0_arm64.whl ; python_version == '3.11' and platform_system == 'Darwin' and platform_machine == 'arm64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp312-cp312-macosx_15_0_arm64.whl ; python_version == '3.12' and platform_system == 'Darwin' and platform_machine == 'arm64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp313-cp313-macosx_15_0_arm64.whl ; python_version == '3.13' and platform_system == 'Darwin' and platform_machine == 'arm64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp314-cp314-macosx_15_0_arm64.whl ; python_version == '3.14' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp311-cp311-macosx_15_0_arm64.whl ; python_version == '3.11' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp312-cp312-macosx_15_0_arm64.whl ; python_version == '3.12' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp313-cp313-macosx_15_0_arm64.whl ; python_version == '3.13' and platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp314-cp314-macosx_15_0_arm64.whl ; python_version == '3.14' and platform_system == 'Darwin' and platform_machine == 'arm64'",
 
     # Windows AMD64
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp311-cp311-win_amd64.whl ; python_version == '3.11' and platform_system == 'Windows' and platform_machine == 'AMD64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp312-cp312-win_amd64.whl ; python_version == '3.12' and platform_system == 'Windows' and platform_machine == 'AMD64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp313-cp313-win_amd64.whl ; python_version == '3.13' and platform_system == 'Windows' and platform_machine == 'AMD64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp314-cp314-win_amd64.whl ; python_version == '3.14' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp311-cp311-win_amd64.whl ; python_version == '3.11' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp312-cp312-win_amd64.whl ; python_version == '3.12' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp313-cp313-win_amd64.whl ; python_version == '3.13' and platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp314-cp314-win_amd64.whl ; python_version == '3.14' and platform_system == 'Windows' and platform_machine == 'AMD64'",
 
     # Linux x86_64
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp311-cp311-manylinux_2_39_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp312-cp312-manylinux_2_39_x86_64.whl ; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp313-cp313-manylinux_2_39_x86_64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp314-cp314-manylinux_2_39_x86_64.whl ; python_version == '3.14' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp311-cp311-manylinux_2_39_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp312-cp312-manylinux_2_39_x86_64.whl ; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp313-cp313-manylinux_2_39_x86_64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp314-cp314-manylinux_2_39_x86_64.whl ; python_version == '3.14' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 
     # Linux aarch64 (ARM64)
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp311-cp311-manylinux_2_39_aarch64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'aarch64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp312-cp312-manylinux_2_39_aarch64.whl ; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'aarch64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp313-cp313-manylinux_2_39_aarch64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'aarch64'",
-    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.1/pinokin-0.1.1-cp314-cp314-manylinux_2_39_aarch64.whl ; python_version == '3.14' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp311-cp311-manylinux_2_39_aarch64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp312-cp312-manylinux_2_39_aarch64.whl ; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp313-cp313-manylinux_2_39_aarch64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'aarch64'",
+    "pinokin @ https://github.com/Jepson2k/pinokin/releases/download/v0.1.3/pinokin-0.1.3-cp314-cp314-manylinux_2_39_aarch64.whl ; python_version == '3.14' and platform_system == 'Linux' and platform_machine == 'aarch64'",
 
     "pyserial>=3.4",
     "scipy>=1.11.4",
@@ -100,10 +100,7 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 markers = [
     "unit: Unit tests that test individual components in isolation",
     "integration: Integration tests that test component interactions with FAKE_SERIAL",
-    "hardware: Hardware tests that require actual robot hardware and human confirmation",
-    "slow: Slow-running tests (typically hardware or complex integration tests)",
-    "e2e: End-to-end tests that exercise complete workflows",
-    "gcode: Tests specifically for GCODE parsing and interpretation functionality"
+    "e2e: End-to-end tests that exercise complete workflows"
 ]
 
 # Filter warnings

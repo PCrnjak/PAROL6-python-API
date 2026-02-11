@@ -72,7 +72,7 @@ pre-commit install
 - Run all pre-commit hooks locally: `pre-commit run -a`
 - Run tests with pytest:
   - `pytest`
-  - Simulator is used by default (PAROL6_FAKE_SERIAL=1). Hardware tests are marked and require explicit opt-in.
+  - Simulator is used by default (PAROL6_FAKE_SERIAL=1).
 
 Adding a command (overview):
 - Create a class under `parol6/commands/` and decorate it with `@register_command("NAME")` (see `parol6/server/command_registry.py`).
@@ -289,12 +289,14 @@ Applied at two levels:
 #### Speed and acceleration
 
 ```python
-client.move_joint(target, speed=50, accel=50)   # 50% of joint limits
-client.move_cart(target, speed=25, accel=100)   # 25% cart speed, full accel
-client.move_cart(target, duration=2.0)          # Fixed duration (uses TOPPRAsd)
+client.move_joints(target, speed=0.5, accel=0.5)   # 50% of joint limits
+client.move_cartesian(target, speed=0.25, accel=1.0)   # 25% cart speed, full accel
+client.move_cartesian(target, duration=2.0)          # Fixed duration (uses TOPPRA)
 ```
 
-For Cartesian moves, joint limits stay at 100% as hard bounds—speed percentage only affects the Cartesian velocity constraint.
+Speed and accel are fractions of maximum (0.0–1.0), not percentages.
+
+For Cartesian moves, joint limits stay at 100% as hard bounds—the speed fraction only affects the Cartesian velocity constraint.
 
 
 ## Kinematics, IK, and singularities

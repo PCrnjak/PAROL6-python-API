@@ -10,7 +10,7 @@ import socket
 import struct
 import time
 from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 import msgspec
 import numpy as np
@@ -20,22 +20,13 @@ from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
 from ..protocol.wire import (
     STRUCT_TO_CMDTYPE,
     decode_status_bin_into,
-    CartJogCmd,
+    CheckpointCmd,
     CurrentActionResultStruct,
     DelayCmd,
-    DisableCmd,
     ElectricGripperCmd,
-    EnableCmd,
     ErrorMsg,
-    GcodeCmd,
-    GcodePauseCmd,
-    GcodeProgramCmd,
-    GcodeResumeCmd,
-    GcodeStopCmd,
-    GcodeStatusResultStruct,
     GetAnglesCmd,
     GetCurrentActionCmd,
-    GetGcodeStatusCmd,
     GetGripperCmd,
     GetIOCmd,
     GetLoopStatsCmd,
@@ -45,44 +36,48 @@ from ..protocol.wire import (
     GetSpeedsCmd,
     GetStatusCmd,
     GetToolCmd,
+    HaltCmd,
     HomeCmd,
-    JogCmd,
+    JogJCmd,
+    JogLCmd,
     LoopStatsResultStruct,
-    MoveCartCmd,
-    MoveCartRelTrfCmd,
-    MoveJointCmd,
-    MovePoseCmd,
-    MultiJogCmd,
+    MoveCCmd,
+    MoveJCmd,
+    MoveJPoseCmd,
+    MoveLCmd,
+    MovePCmd,
+    MoveSCmd,
     OkMsg,
     PingCmd,
     PneumaticGripperCmd,
     ResetCmd,
     ResetLoopStatsCmd,
+    ResumeCmd,
     ResponseMsg,
+    ServoJCmd,
+    ServoJPoseCmd,
+    ServoLCmd,
     SetIOCmd,
     SetPortCmd,
     SetProfileCmd,
     SetToolCmd,
     SimulatorCmd,
-    SmoothArcCenterCmd,
-    SmoothArcParamCmd,
-    SmoothCircleCmd,
-    SmoothSplineCmd,
     StatusBuffer,
     StatusResultStruct,
-    StreamCmd,
     ToolResultStruct,
+    decode_message,
     encode_command,
-    parse_message,
 )
 from ..protocol.types import (
     Axis,
     Frame,
     PingResult,
 )
-from ..utils.se3_utils import so3_rpy
+from pinokin import so3_rpy
 
 logger = logging.getLogger(__name__)
+
+_AXIS_MAP: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
 
 
 class _UDPClientProtocol(asyncio.DatagramProtocol):
@@ -229,6 +224,10 @@ class AsyncRobotClient:
         self.timeout = timeout
         self.retries = retries
 
+        # Pre-allocated buffers for get_pose_rpy
+        self._R_buf = np.zeros((3, 3), dtype=np.float64)
+        self._rpy_buf = np.zeros(3, dtype=np.float64)
+
         # Persistent asyncio datagram endpoint
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _UDPClientProtocol | None = None
@@ -240,10 +239,8 @@ class AsyncRobotClient:
         # Serialize request/response
         self._req_lock = asyncio.Lock()
 
-        # Stream flag for UI convenience
-        self._stream_mode = False
-        # ACK policy
-        self._ack_policy = AckPolicy.from_env(lambda: self._stream_mode)
+        # ACK policy (category-based, no stream_mode dependency)
+        self._ack_policy = AckPolicy()
 
         # Shared status state (single buffer, event-based notification)
         self._status_transport: asyncio.DatagramTransport | None = None
@@ -251,6 +248,9 @@ class AsyncRobotClient:
         self._shared_status: StatusBuffer = StatusBuffer()
         self._status_generation: int = 0
         self._status_event: asyncio.Event = asyncio.Event()
+
+        # Last command index returned by server for queued commands
+        self._last_command_index: int | None = None
 
         # Lifecycle flag
         self._closed: bool = False
@@ -323,7 +323,7 @@ class AsyncRobotClient:
         )
         # Quick readiness check (no blind wait): bounded by client's own timeout
         try:
-            await self.wait_for_server_ready(
+            await self.wait_ready(
                 timeout=min(1.0, float(self.timeout or 0.3)), interval=0.5
             )
         except Exception:
@@ -452,15 +452,13 @@ class AsyncRobotClient:
                 last_gen = self._status_generation
                 yield self._shared_status
 
-    async def _send(self, cmd: msgspec.Struct) -> bool:
+    async def _send(self, cmd: msgspec.Struct) -> int:
         """
-        Send a binary command based on AckPolicy:
-        - System commands: wait for server OK/ERROR, return True on OK, False on ERROR
-        - Motion commands: wait iff policy requires ACK; otherwise fire-and-forget (return True on send)
-        - Query commands: should use _request path; if invoked here, just fire-and-forget
+        Send a binary command based on AckPolicy.
 
-        Args:
-            cmd: Typed command struct
+        Returns:
+            int (command index ≥ 0) for ACK'd queued commands, -1 on failure,
+            bool for system/fire-and-forget/query commands.
         """
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -476,7 +474,8 @@ class AsyncRobotClient:
         # System commands: wait for OK/ERROR
         if cmd_type in SYSTEM_CMD_TYPES:
             try:
-                return await self._request_ok_raw(data, self.timeout)
+                await self._request_ok_raw(data, self.timeout)
+                return True
             except RuntimeError:
                 # Server rejected command
                 return False
@@ -485,9 +484,11 @@ class AsyncRobotClient:
         if cmd_type not in QUERY_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
                 try:
-                    return await self._request_ok_raw(data, self.timeout)
+                    ok = await self._request_ok_raw(data, self.timeout)
+                    self._last_command_index = ok.index
+                    return ok.index if ok.index is not None else 0
                 except RuntimeError:
-                    return False
+                    return -1
             # Fire-and-forget
             self._transport.sendto(data)
             return True
@@ -516,8 +517,7 @@ class AsyncRobotClient:
                         self._rx_queue.get(), timeout=self.timeout
                     )
                     try:
-                        raw = msgspec.msgpack.decode(resp_data)
-                        parsed = parse_message(raw)
+                        parsed = decode_message(resp_data)
                         if isinstance(parsed, ResponseMsg):
                             return parsed
                         return None
@@ -532,7 +532,7 @@ class AsyncRobotClient:
                 break
         return None
 
-    async def _request_ok_raw(self, data: bytes, timeout: float) -> bool:
+    async def _request_ok_raw(self, data: bytes, timeout: float) -> OkMsg:
         """
         Send pre-encoded binary command and wait for 'OK' or 'ERROR' reply.
 
@@ -540,7 +540,7 @@ class AsyncRobotClient:
             data: Pre-encoded msgpack bytes
             timeout: Timeout in seconds.
 
-        Returns True on OK; raises RuntimeError on ERROR, TimeoutError on timeout.
+        Returns OkMsg on OK; raises RuntimeError on ERROR, TimeoutError on timeout.
         """
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -555,78 +555,51 @@ class AsyncRobotClient:
                         timeout=max(0.0, end_time - time.monotonic()),
                     )
                     try:
-                        resp = msgspec.msgpack.decode(resp_data)
-                        match parse_message(resp):
-                            case OkMsg():
-                                return True
+                        match decode_message(resp_data):
+                            case OkMsg() as ok:
+                                return ok
                             case ErrorMsg(message):
                                 raise RuntimeError(f"ERROR|{message}")
-                    except msgspec.DecodeError:
-                        pass  # Ignore non-msgpack datagrams
+                    except msgspec.ValidationError:
+                        pass  # Ignore non-matching datagrams
                 except (asyncio.TimeoutError, TimeoutError):
                     break
         raise TimeoutError("Timeout waiting for OK")
 
     # --------------- Motion / Control ---------------
 
-    async def home(self, wait: bool = False, **wait_kwargs) -> bool:
+    async def home(self, wait: bool = False, **wait_kwargs) -> int:
         """Home the robot to its home position.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete() (timeout, settle_window, etc.)
         """
-        result = await self._send(HomeCmd())
-        if wait and result:
+        index = await self._send(HomeCmd())
+        assert isinstance(index, int)
+        if wait and index >= 0:
             await self.wait_motion_complete(**wait_kwargs)
-        return result
+        return index
 
-    async def enable(self) -> bool:
-        """Enable the robot controller, allowing motion commands.
-
-        Returns:
-            True if the command was acknowledged successfully.
-        """
-        return await self._send(EnableCmd())
-
-    async def disable(self) -> bool:
-        """Disable the robot controller, stopping all motion.
+    async def resume(self) -> int:
+        """Re-enable the robot controller, allowing motion commands.
 
         Returns:
             True if the command was acknowledged successfully.
         """
-        return await self._send(DisableCmd())
+        return await self._send(ResumeCmd())
 
-    async def stop(self) -> bool:
-        """Alias for disable() - stops motion and disables controller."""
-        return await self.disable()
-
-    async def start(self) -> bool:
-        """Alias for enable() - enables controller."""
-        return await self.enable()
-
-    async def stream_on(self) -> bool:
-        """Enable streaming mode for high-frequency motion commands.
-
-        In streaming mode, motion commands are sent without waiting for
-        acknowledgment, allowing higher command rates for smooth motion.
+    async def halt(self) -> int:
+        """Halt the robot — stop all motion and disable.
 
         Returns:
             True if the command was acknowledged successfully.
         """
-        self._stream_mode = True
-        return await self._send(StreamCmd(on=True))
+        return await self._send(HaltCmd())
 
-    async def stream_off(self) -> bool:
-        """Disable streaming mode, returning to acknowledged motion commands.
-
-        Returns:
-            True if the command was acknowledged successfully.
-        """
-        self._stream_mode = False
-        return await self._send(StreamCmd(on=False))
-
-    async def simulator_on(self) -> bool:
+    async def simulator_on(self) -> int:
         """Enable simulator mode (no physical robot hardware required).
 
         The controller will use simulated robot dynamics instead of
@@ -637,7 +610,7 @@ class AsyncRobotClient:
         """
         return await self._send(SimulatorCmd(on=True))
 
-    async def simulator_off(self) -> bool:
+    async def simulator_off(self) -> int:
         """Disable simulator mode, switching to real hardware communication.
 
         Returns:
@@ -645,7 +618,7 @@ class AsyncRobotClient:
         """
         return await self._send(SimulatorCmd(on=False))
 
-    async def set_serial_port(self, port_str: str) -> bool:
+    async def set_serial_port(self, port_str: str) -> int:
         """Set the serial port for robot hardware communication.
 
         Args:
@@ -661,7 +634,7 @@ class AsyncRobotClient:
             raise ValueError("No port provided")
         return await self._send(SetPortCmd(port_str=port_str))
 
-    async def reset(self) -> bool:
+    async def reset(self) -> int:
         """Reset controller state to initial values.
 
         Instantly resets positions to home, clears queues, resets tool/errors.
@@ -719,11 +692,11 @@ class AsyncRobotClient:
         resp = await self._request(GetLoopStatsCmd())
         return LoopStatsResultStruct(*resp.value) if resp else None
 
-    async def reset_loop_stats(self) -> bool:
+    async def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count."""
         return await self._send(ResetLoopStatsCmd())
 
-    async def set_tool(self, tool_name: str) -> bool:
+    async def set_tool(self, tool_name: str) -> int:
         """
         Set the current end-effector tool configuration.
 
@@ -735,7 +708,7 @@ class AsyncRobotClient:
         """
         return await self._send(SetToolCmd(tool_name=tool_name.upper()))
 
-    async def set_profile(self, profile: str) -> bool:
+    async def set_profile(self, profile: str) -> int:
         """
         Set the motion profile for all moves.
 
@@ -767,7 +740,7 @@ class AsyncRobotClient:
             return CurrentActionResultStruct(*resp.value)
         return None
 
-    async def get_queue(self) -> list | None:
+    async def get_queue(self) -> list[str] | None:
         """Get the list of queued non-streamable commands."""
         resp = await self._request(GetQueueCmd())
         return cast(list, resp.value) if resp else None
@@ -784,20 +757,20 @@ class AsyncRobotClient:
 
         try:
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
-            # Rotation matrix rows (row-major layout)
-            R = np.array(
-                [
-                    [pose_matrix[0], pose_matrix[1], pose_matrix[2]],
-                    [pose_matrix[4], pose_matrix[5], pose_matrix[6]],
-                    [pose_matrix[8], pose_matrix[9], pose_matrix[10]],
-                ]
-            )
-            # Use xyz convention (rx, ry, rz) - Roll-Pitch-Yaw
-            rpy_rad = np.zeros(3, dtype=np.float64)
-            so3_rpy(R, rpy_rad)
-            rpy_deg = np.degrees(rpy_rad)
+            R = self._R_buf
+            R[0, 0] = pose_matrix[0]
+            R[0, 1] = pose_matrix[1]
+            R[0, 2] = pose_matrix[2]
+            R[1, 0] = pose_matrix[4]
+            R[1, 1] = pose_matrix[5]
+            R[1, 2] = pose_matrix[6]
+            R[2, 0] = pose_matrix[8]
+            R[2, 1] = pose_matrix[9]
+            R[2, 2] = pose_matrix[10]
+            so3_rpy(R, self._rpy_buf)
+            rpy_deg = np.degrees(self._rpy_buf)
             return [x, y, z, rpy_deg[0], rpy_deg[1], rpy_deg[2]]
-        except (ValueError, IndexError, ImportError):
+        except (ValueError, IndexError):
             return None
 
     async def get_pose_xyz(self) -> list[float] | None:
@@ -871,7 +844,7 @@ class AsyncRobotClient:
                     max_angle_change = 0.0
                     if last_angles is not None:
                         max_angle_change = float(np.abs(angles - last_angles).max())
-                        np.copyto(last_angles, angles)
+                        last_angles[:] = angles
                     else:
                         last_angles = angles.copy()
 
@@ -907,9 +880,7 @@ class AsyncRobotClient:
 
     # --------------- Additional waits and utilities ---------------
 
-    async def wait_for_server_ready(
-        self, timeout: float = 5.0, interval: float = 0.05
-    ) -> bool:
+    async def wait_ready(self, timeout: float = 5.0, interval: float = 0.05) -> bool:
         """Poll ping() until server responds or timeout.
 
         Args:
@@ -971,271 +942,494 @@ class AsyncRobotClient:
                     pass
         return False
 
-    # --------------- Motion encoders ---------------
+    # --------------- Move commands (queued, pre-computed trajectory) ---------------
 
-    async def move_joints(
+    @overload
+    async def moveJ(
         self,
-        joint_angles: list[float],
-        duration: float | None = None,
-        speed: int | None = None,
-        accel: int | None = None,
+        target: list[float],
+        *,
+        duration: float = ...,
+        speed: float = ...,
+        accel: float = ...,
+        r: float = ...,
+        rel: bool = ...,
+        wait: bool = ...,
+        **wait_kwargs,
+    ) -> int:
+        """Joint-space move to target angles."""
+        ...
+
+    @overload
+    async def moveJ(
+        self,
+        target: list[float],
+        *,
+        pose: list[float],
+        duration: float = ...,
+        speed: float = ...,
+        accel: float = ...,
+        r: float = ...,
+        wait: bool = ...,
+        **wait_kwargs,
+    ) -> int:
+        """Joint-space move to Cartesian target via IK."""
+        ...
+
+    async def moveJ(
+        self,
+        target: list[float],
+        *,
+        pose: list[float] | None = None,
+        duration: float = 0.0,
+        speed: float = 0.0,
+        accel: float = 1.0,
+        r: float = 0.0,
+        rel: bool = False,
         wait: bool = False,
         **wait_kwargs,
-    ) -> bool:
-        """Move to specified joint angles.
+    ) -> int:
+        """Joint-space move. Positional arg = joint angles; pose= kwarg = Cartesian target with IK.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
-            joint_angles: Target joint angles in degrees
-            duration: Time to complete motion in seconds
-            speed: Speed as percentage (1-100)
-            accel: Acceleration as percentage (1-100)
+            target: 6 joint angles in degrees (ignored if pose= is set)
+            pose: If set, Cartesian target [x,y,z,rx,ry,rz] — dispatches to MOVEJ_POSE
+            duration: Motion duration in seconds (mutually exclusive with speed)
+            speed: Speed fraction 0-1 (mutually exclusive with duration)
+            accel: Acceleration fraction 0-1
+            r: Blend radius in mm (0 = stop at target)
+            rel: If True, target is relative to current position
             wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("You must provide either a duration or a speed.")
-        cmd = MoveJointCmd(
-            angles=joint_angles,
-            duration=duration if duration else 0.0,
-            speed_pct=float(speed) if speed else 0.0,
-            accel_pct=float(accel) if accel else 100.0,
-        )
-        result = await self._send(cmd)
-        if wait and result:
+        if pose is not None:
+            index = await self._send(
+                MoveJPoseCmd(
+                    pose=pose, duration=duration, speed=speed, accel=accel, r=r
+                )
+            )
+        else:
+            index = await self._send(
+                MoveJCmd(
+                    angles=target,
+                    duration=duration,
+                    speed=speed,
+                    accel=accel,
+                    r=r,
+                    rel=rel,
+                )
+            )
+        if wait and index >= 0:
             await self.wait_motion_complete(**wait_kwargs)
-        return result
+        return index
 
-    async def move_pose(
+    async def moveL(
         self,
         pose: list[float],
-        duration: float | None = None,
-        speed: int | None = None,
-        accel: int | None = None,
+        *,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        duration: float = 0.0,
+        speed: float = 0.0,
+        accel: float = 1.0,
+        r: float = 0.0,
+        rel: bool = False,
         wait: bool = False,
         **wait_kwargs,
-    ) -> bool:
-        """Move to specified pose using joint-space interpolation.
+    ) -> int:
+        """Linear Cartesian move to target pose.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
-            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
-            duration: Time to complete motion in seconds
-            speed: Speed as percentage (1-100)
-            accel: Acceleration as percentage (1-100)
+            pose: Target [x,y,z,rx,ry,rz] in mm and degrees
+            frame: Reference frame ("WRF" or "TRF")
+            duration: Motion duration in seconds
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+            r: Blend radius in mm
+            rel: If True, pose is relative delta
             wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("You must provide either a duration or a speed.")
-        cmd = MovePoseCmd(
+        cmd = MoveLCmd(
             pose=pose,
-            duration=duration if duration else 0.0,
-            speed_pct=float(speed) if speed else 0.0,
-            accel_pct=float(accel) if accel else 100.0,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def move_cartesian(
-        self,
-        pose: list[float],
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Move to specified pose using Cartesian-space interpolation.
-
-        Args:
-            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
-            duration: Time to complete motion in seconds
-            speed: Speed as percentage (1-100)
-            accel: Acceleration as percentage (1-100)
-            wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
-        """
-        if duration is None and speed is None:
-            raise RuntimeError("You must provide either a duration or a speed.")
-        cmd = MoveCartCmd(
-            pose=pose,
-            duration=duration if duration else 0.0,
-            speed_pct=float(speed) if speed else 0.0,
-            accel_pct=float(accel) if accel else 100.0,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def move_cartesian_rel_trf(
-        self,
-        deltas: list[float],  # [dx, dy, dz, rx, ry, rz]
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: int | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Send a MOVECARTRELTRF (relative straight-line in TRF) command.
-
-        Args:
-            deltas: Relative movement [dx, dy, dz, rx, ry, rz] in mm and degrees
-            duration: Time to complete motion in seconds
-            speed: Speed as percentage (1-100)
-            accel: Acceleration as percentage (1-100)
-            wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
-        """
-        if duration is None and speed is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed.")
-        cmd = MoveCartRelTrfCmd(
-            deltas=deltas,
-            duration=duration if duration else 0.0,
-            speed_pct=float(speed) if speed else 0.0,
-            accel_pct=float(accel) if accel else 100.0,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def jog_joint(
-        self,
-        joint_index: int,
-        speed: int,
-        duration: float,
-    ) -> bool:
-        """Jog a single joint at a specified speed for a duration.
-
-        Args:
-            joint_index: Joint to jog (0-5 for positive direction,
-                6-11 for negative/reverse direction).
-            speed: Speed as percentage (1-100).
-            duration: Time to jog in seconds.
-
-        Returns:
-            True if the command was sent successfully.
-        """
-        cmd = JogCmd(
-            joint=joint_index,
-            speed_pct=float(speed),
+            frame=frame,
             duration=duration,
+            speed=speed,
+            accel=accel,
+            r=r,
+            rel=rel,
         )
-        return await self._send(cmd)
+        index = await self._send(cmd)
+        if wait and index >= 0:
+            await self.wait_motion_complete(**wait_kwargs)
+        return index
 
-    async def jog_cartesian(
+    async def moveC(
+        self,
+        via: list[float],
+        end: list[float],
+        *,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        r: float = 0.0,
+        wait: bool = False,
+        **wait_kwargs,
+    ) -> int:
+        """Circular arc through current position -> via -> end.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
+
+        Args:
+            via: Via-point pose [x,y,z,rx,ry,rz]
+            end: End-point pose [x,y,z,rx,ry,rz]
+            frame: Reference frame
+            duration: Motion duration in seconds
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+            r: Blend radius in mm
+            wait: If True, block until motion completes
+        """
+        cmd = MoveCCmd(
+            via=via,
+            end=end,
+            frame=frame,
+            duration=duration,
+            speed=speed,
+            accel=accel,
+            r=r,
+        )
+        index = await self._send(cmd)
+        if wait and index >= 0:
+            await self.wait_motion_complete(**wait_kwargs)
+        return index
+
+    async def moveS(
+        self,
+        waypoints: list[list[float]],
+        *,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        wait: bool = False,
+        **wait_kwargs,
+    ) -> int:
+        """Cubic spline through waypoints.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
+
+        Args:
+            waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
+            frame: Reference frame
+            duration: Motion duration in seconds
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+            wait: If True, block until motion completes
+        """
+        cmd = MoveSCmd(
+            waypoints=waypoints,
+            frame=frame,
+            duration=duration,
+            speed=speed,
+            accel=accel,
+        )
+        index = await self._send(cmd)
+        if wait and index >= 0:
+            await self.wait_motion_complete(**wait_kwargs)
+        return index
+
+    async def moveP(
+        self,
+        waypoints: list[list[float]],
+        *,
+        frame: Literal["WRF", "TRF"] = "WRF",
+        duration: float | None = None,
+        speed: float | None = None,
+        accel: float = 1.0,
+        wait: bool = False,
+        **wait_kwargs,
+    ) -> int:
+        """Process move — constant TCP speed with auto-blending at corners.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
+
+        Args:
+            waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
+            frame: Reference frame
+            duration: Motion duration in seconds
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+            wait: If True, block until motion completes
+        """
+        cmd = MovePCmd(
+            waypoints=waypoints,
+            frame=frame,
+            duration=duration,
+            speed=speed,
+            accel=accel,
+        )
+        index = await self._send(cmd)
+        if wait and index >= 0:
+            await self.wait_motion_complete(**wait_kwargs)
+        return index
+
+    async def checkpoint(self, label: str) -> int:
+        """Insert a checkpoint marker in the motion queue.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
+
+        Args:
+            label: Checkpoint label for progress tracking
+        """
+        index = await self._send(CheckpointCmd(label=label))
+        return index
+
+    async def wait_for_command(self, index: int, timeout: float = 30.0) -> bool:
+        """Wait until a queued command (by index) has completed.
+
+        Args:
+            index: Command index returned by a move command
+            timeout: Maximum wait time in seconds
+        """
+        return await self.wait_for_status(
+            lambda s: s.completed_index >= index,
+            timeout=timeout,
+        )
+
+    async def wait_for_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
+        """Wait until a checkpoint with the given label has been reached.
+
+        Args:
+            label: Checkpoint label to wait for
+            timeout: Maximum wait time in seconds
+        """
+        return await self.wait_for_status(
+            lambda s: s.last_checkpoint == label,
+            timeout=timeout,
+        )
+
+    # --------------- Servo commands (streaming position) ---------------
+
+    @overload
+    async def servoJ(
+        self,
+        target: list[float],
+        *,
+        speed: float = ...,
+        accel: float = ...,
+    ) -> int:
+        """Stream joint position target."""
+        ...
+
+    @overload
+    async def servoJ(
+        self,
+        target: list[float],
+        *,
+        pose: list[float],
+        speed: float = ...,
+        accel: float = ...,
+    ) -> int:
+        """Stream Cartesian position target via IK."""
+        ...
+
+    async def servoJ(
+        self,
+        target: list[float],
+        *,
+        pose: list[float] | None = None,
+        speed: float = 1.0,
+        accel: float = 1.0,
+    ) -> int:
+        """Streaming joint position target. Fire-and-forget.
+
+        Args:
+            target: 6 joint angles in degrees (ignored if pose= is set)
+            pose: If set, Cartesian target — dispatches to SERVOJ_POSE
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+        """
+        if pose is not None:
+            return await self._send(ServoJPoseCmd(pose=pose, speed=speed, accel=accel))
+        return await self._send(ServoJCmd(target=target, speed=speed, accel=accel))
+
+    async def servoL(
+        self,
+        pose: list[float],
+        *,
+        speed: float = 1.0,
+        accel: float = 1.0,
+    ) -> int:
+        """Streaming linear Cartesian position target. Fire-and-forget.
+
+        Args:
+            pose: Target [x,y,z,rx,ry,rz] in mm and degrees
+            speed: Speed fraction 0-1
+            accel: Acceleration fraction 0-1
+        """
+        return await self._send(ServoLCmd(pose=pose, speed=speed, accel=accel))
+
+    # --------------- Jog commands (streaming velocity) ---------------
+
+    @overload
+    async def jogJ(
+        self,
+        joint: int,
+        speed: float,
+        duration: float = ...,
+        *,
+        accel: float = ...,
+    ) -> int:
+        """Jog a single joint."""
+        ...
+
+    @overload
+    async def jogJ(
+        self,
+        *,
+        joints: list[int],
+        speeds: list[float],
+        duration: float = ...,
+        accel: float = ...,
+    ) -> int:
+        """Jog multiple joints simultaneously."""
+        ...
+
+    async def jogJ(
+        self,
+        joint: int | None = None,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        joints: list[int] | None = None,
+        speeds: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> int:
+        """Joint velocity jog. Single-joint or multi-joint.
+
+        Single joint:   jogJ(0, 0.5, 1.0)
+        Multi joint:    jogJ(joints=[0,1], speeds=[0.5, -0.3], duration=1.0)
+
+        Args:
+            joint: Joint index (0-5) for single-joint jog
+            speed: Signed speed fraction for single-joint jog
+            duration: Jog duration in seconds
+            joints: List of joint indices for multi-joint jog
+            speeds: List of signed speed fractions for multi-joint jog
+            accel: Acceleration fraction 0-1
+        """
+        speed_arr = [0.0] * 6
+        if joints is not None and speeds is not None:
+            for j, s in zip(joints, speeds):
+                speed_arr[j] = s
+        elif joint is not None:
+            speed_arr[joint] = speed
+        else:
+            raise ValueError("jogJ requires either joint= or joints=/speeds=")
+        return await self._send(
+            JogJCmd(speeds=speed_arr, duration=duration, accel=accel)
+        )
+
+    @overload
+    async def jogL(
         self,
         frame: Frame,
         axis: Axis,
-        speed: int,
-        duration: float,
-    ) -> bool:
-        """Jog the robot in Cartesian space along a specified axis.
+        speed: float,
+        duration: float = ...,
+        *,
+        accel: float = ...,
+    ) -> int:
+        """Jog a single Cartesian axis."""
+        ...
 
-        Args:
-            frame: Reference frame ('TRF' for Tool, 'WRF' for World).
-            axis: Axis and direction to jog (e.g., 'X+', 'X-', 'Y+', 'RZ-').
-            speed: Speed as percentage (1-100).
-            duration: Time to jog in seconds.
-
-        Returns:
-            True if the command was sent successfully.
-        """
-        cmd = CartJogCmd(
-            frame=frame,
-            axis=axis,
-            speed_pct=float(speed),
-            duration=duration,
-        )
-        return await self._send(cmd)
-
-    async def jog_multiple(
+    @overload
+    async def jogL(
         self,
-        joints: list[int],
-        speeds: list[float],
-        duration: float,
-    ) -> bool:
-        """Jog multiple joints simultaneously.
+        frame: Frame,
+        *,
+        axes: list[Axis],
+        speeds_list: list[float],
+        duration: float = ...,
+        accel: float = ...,
+    ) -> int:
+        """Jog multiple Cartesian axes simultaneously."""
+        ...
+
+    async def jogL(
+        self,
+        frame: Frame,
+        axis: Axis | None = None,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        axes: list[Axis] | None = None,
+        speeds_list: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> int:
+        """Cartesian velocity jog. Single-axis or multi-axis.
+
+        Single axis:  jogL("WRF", "X", 0.5, 1.0)
+        Multi axis:   jogL("WRF", axes=["X","Y"], speeds_list=[0.5, -0.3], duration=1.0)
 
         Args:
-            joints: List of joint indices to jog (0-5).
-            speeds: List of speeds for each joint (percentage, can be negative).
-            duration: Time to jog in seconds.
-
-        Returns:
-            True if the command was sent successfully.
-
-        Raises:
-            ValueError: If joints and speeds lists have different lengths.
+            frame: Reference frame ("WRF" or "TRF")
+            axis: Axis name for single-axis jog
+            speed: Signed speed fraction for single-axis jog
+            duration: Jog duration in seconds
+            axes: List of axis names for multi-axis jog
+            speeds_list: List of signed speed fractions for multi-axis jog
+            accel: Acceleration fraction 0-1
         """
-        if len(joints) != len(speeds):
-            raise ValueError(
-                "Error: The number of joints must match the number of speeds."
-            )
-        cmd = MultiJogCmd(joints=joints, speeds=speeds, duration=duration)
-        return await self._send(cmd)
+        vel = [0.0] * 6
+        if axes is not None and speeds_list is not None:
+            for a, s in zip(axes, speeds_list):
+                vel[_AXIS_MAP[a]] = s
+        elif axis is not None:
+            vel[_AXIS_MAP[axis]] = speed
+        else:
+            raise ValueError("jogL requires either axis= or axes=/speeds_list=")
+        return await self._send(
+            JogLCmd(frame=frame, velocities=vel, duration=duration, accel=accel)
+        )
 
-    async def set_io(self, index: int, value: int) -> bool:
+    # --------------- IO / Gripper / Utility ---------------
+
+    async def set_io(self, index: int, value: int) -> int:
         """Set a digital I/O output bit.
 
-        Args:
-            index: Output index (0-7).
-            value: Output value (0 or 1).
-
-        Returns:
-            True if the command was sent successfully.
-
-        Raises:
-            ValueError: If index is not 0-7 or value is not 0 or 1.
+        Returns the command index (≥ 0) on success, -1 on failure.
         """
         if index < 0 or index > 7:
             raise ValueError("I/O index must be 0..7")
         if value not in (0, 1):
             raise ValueError("I/O value must be 0 or 1")
-        cmd = SetIOCmd(port_index=index, value=value)
-        return await self._send(cmd)
+        result = await self._send(SetIOCmd(port_index=index, value=value))
+        return result
 
-    async def delay(self, seconds: float) -> bool:
+    async def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue.
 
-        The delay is queued with other motion commands and executes
-        in sequence without blocking the client.
-
-        Args:
-            seconds: Delay duration in seconds (must be positive).
-
-        Returns:
-            True if the command was sent successfully.
-
-        Raises:
-            ValueError: If seconds is not positive.
+        Returns the command index (≥ 0) on success, -1 on failure.
         """
         if seconds <= 0:
             raise ValueError("Delay must be positive")
-        cmd = DelayCmd(seconds=seconds)
-        return await self._send(cmd)
-
-    # --------------- IO / Gripper ---------------
+        result = await self._send(DelayCmd(seconds=seconds))
+        return result
 
     async def control_pneumatic_gripper(
         self, action: str, port: int, wait: bool = False, **wait_kwargs
-    ) -> bool:
-        """Control pneumatic gripper via digital outputs.
-
-        Args:
-            action: 'open' or 'close'
-            port: 1 or 2
-            wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
-        """
+    ) -> int:
+        """Control pneumatic gripper via digital outputs."""
         action = action.lower()
         if action not in ("open", "close"):
             raise ValueError("Invalid pneumatic action")
         if port not in (1, 2):
             raise ValueError("Invalid pneumatic port")
-        cmd = PneumaticGripperCmd(open=(action == "open"), port=port)
+        cmd = PneumaticGripperCmd(action=action, port=port)
         result = await self._send(cmd)
         if wait and result:
             await self.wait_motion_complete(**wait_kwargs)
@@ -1244,325 +1438,20 @@ class AsyncRobotClient:
     async def control_electric_gripper(
         self,
         action: str,
-        position: int | None = 255,
-        speed: int | None = 150,
-        current: int | None = 500,
+        position: float = 0.0,
+        speed: float = 0.5,
+        current: int = 500,
         wait: bool = False,
         **wait_kwargs,
-    ) -> bool:
-        """Control electric gripper.
-
-        Args:
-            action: 'move' or 'calibrate'
-            position: 0..255
-            speed: 1..255
-            current: 100..1000 (mA)
-            wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete()
-        """
+    ) -> int:
+        """Control electric gripper."""
         action = action.lower()
         if action not in ("move", "calibrate"):
             raise ValueError("Invalid electric gripper action")
-        pos = 0 if position is None else int(position)
-        spd = 1 if speed is None or speed <= 0 else int(speed)
-        cur = 100 if current is None else int(current)
         cmd = ElectricGripperCmd(
-            calibrate=(action == "calibrate"),
-            position=pos,
-            speed=spd,
-            current=cur,
+            action=action, position=position, speed=speed, current=current
         )
         result = await self._send(cmd)
         if wait and result:
             await self.wait_motion_complete(**wait_kwargs)
         return result
-
-    # --------------- GCODE ---------------
-
-    async def execute_gcode(self, gcode_line: str) -> bool:
-        """Execute a single G-code line.
-
-        Args:
-            gcode_line: G-code command to execute (e.g., 'G0 X100 Y50').
-
-        Returns:
-            True if the command was sent successfully.
-        """
-        cmd = GcodeCmd(line=gcode_line)
-        return await self._send(cmd)
-
-    async def execute_gcode_program(self, program_lines: list[str]) -> bool:
-        """Execute a G-code program from a list of lines.
-
-        Args:
-            program_lines: List of G-code lines to execute sequentially.
-
-        Returns:
-            True if the command was sent successfully.
-        """
-        cmd = GcodeProgramCmd(lines=program_lines)
-        return await self._send(cmd)
-
-    async def load_gcode_file(self, filepath: str) -> bool:
-        """Load and execute a G-code program from a file.
-
-        Args:
-            filepath: Path to the G-code file on the controller.
-
-        Returns:
-            True if the command was sent successfully.
-        """
-        # Read file and send as program
-        try:
-            with open(filepath) as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return await self.execute_gcode_program(lines)
-        except OSError:
-            return False
-
-    async def get_gcode_status(self) -> GcodeStatusResultStruct | None:
-        """Get the current status of the G-code interpreter."""
-        resp = await self._request(GetGcodeStatusCmd())
-        if resp and isinstance(resp.value, (list, tuple)) and len(resp.value) >= 5:
-            return GcodeStatusResultStruct(*resp.value)
-        return None
-
-    async def pause_gcode_program(self) -> bool:
-        """Pause the currently running GCODE program."""
-        return await self._send(GcodePauseCmd())
-
-    async def resume_gcode_program(self) -> bool:
-        """Resume a paused GCODE program."""
-        return await self._send(GcodeResumeCmd())
-
-    async def stop_gcode_program(self) -> bool:
-        """Stop the currently running GCODE program."""
-        return await self._send(GcodeStopCmd())
-
-    # --------------- Smooth motion ---------------
-    async def smooth_circle(
-        self,
-        center: list[float],
-        radius: float,
-        plane: Literal["XY", "XZ", "YZ"] = "XY",
-        frame: Literal["WRF", "TRF"] = "WRF",
-        center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth circular motion.
-
-        Args:
-            center: Center point [x, y, z] in mm
-            radius: Circle radius in mm
-            plane: Motion plane ("XY", "XZ", or "YZ")
-            frame: Reference frame ("WRF" or "TRF")
-            center_mode: How center is interpreted ("ABSOLUTE", "TOOL", "RELATIVE")
-            duration: Motion duration in seconds
-            velocity_percent: Speed as percentage (1-100)
-            accel_percent: Acceleration as percentage (1-100)
-            clockwise: True for clockwise motion
-            wait: If True, block until motion completes
-        """
-        cmd = SmoothCircleCmd(
-            center=center,
-            radius=radius,
-            plane=plane,
-            frame=frame,
-            center_mode=center_mode,
-            duration=duration,
-            speed_pct=velocity_percent,
-            accel_pct=accel_percent if accel_percent else 100.0,
-            clockwise=clockwise,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def smooth_arc_center(
-        self,
-        end_pose: list[float],
-        center: list[float],
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth arc motion defined by center point.
-
-        Args:
-            end_pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
-            center: Arc center [x, y, z] in mm
-            frame: Reference frame ("WRF" or "TRF")
-            duration: Motion duration in seconds
-            velocity_percent: Speed as percentage (1-100)
-            accel_percent: Acceleration as percentage (1-100)
-            clockwise: True for clockwise motion
-            wait: If True, block until motion completes
-        """
-        cmd = SmoothArcCenterCmd(
-            end_pose=end_pose,
-            center=center,
-            frame=frame,
-            duration=duration,
-            speed_pct=velocity_percent,
-            accel_pct=accel_percent if accel_percent else 100.0,
-            clockwise=clockwise,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def smooth_arc_param(
-        self,
-        end_pose: list[float],
-        radius: float,
-        arc_angle: float,
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth arc motion defined parametrically.
-
-        Args:
-            end_pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
-            radius: Arc radius in mm
-            arc_angle: Arc angle in degrees
-            frame: Reference frame ("WRF" or "TRF")
-            duration: Motion duration in seconds
-            velocity_percent: Speed as percentage (1-100)
-            accel_percent: Acceleration as percentage (1-100)
-            clockwise: True for clockwise motion
-            wait: If True, block until motion completes
-        """
-        cmd = SmoothArcParamCmd(
-            end_pose=end_pose,
-            radius=radius,
-            arc_angle=arc_angle,
-            frame=frame,
-            duration=duration,
-            speed_pct=velocity_percent,
-            accel_pct=accel_percent if accel_percent else 100.0,
-            clockwise=clockwise,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    async def smooth_spline(
-        self,
-        waypoints: list[list[float]],
-        frame: Literal["WRF", "TRF"] = "WRF",
-        duration: float | None = None,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth spline motion through waypoints.
-
-        Args:
-            waypoints: List of poses [[x, y, z, rx, ry, rz], ...] in mm and degrees
-            frame: Reference frame ("WRF" or "TRF")
-            duration: Motion duration in seconds
-            velocity_percent: Speed as percentage (1-100)
-            accel_percent: Acceleration as percentage (1-100)
-            wait: If True, block until motion completes
-        """
-        cmd = SmoothSplineCmd(
-            waypoints=waypoints,
-            frame=frame,
-            duration=duration,
-            speed_pct=velocity_percent,
-            accel_pct=accel_percent if accel_percent else 100.0,
-        )
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
-        return result
-
-    # --------------- Work coordinate helpers ---------------
-
-    async def set_work_coordinate_offset(
-        self,
-        coordinate_system: str,
-        x: float | None = None,
-        y: float | None = None,
-        z: float | None = None,
-    ) -> bool:
-        """
-        Set work coordinate system offsets (G54-G59).
-
-        Args:
-            coordinate_system: Work coordinate system to set ('G54' through 'G59')
-            x: X axis offset in mm (None to keep current)
-            y: Y axis offset in mm (None to keep current)
-            z: Z axis offset in mm (None to keep current)
-
-        Returns:
-            Success message, command ID, or dict with status details
-
-        Example:
-            # Set G54 origin to current position
-            await client.set_work_coordinate_offset('G54', x=0, y=0, z=0)
-
-            # Offset G55 by 100mm in X
-            await client.set_work_coordinate_offset('G55', x=100)
-        """
-        valid_systems = ["G54", "G55", "G56", "G57", "G58", "G59"]
-        if coordinate_system not in valid_systems:
-            raise RuntimeError(
-                f"Invalid coordinate system: {coordinate_system}. Must be one of {valid_systems}"
-            )
-
-        coord_num = int(coordinate_system[1:]) - 53  # G54=1, G55=2, etc.
-        offset_params = []
-        if x is not None:
-            offset_params.append(f"X{x}")
-        if y is not None:
-            offset_params.append(f"Y{y}")
-        if z is not None:
-            offset_params.append(f"Z{z}")
-
-        # Always select CS first, then apply offset if any
-        ok = await self.execute_gcode(coordinate_system)
-        if not ok:
-            return False
-        if offset_params:
-            offset_cmd = f"G10 L2 P{coord_num} {' '.join(offset_params)}"
-            return await self.execute_gcode(offset_cmd)
-        return True
-
-    async def zero_work_coordinates(
-        self,
-        coordinate_system: str = "G54",
-    ) -> bool:
-        """
-        Set the current position as zero in the specified work coordinate system.
-
-        Args:
-            coordinate_system: Work coordinate system to zero ('G54' through 'G59')
-
-        Returns:
-            Success message, command ID, or dict with status details
-
-        Example:
-            # Set current position as origin in G54
-            await client.zero_work_coordinates('G54')
-        """
-        # This sets the current position as 0,0,0 in the work coordinate system
-        return await self.set_work_coordinate_offset(coordinate_system, x=0, y=0, z=0)

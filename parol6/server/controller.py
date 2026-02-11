@@ -10,25 +10,26 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 
 from parol6.ack_policy import AckPolicy
 from parol6.commands.base import (
-    CommandBase,
     ExecutionStatusCode,
     MotionCommand,
+    QueryCommand,
+    SystemCommand,
 )
-from parol6.gcode import GcodeInterpreter
-from parol6.server.command_executor import CommandExecutor
+from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.protocol.wire import (
     CommandCode,
     pack_error,
     pack_ok,
+    pack_ok_index,
     unpack_rx_frame_into,
 )
 from parol6.server.command_registry import (
     CommandCategory,
     create_command,
+    create_command_from_struct,
     discover_commands,
 )
 from parol6.server.state import ControllerState, StateManager
@@ -107,11 +108,7 @@ class Controller:
         # TX keepalive timeout
         self._tx_keepalive_s = float(os.getenv("PAROL6_TX_KEEPALIVE_S", "0.2"))
 
-        # GCODE interpreter
-        self.gcode_interpreter = GcodeInterpreter()
-
-        # Status services (updater + multicast broadcaster)
-        self._status_updater: Any | None = None
+        # Status multicast broadcaster
         self._status_broadcaster: Any | None = None
 
         # Helper classes
@@ -129,9 +126,7 @@ class Controller:
         )
         self._cmd_rate = EventRateMetrics()  # Command reception rate
         self._gc_tracker = GCTracker()  # GC frequency and duration tracking
-        self._ack_policy = AckPolicy.from_env(
-            lambda: self.state_manager.get_state().stream_mode
-        )
+        self._ack_policy = AckPolicy()
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
             shutdown_event=self.shutdown_event,
@@ -140,10 +135,6 @@ class Controller:
         )
         self._executor = CommandExecutor(
             state_manager=self.state_manager,
-            gcode_interpreter=self.gcode_interpreter,
-            udp_transport_getter=lambda: self.udp_transport,
-            sync_mock_from_state=self._transport_mgr.sync_mock_from_state,
-            dt=self.config.loop_interval,
         )
 
         # Initialize components on construction
@@ -305,15 +296,13 @@ class Controller:
                 state.Speed_out.fill(0)
 
     def _execute_commands(self, state: ControllerState) -> None:
-        """Phase 3: Execute active command or fetch from GCODE."""
+        """Phase 3: Execute active command."""
         if self._executor.active_command or self._executor.command_queue:
             self._executor.execute_active_command()
-        elif self.gcode_interpreter.is_running:
-            self._executor.fetch_gcode_commands()
         else:
             state.Command_out = CommandCode.IDLE
             state.Speed_out.fill(0)
-            np.copyto(state.Position_out, state.Position_in, casting="no")
+            state.Position_out[:] = state.Position_in
 
     def _write_to_firmware(self, state: ControllerState) -> None:
         """Phase 4: Write state to serial transport if changed."""
@@ -467,6 +456,11 @@ class Controller:
         assert self.udp_transport is not None
         self.udp_transport.send(pack_ok(), addr)
 
+    def _reply_ok_index(self, addr: tuple[str, int], index: int) -> None:
+        """Send OK response with command index. Caller must ensure udp_transport is not None."""
+        assert self.udp_transport is not None
+        self.udp_transport.send(pack_ok_index(index), addr)
+
     def _process_command(
         self, data: bytes, addr: tuple[str, int], state: ControllerState
     ) -> None:
@@ -477,16 +471,19 @@ class Controller:
             addr: Client address tuple (host, port)
             state: Controller state
         """
-        # Update command metrics
-        state.command_count += 1
         self._cmd_rate.record(time.perf_counter())
 
         # Try stream fast-path first (avoids full command creation)
-        if self._executor.try_stream_fast_path(data, state, addr):
+        result = self._executor.try_stream_fast_path(data, state)
+        if result is True:
             return
 
-        # Create command instance from raw bytes via single-pass decode
-        command, category, error = create_command(data)
+        # If fast-path returned a decoded struct, reuse it; otherwise decode from bytes
+        if result is not False:
+            command, category, error = create_command_from_struct(result)
+        else:
+            command, category, error = create_command(data)
+
         if not command or category is None:
             if error:
                 logger.warning(f"Command validation failed: {error}")
@@ -501,10 +498,10 @@ class Controller:
 
         # Dispatch by category (determined at registration time, no isinstance needed)
         match category:
+            case CommandCategory.QUERY:
+                self._handle_query(command, state, addr)  # type: ignore[arg-type]
             case CommandCategory.SYSTEM:
                 self._handle_system_command(command, state, addr)  # type: ignore[arg-type]
-            case CommandCategory.QUERY:
-                self._handle_query_command(command, state, addr)  # type: ignore[arg-type]
             case CommandCategory.MOTION:
                 self._handle_motion_command(command, state, addr)  # type: ignore[arg-type]
 
@@ -522,52 +519,80 @@ class Controller:
             logger.warning(f"Motion command rejected - controller disabled: {cmd_name}")
             return
 
-        if state.stream_mode and command.streamable:
-            self._prepare_stream_mode()
+        # Streaming commands: cancel active streamable + clear queued streamable
+        if getattr(command, "streamable", False):
+            if self.udp_transport:
+                drained = self.udp_transport.drain_buffer()
+                if drained > 0:
+                    logger.log(TRACE, "udp_buffer_drained count=%d", drained)
+            self._executor.cancel_active_streamable()
+            removed = self._executor.clear_streamable_commands(
+                "Streaming command prepare"
+            )
+            if removed:
+                logger.log(TRACE, "queued_streamables_removed count=%d", removed)
 
-        status = self._executor.queue_command(addr, command, None)
-        logger.log(TRACE, "Command %s queued with status: %s", cmd_name, status.code)
-
-        if cmd_type and self._ack_policy.requires_ack(cmd_type):
-            if status.code == ExecutionStatusCode.QUEUED:
-                self._reply_ok(addr)
-            else:
-                self._reply_error(addr, status.message or "Queue error")
-
-    def _handle_system_command(
-        self, command: CommandBase, state: ControllerState, addr: tuple[str, int]
-    ) -> None:
-        """Execute system command and send response."""
         try:
-            status = self._executor.execute_immediate(command, state, addr)
+            cmd_index = self._executor.queue_command(addr, command, None)
+            logger.log(TRACE, "Command %s queued (index=%d)", cmd_name, cmd_index)
+            if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                self._reply_ok_index(addr, cmd_index)
+        except QueueFullError:
+            if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                self._reply_error(addr, "Queue full")
 
-            # Handle side-effects based on command details
-            if status.details:
-                if "simulator_mode" in status.details:
-                    if not self._handle_simulator_toggle(
-                        status.details["simulator_mode"], state, addr
-                    ):
-                        return  # Error response already sent
-                if "serial_port" in status.details:
-                    self._handle_set_port(status.details["serial_port"])
-
-            if status.code == ExecutionStatusCode.COMPLETED:
-                self._reply_ok(addr)
-            else:
-                self._reply_error(addr, status.message or "System command failed")
+    def _handle_query(
+        self,
+        command: QueryCommand,
+        state: ControllerState,
+        addr: tuple[str, int],
+    ) -> None:
+        """Execute query command and send response directly."""
+        try:
+            command.setup(state)
+            response = command.compute(state)
+            assert self.udp_transport is not None
+            self.udp_transport.send(response, addr)
         except Exception as e:
-            logger.error(f"System command error: {e}")
+            logger.error("Query error: %s", e)
             self._reply_error(addr, str(e))
 
-    def _handle_query_command(
-        self, command: CommandBase, state: ControllerState, addr: tuple[str, int]
+    def _handle_system_command(
+        self,
+        command: SystemCommand,
+        state: ControllerState,
+        addr: tuple[str, int],
     ) -> None:
-        """Execute query command immediately."""
+        """Execute system command, apply side effects, and send reply."""
         try:
-            self._executor.execute_immediate(command, state, addr)
-            # Query commands send their own responses via command.reply()
+            command.setup(state)
+            code = command.tick(state)
+
+            # Infrastructure side effects (only 2-3 commands trigger these)
+            if command._switch_simulator is not None:
+                state.Command_out = CommandCode.IDLE
+                state.Speed_out.fill(0)
+                self._executor.cancel_active_command("Simulator mode toggle")
+                self._executor.clear_queue("Simulator mode toggle")
+                success, error = self._transport_mgr.switch_simulator_mode(
+                    command._switch_simulator, sync_state=state
+                )
+                if not success:
+                    raise RuntimeError(error or "Simulator toggle failed")
+            if command._switch_port is not None:
+                self._transport_mgr.switch_to_port(command._switch_port)
+            if command._sync_mock:
+                self._transport_mgr.sync_mock_from_state(state)
+
+            if code == ExecutionStatusCode.COMPLETED:
+                self._reply_ok(addr)
+            else:
+                self._reply_error(
+                    addr, command.error_message or "System command failed"
+                )
+
         except Exception as e:
-            logger.error(f"Query command error: {e}")
+            logger.error("System command error: %s", e)
             self._reply_error(addr, str(e))
 
     def _set_high_priority(self) -> None:
@@ -600,47 +625,3 @@ class Controller:
 
         except Exception as e:
             logger.warning(f"Failed to set process priority/affinity: {e}")
-
-    def _handle_set_port(self, port: str) -> None:
-        """Handle SET_PORT command side-effect."""
-        self.config.serial_port = port
-        self._transport_mgr.switch_to_port(port)
-
-    def _handle_simulator_toggle(
-        self, mode: str, state: ControllerState, addr: tuple[str, int]
-    ) -> bool:
-        """Handle SIMULATOR command side-effect.
-
-        Returns False if an error response was sent and caller should skip OK response.
-        """
-        enable = mode in ("on", "1", "true", "yes")
-
-        # Pre-switch safety
-        try:
-            state.Command_out = CommandCode.IDLE
-            state.Speed_out.fill(0)
-            self._executor.cancel_active_command("Simulator mode toggle")
-            self._executor.clear_queue("Simulator mode toggle")
-        except Exception as e:
-            logger.debug("Simulator toggle pre-switch safety failed: %s", e)
-
-        success, error = self._transport_mgr.switch_simulator_mode(
-            enable, sync_state=state
-        )
-        if not success and error:
-            self._reply_error(addr, error)
-            return False
-
-        return True
-
-    def _prepare_stream_mode(self) -> None:
-        """Prepare for stream mode by clearing stale commands."""
-        if self.udp_transport:
-            drained = self.udp_transport.drain_buffer()
-            if drained > 0:
-                logger.log(TRACE, "udp_buffer_drained count=%d", drained)
-
-        self._executor.cancel_active_streamable()
-        removed = self._executor.clear_streamable_commands("Stream mode prepare")
-        if removed:
-            logger.log(TRACE, "queued_streamables_removed count=%d", removed)

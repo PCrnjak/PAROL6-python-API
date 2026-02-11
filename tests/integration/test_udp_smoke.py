@@ -3,14 +3,9 @@ Integration smoke tests for UDP communication using parol6.
 Covers PING/PONG, GET_* endpoints, STOP semantics, and basic functionality.
 """
 
-import os
 import socket
-import sys
 
 import pytest
-
-# Add the parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from parol6 import RobotClient
 
@@ -100,19 +95,18 @@ class TestGetEndpoints:
 
 
 @pytest.mark.integration
-class TestStreamMode:
-    """Test streaming mode functionality."""
+class TestServoMode:
+    """Test servo (real-time) mode functionality.
 
-    def test_stream_mode_toggle(self, server_proc, ports):
-        """Test STREAM ON/OFF commands."""
-        client = RobotClient(ports.server_ip, ports.server_port)
+    stream_on/stream_off were removed in the API redesign.
+    Servo commands (servoJ/servoL) replaced streaming mode.
+    """
 
-        # Enable stream mode and verify responsiveness
-        assert client.stream_on() is True
-        assert client.ping() is not None
-
-        # Disable stream mode and verify responsiveness
-        assert client.stream_off() is True
+    def test_servo_joint_basic(self, client, server_proc):
+        """Test that servoJ command is accepted."""
+        # servoJ sends a single real-time joint target
+        result = client.servoJ([0, -45, 180, 0, 0, 180], speed=0.5, accel=0.5)
+        assert result is True
         assert client.ping() is not None
 
 
@@ -123,7 +117,7 @@ class TestBasicMotionCommands:
     def test_home_command(self, client, server_proc):
         """Test HOME command (fire-and-forget)."""
         result = client.home()
-        assert result is True
+        assert result >= 0
 
         # Wait for completion and verify robot stops
         assert client.wait_motion_complete(timeout=15.0)
@@ -141,11 +135,11 @@ class TestBasicMotionCommands:
         # Use joint angles that are within the robot's limits
         # Joint 2 range: [-145.0088, -3.375]
         # Joint 3 range: [107.866, 287.8675]
-        result = client.move_joints(
+        result = client.moveJ(
             [0, -45, 180, 15, 20, 25],  # Valid angles within joint limits
             duration=2.0,
         )
-        assert result is True
+        assert result >= 0
 
         # Wait for completion and verify robot stops
         assert client.wait_motion_complete(timeout=15.0)
@@ -157,11 +151,11 @@ class TestBasicMotionCommands:
 
     def test_basic_pose_move(self, client, server_proc):
         """Test basic pose movement command with validation."""
-        result = client.move_pose(
-            [100, 100, 100, 0, 0, 0],
-            speed=50,
+        result = client.moveJ(
+            pose=[100, 100, 100, 0, 0, 0],
+            speed=0.5,
         )
-        assert result is True
+        assert result >= 0
 
         # Wait for completion and verify robot stops
         assert client.wait_motion_complete(timeout=15.0)
@@ -173,16 +167,16 @@ class TestBasicMotionCommands:
 
     def test_cartesian_move_validation(self, client, server_proc):
         """Test cartesian movement with proper validation."""
-        # Test that move requires either duration or speed (client raises)
-        with pytest.raises(RuntimeError):
-            client.move_cartesian([50, 50, 50, 0, 0, 0])  # No duration or speed
+        # Test that move requires either duration or speed (struct validates)
+        with pytest.raises(ValueError):
+            client.moveL([50, 50, 50, 0, 0, 0])  # No duration or speed
 
         # Valid cartesian move (may still fail IK in FAKE_SERIAL)
-        result = client.move_cartesian(
+        result = client.moveL(
             [50, 50, 50, 0, 0, 0],
             duration=2.0,
         )
-        assert result is True
+        assert result >= 0
 
 
 @pytest.mark.integration
@@ -235,10 +229,10 @@ class TestCommandQueuing:
         start_time = __import__("time").time()
 
         # Execute sequence using public API
-        assert client.home() is True
-        assert client.delay(0.2) is True
-        assert client.delay(0.2) is True
-        assert client.delay(0.2) is True
+        assert client.home() >= 0
+        assert client.delay(0.2) >= 0
+        assert client.delay(0.2) >= 0
+        assert client.delay(0.2) >= 0
 
         # Wait for all commands to complete via speeds
         assert client.wait_motion_complete(timeout=10.0)

@@ -46,15 +46,14 @@ mypy parol6/
 # Run all pre-commit hooks
 pre-commit run -a
 
-# Testing (simulator used by default)
+# Testing (simulator used by default via conftest.py — do NOT prefix with env vars)
 pytest
 
 # Run specific test file
 pytest tests/unit/test_wire.py -v
-
-# Hardware tests (require physical robot, explicit opt-in)
-pytest -m hardware --run-hardware
 ```
+
+**IMPORTANT: Do NOT prefix `pytest` commands with environment variables like `PAROL6_FAKE_SERIAL=1 pytest ...`. The conftest.py already configures `PAROL6_FAKE_SERIAL=1`. Just run `pytest` directly.**
 
 ## Controller CLI
 
@@ -110,8 +109,6 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 
 - `@pytest.mark.unit`: Isolated component tests
 - `@pytest.mark.integration`: Component interaction tests (uses simulator)
-- `@pytest.mark.hardware`: Requires physical robot and explicit opt-in
-- `@pytest.mark.gcode`: GCODE parsing/interpretation tests
 
 ## Performance Warnings
 
@@ -119,6 +116,18 @@ If you see `Control loop avg period degraded by +XX%`:
 - Reduce `PAROL6_CONTROL_RATE_HZ`
 - Disable TRACE logging (significant overhead)
 - Avoid heavy background tasks during motion
+
+## Hot Path Rules
+
+`execute_step()` and `tick()` run at 100 Hz. **No heap allocations** in these methods.
+
+For streamable commands (`streamable = True`), `do_setup()` also runs at high frequency (50 Hz from UI) via `assign_params()` + `do_setup()` fast-path. Treat it as a hot path too.
+
+- No `list(...)`, `[x for x in ...]`, `dict(...)`, or other container construction
+- No string formatting or f-strings (except in error/stop paths that run once)
+- Pre-allocate all buffers in `__init__`
+- `ndarray[:] = list` is fine — numpy writes into existing buffer in-place
+- Use `dest[:] = src` for array copies. Only use `np.copyto(dest, src, casting=...)` when casting is needed — it's slower otherwise
 
 ## Code Style
 
@@ -130,3 +139,11 @@ If you see `Control loop avg period degraded by +XX%`:
   - `cast()` from typing when the type is known but mypy can't infer it
   - `np.atleast_1d()` or similar to guarantee array returns from numpy functions
   - Only use `# type: ignore` as a last resort for genuine mypy/library limitations (e.g., numpy's `ArrayLike` being too broad)
+
+## Testing Guidelines
+
+Prefer fewer, comprehensive integration tests that mimic manual testing over a large number of unit tests. We have no code coverage requirements—the goal is working features, not metrics.
+- **NEVER** run long test suites and only capture a few lines of output (e.g. `| tail -5` or `| grep passed`). This wastes time when you have to re-run to see failures.
+- Always capture enough output to see BOTH the summary line AND any failure tracebacks in a single run. Use `tail -40` or similar.
+- For background test runs, just let the full output come through.
+- **NEVER run parol6 and web commander test suites in parallel** — no proper isolation, they share resources and have timing issues when resource-constrained. Always run sequentially.

@@ -9,8 +9,7 @@ Run from the repository root:
 """
 
 import asyncio
-from parol6 import AsyncRobotClient
-from parol6.client.manager import managed_server
+from parol6 import AsyncRobotClient, Robot
 
 HOST = "127.0.0.1"
 PORT = 5001
@@ -18,7 +17,7 @@ PORT = 5001
 
 async def run_client() -> int:
     async with AsyncRobotClient(host=HOST, port=PORT, timeout=2.0) as client:
-        ready = await client.wait_for_server_ready(timeout=5.0)
+        ready = await client.wait_ready(timeout=5.0)
         print(f"server ready: {ready}")
         if not ready:
             return 1
@@ -34,20 +33,20 @@ async def run_client() -> int:
         # Consume one status broadcast
         print("one status frame speeds:")
         async for status in client.status_stream():
-            print(status.get("speeds"))
+            print(status.speeds)
             break
 
-        # Small relative TRF move (safe in simulator)
+        # Small relative move (safe in simulator)
         # Move +5mm in Z over 1.0s
-        moved = await client.move_cartesian_rel_trf([0, 0, 5, 0, 0, 0], duration=1.0)
-        print("move_cartesian_rel_trf ->", moved)
+        moved = await client.moveL([0, 0, 5, 0, 0, 0], rel=True, duration=1.0)
+        print("moveL ->", moved)
 
         return 0
 
 
 def main() -> None:
     # Auto-start and stop controller for this example
-    with managed_server(host=HOST, port=PORT, normalize_logs=True):
+    with Robot(host=HOST, port=PORT, normalize_logs=True):
         code = asyncio.run(run_client())
     raise SystemExit(code)
 

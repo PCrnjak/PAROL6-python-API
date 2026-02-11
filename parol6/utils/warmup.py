@@ -14,6 +14,7 @@ from parol6.commands.cartesian_commands import (
     _apply_velocity_delta_trf_jit,
     _apply_velocity_delta_wrf_jit,
 )
+from parol6.commands.servo_commands import _vel_scale_and_convert_jit
 from parol6.config import (
     deg_to_steps,
     deg_to_steps_scalar,
@@ -52,7 +53,7 @@ from parol6.server.ik_worker import (
     _compute_joint_enable,
     _compute_target_poses,
 )
-from parol6.server.ipc import unpack_ik_response_into
+from parol6.server.status_cache import unpack_ik_response_into
 from parol6.server.loop_timer import (
     _compute_event_rate,
     _compute_loop_stats,
@@ -61,7 +62,6 @@ from parol6.server.loop_timer import (
     _quickselect_partition,
 )
 from parol6.server.status_cache import _update_arrays
-from parol6.utils.se3_utils import arrays_equal_6
 from parol6.server.transport_manager import _arrays_changed
 from parol6.server.transports.mock_serial_transport import (
     _encode_payload_jit,
@@ -69,31 +69,7 @@ from parol6.server.transports.mock_serial_transport import (
     _write_frame_jit,
 )
 from parol6.utils.ik import _check_limits_core, _ik_safety_check
-from parol6.utils.se3_utils import (
-    _compute_V_inv_matrix,
-    _compute_V_matrix,
-    se3_angdist,
-    se3_copy,
-    se3_exp,
-    se3_exp_ws,
-    se3_from_rpy,
-    se3_from_trans,
-    se3_identity,
-    se3_interp,
-    se3_interp_ws,
-    se3_inverse,
-    se3_log,
-    se3_log_ws,
-    se3_mul,
-    se3_rpy,
-    se3_rx,
-    se3_ry,
-    se3_rz,
-    so3_exp,
-    so3_from_rpy,
-    so3_log,
-    so3_rpy,
-)
+from pinokin import warmup_numba_se3
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +82,9 @@ def warmup_jit() -> float:
     """
     logging.info("Warming JIT...")
     start = time.perf_counter()
+
+    # Warm up pinokin's zero-allocation SE3/SO3 functions
+    warmup_numba_se3()
 
     dummy_6f = np.zeros(6, dtype=np.float64)
     dummy_6i = np.zeros(6, dtype=np.int32)
@@ -162,10 +141,6 @@ def warmup_jit() -> float:
 
     dummy_3x3 = np.eye(3, dtype=np.float64)
 
-    # parol6/utils/se3_utils.py - arrays_equal_6
-    arrays_equal_6(dummy_6i, dummy_6i)
-    arrays_equal_6(dummy_6f, dummy_6f)
-
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)
     _update_arrays(
@@ -181,17 +156,10 @@ def warmup_jit() -> float:
         dummy_6i,
     )
 
-    # parol6/utils/se3_utils.py
+    # Dummy SE3 matrices for jit warmups below
     dummy_4x4 = np.zeros((4, 4), dtype=np.float64)
     dummy_4x4_b = np.zeros((4, 4), dtype=np.float64)
     dummy_4x4_out = np.zeros((4, 4), dtype=np.float64)
-    se3_identity(dummy_4x4)
-    se3_from_trans(0.0, 0.0, 0.0, dummy_4x4)
-    se3_rx(0.0, dummy_4x4)
-    se3_ry(0.0, dummy_4x4)
-    se3_rz(0.0, dummy_4x4)
-    se3_mul(dummy_4x4, dummy_4x4_b, dummy_4x4_out)
-    se3_copy(dummy_4x4, dummy_4x4_b)
 
     # parol6/server/ik_worker.py
     dummy_qlim = np.zeros((2, 6), dtype=np.float64)
@@ -312,50 +280,14 @@ def warmup_jit() -> float:
         dummy_gripper_in,  # gripper_in
     )
 
-    # parol6/utils/se3_utils.py - additional functions
-    dummy_3x3_out = np.zeros((3, 3), dtype=np.float64)
-    dummy_3f = np.zeros(3, dtype=np.float64)
+    # Workspace arrays for jit functions below (SE3 funcs already warmed by pinokin)
     dummy_twist = np.zeros(6, dtype=np.float64)
-
-    so3_from_rpy(0.0, 0.0, 0.0, dummy_3x3_out)
-    se3_from_rpy(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, dummy_4x4)
-    so3_rpy(dummy_3x3, dummy_3f)
-    se3_rpy(dummy_4x4, dummy_3f)
-    se3_inverse(dummy_4x4, dummy_4x4_out)
-    so3_log(dummy_3x3, dummy_3f)
-    so3_exp(dummy_3f, dummy_3x3_out)
-    _compute_V_matrix(dummy_3f, dummy_3x3_out)
-    _compute_V_inv_matrix(dummy_3f, dummy_3x3_out)
-    se3_log(dummy_4x4, dummy_twist)
-    se3_exp(dummy_twist, dummy_4x4_out)
-    se3_interp(dummy_4x4, dummy_4x4_b, 0.5, dummy_4x4_out)
-    se3_angdist(dummy_4x4, dummy_4x4_b)
-    # Workspace arrays for _ws functions
     omega_ws = np.zeros(3, dtype=np.float64)
     R_ws = np.zeros((3, 3), dtype=np.float64)
     V_ws = np.zeros((3, 3), dtype=np.float64)
     V_inv_ws = np.zeros((3, 3), dtype=np.float64)
-    T1_inv_ws = np.zeros((4, 4), dtype=np.float64)
-    delta_ws = np.zeros((4, 4), dtype=np.float64)
-    twist_ws = np.zeros(6, dtype=np.float64)
-    delta_scaled_ws = np.zeros((4, 4), dtype=np.float64)
-    se3_log_ws(dummy_4x4, dummy_twist, omega_ws, R_ws, V_inv_ws)
-    se3_exp_ws(dummy_twist, dummy_4x4_out, omega_ws, R_ws, V_ws)
-    se3_interp_ws(
-        dummy_4x4,
-        dummy_4x4_b,
-        0.5,
-        dummy_4x4_out,
-        T1_inv_ws,
-        delta_ws,
-        twist_ws,
-        delta_scaled_ws,
-        omega_ws,
-        R_ws,
-        V_ws,
-    )
 
-    # parol6/motion/streaming_executors.py - additional functions
+    # parol6/motion/streaming_executors.py
     ref_inv = np.zeros((4, 4), dtype=np.float64)
     delta_4x4 = np.zeros((4, 4), dtype=np.float64)
     _pose_to_tangent_jit(
@@ -401,6 +333,13 @@ def warmup_jit() -> float:
         omega_ws,  # omega_ws
         R_ws,  # R_ws
         V_ws,  # V_ws
+    )
+    _vel_scale_and_convert_jit(
+        dummy_6f,  # target_q
+        dummy_6f,  # current_q
+        out_6f,  # scratch
+        out_6i,  # out_steps
+        dummy_6f.copy(),  # flip_target_q
     )
 
     elapsed = time.perf_counter() - start

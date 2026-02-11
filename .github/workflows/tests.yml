@@ -56,7 +56,7 @@ jobs:
           python -V
           pip list
 
-      - name: Run tests (skip hardware)
+      - name: Run tests
         env:
           PYTHONUNBUFFERED: '1'
           PYTHONUTF8: '1'

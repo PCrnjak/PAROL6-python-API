@@ -16,7 +16,7 @@ PORT = 5001
 
 def main() -> None:
     with RobotClient(host=HOST, port=PORT, timeout=2.0) as client:
-        ready = client.wait_for_server_ready(timeout=3.0)
+        ready = client.wait_ready(timeout=3.0)
         print(f"server ready: {ready}")
         print("ping:", client.ping())
         print("pose xyz:", client.get_pose_xyz())

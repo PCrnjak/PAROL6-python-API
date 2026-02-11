@@ -5,7 +5,6 @@ Contains commands for Cartesian space movements: CartesianJog, MovePose, MoveCar
 
 import logging
 import time
-from abc import abstractmethod
 from typing import cast
 
 import numpy as np
@@ -23,28 +22,41 @@ from parol6.config import (
 )
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.protocol.wire import (
-    CartJogCmd,
     CmdType,
-    MoveCartCmd,
-    MoveCartRelTrfCmd,
+    JogLCmd,
+    MoveLCmd,
 )
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
-from parol6.utils.ik import AXIS_MAP, solve_ik
-from parol6.utils.se3_utils import (
-    se3_exp_ws,
-    se3_from_rpy,
-    se3_interp,
-    se3_mul,
-)
+from parol6.utils.ik import solve_ik
+from pinokin import se3_exp_ws, se3_from_rpy, se3_interp, se3_mul
 
 from .base import (
-    ExecutionStatus,
+    ExecutionStatusCode,
     MotionCommand,
     TrajectoryMoveCommandBase,
 )
 
 logger = logging.getLogger(__name__)
+
+# Pre-computed Cartesian jog limit constants (avoid per-tick recomputation)
+_CART_ANG_JOG_MIN_RAD: float = float(np.deg2rad(CART_ANG_JOG_MIN))
+_CART_ANG_JOG_MAX_RAD: float = float(LIMITS.cart.jog.velocity.angular)
+_CART_LIN_JOG_MIN_MS: float = CART_LIN_JOG_MIN / 1000.0
+_CART_LIN_JOG_MAX_MS: float = float(LIMITS.cart.jog.velocity.linear)
+
+
+def _linmap_frac(frac: float, lo: float, hi: float) -> float:
+    if frac < 0.0:
+        frac = 0.0
+    elif frac > 1.0:
+        frac = 1.0
+    return lo + (hi - lo) * frac
+
+
+# Rate-limiting for IK failure warnings during Cartesian jog
+_IK_WARN_INTERVAL: float = 1.0
+_last_ik_warn_time: float = 0.0
 
 
 @njit(cache=True)
@@ -148,177 +160,19 @@ def _apply_velocity_delta_trf_jit(
     se3_mul(current_pose, delta, out)
 
 
-class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
-    """Base class for Cartesian move commands with straight-line path following."""
-
-    streamable = True
-
-    __slots__ = (
-        "initial_pose",
-        "target_pose",
-        "_ik_stopping",
-        "_duration",
-    )
-
-    def __init__(self):
-        super().__init__()
-        self.initial_pose: np.ndarray | None = None
-        self.target_pose: np.ndarray | None = None
-        self._duration: float | None = None
-
-    @abstractmethod
-    def _compute_target_pose(self, state: "ControllerState") -> None:
-        """Compute self.target_pose from parsed parameters. Called during setup."""
-        ...
-
-    def do_setup(self, state: "ControllerState") -> None:
-        """Set up the move - compute target pose and pre-compute trajectory if non-streaming."""
-        self.initial_pose = get_fkine_se3(state)
-        self._compute_target_pose(state)
-        self._streaming_initialized = False  # Track first-tick initialization
-        self._ik_stopping = False  # Track graceful stop on IK failure
-
-        if state.stream_mode:
-            return
-
-        # Non-streaming: pre-compute trajectory
-        self._precompute_trajectory(state)
-
-    def _precompute_trajectory(self, state: "ControllerState") -> None:
-        """Pre-compute joint trajectory that follows straight-line Cartesian path."""
-        assert self.initial_pose is not None and self.target_pose is not None
-        assert self.p is not None
-
-        steps_to_rad(state.Position_in, self._q_rad_buf)
-        current_rad = self._q_rad_buf
-
-        duration = self.p.duration if self.p.duration > 0.0 else None
-        vel_pct = self.p.speed_pct if self.p.speed_pct > 0.0 else 100.0
-        acc_pct = self.p.accel_pct
-
-        cart_poses = []
-        interp_buf = np.zeros((4, 4), dtype=np.float64)
-        for i in range(PATH_SAMPLES):
-            s = i / (PATH_SAMPLES - 1)
-            se3_interp(self.initial_pose, self.target_pose, s, interp_buf)
-            cart_poses.append(interp_buf.copy())
-
-        joint_path = JointPath.from_poses(cart_poses, current_rad, quiet_logging=True)
-
-        # SI units (m/s, m/s²) - trajectory builder uses SI directly
-        cart_vel_max = LIMITS.cart.hard.velocity.linear * (vel_pct / 100.0)
-        cart_acc_max = LIMITS.cart.hard.acceleration.linear * (acc_pct / 100.0)
-
-        builder = TrajectoryBuilder(
-            joint_path=joint_path,
-            profile=state.motion_profile,
-            velocity_percent=vel_pct if duration is None else None,
-            accel_percent=acc_pct,
-            duration=duration,
-            dt=INTERVAL_S,
-            cart_vel_limit=cart_vel_max,
-            cart_acc_limit=cart_acc_max,
-        )
-
-        trajectory = builder.build()
-        self.trajectory_steps = trajectory.steps
-        self._duration = trajectory.duration
-
-        self.log_debug(
-            "  -> Pre-computed Cartesian path: profile=%s, steps=%d, duration=%.3fs",
-            state.motion_profile,
-            len(self.trajectory_steps),
-            float(self._duration),
-        )
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute one tick - handles both streaming and non-streaming modes."""
-        if state.stream_mode:
-            # Streaming mode uses CartesianStreamingExecutor for straight-line TCP motion
-            cse = state.cartesian_streaming_executor
-            if cse is None:
-                logger.warning("[MOVECART] No cartesian_streaming_executor available")
-                self.is_finished = True
-                return ExecutionStatus.completed("MOVECART: no executor")
-
-            # Get current joint position for IK seed
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-
-            # Initialize on first tick, or if executor not active (streaming interrupted)
-            if not self._streaming_initialized or not cse.active:
-                assert self.initial_pose is not None and self.target_pose is not None
-                assert self.p is not None
-                # Only sync pose if not already active to preserve velocity
-                if not cse.active:
-                    cse.sync_pose(self.initial_pose)
-                vel_pct = self.p.speed_pct if self.p.speed_pct > 0.0 else 100.0
-                acc_pct = self.p.accel_pct
-                cse.set_limits(vel_pct, acc_pct)
-                cse.set_pose_target(self.target_pose)
-                self._streaming_initialized = True
-
-            # Get smoothed pose from Cartesian executor (straight-line interpolation)
-            smoothed_pose, _vel, finished = cse.tick()
-
-            # Solve IK for the smoothed Cartesian pose
-            ik_solution = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_rad_buf)
-            if not ik_solution.success or ik_solution.q is None:
-                if not self._ik_stopping:
-                    logger.warning(
-                        f"[MOVECART] IK failed - initiating graceful stop: "
-                        f"pos={smoothed_pose[:3, 3]}"
-                    )
-                    cse.stop()
-                    self._ik_stopping = True
-                else:
-                    # Still failing, check if we've stopped decelerating
-                    if np.dot(_vel, _vel) < 1e-8:
-                        # Sync CSE to actual robot pose now that we've stopped
-                        cse.sync_pose(get_fkine_se3(state))
-                        self.is_finished = True
-                        return ExecutionStatus.completed(
-                            f"{self.__class__.__name__}: IK limit reached"
-                        )
-                return ExecutionStatus.executing(f"{self.__class__.__name__} stopping")
-
-            # IK succeeded - if we were stopping, recover by resuming motion
-            if self._ik_stopping:
-                logger.info("[MOVECART] IK recovered - resuming motion")
-                assert self.target_pose is not None
-                cse.set_pose_target(self.target_pose)
-                self._ik_stopping = False
-
-            # Send joint position to robot
-            rad_to_steps(ik_solution.q, self._steps_buf)
-            self.set_move_position(state, self._steps_buf)
-
-            if finished:
-                self.log_info("%s (streaming) finished.", self.__class__.__name__)
-                # Deactivate executor so next command properly syncs pose
-                cse.active = False
-                self.is_finished = True
-                return ExecutionStatus.completed(f"{self.__class__.__name__} complete")
-
-            return ExecutionStatus.executing(self.__class__.__name__)
-
-        # Non-streaming: use inherited trajectory execution
-        return super().execute_step(state)
-
-
-@register_command(CmdType.CARTJOG)
-class CartesianJogCommand(MotionCommand):
+@register_command(CmdType.JOGL)
+class JogLCommand(MotionCommand[JogLCmd]):
     """
     A non-blocking command to jog the robot's end-effector in Cartesian space.
+    Uses static 6-element velocity vector [vx,vy,vz,wx,wy,wz] on the wire.
     """
 
-    PARAMS_TYPE = CartJogCmd
+    PARAMS_TYPE = JogLCmd
     streamable = True
 
     __slots__ = (
-        "axis_vectors",
         "is_rotation",
         "_ik_stopping",
-        "_jog_initialized",
         "_axis_index",
         "_axis_sign",
         # Pre-allocated buffers (allocated once in __init__, reused across streaming)
@@ -330,18 +184,13 @@ class CartesianJogCommand(MotionCommand):
         "_omega_ws",
         "_R_ws",
         "_V_ws",
+        "_dot_buf",
     )
 
-    # Class-level rate limiting for IK warnings (shared across instances)
-    _last_ik_warn_time: float = 0.0
-    _IK_WARN_INTERVAL: float = 1.0  # Log at most once per second
-
-    def __init__(self):
-        super().__init__()
-        self.axis_vectors = None
+    def __init__(self, p: JogLCmd):
+        super().__init__(p)
         self.is_rotation = False
         self._ik_stopping = False
-        self._jog_initialized = False
         self._axis_index = 0
         self._axis_sign = 1.0
 
@@ -353,38 +202,29 @@ class CartesianJogCommand(MotionCommand):
         self._omega_ws = np.zeros(3, dtype=np.float64)
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
         self._V_ws = np.zeros((3, 3), dtype=np.float64)
+        self._dot_buf = np.zeros((), dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Set the end time when the command actually starts."""
-        assert self.p is not None
-
-        # Axis is validated by struct pattern constraint, but we still need to look it up
-        axis_key = self.p.axis
-        self.axis_vectors = AXIS_MAP[axis_key]
-        self.is_rotation = any(self.axis_vectors[1])
-
+        """Find dominant axis and start timer."""
+        vels = self.p.velocities
+        max_idx = 0
+        max_abs = abs(vels[0])
+        for i in range(1, 6):
+            a = abs(vels[i])
+            if a > max_abs:
+                max_abs = a
+                max_idx = i
+        self.is_rotation = max_idx >= 3
+        self._axis_index = max_idx - 3 if max_idx >= 3 else max_idx
+        self._axis_sign = 1.0 if vels[max_idx] >= 0 else -1.0
         self.start_timer(self.p.duration)
-        self._jog_initialized = False
         self._ik_stopping = False
-
-        if self.is_rotation:
-            vec = self.axis_vectors[1]
-        else:
-            vec = self.axis_vectors[0]
-
-        for i, v in enumerate(vec):
-            if v != 0:
-                self._axis_index = i
-                self._axis_sign = float(np.sign(v))
-                break
 
     def _compute_target_pose_from_velocity(
         self, state: "ControllerState", smoothed_vel: np.ndarray
     ) -> None:
         """Compute target pose from smoothed velocity."""
-        assert self.p is not None
         cse = state.cartesian_streaming_executor
-        assert cse is not None
         current_pose = get_fkine_se3(state)
 
         if self.p.frame == "WRF":
@@ -419,29 +259,24 @@ class CartesianJogCommand(MotionCommand):
                 self._V_ws,
             )
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+    def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of Cartesian jogging."""
-        assert self.p is not None
-
         cse = state.cartesian_streaming_executor
-        if cse is None:
-            logger.warning("[CARTJOG] No cartesian_streaming_executor available")
-            self.is_finished = True
-            return ExecutionStatus.completed("CARTJOG: no executor")
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
         # Initialize only if not already active (preserve velocity across streaming)
         if not cse.active:
             cse.sync_pose(get_fkine_se3(state))
-            cse.set_limits(100.0, self.p.accel_pct)
+            cse.set_limits(1.0, self.p.accel)
 
         # Handle timer expiry - stop smoothly
         if self.timer_expired():
             cse.set_jog_velocity_1dof(self._axis_index, 0.0, self.is_rotation)
             _smoothed_pose, smoothed_vel, finished = cse.tick()
 
-            if not finished and np.dot(smoothed_vel, smoothed_vel) > 1e-8:
+            np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
+            if not finished and self._dot_buf > 1e-8:
                 self._compute_target_pose_from_velocity(state, smoothed_vel)
                 ik_result = solve_ik(
                     PAROL6_ROBOT.robot, self._target_pose_buf, self._q_rad_buf
@@ -449,23 +284,25 @@ class CartesianJogCommand(MotionCommand):
                 if ik_result.success and ik_result.q is not None:
                     rad_to_steps(ik_result.q, self._steps_buf)
                     self.set_move_position(state, self._steps_buf)
-                return ExecutionStatus.executing("CARTJOG (stopping)")
+                return ExecutionStatusCode.EXECUTING
 
-            self.is_finished = True
+            self.finish()
             self.stop_and_idle(state)
-            return ExecutionStatus.completed("CARTJOG complete")
+            return ExecutionStatusCode.COMPLETED
 
-        # Compute target velocity based on speed percentage
+        # Compute target velocity based on speed fraction from velocity vector
+        vels = self.p.velocities
+        speed_mag = abs(vels[self._axis_index + (3 if self.is_rotation else 0)])
         if self.is_rotation:
-            cart_ang_max = np.rad2deg(LIMITS.cart.jog.velocity.angular)
-            vel_deg_s = self.linmap_pct(
-                self.p.speed_pct, CART_ANG_JOG_MIN, cart_ang_max
+            velocity = (
+                _linmap_frac(speed_mag, _CART_ANG_JOG_MIN_RAD, _CART_ANG_JOG_MAX_RAD)
+                * self._axis_sign
             )
-            velocity = np.radians(vel_deg_s) * self._axis_sign
         else:
-            cart_lin_max = LIMITS.cart.jog.velocity.linear * 1000
-            vel_mm_s = self.linmap_pct(self.p.speed_pct, CART_LIN_JOG_MIN, cart_lin_max)
-            velocity = (vel_mm_s / 1000.0) * self._axis_sign
+            velocity = (
+                _linmap_frac(speed_mag, _CART_LIN_JOG_MIN_MS, _CART_LIN_JOG_MAX_MS)
+                * self._axis_sign
+            )
 
         # Set target velocity (WRF transforms to body frame, TRF uses body directly)
         if self.p.frame == "WRF":
@@ -480,25 +317,24 @@ class CartesianJogCommand(MotionCommand):
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
                 now = time.monotonic()
-                if (
-                    now - CartesianJogCommand._last_ik_warn_time
-                    > CartesianJogCommand._IK_WARN_INTERVAL
-                ):
+                global _last_ik_warn_time
+                if now - _last_ik_warn_time > _IK_WARN_INTERVAL:
                     logger.warning(
                         f"[CARTJOG] IK failed - initiating graceful stop: pos={self._target_pose_buf[:3, 3]}"
                     )
-                    CartesianJogCommand._last_ik_warn_time = now
+                    _last_ik_warn_time = now
                 cse.stop()
                 self._ik_stopping = True
             else:
                 # Still failing, check if we've stopped decelerating
-                if np.dot(smoothed_vel, smoothed_vel) < 1e-8:
+                np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
+                if self._dot_buf < 1e-8:
                     # Sync CSE to actual robot pose now that we've stopped
                     # This allows recovery by jogging in a different direction
                     cse.sync_pose(get_fkine_se3(state))
-                    self.is_finished = True
-                    return ExecutionStatus.completed("CARTJOG: IK limit reached")
-            return ExecutionStatus.executing("CARTJOG (IK stop)")
+                    self.finish()
+                    return ExecutionStatusCode.COMPLETED
+            return ExecutionStatusCode.EXECUTING
 
         # IK succeeded - if we were stopping, recover by resuming jogging
         if self._ik_stopping:
@@ -517,60 +353,221 @@ class CartesianJogCommand(MotionCommand):
         rad_to_steps(ik_result.q, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 
-        return ExecutionStatus.executing("CARTJOG")
+        return ExecutionStatusCode.EXECUTING
 
 
-@register_command(CmdType.MOVECART)
-class MoveCartCommand(CartesianMoveCommandBase):
-    """Move the robot's end-effector in a straight line to an absolute Cartesian pose."""
+@register_command(CmdType.MOVEL)
+class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
+    """Move the robot's end-effector in a straight line to a Cartesian pose.
 
-    PARAMS_TYPE = MoveCartCmd
+    Supports absolute and relative modes via the `rel` field, and WRF/TRF frames.
+    """
 
-    __slots__ = ()
+    PARAMS_TYPE = MoveLCmd
 
-    def __init__(self):
-        super().__init__()
+    __slots__ = (
+        "initial_pose",
+        "target_pose",
+        "_interp_buf",
+    )
+
+    def __init__(self, p: MoveLCmd):
+        super().__init__(p)
+        self.initial_pose: np.ndarray | None = None
+        self.target_pose: np.ndarray | None = None
+        self._interp_buf = np.zeros((4, 4), dtype=np.float64)
+
+    def do_setup(self, state: "ControllerState") -> None:
+        """Set up the move - compute target pose and pre-compute trajectory."""
+        self.initial_pose = get_fkine_se3(state)
+        self._compute_target_pose(state)
+        self._precompute_trajectory(state)
+
+    def _precompute_trajectory(self, state: "ControllerState") -> None:
+        """Pre-compute joint trajectory that follows straight-line Cartesian path."""
+        assert self.initial_pose is not None and self.target_pose is not None
+
+        steps_to_rad(state.Position_in, self._q_rad_buf)
+        current_rad = self._q_rad_buf
+
+        cart_poses = np.empty((PATH_SAMPLES, 4, 4), dtype=np.float64)
+        for i in range(PATH_SAMPLES):
+            s = i / (PATH_SAMPLES - 1)
+            se3_interp(self.initial_pose, self.target_pose, s, cart_poses[i])
+
+        joint_path = JointPath.from_poses(cart_poses, current_rad, quiet_logging=True)
+
+        builder = TrajectoryBuilder(
+            joint_path=joint_path,
+            profile=state.motion_profile,
+            velocity_frac=self.p.resolved_speed,
+            accel_frac=self.p.accel,
+            duration=self.p.resolved_duration,
+            dt=INTERVAL_S,
+            cart_vel_limit=LIMITS.cart.hard.velocity.linear * self.p.resolved_speed,
+            cart_acc_limit=LIMITS.cart.hard.acceleration.linear * self.p.accel,
+        )
+
+        trajectory = builder.build()
+        self.trajectory_steps = trajectory.steps
+        self._duration = trajectory.duration
+
+        self.log_debug(
+            "  -> Pre-computed Cartesian path: profile=%s, steps=%d, duration=%.3fs",
+            state.motion_profile,
+            len(self.trajectory_steps),
+            float(self._duration),
+        )
 
     def _compute_target_pose(self, state: "ControllerState") -> None:
-        """Compute absolute target pose from parsed coordinates."""
-        assert self.p is not None
+        """Compute target pose — absolute or relative based on rel flag."""
         pose = self.p.pose
-        self.target_pose = np.zeros((4, 4), dtype=np.float64)
-        se3_from_rpy(
-            pose[0] / 1000.0,
-            pose[1] / 1000.0,
-            pose[2] / 1000.0,
-            np.radians(pose[3]),
-            np.radians(pose[4]),
-            np.radians(pose[5]),
-            self.target_pose,
+
+        if self.p.rel:
+            # Relative move: compute delta SE3, then apply in tool frame (TRF)
+            # or world frame (WRF) depending on self.p.frame
+            delta_se3 = np.zeros((4, 4), dtype=np.float64)
+            se3_from_rpy(
+                pose[0] / 1000.0,
+                pose[1] / 1000.0,
+                pose[2] / 1000.0,
+                np.radians(pose[3]),
+                np.radians(pose[4]),
+                np.radians(pose[5]),
+                delta_se3,
+            )
+            if self.p.frame == "TRF":
+                # Post-multiply for tool-relative motion
+                self.target_pose = cast(np.ndarray, self.initial_pose) @ delta_se3
+            else:
+                # Pre-multiply for world-relative motion
+                self.target_pose = delta_se3 @ cast(np.ndarray, self.initial_pose)
+        else:
+            # Absolute target pose
+            self.target_pose = np.zeros((4, 4), dtype=np.float64)
+            se3_from_rpy(
+                pose[0] / 1000.0,
+                pose[1] / 1000.0,
+                pose[2] / 1000.0,
+                np.radians(pose[3]),
+                np.radians(pose[4]),
+                np.radians(pose[5]),
+                self.target_pose,
+            )
+
+    def do_setup_with_blend(
+        self,
+        state: "ControllerState",
+        next_cmds: "list[TrajectoryMoveCommandBase]",
+    ) -> int:
+        """Build composite Cartesian trajectory with blend zones."""
+        if self.blend_radius <= 0 or not next_cmds:
+            self.do_setup(state)
+            return 0
+
+        chain: list[MoveLCommand] = [self]
+        for cmd in next_cmds:
+            if isinstance(cmd, MoveLCommand):
+                chain.append(cmd)
+            else:
+                break
+        if len(chain) < 2:
+            self.do_setup(state)
+            return 0
+
+        from parol6.motion.geometry import build_composite_cartesian_path
+
+        initial_pose = get_fkine_se3(state)
+        self.initial_pose = initial_pose
+
+        waypoints = [initial_pose]
+        blend_radii: list[float] = []
+        prev_pose = initial_pose
+
+        for i, movel in enumerate(chain):
+            movel.initial_pose = prev_pose
+            movel._compute_target_pose(state)
+            if movel.target_pose is None:
+                if i < 2:
+                    self.do_setup(state)
+                    return 0
+                chain = chain[:i]
+                break
+            waypoints.append(movel.target_pose)
+            prev_pose = movel.target_pose
+            if i < len(chain) - 1:
+                blend_radii.append(movel.blend_radius)
+
+        if len(waypoints) < 3:
+            self.do_setup(state)
+            return 0
+
+        composite_poses = build_composite_cartesian_path(
+            waypoints,
+            blend_radii,
+            samples_per_segment=PATH_SAMPLES,
         )
 
+        if len(composite_poses) == 0:
+            self.do_setup(state)
+            return 0
 
-@register_command(CmdType.MOVECARTRELTRF)
-class MoveCartRelTrfCommand(CartesianMoveCommandBase):
-    """Move the robot's end-effector relative to current position in Tool Reference Frame."""
+        steps_to_rad(state.Position_in, self._q_rad_buf)
 
-    PARAMS_TYPE = MoveCartRelTrfCmd
+        try:
+            joint_path = JointPath.from_poses(
+                composite_poses, self._q_rad_buf, quiet_logging=True
+            )
+        except Exception:
+            self.log_warning(
+                "Blend IK failed for %d-segment Cartesian path, falling back",
+                len(waypoints) - 1,
+            )
+            self.do_setup(state)
+            return 0
 
-    __slots__ = ()
+        # Use minimum speed/accel across chain, sum durations when all duration-based
+        min_speed = self.p.resolved_speed
+        min_accel = self.p.accel
+        total_duration = self.p.resolved_duration
+        all_have_duration = total_duration is not None
 
-    def __init__(self):
-        super().__init__()
+        for i in range(1, len(chain)):
+            cmd = chain[i]
+            s = cmd.p.resolved_speed
+            a = cmd.p.accel
+            if s < min_speed:
+                min_speed = s
+            if a < min_accel:
+                min_accel = a
+            d = cmd.p.resolved_duration
+            if all_have_duration and d is not None:
+                assert total_duration is not None
+                total_duration += d
+            else:
+                all_have_duration = False
+                total_duration = None
 
-    def _compute_target_pose(self, state: "ControllerState") -> None:
-        """Compute target pose from current pose + TRF delta."""
-        assert self.p is not None
-        deltas = self.p.deltas
-        delta_se3 = np.zeros((4, 4), dtype=np.float64)
-        se3_from_rpy(
-            deltas[0] / 1000.0,
-            deltas[1] / 1000.0,
-            deltas[2] / 1000.0,
-            np.radians(deltas[3]),
-            np.radians(deltas[4]),
-            np.radians(deltas[5]),
-            delta_se3,
+        builder = TrajectoryBuilder(
+            joint_path=joint_path,
+            profile=state.motion_profile,
+            velocity_frac=min_speed,
+            accel_frac=min_accel,
+            duration=total_duration,
+            dt=INTERVAL_S,
+            cart_vel_limit=LIMITS.cart.hard.velocity.linear * min_speed,
+            cart_acc_limit=LIMITS.cart.hard.acceleration.linear * min_accel,
         )
-        # Post-multiply for tool-relative motion
-        self.target_pose = cast(np.ndarray, self.initial_pose) @ delta_se3
+
+        trajectory = builder.build()
+        self.trajectory_steps = trajectory.steps
+        self._duration = trajectory.duration
+
+        consumed = len(chain) - 1
+        self.log_info(
+            "  -> Blended Cartesian trajectory: %d segments, steps=%d, duration=%.3fs",
+            len(waypoints) - 1,
+            len(self.trajectory_steps),
+            trajectory.duration,
+        )
+        return consumed

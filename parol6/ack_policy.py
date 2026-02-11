@@ -1,15 +1,12 @@
 import os
-from collections.abc import Callable
 
 from parol6.protocol.wire import CmdType
 
 # System command types (always require ACK)
 SYSTEM_CMD_TYPES: set[CmdType] = {
-    CmdType.STOP,
-    CmdType.ENABLE,
-    CmdType.DISABLE,
+    CmdType.RESUME,
+    CmdType.HALT,
     CmdType.SET_PORT,
-    CmdType.STREAM,
     CmdType.SIMULATOR,
     CmdType.SET_PROFILE,
     CmdType.RESET,
@@ -23,13 +20,37 @@ QUERY_CMD_TYPES: set[CmdType] = {
     CmdType.GET_GRIPPER,
     CmdType.GET_SPEEDS,
     CmdType.GET_STATUS,
-    CmdType.GET_GCODE_STATUS,
     CmdType.GET_LOOP_STATS,
     CmdType.GET_CURRENT_ACTION,
     CmdType.GET_QUEUE,
     CmdType.GET_TOOL,
     CmdType.GET_PROFILE,
     CmdType.PING,
+}
+
+# Streaming commands are fire-and-forget (no ACK needed)
+FIRE_AND_FORGET: set[CmdType] = {
+    CmdType.SERVOJ,
+    CmdType.SERVOJ_POSE,
+    CmdType.SERVOL,
+    CmdType.JOGJ,
+    CmdType.JOGL,
+}
+
+# Queued motion commands that return a command index in their ACK
+QUEUED_CMD_TYPES: set[CmdType] = {
+    CmdType.HOME,
+    CmdType.MOVEJ,
+    CmdType.MOVEJ_POSE,
+    CmdType.MOVEL,
+    CmdType.MOVEC,
+    CmdType.MOVES,
+    CmdType.MOVEP,
+    CmdType.SET_TOOL,
+    CmdType.DELAY,
+    CmdType.CHECKPOINT,
+    CmdType.PNEUMATICGRIPPER,
+    CmdType.ELECTRICGRIPPER,
 }
 
 
@@ -41,27 +62,23 @@ class AckPolicy:
     - If force_ack is set, it overrides everything.
     - System commands always require ack.
     - Query commands use request/response, not ACKs.
-    - Motion and other commands: ACKs only when forced.
+    - Streaming commands (servo/jog) are fire-and-forget.
+    - Queued motion commands require ack (returns command index).
+
+    When force_ack is not provided, the PAROL6_FORCE_ACK env var is checked.
     """
 
     def __init__(
         self,
-        get_stream_mode: Callable[[], bool],
         force_ack: bool | None = None,
     ) -> None:
-        self._get_stream_mode = get_stream_mode
+        if force_ack is None:
+            raw = os.getenv("PAROL6_FORCE_ACK", "").strip().lower()
+            if raw in {"1", "true", "yes", "on"}:
+                force_ack = True
+            elif raw in {"0", "false", "no", "off"}:
+                force_ack = False
         self._force_ack = force_ack
-
-    @staticmethod
-    def from_env(get_stream_mode: Callable[[], bool]) -> "AckPolicy":
-        raw = os.getenv("PAROL6_FORCE_ACK", "").strip().lower()
-        if raw in {"1", "true", "yes", "on"}:
-            force = True
-        elif raw in {"0", "false", "no", "off"}:
-            force = False
-        else:
-            force = None
-        return AckPolicy(get_stream_mode=get_stream_mode, force_ack=force)
 
     def requires_ack(self, cmd_type: CmdType) -> bool:
         """Check if a command type requires an ACK response."""
@@ -77,5 +94,13 @@ class AckPolicy:
         if cmd_type in QUERY_CMD_TYPES:
             return False
 
-        # Motion and other commands: ACKs only when forced
+        # Streaming commands are fire-and-forget
+        if cmd_type in FIRE_AND_FORGET:
+            return False
+
+        # Queued motion commands require ACK (returns command index)
+        if cmd_type in QUEUED_CMD_TYPES:
+            return True
+
+        # Default: no ACK
         return False

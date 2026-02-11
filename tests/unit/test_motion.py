@@ -136,18 +136,18 @@ class TestTrajectoryBuilder:
         assert len(trajectory) > 0
         assert trajectory.duration > 0
 
-    def test_velocity_percent_scaling(self, simple_joint_path):
-        """Lower velocity_percent should increase duration."""
+    def test_velocity_frac_scaling(self, simple_joint_path):
+        """Lower velocity_frac should increase duration."""
         # Use TOPPRA which is time-optimal and respects velocity limits
         builder_100 = TrajectoryBuilder(
             joint_path=simple_joint_path,
             profile=ProfileType.TOPPRA,
-            velocity_percent=100.0,
+            velocity_frac=1.0,
         )
         builder_50 = TrajectoryBuilder(
             joint_path=simple_joint_path,
             profile=ProfileType.TOPPRA,
-            velocity_percent=50.0,
+            velocity_frac=0.5,
         )
 
         traj_100 = builder_100.build()

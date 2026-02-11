@@ -8,7 +8,7 @@ Tests for trajectory execution:
 import numpy as np
 import pytest
 
-from parol6.commands.joint_commands import MoveJointCommand
+from parol6.commands.joint_commands import MoveJCommand
 from parol6.config import rad_to_steps, steps_to_rad
 from parol6.motion import JointPath, TrajectoryBuilder, ProfileType
 
@@ -28,8 +28,6 @@ class MockState:
         self.Speed_out = np.zeros(6, dtype=np.int32)
         self.Command_out = 0
         self.motion_profile = "TOPPRA"
-        self.stream_mode = False
-        self.streaming_executor = None
 
 
 class TestPrecomputedTrajectories:
@@ -44,8 +42,8 @@ class TestPrecomputedTrajectories:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.RUCKIG,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
         )
 
         trajectory = builder.build()
@@ -62,8 +60,8 @@ class TestPrecomputedTrajectories:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.TOPPRA,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
         )
 
         trajectory = builder.build()
@@ -79,8 +77,8 @@ class TestPrecomputedTrajectories:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.LINEAR,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
         )
 
         trajectory = builder.build()
@@ -105,8 +103,8 @@ class TestLimitValidation:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.QUINTIC,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
             duration=0.5,  # Too short for this move - will be extended
         )
 
@@ -127,8 +125,8 @@ class TestLimitValidation:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.QUINTIC,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
             duration=2.0,  # Long duration for small move
         )
 
@@ -149,8 +147,8 @@ class TestLimitValidation:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.TRAPEZOID,
-            velocity_percent=50.0,
-            accel_percent=50.0,
+            velocity_frac=0.5,
+            accel_frac=0.5,
             duration=0.3,  # Too short for this move - will be extended
         )
 
@@ -174,8 +172,8 @@ class TestRuckigExecution:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.RUCKIG,
-            velocity_percent=100.0,
-            accel_percent=100.0,
+            velocity_frac=1.0,
+            accel_frac=1.0,
         )
 
         trajectory = builder.build()
@@ -193,17 +191,16 @@ class TestRuckigExecution:
         )
 
     def test_ruckig_joint_move_command_setup(self):
-        """MoveJointCommand with RUCKIG profile sets up trajectory."""
-        from parol6.protocol.wire import MoveJointCmd
+        """MoveJCommand with RUCKIG profile sets up trajectory."""
+        from parol6.protocol.wire import MoveJCmd
 
-        cmd = MoveJointCommand()
-        # Create params struct with speed_pct (duration=0 means use speed)
-        params = MoveJointCmd(
+        # Create params struct with speed (duration=0 means use speed)
+        params = MoveJCmd(
             angles=[10.0, -50.0, 180.0, 15.0, 10.0, 5.0],
-            speed_pct=50.0,
-            accel_pct=50.0,
+            speed=0.5,
+            accel=0.5,
         )
-        cmd.assign_params(params)
+        cmd = MoveJCommand(params)
 
         state = MockState()
         state.motion_profile = "RUCKIG"
@@ -228,7 +225,7 @@ class TestQuinticGeometry:
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=ProfileType.QUINTIC,
-            velocity_percent=50.0,
+            velocity_frac=0.5,
             duration=3.0,  # Long duration for safe velocity
         )
 

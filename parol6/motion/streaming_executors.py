@@ -20,12 +20,7 @@ from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ru
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import LIMITS
-from parol6.utils.se3_utils import (
-    se3_exp_ws,
-    se3_inverse,
-    se3_log_ws,
-    se3_mul,
-)
+from pinokin import se3_exp_ws, se3_inverse, se3_log_ws, se3_mul
 
 logger = logging.getLogger(__name__)
 
@@ -147,12 +142,10 @@ class RuckigExecutorBase(ABC):
         """Apply current limits (with scaling) to Ruckig parameters."""
         ...
 
-    def set_limits(
-        self, velocity_percent: float = 100.0, accel_percent: float = 100.0
-    ) -> None:
-        """Set velocity/acceleration as percentage of limits."""
-        self._vel_scale = max(0.01, min(1.0, velocity_percent / 100.0))
-        self._acc_scale = max(0.01, min(1.0, accel_percent / 100.0))
+    def set_limits(self, velocity_frac: float = 1.0, accel_frac: float = 1.0) -> None:
+        """Set velocity/acceleration as fraction of limits (0.0-1.0)."""
+        self._vel_scale = max(0.01, min(1.0, velocity_frac))
+        self._acc_scale = max(0.01, min(1.0, accel_frac))
         self._apply_limits()
 
     def _tick_ruckig(self) -> tuple[Result, list[float], list[float]]:
@@ -318,7 +311,7 @@ class StreamingExecutor(RuckigExecutorBase):
             self.inp.target_velocity = self._zeros  # Stop at target
             self.active = True
 
-    def set_jog_velocity(self, joint_velocities: list[float]) -> None:
+    def set_jog_velocity(self, joint_velocities: NDArray[np.float64]) -> None:
         """
         Set target velocity for jogging using Ruckig velocity control.
 
@@ -356,7 +349,6 @@ class StreamingExecutor(RuckigExecutorBase):
         np.subtract(self._q_target_buf, self._q_current_buf, out=self._dq_buf)
 
         # Get the linear part of the Jacobian (first 3 rows)
-        assert PAROL6_ROBOT.robot is not None
         PAROL6_ROBOT.robot.jacob0_into(self._q_current_buf, self._jacob0_buf)
         J_lin = self._jacob0_buf[:3, :]
 

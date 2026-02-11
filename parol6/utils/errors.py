@@ -11,9 +11,6 @@ class IKError(RuntimeError):
         self.original_message = message
         super().__init__(f"IK ERROR: {message}")
 
-    def __str__(self):
-        return f"IK ERROR: {self.original_message}"
-
 
 class TrajectoryPlanningError(RuntimeError):
     """Trajectory generation/planning failure."""
@@ -21,6 +18,3 @@ class TrajectoryPlanningError(RuntimeError):
     def __init__(self, message: str):
         self.original_message = message
         super().__init__(f"Trajectory Planning Error: {message}")
-
-    def __str__(self):
-        return f"Trajectory Planning Error: {self.original_message}"

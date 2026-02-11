@@ -1,7 +1,7 @@
 """
-Integration test for streaming Cartesian move accuracy.
+Integration test for servo Cartesian move accuracy.
 
-Tests the CartesianStreamingExecutor path used for TCP dragging.
+Tests the servoL path used for TCP dragging.
 Catches bugs where reference pose gets corrupted (e.g., aliasing with FK cache).
 """
 
@@ -40,103 +40,87 @@ def assert_pose_accuracy(
 
 
 @pytest.mark.integration
-class TestStreamingCartesianAccuracy:
-    """Test that streaming cartesian moves reach correct targets."""
+class TestServoCartesianAccuracy:
+    """Test that servo cartesian moves reach correct targets."""
 
-    def test_streaming_movecart_reaches_target(self, client, server_proc):
-        """Streaming cartesian move should arrive at the requested target.
+    def test_servoL_reaches_target(self, client, server_proc):
+        """servoL move should arrive at the requested target.
 
-        Tests the CartesianStreamingExecutor path activated by stream_on().
+        Tests the servo Cartesian path (replaces old stream_on + move_cartesian).
         """
-        assert client.enable() is True
-        assert client.home() is True
+        assert client.resume() is True
+        assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
         # Get starting pose
         start_pose = client.get_pose_rpy()
         print(f"\nStart pose: {start_pose}")
 
-        # Enable streaming mode (activates CartesianStreamingExecutor)
-        assert client.stream_on() is True
+        # Target: offset from start (like beginning of a TCP drag)
+        target = list(start_pose)
+        target[0] += 30.0  # +30mm in X
 
-        try:
-            # Target: offset from start (like beginning of a TCP drag)
-            target = list(start_pose)
-            target[0] += 30.0  # +15mm in X
+        print(f"Target pose: {target}")
 
-            print(f"Target pose: {target}")
+        # Send servo cartesian move (fire-and-forget, no stream mode toggle needed)
+        result = client.servoL(target, speed=1.0)
+        assert result is True
 
-            # Send streaming cartesian move
-            result = client.move_cartesian(target, speed=100)
-            assert result is True
+        # Wait for motion to settle
+        assert client.wait_motion_complete(timeout=10.0)
 
-            # Wait for motion to settle
-            assert client.wait_motion_complete(timeout=10.0)
+        # Verify final pose
+        final_pose = client.get_pose_rpy()
+        print(f"Final pose:  {final_pose}")
 
-            # Verify final pose
-            final_pose = client.get_pose_rpy()
-            print(f"Final pose:  {final_pose}")
+        assert_pose_accuracy(final_pose, target)
 
-            assert_pose_accuracy(final_pose, target)
-            print("✓ Streaming movecart reached target accurately")
+    def test_servoL_sequential_targets(self, client, server_proc):
+        """Sequential servo moves should each reach their target.
 
-        finally:
-            # Always disable streaming mode
-            client.stream_off()
-
-    def test_streaming_movecart_sequential_targets(self, client, server_proc):
-        """Sequential streaming moves should each reach their target.
-
-        Simulates TCP dragging behavior where multiple MOVECART commands
-        are sent in sequence while streaming mode is active.
+        Simulates TCP dragging behavior where multiple servoL commands
+        are sent in sequence.
         """
-        assert client.enable() is True
-        assert client.home() is True
+        assert client.resume() is True
+        assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
         start_pose = client.get_pose_rpy()
         print(f"\nStart pose: {start_pose}")
 
-        # Enable streaming mode
-        assert client.stream_on() is True
+        # Simulate a drag path: series of small incremental moves
+        # This pattern catches bugs where reference pose gets corrupted
+        # between moves (like the FK cache aliasing bug)
+        offsets = [
+            (30.0, 0.0, 0.0),  # +30mm X
+            (30.0, 30.0, 0.0),  # +30mm X, +30mm Y
+            (30.0, 30.0, -30.0),  # +30mm X, +30mm Y, -30mm Z
+            (0.0, 0.0, 0.0),  # hold position
+        ]
 
-        try:
-            # Simulate a drag path: series of small incremental moves
-            # This pattern catches bugs where reference pose gets corrupted
-            # between moves (like the FK cache aliasing bug)
-            offsets = [
-                (30.0, 0.0, 0.0),  # +30mm X
-                (30.0, 30.0, 0.0),  # +30mm X, +30mm Y
-                (30.0, 30.0, -30.0),  # +30mm X, +30mm Y, -30mm Z
-                (0.0, 0.0, 0.0),  # hold position
-            ]
+        for i, (dx, dy, dz) in enumerate(offsets):
+            target = list(start_pose)
+            target[0] += dx
+            target[1] += dy
+            target[2] += dz
 
-            for i, (dx, dy, dz) in enumerate(offsets):
-                target = list(start_pose)
-                target[0] += dx
-                target[1] += dy
-                target[2] += dz
+            print(f"\n--- Move {i + 1}/{len(offsets)} ---")
+            print(f"Target: {target[:3]}")
 
-                print(f"\n--- Move {i + 1}/{len(offsets)} ---")
-                print(f"Target: {target[:3]}")
+            result = client.servoL(target, speed=1.0)
+            assert result is True
 
-                result = client.move_cartesian(target, speed=100)
-                assert result is True
+            # Wait for this move to complete before next
+            assert client.wait_motion_complete(timeout=10.0, settle_window=2.0)
 
-                # Wait for this move to complete before next
-                assert client.wait_motion_complete(timeout=10.0, settle_window=2.0)
+            final_pose = client.get_pose_rpy()
+            start_pose = final_pose
+            print(f"Final:  {final_pose[:3]}")
 
-                final_pose = client.get_pose_rpy()
-                start_pose = final_pose
-                print(f"Final:  {final_pose[:3]}")
+            assert_pose_accuracy(final_pose, target, context=f"Move {i + 1}: ")
+            print(f"Move {i + 1} accurate")
 
-                assert_pose_accuracy(final_pose, target, context=f"Move {i + 1}: ")
-                print(f"✓ Move {i + 1} accurate")
-
-            print("\n✓ All sequential streaming moves reached targets accurately")
-
-        finally:
-            client.stream_off()
+        print("\nAll sequential servo moves reached targets accurately")
 
 
 if __name__ == "__main__":

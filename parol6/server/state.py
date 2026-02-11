@@ -4,16 +4,14 @@ import atexit
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
+from typing import Any
 
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.utils.se3_utils import arrays_equal_6
-from parol6.config import steps_to_rad
+from pinokin import arrays_equal_6
+from parol6.config import CONTROL_RATE_HZ, steps_to_rad
+from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 from parol6.protocol.wire import CommandCode
 
 
@@ -42,16 +40,17 @@ class ControllerState:
     soft_error: bool = False
     disabled_reason: str = ""
     e_stop_active: bool = False
-    stream_mode: bool = False
 
     # Motion profile for all moves (TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR)
     # Note: RUCKIG is point-to-point only; Cartesian moves fall back to TOPPRA
     motion_profile: str = "TOPPRA"
 
     # Streaming executors for online motion (jogging/streaming)
-    streaming_executor: "StreamingExecutor | None" = None  # Joint-space Ruckig
-    cartesian_streaming_executor: "CartesianStreamingExecutor | None" = (
-        None  # Cartesian Ruckig
+    streaming_executor: StreamingExecutor = field(
+        default_factory=lambda: StreamingExecutor(num_dofs=6, dt=1.0 / CONTROL_RATE_HZ)
+    )
+    cartesian_streaming_executor: CartesianStreamingExecutor = field(
+        default_factory=lambda: CartesianStreamingExecutor(dt=1.0 / CONTROL_RATE_HZ)
     )
 
     # Tool configuration (affects kinematics and visualization)
@@ -126,6 +125,12 @@ class ControllerState:
     action_next: str = ""
     queue_nonstreamable: list[str] = field(default_factory=list)
 
+    # Queue progress tracking (monotonically increasing command indices)
+    next_command_index: int = 0
+    executing_command_index: int = -1
+    completed_command_index: int = -1
+    last_checkpoint: str = ""
+
     # Network setup and uptime
     ip: str = "127.0.0.1"
     port: int = 5001
@@ -146,9 +151,6 @@ class ControllerState:
     max_period_s: float = 0.0
     p95_period_s: float = 0.0
     p99_period_s: float = 0.0
-
-    # Command frequency metrics (rate tracked by EventRateMetrics in controller)
-    command_count: int = 0
 
     # Flag to signal loop stats reset (picked up by controller)
     loop_stats_reset_pending: bool = False
@@ -184,7 +186,6 @@ class ControllerState:
         self.soft_error = False
         self.disabled_reason = ""
         self.e_stop_active = False
-        self.stream_mode = False
         self.motion_profile = "TOPPRA"
 
         # Tool back to none
@@ -233,21 +234,22 @@ class ControllerState:
         self.action_next = ""
         self.queue_nonstreamable.clear()
 
+        # Queue progress tracking
+        self.next_command_index = 0
+        self.executing_command_index = -1
+        self.completed_command_index = -1
+        self.last_checkpoint = ""
+
         # Gripper mode tracker
         self.gripper_mode_tracker = GripperModeResetTracker()
-
-        # Metrics (keep loop_count for uptime, reset command count)
-        self.command_count = 0
 
         # Invalidate fkine cache (SE3 is pre-allocated, just reset tracking)
         self._fkine_last_pos_in.fill(0)
         self._fkine_last_tool = ""
 
         # Reset streaming executors (clears reference_pose and Ruckig state)
-        if self.streaming_executor is not None:
-            self.streaming_executor.reset()
-        if self.cartesian_streaming_executor is not None:
-            self.cartesian_streaming_executor.reset()
+        self.streaming_executor.reset()
+        self.cartesian_streaming_executor.reset()
 
         logger.debug("Controller state reset (preserving connection)")
 
@@ -285,23 +287,7 @@ class StateManager:
         if not hasattr(self, "_initialized"):
             self._state = ControllerState()
             self._initialized = True
-            self._init_streaming_executor()
             logger.info("StateManager initialized with NumPy buffers")
-
-    def _init_streaming_executor(self) -> None:
-        """Initialize the streaming executors for jogging/streaming."""
-        from parol6.config import CONTROL_RATE_HZ
-        from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
-
-        if self._state is not None:
-            dt = 1.0 / CONTROL_RATE_HZ
-            self._state.streaming_executor = StreamingExecutor(
-                num_dofs=6,
-                dt=dt,
-            )
-            self._state.cartesian_streaming_executor = CartesianStreamingExecutor(
-                dt=dt,
-            )
 
     def get_state(self) -> ControllerState:
         """
@@ -322,7 +308,6 @@ class StateManager:
         to known defaults.
         """
         self._state = ControllerState()
-        self._init_streaming_executor()
         logger.info("Controller state reset")
 
 
@@ -333,9 +318,6 @@ _state_manager: StateManager | None = None
 @atexit.register
 def _cleanup_state_manager() -> None:
     global _state_manager
-    if _state_manager is not None and _state_manager._state is not None:
-        _state_manager._state.streaming_executor = None
-        _state_manager._state.cartesian_streaming_executor = None
     _state_manager = None
 
 
@@ -386,7 +368,6 @@ def ensure_fkine_updated(state: ControllerState) -> None:
 
     if pos_changed or tool_changed:
         steps_to_rad(state.Position_in, state._fkine_q_rad)
-        assert PAROL6_ROBOT.robot is not None
         PAROL6_ROBOT.robot.fkine_into(state._fkine_q_rad, state._fkine_mat)
 
         # Cache as flattened 16-vector with mm translation (zero-allocation)
@@ -396,7 +377,7 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         state._fkine_flat_mm[11] *= 1000.0  # Z translation to mm
 
         # Update cache tracking
-        np.copyto(state._fkine_last_pos_in, state.Position_in)
+        state._fkine_last_pos_in[:] = state.Position_in
         state._fkine_last_tool = state.current_tool
 
 
@@ -409,23 +390,6 @@ def get_fkine_se3(state: ControllerState | None = None) -> np.ndarray:
     -------
     np.ndarray
         4x4 SE3 transformation matrix (translation in meters)
-    """
-    if state is None:
-        state = get_state()
-    ensure_fkine_updated(state)
-    return state._fkine_mat
-
-
-def get_fkine_matrix(state: ControllerState | None = None) -> np.ndarray:
-    """
-    Get the current end-effector pose as a 4x4 homogeneous transformation matrix.
-    Automatically updates cache if needed.
-    Translation is in meters.
-
-    Returns
-    -------
-    np.ndarray
-        4x4 transformation matrix (translation in meters)
     """
     if state is None:
         state = get_state()

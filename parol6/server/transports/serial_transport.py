@@ -13,7 +13,7 @@ import numba  # type: ignore[import-untyped]
 import numpy as np
 import serial
 
-from parol6.config import SERIAL_RX_RING_DEFAULT, get_com_port_with_fallback
+from parol6.config import SERIAL_RX_RING_DEFAULT
 from parol6.protocol.wire import pack_tx_frame_into
 
 logger = logging.getLogger(__name__)
@@ -383,7 +383,8 @@ class SerialTransport:
             logger.error(f"Serial poll error: {e}")
             self.disconnect()
             return False
-        except (OSError, TypeError, ValueError, AttributeError):
+        except (OSError, TypeError, ValueError, AttributeError) as e:
+            logger.debug("Serial disconnect: %s", e)
             self.disconnect()
             return False
 
@@ -478,30 +479,3 @@ class SerialTransport:
             # Reset interval statistics
             self._last_print_time = current_time
             self._interval_msg_count = 0
-
-
-def create_serial_transport(
-    port: str | None = None, baudrate: int = 2000000
-) -> SerialTransport:
-    """
-    Factory function to create and optionally connect a serial transport.
-
-    Args:
-        port: Optional serial port to connect to
-        baudrate: Baud rate for communication
-
-    Returns:
-        SerialTransport instance (may or may not be connected)
-    """
-    transport = SerialTransport(port=port, baudrate=baudrate)
-
-    # Try to connect if port provided
-    if port:
-        transport.connect(port)
-    else:
-        # Try to load and connect to saved port
-        saved_port = get_com_port_with_fallback()
-        if saved_port:
-            transport.connect(saved_port)
-
-    return transport

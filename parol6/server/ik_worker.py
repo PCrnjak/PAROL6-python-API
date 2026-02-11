@@ -7,27 +7,28 @@ in a separate process, communicating with the main process via shared memory.
 
 import logging
 import signal
+import sys
+from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 
-from parol6.utils.se3_utils import (
-    se3_from_trans,
-    se3_mul,
-    se3_rx,
-    se3_ry,
-    se3_rz,
-)
+from pinokin import se3_from_trans, se3_mul, se3_rx, se3_ry, se3_rz
 
-
-from parol6.server.ipc import (
-    attach_shm,
-    pack_ik_response,
-    unpack_ik_request,
+from parol6.server.ik_layout import (
+    IK_INPUT_Q_OFFSET,
+    IK_INPUT_T_OFFSET,
+    IK_OUTPUT_CART_TRF_OFFSET,
+    IK_OUTPUT_CART_WRF_OFFSET,
+    IK_OUTPUT_JOINT_OFFSET,
+    IK_OUTPUT_VERSION_OFFSET,
 )
 
 logger = logging.getLogger(__name__)
+
+# track parameter added in Python 3.13
+_SHM_EXTRA_KWARGS = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 def ik_enablement_worker_main(
@@ -52,27 +53,51 @@ def ik_enablement_worker_main(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Attach to shared memory
-    input_shm = attach_shm(input_shm_name)
-    output_shm = attach_shm(output_shm_name)
+    input_shm = SharedMemory(name=input_shm_name, create=False, **_SHM_EXTRA_KWARGS)
+    output_shm = SharedMemory(name=output_shm_name, create=False, **_SHM_EXTRA_KWARGS)
     assert input_shm.buf is not None
     assert output_shm.buf is not None
     input_mv = memoryview(input_shm.buf)
     output_mv = memoryview(output_shm.buf)
+
+    # Zero-alloc input views: read directly from shared memory
+    q_rad = np.frombuffer(
+        input_shm.buf, dtype=np.float64, count=6, offset=IK_INPUT_Q_OFFSET
+    )
+    T_flat = np.frombuffer(
+        input_shm.buf, dtype=np.float64, count=16, offset=IK_INPUT_T_OFFSET
+    )
+    T_matrix = T_flat.reshape((4, 4))  # View, no copy
+
+    # Zero-alloc output views: write directly to shared memory
+    joint_en = np.frombuffer(
+        output_shm.buf, dtype=np.uint8, count=12, offset=IK_OUTPUT_JOINT_OFFSET
+    )
+    cart_en_wrf = np.frombuffer(
+        output_shm.buf, dtype=np.uint8, count=12, offset=IK_OUTPUT_CART_WRF_OFFSET
+    )
+    cart_en_trf = np.frombuffer(
+        output_shm.buf, dtype=np.uint8, count=12, offset=IK_OUTPUT_CART_TRF_OFFSET
+    )
+    version_view = np.frombuffer(
+        output_shm.buf, dtype=np.uint64, count=1, offset=IK_OUTPUT_VERSION_OFFSET
+    )
+
+    # Initialize outputs
+    joint_en[:] = 1
+    cart_en_wrf[:] = 1
+    cart_en_trf[:] = 1
 
     # Initialize robot model in this process
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
     from parol6.utils.ik import solve_ik
 
     robot = PAROL6_ROBOT.robot
-    assert robot is not None
     qlim = robot.qlim
 
     response_version = 0
 
-    # Pre-allocate output arrays for zero-allocation in loop
-    joint_en = np.ones(12, dtype=np.uint8)
-    cart_en_wrf = np.ones(12, dtype=np.uint8)
-    cart_en_trf = np.ones(12, dtype=np.uint8)
+    # Pre-allocate work array for cartesian targets
     cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
 
     logger.info("IK worker subprocess started")
@@ -85,8 +110,7 @@ def ik_enablement_worker_main(
 
             request_event.clear()
 
-            # Read inputs from shared memory
-            q_rad, T_matrix = unpack_ik_request(input_mv)
+            # Input data is already available via views (q_rad, T_matrix)
 
             # Compute joint enablement
             if qlim is not None:
@@ -115,24 +139,27 @@ def ik_enablement_worker_main(
                 cart_en_trf,
             )
 
-            # Write results with incremented version
+            # Output data written directly via views, just update version
             response_version += 1
-            pack_ik_response(
-                output_mv, joint_en, cart_en_wrf, cart_en_trf, response_version
-            )
+            version_view[0] = response_version
 
     except Exception as e:
         logger.exception("IK worker subprocess error: %s", e)
     finally:
-        # Release memoryviews before closing shared memory to avoid BufferError
+        # Release numpy views before closing shared memory
+        del q_rad, T_flat, T_matrix
+        del joint_en, cart_en_wrf, cart_en_trf, version_view
+
+        # Release memoryviews
         try:
             input_mv.release()
         except BufferError:
-            pass  # Already released or not releasable
+            pass
         try:
             output_mv.release()
         except BufferError:
-            pass  # Already released or not releasable
+            pass
+
         input_shm.close()
         output_shm.close()
         logger.info("IK worker subprocess exiting")

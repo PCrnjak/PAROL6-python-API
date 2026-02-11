@@ -24,13 +24,13 @@ from ruckig import InputParameter, OutputParameter, Result, Ruckig
 import toppra as ta
 import toppra.algorithm as algo
 import toppra.constraint as constraint
+from toppra.interpolator import SplineInterpolator
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
 
 
-from parol6.utils.ik import solve_ik
-from parol6.utils.se3_utils import se3_from_rpy
+from pinokin import Damping, IKSolver, se3_from_rpy
 
 
 logger = logging.getLogger(__name__)
@@ -116,46 +116,44 @@ class JointPath:
         """
         from parol6.utils.errors import IKError
 
-        # Convert to list of SE3 if NDArray
-        if isinstance(poses, np.ndarray):
-            se3_poses = [
+        # Convert to list of SE3 (4x4) matrices for batch_ik
+        if isinstance(poses, np.ndarray) and poses.ndim == 3:
+            # (N, 4, 4) SE3 matrices — create list of views (no data copy)
+            se3_poses = [poses[i] for i in range(len(poses))]
+        elif isinstance(poses, np.ndarray):
+            # (N, 6) [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] — convert to SE3
+            n = len(poses)
+            se3_poses = [np.empty((4, 4), dtype=np.float64) for _ in range(n)]
+            for i, p in enumerate(poses):
                 se3_from_rpy(
-                    p[0] / 1000.0,  # x mm -> m
-                    p[1] / 1000.0,  # y mm -> m
-                    p[2] / 1000.0,  # z mm -> m
-                    p[3],  # rx degrees
-                    p[4],  # ry degrees
-                    p[5],  # rz degrees
-                    degrees=True,
+                    p[0] / 1000.0,
+                    p[1] / 1000.0,
+                    p[2] / 1000.0,
+                    np.radians(p[3]),
+                    np.radians(p[4]),
+                    np.radians(p[5]),
+                    se3_poses[i],
                 )
-                for p in poses
-            ]
         else:
             se3_poses = poses
 
-        n_poses = len(se3_poses)
-        positions = np.empty((n_poses, 6), dtype=np.float64)
-        q_prev = np.asarray(seed_q, dtype=np.float64)
+        solver = IKSolver(
+            PAROL6_ROBOT.robot,
+            damping=Damping.Sugihara,
+            tol=1e-12,
+            lm_lambda=0.0,
+            max_iter=10,
+            max_restarts=10,
+        )
+        result = solver.batch_ik(se3_poses, np.asarray(seed_q, dtype=np.float64))
 
-        for i, target_se3 in enumerate(se3_poses):
-            ik_result = solve_ik(
-                PAROL6_ROBOT.robot,
-                target_se3,
-                q_prev,
-                quiet_logging=quiet_logging,
+        if not result.all_valid:
+            failed = [i for i, v in enumerate(result.valid) if not v]
+            raise IKError(
+                f"Cartesian path points {failed}/{len(se3_poses)} are unreachable."
             )
 
-            if not ik_result.success or ik_result.q is None:
-                error_str = f"Cartesian path point {i}/{n_poses} is unreachable."
-                if ik_result.violations:
-                    error_str += f" Reason: {ik_result.violations}"
-                raise IKError(error_str)
-
-            q_curr = np.asarray(ik_result.q, dtype=np.float64)
-            positions[i] = q_curr
-            q_prev = q_curr
-
-        return cls(positions=positions)
+        return cls(positions=result.joint_positions)
 
     @classmethod
     def interpolate(
@@ -282,9 +280,9 @@ class TrajectoryBuilder:
         self,
         joint_path: JointPath,
         profile: ProfileType | str,
-        velocity_percent: float | None = None,
-        accel_percent: float | None = None,
-        jerk_percent: float | None = None,
+        velocity_frac: float = 1.0,
+        accel_frac: float = 1.0,
+        jerk_frac: float = 1.0,
         duration: float | None = None,
         dt: float = INTERVAL_S,
         cart_vel_limit: float | None = None,
@@ -296,9 +294,9 @@ class TrajectoryBuilder:
         Args:
             joint_path: Path in joint space
             profile: Motion profile to apply
-            velocity_percent: Scale joint velocity limits (0-100), default 100
-            accel_percent: Scale joint acceleration limits (0-100), default 100
-            jerk_percent: Scale jerk limits (0-100), default 100
+            velocity_frac: Scale joint velocity limits (0.0-1.0), default 1.0
+            accel_frac: Scale joint acceleration limits (0.0-1.0), default 1.0
+            jerk_frac: Scale jerk limits (0.0-1.0), default 1.0
             duration: Override duration (stretches profile if longer than TOPP-RA min)
             dt: Control loop time step
             cart_vel_limit: Cartesian linear velocity limit in m/s (for Cartesian commands)
@@ -316,27 +314,21 @@ class TrajectoryBuilder:
             logger.warning("RUCKIG cannot follow Cartesian paths, using TOPPRA")
             self.profile = ProfileType.TOPPRA
 
-        self.velocity_percent = (
-            velocity_percent if velocity_percent is not None else 100.0
-        )
-        self.accel_percent = accel_percent if accel_percent is not None else 100.0
-        self.jerk_percent = jerk_percent if jerk_percent is not None else 100.0
+        self.velocity_frac = velocity_frac
+        self.accel_frac = accel_frac
+        self.jerk_frac = jerk_frac
         self.duration = duration
         self.dt = dt
         self.cart_vel_limit = cart_vel_limit
         self.cart_acc_limit = cart_acc_limit
 
-        # Joint limits scaled by user percentages.
+        # Joint limits scaled by user fractions.
         # Apply 1% safety margin to account for floating-point precision in
         # trajectory libraries and integer rounding in rad→steps conversion.
         limit_margin = 0.99
-        self.v_max = (
-            LIMITS.joint.hard.velocity * (self.velocity_percent / 100.0) * limit_margin
-        )
-        self.a_max = (
-            LIMITS.joint.hard.acceleration * (self.accel_percent / 100.0) * limit_margin
-        )
-        self.j_max = LIMITS.joint.hard.jerk * (self.jerk_percent / 100.0) * limit_margin
+        self.v_max = LIMITS.joint.hard.velocity * self.velocity_frac * limit_margin
+        self.a_max = LIMITS.joint.hard.acceleration * self.accel_frac * limit_margin
+        self.j_max = LIMITS.joint.hard.jerk * self.jerk_frac * limit_margin
 
         # Pre-compute limit arrays for TOPP-RA (avoids allocation per build() call)
         self._vlim = np.column_stack([-self.v_max, self.v_max])
@@ -435,9 +427,8 @@ class TrajectoryBuilder:
                 instance = algo.TOPPRA(constraints, path, gridpoints=gridpoints)
                 jnt_traj = instance.compute_trajectory()
 
-            if jnt_traj is None:
-                logger.warning("TOPP-RA failed, falling back to simple trajectory")
-                return self._build_simple_trajectory()
+            if not isinstance(jnt_traj, SplineInterpolator):
+                raise RuntimeError("TOPP-RA failed to compute trajectory")
 
             duration = float(jnt_traj.duration)
 
@@ -782,9 +773,8 @@ class TrajectoryBuilder:
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
-        user_duration = self.duration if self.duration and self.duration > 0 else None
-        if user_duration:
-            duration = user_duration
+        if self.duration:
+            duration = self.duration
         else:
             duration = self._compute_joint_duration_quintic()
 
@@ -833,9 +823,8 @@ class TrajectoryBuilder:
         """
         from interpolatepy import BoundaryCondition, PolynomialTrajectory, TimeInterval
 
-        user_duration = self.duration if self.duration and self.duration > 0 else None
-        if user_duration:
-            duration = user_duration
+        if self.duration:
+            duration = self.duration
         else:
             # Use per-segment analysis to handle singularities and wrist flips
             duration = self._compute_cartesian_duration_from_path()
@@ -850,7 +839,9 @@ class TrajectoryBuilder:
         times = np.linspace(0.0, duration, n_output)
 
         # Evaluate quintic trajectory to get profile-shaped s values
-        profile_s = np.array([traj(t)[0] for t in times], dtype=np.float64)
+        profile_s = np.empty(n_output, dtype=np.float64)
+        for i in range(n_output):
+            profile_s[i] = traj(float(times[i]))[0]
 
         # Sample path at quintic-shaped s values
         trajectory_rad = self.joint_path.sample_many(profile_s)
@@ -892,10 +883,8 @@ class TrajectoryBuilder:
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
-        # Compute duration for each joint, take the maximum
-        user_duration = self.duration if self.duration and self.duration > 0 else None
-        if user_duration:
-            duration = user_duration
+        if self.duration:
+            duration = self.duration
         else:
             duration = self._compute_joint_duration_trapezoid()
 
@@ -953,9 +942,8 @@ class TrajectoryBuilder:
             TrapezoidalTrajectory,
         )
 
-        user_duration = self.duration if self.duration and self.duration > 0 else None
-        if user_duration:
-            duration = user_duration
+        if self.duration:
+            duration = self.duration
         else:
             # Use per-segment analysis to handle singularities and wrist flips
             duration = self._compute_cartesian_duration_from_path()
@@ -975,9 +963,9 @@ class TrajectoryBuilder:
         traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(params)
 
         # If user specified longer duration, scale to match
-        if user_duration and user_duration > profile_duration:
-            time_scale = profile_duration / user_duration
-            duration = user_duration
+        if self.duration and self.duration > profile_duration:
+            time_scale = profile_duration / self.duration
+            duration = self.duration
         else:
             time_scale = 1.0
             duration = profile_duration
@@ -1033,7 +1021,7 @@ class TrajectoryBuilder:
 
             # cart_vel_limit is already in m/s (SI units)
             v_max_m_s = self.cart_vel_limit
-            # Use scaled joint limits (respects user's velocity_percent)
+            # Use scaled joint limits (respects user's velocity_frac)
             v_max_joint = self.v_max
 
             # Pre-allocate buffers for velocity limits (avoids per-call allocation)
@@ -1046,7 +1034,6 @@ class TrajectoryBuilder:
                 dq_ds = path(s, 1)  # Path tangent (first derivative)
 
                 # Get the linear part of the Jacobian (first 3 rows)
-                assert robot is not None
                 robot.jacob0_into(q, _jac_buf)
                 J_lin = _jac_buf[:3, :]
 
@@ -1142,8 +1129,7 @@ class TrajectoryBuilder:
             out.pass_to_input(inp)
 
         if result == Result.Error:
-            logger.warning("Ruckig failed, falling back to simple trajectory")
-            return self._build_simple_trajectory()
+            raise RuntimeError("Ruckig failed to compute trajectory")
 
         actual_duration = out.trajectory.duration
 
@@ -1170,94 +1156,3 @@ class TrajectoryBuilder:
         segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
 
         return max(float(np.sum(segment_times)), self.dt * 2)
-
-
-def build_cartesian_trajectory(
-    start_pose: NDArray | list[float],
-    end_pose: NDArray | list[float],
-    seed_q: NDArray[np.float64],
-    profile: ProfileType | str,
-    n_samples: int = 100,
-    velocity_percent: float | None = None,
-    accel_percent: float | None = None,
-    duration: float | None = None,
-    dt: float = INTERVAL_S,
-) -> Trajectory:
-    """
-    Convenience function to build trajectory for straight-line Cartesian motion.
-
-    Args:
-        start_pose: [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
-        end_pose: [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
-        seed_q: Current joint angles for IK seeding
-        profile: Motion profile to apply
-        n_samples: Number of Cartesian waypoints to generate
-        velocity_percent: Scale velocity limits (0-100)
-        accel_percent: Scale acceleration limits (0-100)
-        duration: Override duration
-        dt: Control loop time step
-
-    Returns:
-        Trajectory ready for execution
-    """
-    start = np.asarray(start_pose, dtype=np.float64)
-    end = np.asarray(end_pose, dtype=np.float64)
-
-    # Generate Cartesian waypoints (vectorized)
-    t = np.linspace(0.0, 1.0, n_samples).reshape(-1, 1)
-    poses = start + t * (end - start)
-
-    # Solve IK for all poses
-    joint_path = JointPath.from_poses(poses, seed_q)
-
-    # Build trajectory
-    builder = TrajectoryBuilder(
-        joint_path=joint_path,
-        profile=profile,
-        velocity_percent=velocity_percent,
-        accel_percent=accel_percent,
-        duration=duration,
-        dt=dt,
-    )
-
-    return builder.build()
-
-
-def build_joint_trajectory(
-    start_rad: NDArray[np.float64],
-    end_rad: NDArray[np.float64],
-    profile: ProfileType | str,
-    n_samples: int = 50,
-    velocity_percent: float | None = None,
-    accel_percent: float | None = None,
-    duration: float | None = None,
-    dt: float = INTERVAL_S,
-) -> Trajectory:
-    """
-    Convenience function to build trajectory for joint-space motion.
-
-    Args:
-        start_rad: Starting joint angles in radians
-        end_rad: Ending joint angles in radians
-        profile: Motion profile to apply
-        n_samples: Number of joint waypoints
-        velocity_percent: Scale velocity limits (0-100)
-        accel_percent: Scale acceleration limits (0-100)
-        duration: Override duration
-        dt: Control loop time step
-
-    Returns:
-        Trajectory ready for execution
-    """
-    joint_path = JointPath.interpolate(start_rad, end_rad, n_samples)
-
-    builder = TrajectoryBuilder(
-        joint_path=joint_path,
-        profile=profile,
-        velocity_percent=velocity_percent,
-        accel_percent=accel_percent,
-        duration=duration,
-        dt=dt,
-    )
-
-    return builder.build()

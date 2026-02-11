@@ -1,4 +1,5 @@
-# Clean, hierarchical, vectorized, and typed robot configuration and helpers
+"""PAROL6 robot kinematics, limits, and configuration."""
+
 import atexit
 import logging
 from dataclasses import dataclass
@@ -23,7 +24,6 @@ Limits2f = NDArray[np.float64]  # shape (6,2)
 # -----------------------------
 # Kinematics and conversion constants
 # -----------------------------
-Joint_num = 6
 Microstep = 32
 steps_per_revolution = 200
 
@@ -58,7 +58,7 @@ _urdf_path = str(
 )
 
 # Current robot instance (tool transform applied in-place)
-robot: Robot | None = None
+robot: Robot = Robot(_urdf_path)
 
 
 def apply_tool(tool_name: str) -> None:
@@ -70,11 +70,6 @@ def apply_tool(tool_name: str) -> None:
     tool_name : str
         Name of the tool from tools.TOOL_CONFIGS
     """
-    global robot
-
-    if robot is None:
-        robot = Robot(_urdf_path)
-
     T_tool = get_tool_transform(tool_name)
 
     if tool_name != "NONE" and not np.allclose(T_tool, np.eye(4)):
@@ -92,7 +87,7 @@ apply_tool("NONE")
 @atexit.register
 def _cleanup_robot() -> None:
     global robot
-    robot = None
+    del robot
 
 
 # -----------------------------
@@ -141,243 +136,31 @@ _joint_jerk_rad = (
 )
 
 
-def _compute_tcp_velocity_at_config(
-    q: NDArray, direction: int, v_max_joint: NDArray
-) -> float | None:
-    """
-    Compute max TCP velocity in a direction while maintaining orientation.
+# Pre-computed Cartesian limits from Jacobian pseudoinverse workspace sampling.
+# Derived from _compute_tcp_velocity_at_config() over 500/200/200 random configs
+# with seeds 42/43/44, using median velocity and mean angular rates from wrist joints.
+# Values are floored to reasonable precision to avoid false precision.
+#
+# Linear units: mm/s, mm/s^2, mm/s^3
+# Angular units: deg/s, deg/s^2, deg/s^3
+_cart_linear_velocity_max: float = 200
+_cart_angular_velocity_max: float = 280
+_cart_linear_acc_max: float = 550
+_cart_angular_acc_max: float = 835
+_cart_linear_jerk_max: float = 5500
+_cart_angular_jerk_max: float = 8350
 
-    Uses Jacobian pseudoinverse to find joint velocities that achieve pure
-    linear TCP motion (no rotation). This models real Cartesian motion where
-    wrist joints must compensate to maintain tool orientation.
-
-    Args:
-        q: Joint configuration in radians (6,)
-        direction: 0=X, 1=Y, 2=Z
-        v_max_joint: Joint velocity limits in rad/s (6,)
-
-    Returns:
-        Max TCP velocity in m/s, or None if near singularity
-    """
-    try:
-        assert robot is not None
-        J = robot.jacob0(q)
-        if np.linalg.cond(J) > 1e6:
-            return None  # Near singularity
-
-        # Desired TCP velocity: 1 m/s in direction, zero angular velocity
-        desired = np.zeros(6)
-        desired[direction] = 1.0
-
-        # Pseudoinverse gives minimum-norm joint velocities
-        J_pinv = np.linalg.pinv(J)
-        q_dot = J_pinv @ desired
-
-        # Verify orientation is maintained (angular velocity near zero)
-        omega = J[3:, :] @ q_dot
-        if np.linalg.norm(omega) > 0.01:
-            return None  # Can't maintain orientation
-
-        # Find limiting joint and scale factor
-        q_dot_abs = np.abs(q_dot) + 1e-10
-        scale_factors = v_max_joint / q_dot_abs
-        max_scale = np.min(scale_factors)
-
-        return max_scale  # m/s
-    except Exception:
-        return None
-
-
-def _compute_jacobian_velocity_bound() -> tuple[float, float]:
-    """
-    Compute Cartesian velocity bound using Jacobian pseudoinverse sampling.
-
-    Samples the workspace and computes achievable TCP velocity while maintaining
-    orientation (zero angular velocity). This is more accurate than column-norm
-    methods because it accounts for joint coupling required for Cartesian motion.
-
-    Method:
-        1. Sample random configurations within joint limits
-        2. For each config, compute max TCP velocity in X, Y, Z directions
-           using J_pinv @ [v, 0, 0, 0, 0, 0] to find required joint velocities
-        3. Scale by limiting joint to find max achievable velocity
-        4. Return median across workspace (conservative but realistic)
-
-    Returns:
-        (v_linear_max, ω_angular_max) in (m/s, rad/s)
-    """
-    np.random.seed(42)  # Reproducible results
-    n_samples = 500
-
-    velocities = []
-
-    for _ in range(n_samples):
-        # Random config within joint limits
-        q = np.array(
-            [
-                np.random.uniform(
-                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
-                )
-                for j in range(6)
-            ]
-        )
-
-        # Test X, Y, Z directions
-        for direction in range(3):
-            v = _compute_tcp_velocity_at_config(q, direction, _joint_speed_rad)
-            if v is not None and v > 0.001:  # Filter near-singular configs
-                velocities.append(v)
-
-    if not velocities:
-        # Fallback to conservative estimate
-        return 0.1, 1.0
-
-    # Use median for conservative but realistic estimate
-    median_vel = float(np.median(velocities))
-
-    # Angular velocity: estimate from wrist joint speeds
-    # (less critical, use simple estimate)
-    angular_vel = float(np.mean(_joint_speed_rad[3:6]))
-
-    return median_vel, angular_vel
-
-
-def _compute_jacobian_accel_bound() -> tuple[float, float]:
-    """
-    Compute Cartesian acceleration bound using same approach as velocity.
-
-    Returns:
-        (a_linear_max, a_angular_max) in (m/s², rad/s²)
-    """
-    np.random.seed(43)  # Different seed for variety
-    n_samples = 200
-
-    accelerations = []
-
-    for _ in range(n_samples):
-        q = np.array(
-            [
-                np.random.uniform(
-                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
-                )
-                for j in range(6)
-            ]
-        )
-
-        for direction in range(3):
-            a = _compute_tcp_velocity_at_config(q, direction, _joint_acc_rad)
-            if a is not None and a > 0.001:
-                accelerations.append(a)
-
-    if not accelerations:
-        linear_acc = 1.0  # Fallback
-    else:
-        linear_acc = float(np.median(accelerations))
-
-    # Angular acceleration: estimate from wrist joint accelerations
-    angular_acc = float(np.mean(_joint_acc_rad[3:6]))
-
-    return linear_acc, angular_acc
-
-
-def _compute_jacobian_jerk_bound() -> tuple[float, float]:
-    """
-    Compute Cartesian jerk bound using same approach as velocity/acceleration.
-
-    Returns:
-        (j_linear_max, j_angular_max) in (m/s³, rad/s³)
-    """
-    np.random.seed(44)  # Different seed
-    n_samples = 200
-
-    jerks = []
-
-    for _ in range(n_samples):
-        q = np.array(
-            [
-                np.random.uniform(
-                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
-                )
-                for j in range(6)
-            ]
-        )
-
-        for direction in range(3):
-            j = _compute_tcp_velocity_at_config(q, direction, _joint_jerk_rad)
-            if j is not None and j > 0.001:
-                jerks.append(j)
-
-    if not jerks:
-        linear_jerk = 10.0  # Fallback
-    else:
-        linear_jerk = float(np.median(jerks))
-
-    # Angular jerk: estimate from wrist joint jerks
-    angular_jerk = float(np.mean(_joint_jerk_rad[3:6]))
-
-    return linear_jerk, angular_jerk
-
-
-# Cartesian limits derived from Jacobian analysis
-_cart_linear_velocity_max: float = 0.0  # Set after robot init
-_cart_angular_velocity_max: float = 0.0
-_cart_linear_acc_max: float = 0.0
-_cart_angular_acc_max: float = 0.0
-_cart_linear_jerk_max: float = 0.0
-_cart_angular_jerk_max: float = 0.0
-
-# Min values as fraction of max
-_cart_linear_velocity_min: float = 0.0
-_cart_angular_velocity_min: float = 0.0
-_cart_linear_acc_min: float = 0.0
-_cart_angular_acc_min: float = 0.0
-_cart_linear_jerk_min: float = 0.0
-_cart_angular_jerk_min: float = 0.0
+# Min values as 1% of max
+_cart_linear_velocity_min: float = _cart_linear_velocity_max * 0.01
+_cart_angular_velocity_min: float = _cart_angular_velocity_max * 0.01
+_cart_linear_acc_min: float = _cart_linear_acc_max * 0.01
+_cart_angular_acc_min: float = _cart_angular_acc_max * 0.01
+_cart_linear_jerk_min: float = _cart_linear_jerk_max * 0.01
+_cart_angular_jerk_min: float = _cart_angular_jerk_max * 0.01
 
 # Jog limits (80% of max for safety margin)
-_cart_linear_velocity_max_JOG: float = 0.0
-_cart_linear_velocity_min_JOG: float = 0.0
-
-
-def _init_cartesian_limits() -> None:
-    """Initialize Cartesian limits after robot model is loaded.
-
-    Linear velocity/acceleration/jerk are stored in mm/s, mm/s², mm/s³.
-    Angular velocity/acceleration/jerk are stored in deg/s, deg/s², deg/s³.
-    """
-    global _cart_linear_velocity_max, _cart_angular_velocity_max
-    global _cart_linear_velocity_min, _cart_angular_velocity_min
-    global _cart_linear_acc_max, _cart_linear_acc_min
-    global _cart_angular_acc_max, _cart_angular_acc_min
-    global _cart_linear_jerk_max, _cart_linear_jerk_min
-    global _cart_angular_jerk_max, _cart_angular_jerk_min
-    global _cart_linear_velocity_max_JOG, _cart_linear_velocity_min_JOG
-
-    linear_vel_m_s, angular_vel_rad_s = _compute_jacobian_velocity_bound()
-    linear_acc_m_s2, angular_acc_rad_s2 = _compute_jacobian_accel_bound()
-    linear_jerk_m_s3, angular_jerk_rad_s3 = _compute_jacobian_jerk_bound()
-
-    # Convert linear units from m/s to mm/s (and similar for accel/jerk)
-    _cart_linear_velocity_max = linear_vel_m_s * 1000.0
-    _cart_linear_acc_max = linear_acc_m_s2 * 1000.0
-    _cart_linear_jerk_max = linear_jerk_m_s3 * 1000.0
-
-    # Convert angular units from rad/s to deg/s (and similar for accel/jerk)
-    _cart_angular_velocity_max = np.degrees(angular_vel_rad_s)
-    _cart_angular_acc_max = np.degrees(angular_acc_rad_s2)
-    _cart_angular_jerk_max = np.degrees(angular_jerk_rad_s3)
-
-    # Min values as 1% of max
-    _cart_linear_velocity_min = _cart_linear_velocity_max * 0.01
-    _cart_angular_velocity_min = _cart_angular_velocity_max * 0.01
-    _cart_linear_acc_min = _cart_linear_acc_max * 0.01
-    _cart_angular_acc_min = _cart_angular_acc_max * 0.01
-    _cart_linear_jerk_min = _cart_linear_jerk_max * 0.01
-    _cart_angular_jerk_min = _cart_angular_jerk_max * 0.01
-
-    # Jog limits (80% of max for additional safety during jogging)
-    _cart_linear_velocity_max_JOG = _cart_linear_velocity_max * 0.8
-    _cart_linear_velocity_min_JOG = _cart_linear_velocity_min
+_cart_linear_velocity_max_JOG: float = _cart_linear_velocity_max * 0.8
+_cart_linear_velocity_min_JOG: float = _cart_linear_velocity_min
 
 
 def log_derived_limits() -> None:
@@ -407,9 +190,6 @@ def log_derived_limits() -> None:
 
 # Standby positions
 _standby_deg: Vec6f = np.array([90.0, -90.0, 180.0, 0.0, 0.0, 180.0], dtype=np.float64)
-
-# Initialize Cartesian limits (depends on robot model and standby positions)
-_init_cartesian_limits()
 
 
 # -----------------------------
@@ -538,11 +318,60 @@ def split_2_bitfield(var_in: int) -> list[int]:
 
 
 if __name__ == "__main__":
-    # Simple sanity prints
+    # Recalculate Cartesian limits from current joint parameters.
+    # Run: python -m parol6.PAROL6_ROBOT
+    #
+    # Uses Jacobian pseudoinverse workspace sampling to derive achievable
+    # TCP velocity/acceleration/jerk while maintaining tool orientation.
+    # Copy the printed values into the pre-computed constants above.
+
     from parol6.config import steps_to_rad
 
+    def _compute_tcp_velocity_at_config(
+        q: NDArray, direction: int, v_max_joint: NDArray
+    ) -> float | None:
+        """Max TCP velocity in one direction while maintaining orientation."""
+        try:
+            J = robot.jacob0(q)
+            if np.linalg.cond(J) > 1e6:
+                return None
+            desired = np.zeros(6)
+            desired[direction] = 1.0
+            q_dot = np.linalg.pinv(J) @ desired
+            if np.linalg.norm(J[3:, :] @ q_dot) > 0.01:
+                return None
+            return float(np.min(v_max_joint / (np.abs(q_dot) + 1e-10)))
+        except (np.linalg.LinAlgError, ValueError):
+            return None
+
+    def _sample_limit(n_samples: int, seed: int, v_max: NDArray) -> tuple[float, float]:
+        """Sample workspace and return (median_linear_m, mean_angular_rad)."""
+        rng = np.random.default_rng(seed)
+        results = []
+        for _ in range(n_samples):
+            q = np.array([rng.uniform(lo, hi) for lo, hi in _joint_limits_radian])
+            for d in range(3):
+                v = _compute_tcp_velocity_at_config(q, d, v_max)
+                if v is not None and v > 0.001:
+                    results.append(v)
+        linear = float(np.median(results)) if results else 0.1
+        angular = float(np.mean(v_max[3:6]))
+        return linear, angular
+
+    vel_lin, vel_ang = _sample_limit(500, 42, _joint_speed_rad)
+    acc_lin, acc_ang = _sample_limit(200, 43, _joint_acc_rad)
+    jerk_lin, jerk_ang = _sample_limit(200, 44, _joint_jerk_rad)
+
+    print("=== Recalculated Cartesian Limits ===")
+    print(f"_cart_linear_velocity_max: float = {vel_lin * 1000:.0f}")
+    print(f"_cart_angular_velocity_max: float = {np.degrees(vel_ang):.0f}")
+    print(f"_cart_linear_acc_max: float = {acc_lin * 1000:.0f}")
+    print(f"_cart_angular_acc_max: float = {np.degrees(acc_ang):.0f}")
+    print(f"_cart_linear_jerk_max: float = {jerk_lin * 1000:.0f}")
+    print(f"_cart_angular_jerk_max: float = {np.degrees(jerk_ang):.0f}")
+
+    print("\n=== Joint Info ===")
     j_step_rad = np.zeros(6, dtype=np.float64)
     steps_to_rad(np.array([1, 1, 1, 1, 1, 1], dtype=np.int32), j_step_rad)
     print("Smallest step (deg):", np.rad2deg(j_step_rad))
     print("Standby deg:", joint.standby_deg)
-    print("Standby rad:", np.deg2rad(joint.standby_deg))

@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from parol6.utils.se3_utils import se3_from_trans, se3_mul, se3_rx
+from pinokin import se3_from_trans, se3_mul, se3_rx
 
 
 def _make_pneumatic_transform() -> np.ndarray:

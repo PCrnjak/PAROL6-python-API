@@ -13,11 +13,9 @@ class TestResetCommandParsing:
 
     def test_init(self):
         """RESET takes no parameters."""
-        cmd = ResetCommand()
-        # Assign the empty params struct
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
 
-        assert cmd.is_valid is True
+        assert not cmd.is_finished
         assert cmd.p is not None
 
     def test_struct_has_no_params(self):
@@ -38,8 +36,7 @@ class TestResetCommandExecution:
         )
         state.Speed_in = np.array([10, 20, 30, 40, 50, 60], dtype=np.int32)
 
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)  # Reset executes in tick
 
         assert np.all(state.Position_in == 0)
@@ -52,8 +49,7 @@ class TestResetCommandExecution:
         state.soft_error = True
         state.disabled_reason = "some error"
 
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)
 
         assert state.e_stop_active is False
@@ -65,8 +61,7 @@ class TestResetCommandExecution:
         state = ControllerState()
         state._current_tool = "GRIPPER"
 
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)
 
         assert state._current_tool == "NONE"
@@ -78,8 +73,7 @@ class TestResetCommandExecution:
         state.command_queue.append("cmd2")
         state.incoming_command_buffer.append(("msg", ("addr", 123)))
 
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)
 
         assert len(state.command_queue) == 0
@@ -93,8 +87,7 @@ class TestResetCommandExecution:
         state.start_time = 12345.0
         state.ser = "mock_serial"
 
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)
 
         assert state.ip == "192.168.1.100"
@@ -105,8 +98,7 @@ class TestResetCommandExecution:
     def test_reset_finishes_immediately(self):
         """Reset command should complete in single tick."""
         state = ControllerState()
-        cmd = ResetCommand()
-        cmd.assign_params(ResetCmd())
+        cmd = ResetCommand(ResetCmd())
         cmd.tick(state)
 
         assert cmd.is_finished is True
