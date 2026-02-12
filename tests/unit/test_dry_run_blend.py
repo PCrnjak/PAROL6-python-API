@@ -46,21 +46,21 @@ class TestDryRunBlend:
         assert result.error is None
 
     def test_flush_returns_buffered(self, client):
-        """Explicit flush() after buffered commands should return result."""
+        """Explicit flush() after buffered commands should return results list."""
         r1 = client.moveJ(angles=W1, speed=0.5, r=10)
         assert r1 is None
 
         r2 = client.moveJ(angles=W2, speed=0.5, r=10)
         assert r2 is None
 
-        result = client.flush()
-        assert result is not None, "flush() should return buffered composite"
-        assert result.tcp_poses.shape[0] > 0
-        assert result.error is None
+        results = client.flush()
+        assert len(results) > 0, "flush() should return buffered results"
+        assert results[0].tcp_poses.shape[0] > 0
+        assert results[0].error is None
 
-    def test_flush_empty_returns_none(self, client):
-        """flush() with no buffered commands should return None."""
-        assert client.flush() is None
+    def test_flush_empty_returns_empty_list(self, client):
+        """flush() with no buffered commands should return empty list."""
+        assert client.flush() == []
 
     def test_blended_trajectory_is_longer(self, client):
         """Composite blended trajectory should have longer duration than a single move."""

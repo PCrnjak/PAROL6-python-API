@@ -67,6 +67,7 @@ from ..protocol.wire import (
     ToolResultStruct,
     decode_message,
     encode_command,
+    encode_command_into,
 )
 from ..protocol.types import (
     Axis,
@@ -227,6 +228,9 @@ class AsyncRobotClient:
         # Pre-allocated buffers for get_pose_rpy
         self._R_buf = np.zeros((3, 3), dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
+
+        # Pre-allocated TX buffer for fire-and-forget command encoding
+        self._tx_buf = bytearray(256)
 
         # Persistent asyncio datagram endpoint
         self._transport: asyncio.DatagramTransport | None = None
@@ -468,13 +472,10 @@ class AsyncRobotClient:
         if cmd_type is None:
             return False
 
-        # Encode the struct
-        data = encode_command(cmd)
-
-        # System commands: wait for OK/ERROR
+        # System commands: need stable bytes across await
         if cmd_type in SYSTEM_CMD_TYPES:
             try:
-                await self._request_ok_raw(data, self.timeout)
+                await self._request_ok_raw(encode_command(cmd), self.timeout)
                 return True
             except RuntimeError:
                 # Server rejected command
@@ -484,17 +485,19 @@ class AsyncRobotClient:
         if cmd_type not in QUERY_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
                 try:
-                    ok = await self._request_ok_raw(data, self.timeout)
+                    ok = await self._request_ok_raw(encode_command(cmd), self.timeout)
                     self._last_command_index = ok.index
                     return ok.index if ok.index is not None else 0
                 except RuntimeError:
                     return -1
-            # Fire-and-forget
-            self._transport.sendto(data)
+            # Fire-and-forget: reuse pre-allocated buffer (sendto copies)
+            encode_command_into(cmd, self._tx_buf)
+            self._transport.sendto(self._tx_buf)
             return True
 
-        # Queries: fire-and-forget here (query methods use _request())
-        self._transport.sendto(data)
+        # Queries via _send: fire-and-forget
+        encode_command_into(cmd, self._tx_buf)
+        self._transport.sendto(self._tx_buf)
         return True
 
     async def _request(self, cmd: msgspec.Struct) -> ResponseMsg | None:
@@ -573,6 +576,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Motion
+
+        Example:
+            rbt.home()
+
         Args:
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete() (timeout, settle_window, etc.)
@@ -586,6 +594,11 @@ class AsyncRobotClient:
     async def resume(self) -> int:
         """Re-enable the robot controller, allowing motion commands.
 
+        Category: Control
+
+        Example:
+            rbt.resume()
+
         Returns:
             True if the command was acknowledged successfully.
         """
@@ -593,6 +606,11 @@ class AsyncRobotClient:
 
     async def halt(self) -> int:
         """Halt the robot — stop all motion and disable.
+
+        Category: Control
+
+        Example:
+            rbt.halt()
 
         Returns:
             True if the command was acknowledged successfully.
@@ -605,6 +623,11 @@ class AsyncRobotClient:
         The controller will use simulated robot dynamics instead of
         communicating with real hardware over serial.
 
+        Category: Control
+
+        Example:
+            rbt.simulator_on()
+
         Returns:
             True if the command was acknowledged successfully.
         """
@@ -613,6 +636,11 @@ class AsyncRobotClient:
     async def simulator_off(self) -> int:
         """Disable simulator mode, switching to real hardware communication.
 
+        Category: Control
+
+        Example:
+            rbt.simulator_off()
+
         Returns:
             True if the command was acknowledged successfully.
         """
@@ -620,6 +648,11 @@ class AsyncRobotClient:
 
     async def set_serial_port(self, port_str: str) -> int:
         """Set the serial port for robot hardware communication.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_serial_port("/dev/ttyUSB0")
 
         Args:
             port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
@@ -639,12 +672,23 @@ class AsyncRobotClient:
 
         Instantly resets positions to home, clears queues, resets tool/errors.
         Preserves serial connection. Useful for fast test isolation.
+
+        Category: Control
+
+        Example:
+            rbt.reset()
         """
         return await self._send(ResetCmd())
 
     # --------------- Status / Queries ---------------
     async def ping(self) -> PingResult | None:
-        """Return parsed ping result with serial_connected status."""
+        """Return parsed ping result with serial_connected status.
+
+        Category: Query
+
+        Example:
+            rbt.ping()
+        """
         resp = await self._request(PingCmd())
         if resp is None:
             return None
@@ -652,53 +696,111 @@ class AsyncRobotClient:
         return PingResult(serial_connected=bool(serial), raw=str(resp))
 
     async def get_angles(self) -> list[float] | None:
-        """Get current joint angles in degrees [J1, J2, J3, J4, J5, J6]."""
+        """Get current joint angles in degrees [J1, J2, J3, J4, J5, J6].
+
+        Category: Query
+
+        Example:
+            angles = rbt.get_angles()
+        """
         resp = await self._request(GetAnglesCmd())
         return cast(list[float], resp.value) if resp else None
 
     async def get_io(self) -> list[int] | None:
-        """Get digital I/O status [in1, in2, out1, out2, estop]."""
+        """Get digital I/O status [in1, in2, out1, out2, estop].
+
+        Category: Query
+
+        Example:
+            io = rbt.get_io()
+        """
         resp = await self._request(GetIOCmd())
         return cast(list[int], resp.value) if resp else None
 
     async def get_gripper_status(self) -> list[int] | None:
-        """Get electric gripper status [id, pos, speed, current, status, obj_detected]."""
+        """Get electric gripper status [id, pos, speed, current, status, obj_detected].
+
+        Category: Query
+
+        Example:
+            gs = rbt.get_gripper_status()
+        """
         resp = await self._request(GetGripperCmd())
         return cast(list[int], resp.value) if resp else None
 
     async def get_speeds(self) -> list[float] | None:
-        """Get current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6]."""
+        """Get current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
+
+        Category: Query
+
+        Example:
+            speeds = rbt.get_speeds()
+        """
         resp = await self._request(GetSpeedsCmd())
         return cast(list[float], resp.value) if resp else None
 
     async def get_pose(
         self, frame: Literal["WRF", "TRF"] = "WRF"
     ) -> list[float] | None:
-        """Get 16-element transformation matrix (flattened) with translation in mm."""
+        """Get 16-element transformation matrix (flattened) with translation in mm.
+
+        Category: Query
+
+        Example:
+            pose = rbt.get_pose()
+        """
         resp = await self._request(GetPoseCmd(frame=frame))
         return cast(list[float], resp.value) if resp else None
 
     async def get_gripper(self) -> list[int] | None:
-        """Alias for get_gripper_status."""
+        """Alias for get_gripper_status.
+
+        Category: Query
+
+        Example:
+            gripper = rbt.get_gripper()
+        """
         return await self.get_gripper_status()
 
     async def get_status(self) -> StatusResultStruct | None:
-        """Get aggregate status (pose, angles, speeds, io, gripper)."""
+        """Get aggregate status (pose, angles, speeds, io, gripper).
+
+        Category: Query
+
+        Example:
+            status = rbt.get_status()
+        """
         resp = await self._request(GetStatusCmd())
         return StatusResultStruct(*resp.value) if resp else None
 
     async def get_loop_stats(self) -> LoopStatsResultStruct | None:
-        """Fetch control-loop runtime metrics."""
+        """Fetch control-loop runtime metrics.
+
+        Category: Query
+
+        Example:
+            stats = rbt.get_loop_stats()
+        """
         resp = await self._request(GetLoopStatsCmd())
         return LoopStatsResultStruct(*resp.value) if resp else None
 
     async def reset_loop_stats(self) -> int:
-        """Reset control-loop min/max metrics and overrun count."""
+        """Reset control-loop min/max metrics and overrun count.
+
+        Category: Query
+
+        Example:
+            rbt.reset_loop_stats()
+        """
         return await self._send(ResetLoopStatsCmd())
 
     async def set_tool(self, tool_name: str) -> int:
-        """
-        Set the current end-effector tool configuration.
+        """Set the current end-effector tool configuration.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_tool("NONE")
 
         Args:
             tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
@@ -709,8 +811,12 @@ class AsyncRobotClient:
         return await self._send(SetToolCmd(tool_name=tool_name.upper()))
 
     async def set_profile(self, profile: str) -> int:
-        """
-        Set the motion profile for all moves.
+        """Set the motion profile for all moves.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_profile("TOPPRA")
 
         Args:
             profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
@@ -722,34 +828,62 @@ class AsyncRobotClient:
         return await self._send(SetProfileCmd(profile=profile.upper()))
 
     async def get_profile(self) -> str | None:
-        """Get the current motion profile."""
+        """Get the current motion profile.
+
+        Category: Query
+
+        Example:
+            profile = rbt.get_profile()
+        """
         resp = await self._request(GetProfileCmd())
         return str(resp.value).upper() if resp and resp.value else None
 
     async def get_tool(self) -> ToolResultStruct | None:
-        """Get the current tool and available tools."""
+        """Get the current tool and available tools.
+
+        Category: Query
+
+        Example:
+            tool = rbt.get_tool()
+        """
         resp = await self._request(GetToolCmd())
         if resp and isinstance(resp.value, (list, tuple)) and len(resp.value) >= 2:
             return ToolResultStruct(*resp.value)
         return None
 
     async def get_current_action(self) -> CurrentActionResultStruct | None:
-        """Get the current executing action (current, state, next)."""
+        """Get the current executing action (current, state, next).
+
+        Category: Query
+
+        Example:
+            action = rbt.get_current_action()
+        """
         resp = await self._request(GetCurrentActionCmd())
         if resp and isinstance(resp.value, (list, tuple)) and len(resp.value) >= 3:
             return CurrentActionResultStruct(*resp.value)
         return None
 
     async def get_queue(self) -> list[str] | None:
-        """Get the list of queued non-streamable commands."""
+        """Get the list of queued non-streamable commands.
+
+        Category: Query
+
+        Example:
+            queue = rbt.get_queue()
+        """
         resp = await self._request(GetQueueCmd())
         return cast(list, resp.value) if resp else None
 
     # --------------- Helper methods ---------------
 
     async def get_pose_rpy(self) -> list[float] | None:
-        """
-        Get robot pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] using RPY order='xyz'.
+        """Get robot pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] using RPY order='xyz'.
+
+        Category: Query
+
+        Example:
+            rpy = rbt.get_pose_rpy()
         """
         pose_matrix = await self.get_pose()
         if not pose_matrix or len(pose_matrix) != 16:
@@ -774,20 +908,36 @@ class AsyncRobotClient:
             return None
 
     async def get_pose_xyz(self) -> list[float] | None:
-        """Get robot position as [x, y, z] in mm."""
+        """Get robot position as [x, y, z] in mm.
+
+        Category: Query
+
+        Example:
+            xyz = rbt.get_pose_xyz()
+        """
         pose_rpy = await self.get_pose_rpy()
         return pose_rpy[:3] if pose_rpy else None
 
     async def is_estop_pressed(self) -> bool:
-        """Check if E-stop is pressed. Returns True if pressed."""
+        """Check if E-stop is pressed. Returns True if pressed.
+
+        Category: Query
+
+        Example:
+            pressed = rbt.is_estop_pressed()
+        """
         io_status = await self.get_io()
         if io_status and len(io_status) >= 5:
             return io_status[4] == 0  # E-stop at index 4, 0 means pressed
         return False
 
     async def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
-        """
-        Check if robot has stopped moving.
+        """Check if robot has stopped moving.
+
+        Category: Query
+
+        Example:
+            stopped = rbt.is_robot_stopped()
 
         Args:
             threshold_speed: Speed threshold in steps/sec
@@ -808,13 +958,17 @@ class AsyncRobotClient:
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
     ) -> bool:
-        """
-        Wait for robot to stop moving using multicast status broadcasts.
+        """Wait for robot to stop moving using multicast status broadcasts.
 
         This method first waits for motion to START (speeds above threshold),
         then waits for motion to COMPLETE (speeds below threshold for settle_window).
         This avoids a race condition where the method returns immediately if
         called before motion has begun.
+
+        Category: Synchronization
+
+        Example:
+            rbt.wait_motion_complete()
 
         Args:
             timeout: Maximum time to wait in seconds
@@ -993,6 +1147,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Motion
+
+        Example:
+            rbt.moveJ([90, -90, 180, 0, 0, 180], speed=0.5)
+
         Args:
             target: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target [x,y,z,rx,ry,rz] — dispatches to MOVEJ_POSE
@@ -1041,6 +1200,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Motion
+
+        Example:
+            rbt.moveL([0, 263, 242, 90, 0, 90], speed=0.5)
+
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
             frame: Reference frame ("WRF" or "TRF")
@@ -1082,6 +1246,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Motion
+
+        Example:
+            rbt.moveC(via=[0, 250, 250, 90, 0, 90], end=[0, 263, 242, 90, 0, 90], speed=0.5)
+
         Args:
             via: Via-point pose [x,y,z,rx,ry,rz]
             end: End-point pose [x,y,z,rx,ry,rz]
@@ -1121,6 +1290,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Smooth Motion
+
+        Example:
+            rbt.moveS([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
+
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
@@ -1156,6 +1330,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Smooth Motion
+
+        Example:
+            rbt.moveP([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
+
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
@@ -1181,6 +1360,11 @@ class AsyncRobotClient:
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
+        Category: Synchronization
+
+        Example:
+            rbt.checkpoint("pick_done")
+
         Args:
             label: Checkpoint label for progress tracking
         """
@@ -1189,6 +1373,11 @@ class AsyncRobotClient:
 
     async def wait_for_command(self, index: int, timeout: float = 30.0) -> bool:
         """Wait until a queued command (by index) has completed.
+
+        Category: Synchronization
+
+        Example:
+            rbt.wait_for_command(index)
 
         Args:
             index: Command index returned by a move command
@@ -1201,6 +1390,11 @@ class AsyncRobotClient:
 
     async def wait_for_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
         """Wait until a checkpoint with the given label has been reached.
+
+        Category: Synchronization
+
+        Example:
+            rbt.wait_for_checkpoint("pick_done")
 
         Args:
             label: Checkpoint label to wait for
@@ -1246,6 +1440,11 @@ class AsyncRobotClient:
     ) -> int:
         """Streaming joint position target. Fire-and-forget.
 
+        Category: Streaming
+
+        Example:
+            rbt.servoJ([90, -90, 180, 0, 0, 180])
+
         Args:
             target: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target — dispatches to SERVOJ_POSE
@@ -1264,6 +1463,11 @@ class AsyncRobotClient:
         accel: float = 1.0,
     ) -> int:
         """Streaming linear Cartesian position target. Fire-and-forget.
+
+        Category: Streaming
+
+        Example:
+            rbt.servoL([0, 263, 242, 90, 0, 90])
 
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
@@ -1312,6 +1516,11 @@ class AsyncRobotClient:
 
         Single joint:   jogJ(0, 0.5, 1.0)
         Multi joint:    jogJ(joints=[0,1], speeds=[0.5, -0.3], duration=1.0)
+
+        Category: Jog
+
+        Example:
+            rbt.jogJ(0, speed=0.5, duration=1.0)
 
         Args:
             joint: Joint index (0-5) for single-joint jog
@@ -1375,6 +1584,11 @@ class AsyncRobotClient:
         Single axis:  jogL("WRF", "X", 0.5, 1.0)
         Multi axis:   jogL("WRF", axes=["X","Y"], speeds_list=[0.5, -0.3], duration=1.0)
 
+        Category: Jog
+
+        Example:
+            rbt.jogL("WRF", "X", speed=0.5, duration=1.0)
+
         Args:
             frame: Reference frame ("WRF" or "TRF")
             axis: Axis name for single-axis jog
@@ -1402,6 +1616,11 @@ class AsyncRobotClient:
         """Set a digital I/O output bit.
 
         Returns the command index (≥ 0) on success, -1 on failure.
+
+        Category: IO
+
+        Example:
+            rbt.set_io(0, 1)
         """
         if index < 0 or index > 7:
             raise ValueError("I/O index must be 0..7")
@@ -1414,6 +1633,11 @@ class AsyncRobotClient:
         """Insert a non-blocking delay in the motion queue.
 
         Returns the command index (≥ 0) on success, -1 on failure.
+
+        Category: Synchronization
+
+        Example:
+            rbt.delay(1.0)
         """
         if seconds <= 0:
             raise ValueError("Delay must be positive")
@@ -1423,7 +1647,13 @@ class AsyncRobotClient:
     async def control_pneumatic_gripper(
         self, action: str, port: int, wait: bool = False, **wait_kwargs
     ) -> int:
-        """Control pneumatic gripper via digital outputs."""
+        """Control pneumatic gripper via digital outputs.
+
+        Category: Gripper
+
+        Example:
+            rbt.control_pneumatic_gripper("open", port=1)
+        """
         action = action.lower()
         if action not in ("open", "close"):
             raise ValueError("Invalid pneumatic action")
@@ -1444,7 +1674,13 @@ class AsyncRobotClient:
         wait: bool = False,
         **wait_kwargs,
     ) -> int:
-        """Control electric gripper."""
+        """Control electric gripper.
+
+        Category: Gripper
+
+        Example:
+            rbt.control_electric_gripper("move", position=0.5)
+        """
         action = action.lower()
         if action not in ("move", "calibrate"):
             raise ValueError("Invalid electric gripper action")

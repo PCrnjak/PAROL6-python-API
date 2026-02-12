@@ -168,6 +168,8 @@ class MotionParamsMixin:
     to avoid Pylance invariance errors on override.
     """
 
+    __slots__ = ()
+
     accel: float
 
     @property
@@ -192,6 +194,7 @@ class MoveJCmd(
     tag=int(CmdType.MOVEJ),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVEJ: joint-space move to target angles (degrees)."""
 
@@ -228,6 +231,7 @@ class MoveJPoseCmd(
     tag=int(CmdType.MOVEJ_POSE),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVEJ_POSE: joint-space move to a Cartesian pose (IK at target)."""
 
@@ -253,6 +257,7 @@ class MoveLCmd(
     tag=int(CmdType.MOVEL),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVEL: linear Cartesian move to target pose."""
 
@@ -280,6 +285,7 @@ class MoveCCmd(
     tag=int(CmdType.MOVEC),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVEC: circular arc through current → via → end."""
 
@@ -308,6 +314,7 @@ class MoveSCmd(
     tag=int(CmdType.MOVES),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVES: cubic spline through waypoints."""
 
@@ -338,6 +345,7 @@ class MovePCmd(
     tag=int(CmdType.MOVEP),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """MOVEP: process move — constant TCP speed with auto-blending at corners."""
 
@@ -365,6 +373,7 @@ class CheckpointCmd(
     tag=int(CmdType.CHECKPOINT),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """CHECKPOINT: queue marker for progress tracking."""
 
@@ -379,6 +388,7 @@ class ServoJCmd(
     tag=int(CmdType.SERVOJ),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """SERVOJ: streaming joint position target (degrees)."""
 
@@ -392,6 +402,7 @@ class ServoJPoseCmd(
     tag=int(CmdType.SERVOJ_POSE),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """SERVOJ_POSE: streaming joint position target via Cartesian pose (IK)."""
 
@@ -405,6 +416,7 @@ class ServoLCmd(
     tag=int(CmdType.SERVOL),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """SERVOL: streaming linear Cartesian position target."""
 
@@ -421,6 +433,7 @@ class JogJCmd(
     tag=int(CmdType.JOGJ),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """JOGJ: streaming joint velocity. Static 6-element signed speed fractions."""
 
@@ -441,6 +454,7 @@ class JogLCmd(
     tag=int(CmdType.JOGL),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """JOGL: streaming Cartesian velocity. Static 6-element [vx,vy,vz,wx,wy,wz]."""
 
@@ -457,32 +471,44 @@ class JogLCmd(
                 )
 
 
-class HomeCmd(msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True):
+class HomeCmd(
+    msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True, gc=False
+):
     """HOME: [CmdType.HOME]"""
 
     pass
 
 
-class ResumeCmd(msgspec.Struct, tag=int(CmdType.RESUME), array_like=True, frozen=True):
+class ResumeCmd(
+    msgspec.Struct, tag=int(CmdType.RESUME), array_like=True, frozen=True, gc=False
+):
     """RESUME: [CmdType.RESUME] — re-enable the controller."""
 
     pass
 
 
-class HaltCmd(msgspec.Struct, tag=int(CmdType.HALT), array_like=True, frozen=True):
+class HaltCmd(
+    msgspec.Struct, tag=int(CmdType.HALT), array_like=True, frozen=True, gc=False
+):
     """HALT: [CmdType.HALT] — stop all motion and disable."""
 
     pass
 
 
-class ResetCmd(msgspec.Struct, tag=int(CmdType.RESET), array_like=True, frozen=True):
+class ResetCmd(
+    msgspec.Struct, tag=int(CmdType.RESET), array_like=True, frozen=True, gc=False
+):
     """RESET: [CmdType.RESET]"""
 
     pass
 
 
 class ResetLoopStatsCmd(
-    msgspec.Struct, tag=int(CmdType.RESET_LOOP_STATS), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(CmdType.RESET_LOOP_STATS),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """RESET_LOOP_STATS: [CmdType.RESET_LOOP_STATS]
 
@@ -492,7 +518,9 @@ class ResetLoopStatsCmd(
     pass
 
 
-class SetIOCmd(msgspec.Struct, tag=int(CmdType.SET_IO), array_like=True, frozen=True):
+class SetIOCmd(
+    msgspec.Struct, tag=int(CmdType.SET_IO), array_like=True, frozen=True, gc=False
+):
     """SET_IO: [CmdType.SET_IO, port_index, value]
 
     port_index: 0-7 (8-bit I/O port)
@@ -504,7 +532,7 @@ class SetIOCmd(msgspec.Struct, tag=int(CmdType.SET_IO), array_like=True, frozen=
 
 
 class SetPortCmd(
-    msgspec.Struct, tag=int(CmdType.SET_PORT), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.SET_PORT), array_like=True, frozen=True, gc=False
 ):
     """SET_PORT: [CmdType.SET_PORT, port_str]"""
 
@@ -512,21 +540,23 @@ class SetPortCmd(
 
 
 class SimulatorCmd(
-    msgspec.Struct, tag=int(CmdType.SIMULATOR), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.SIMULATOR), array_like=True, frozen=True, gc=False
 ):
     """SIMULATOR: [CmdType.SIMULATOR, on]"""
 
     on: bool
 
 
-class DelayCmd(msgspec.Struct, tag=int(CmdType.DELAY), array_like=True, frozen=True):
+class DelayCmd(
+    msgspec.Struct, tag=int(CmdType.DELAY), array_like=True, frozen=True, gc=False
+):
     """DELAY: [CmdType.DELAY, seconds]"""
 
     seconds: Annotated[float, msgspec.Meta(gt=0.0)]
 
 
 class SetToolCmd(
-    msgspec.Struct, tag=int(CmdType.SET_TOOL), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.SET_TOOL), array_like=True, frozen=True, gc=False
 ):
     """SET_TOOL: [CmdType.SET_TOOL, tool_name]"""
 
@@ -539,7 +569,7 @@ class SetToolCmd(
 
 
 class SetProfileCmd(
-    msgspec.Struct, tag=int(CmdType.SET_PROFILE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.SET_PROFILE), array_like=True, frozen=True, gc=False
 ):
     """SET_PROFILE: [CmdType.SET_PROFILE, profile]"""
 
@@ -547,7 +577,11 @@ class SetProfileCmd(
 
 
 class PneumaticGripperCmd(
-    msgspec.Struct, tag=int(CmdType.PNEUMATICGRIPPER), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(CmdType.PNEUMATICGRIPPER),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """PNEUMATICGRIPPER: [CmdType.PNEUMATICGRIPPER, action, port]"""
 
@@ -556,7 +590,11 @@ class PneumaticGripperCmd(
 
 
 class ElectricGripperCmd(
-    msgspec.Struct, tag=int(CmdType.ELECTRICGRIPPER), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(CmdType.ELECTRICGRIPPER),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """ELECTRICGRIPPER: [CmdType.ELECTRICGRIPPER, action, position, speed, current]"""
 
@@ -567,14 +605,16 @@ class ElectricGripperCmd(
 
 
 # Query commands (no params, just the tag)
-class PingCmd(msgspec.Struct, tag=int(CmdType.PING), array_like=True, frozen=True):
+class PingCmd(
+    msgspec.Struct, tag=int(CmdType.PING), array_like=True, frozen=True, gc=False
+):
     """PING: [CmdType.PING]"""
 
     pass
 
 
 class GetStatusCmd(
-    msgspec.Struct, tag=int(CmdType.GET_STATUS), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_STATUS), array_like=True, frozen=True, gc=False
 ):
     """GET_STATUS: [CmdType.GET_STATUS]"""
 
@@ -582,7 +622,7 @@ class GetStatusCmd(
 
 
 class GetAnglesCmd(
-    msgspec.Struct, tag=int(CmdType.GET_ANGLES), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_ANGLES), array_like=True, frozen=True, gc=False
 ):
     """GET_ANGLES: [CmdType.GET_ANGLES]"""
 
@@ -590,21 +630,23 @@ class GetAnglesCmd(
 
 
 class GetPoseCmd(
-    msgspec.Struct, tag=int(CmdType.GET_POSE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_POSE), array_like=True, frozen=True, gc=False
 ):
     """GET_POSE: [CmdType.GET_POSE, frame]"""
 
     frame: Annotated[str, msgspec.Meta(pattern=r"^(WRF|TRF)$")] | None = None
 
 
-class GetIOCmd(msgspec.Struct, tag=int(CmdType.GET_IO), array_like=True, frozen=True):
+class GetIOCmd(
+    msgspec.Struct, tag=int(CmdType.GET_IO), array_like=True, frozen=True, gc=False
+):
     """GET_IO: [CmdType.GET_IO]"""
 
     pass
 
 
 class GetGripperCmd(
-    msgspec.Struct, tag=int(CmdType.GET_GRIPPER), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_GRIPPER), array_like=True, frozen=True, gc=False
 ):
     """GET_GRIPPER: [CmdType.GET_GRIPPER]"""
 
@@ -612,7 +654,7 @@ class GetGripperCmd(
 
 
 class GetSpeedsCmd(
-    msgspec.Struct, tag=int(CmdType.GET_SPEEDS), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_SPEEDS), array_like=True, frozen=True, gc=False
 ):
     """GET_SPEEDS: [CmdType.GET_SPEEDS]"""
 
@@ -620,7 +662,7 @@ class GetSpeedsCmd(
 
 
 class GetToolCmd(
-    msgspec.Struct, tag=int(CmdType.GET_TOOL), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_TOOL), array_like=True, frozen=True, gc=False
 ):
     """GET_TOOL: [CmdType.GET_TOOL]"""
 
@@ -628,7 +670,7 @@ class GetToolCmd(
 
 
 class GetQueueCmd(
-    msgspec.Struct, tag=int(CmdType.GET_QUEUE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_QUEUE), array_like=True, frozen=True, gc=False
 ):
     """GET_QUEUE: [CmdType.GET_QUEUE]"""
 
@@ -636,7 +678,11 @@ class GetQueueCmd(
 
 
 class GetCurrentActionCmd(
-    msgspec.Struct, tag=int(CmdType.GET_CURRENT_ACTION), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(CmdType.GET_CURRENT_ACTION),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """GET_CURRENT_ACTION: [CmdType.GET_CURRENT_ACTION]"""
 
@@ -644,7 +690,11 @@ class GetCurrentActionCmd(
 
 
 class GetLoopStatsCmd(
-    msgspec.Struct, tag=int(CmdType.GET_LOOP_STATS), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(CmdType.GET_LOOP_STATS),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """GET_LOOP_STATS: [CmdType.GET_LOOP_STATS]"""
 
@@ -652,7 +702,7 @@ class GetLoopStatsCmd(
 
 
 class GetProfileCmd(
-    msgspec.Struct, tag=int(CmdType.GET_PROFILE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(CmdType.GET_PROFILE), array_like=True, frozen=True, gc=False
 ):
     """GET_PROFILE: [CmdType.GET_PROFILE]"""
 
@@ -740,6 +790,24 @@ def encode_command(cmd: Command) -> bytes:
     return _encoder.encode(cmd)
 
 
+def encode_command_into(cmd: Command, buf: bytearray) -> bytearray:
+    """Encode a typed command struct into a pre-allocated bytearray.
+
+    The buffer is resized to exactly fit the encoded output.
+    Reuses the same bytearray object across calls to avoid per-send
+    ``bytes`` allocations on fire-and-forget paths.
+
+    Args:
+        cmd: Typed command struct
+        buf: Pre-allocated bytearray (will be resized in-place)
+
+    Returns:
+        The same *buf* object, now containing the encoded bytes.
+    """
+    _encoder.encode_into(cmd, buf)
+    return buf
+
+
 # =============================================================================
 # Response Structs - Tagged Union for single-pass decode
 # Wire format: [MsgType.RESPONSE, QueryType.XXX, ...fields]
@@ -747,7 +815,7 @@ def encode_command(cmd: Command) -> bytes:
 
 
 class StatusResultStruct(
-    msgspec.Struct, tag=int(QueryType.STATUS), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.STATUS), array_like=True, frozen=True, gc=False
 ):
     """Aggregate robot status."""
 
@@ -759,7 +827,11 @@ class StatusResultStruct(
 
 
 class LoopStatsResultStruct(
-    msgspec.Struct, tag=int(QueryType.LOOP_STATS), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(QueryType.LOOP_STATS),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """Control loop runtime metrics."""
 
@@ -776,7 +848,7 @@ class LoopStatsResultStruct(
 
 
 class ToolResultStruct(
-    msgspec.Struct, tag=int(QueryType.TOOL), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.TOOL), array_like=True, frozen=True, gc=False
 ):
     """Tool configuration."""
 
@@ -785,7 +857,11 @@ class ToolResultStruct(
 
 
 class CurrentActionResultStruct(
-    msgspec.Struct, tag=int(QueryType.CURRENT_ACTION), array_like=True, frozen=True
+    msgspec.Struct,
+    tag=int(QueryType.CURRENT_ACTION),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
     """Current executing action."""
 
@@ -795,7 +871,7 @@ class CurrentActionResultStruct(
 
 
 class PingResultStruct(
-    msgspec.Struct, tag=int(QueryType.PING), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.PING), array_like=True, frozen=True, gc=False
 ):
     """Ping response with serial connectivity status."""
 
@@ -803,7 +879,7 @@ class PingResultStruct(
 
 
 class AnglesResultStruct(
-    msgspec.Struct, tag=int(QueryType.ANGLES), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.ANGLES), array_like=True, frozen=True, gc=False
 ):
     """Joint angles response."""
 
@@ -811,7 +887,7 @@ class AnglesResultStruct(
 
 
 class PoseResultStruct(
-    msgspec.Struct, tag=int(QueryType.POSE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.POSE), array_like=True, frozen=True, gc=False
 ):
     """Pose response."""
 
@@ -819,7 +895,7 @@ class PoseResultStruct(
 
 
 class IOResultStruct(
-    msgspec.Struct, tag=int(QueryType.IO), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.IO), array_like=True, frozen=True, gc=False
 ):
     """I/O status response."""
 
@@ -827,7 +903,7 @@ class IOResultStruct(
 
 
 class GripperResultStruct(
-    msgspec.Struct, tag=int(QueryType.GRIPPER), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.GRIPPER), array_like=True, frozen=True, gc=False
 ):
     """Gripper status response."""
 
@@ -835,7 +911,7 @@ class GripperResultStruct(
 
 
 class SpeedsResultStruct(
-    msgspec.Struct, tag=int(QueryType.SPEEDS), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.SPEEDS), array_like=True, frozen=True, gc=False
 ):
     """Speeds response."""
 
@@ -843,7 +919,7 @@ class SpeedsResultStruct(
 
 
 class ProfileResultStruct(
-    msgspec.Struct, tag=int(QueryType.PROFILE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.PROFILE), array_like=True, frozen=True, gc=False
 ):
     """Motion profile response."""
 
@@ -851,7 +927,7 @@ class ProfileResultStruct(
 
 
 class QueueResultStruct(
-    msgspec.Struct, tag=int(QueryType.QUEUE), array_like=True, frozen=True
+    msgspec.Struct, tag=int(QueryType.QUEUE), array_like=True, frozen=True, gc=False
 ):
     """Queue status response."""
 
@@ -883,6 +959,7 @@ class OkMsg(
     tag=int(MsgType.OK),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """OK response, optionally carrying a command index for queued commands."""
 
@@ -894,6 +971,7 @@ class ErrorMsg(
     tag=int(MsgType.ERROR),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """Error response with message."""
 
@@ -905,6 +983,7 @@ class ResponseMsg(
     tag=int(MsgType.RESPONSE),
     array_like=True,
     frozen=True,
+    gc=False,
 ):
     """Query response with type and value."""
 

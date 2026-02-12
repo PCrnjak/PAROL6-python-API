@@ -230,9 +230,16 @@ class DryRunRobotClient:
         """Access the simulated controller state."""
         return self._state
 
-    def flush(self) -> DryRunResult | None:
-        """Flush pending blend buffer. Call after script completion."""
-        return self._flush_blend()
+    def flush(self) -> list[DryRunResult]:
+        """Flush all pending blend commands. Call after script completion."""
+        results: list[DryRunResult] = []
+        while self._blend_buffer:
+            r = self._flush_blend()
+            if r is not None:
+                results.append(r)
+            else:
+                break
+        return results
 
     def _setup_and_snapshot(
         self,
@@ -259,13 +266,32 @@ class DryRunRobotClient:
         return result
 
     def _flush_blend(self) -> DryRunResult | None:
-        """Flush blend buffer: build composite trajectory from buffered commands."""
+        """Flush one composite trajectory from the blend buffer.
+
+        Uses the consumed count from do_setup_with_blend to keep unconsumed
+        commands in the buffer (e.g. mixed-type chains where only compatible
+        commands are blended together).
+        """
         if not self._blend_buffer:
             return None
         head = self._blend_buffer[0]
         rest = self._blend_buffer[1:]
-        self._blend_buffer.clear()
-        return self._setup_and_snapshot(head, rest if rest else None)
+        consumed = 0
+        try:
+            if rest:
+                consumed = head.do_setup_with_blend(self._state, rest)
+            else:
+                head.setup(self._state)
+        except Exception as e:
+            self._blend_buffer.clear()
+            return _error_result(str(e))
+        if len(head.trajectory_steps) == 0:
+            self._blend_buffer.clear()
+            return _error_result(head.error_message or "Empty trajectory")
+        result = self._snapshot_trajectory(head)
+        self._state.Position_in[:] = head.trajectory_steps[-1]
+        del self._blend_buffer[: 1 + consumed]
+        return result
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the real pipeline locally."""
@@ -280,11 +306,13 @@ class DryRunRobotClient:
             if isinstance(cmd, TrajectoryMoveCommandBase):
                 return self._dispatch_trajectory(cmd)
             # Non-trajectory motion (jog): flush blend buffer first
-            self._flush_blend()
+            while self._blend_buffer:
+                self._flush_blend()
             return self._simulate_jog(cmd)
 
         # System/Query: flush blend buffer first
-        self._flush_blend()
+        while self._blend_buffer:
+            self._flush_blend()
 
         if isinstance(cmd, SystemCommand):
             try:

@@ -545,7 +545,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             self.inp.target_position = [0.0] * 6
             self.active = False
 
-    def _pose_to_tangent(self, pose: np.ndarray) -> list[float]:
+    def _pose_to_tangent(self, pose: np.ndarray) -> np.ndarray:
         """
         Convert SE3 pose to 6D tangent vector relative to reference.
 
@@ -556,10 +556,11 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             pose: 4x4 SE3 matrix to convert
 
         Returns:
-            6D tangent vector [x, y, z, wx, wy, wz]
+            Pre-allocated 6D buffer (reused across calls; Ruckig copies on assignment)
         """
         if self.reference_pose is None:
-            return [0.0] * 6
+            self._tangent_buf.fill(0.0)
+            return self._tangent_buf
         # Use JIT function with pre-allocated workspace buffers (zero allocation)
         _pose_to_tangent_jit(
             self.reference_pose,
@@ -571,7 +572,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             self._R_ws,
             self._V_ws,
         )
-        return list(self._tangent_buf)
+        return self._tangent_buf
 
     def _tangent_to_pose(self, tangent: list[float]) -> np.ndarray:
         """
@@ -613,7 +614,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
             self.inp.control_interface = ControlInterface.Position
             self.inp.target_position = target_tangent
-            self.inp.target_velocity = [0.0] * 6  # Stop at target
+            self.inp.target_velocity = self._zeros  # Stop at target
 
             self._apply_limits()
             self.active = True
