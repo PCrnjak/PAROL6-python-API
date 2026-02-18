@@ -341,9 +341,15 @@ class AsyncRobotClient:
                 cfg.MCAST_PORT, cfg.STATUS_UNICAST_HOST
             )
         else:
-            self._status_sock = _create_multicast_socket(
-                cfg.MCAST_GROUP, cfg.MCAST_PORT, cfg.MCAST_IF
-            )
+            try:
+                self._status_sock = _create_multicast_socket(
+                    cfg.MCAST_GROUP, cfg.MCAST_PORT, cfg.MCAST_IF
+                )
+            except OSError:
+                logging.warning("Multicast socket failed, falling back to unicast")
+                self._status_sock = _create_unicast_socket(
+                    cfg.MCAST_PORT, cfg.STATUS_UNICAST_HOST
+                )
 
         # Create the datagram endpoint with the status protocol
         loop = asyncio.get_running_loop()
