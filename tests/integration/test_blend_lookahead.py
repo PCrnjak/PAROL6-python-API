@@ -12,16 +12,18 @@ class TestJointBlendLookahead:
     """Joint-space blending with N-command lookahead."""
 
     def test_three_moveJ_blended_reaches_final_target(self, client, server_proc):
-        """Three moveJ with r>0 should blend and reach the last target."""
+        """Three moveJ with blend zones should reach the last target."""
         targets = [
             [80, -80, 170, 5, 5, 170],
             [70, -70, 160, 10, 10, 160],
             [60, -60, 150, 15, 15, 150],
         ]
 
-        # Queue all without waiting (wait=False so they stack in the queue)
-        for t in targets:
-            assert client.moveJ(t, speed=0.5, r=30.0, wait=False) >= 0
+        # r>0 on intermediate commands creates blend zones; r=0 on the last
+        # command terminates the chain and triggers immediate planner flush.
+        for i, t in enumerate(targets):
+            r = 30.0 if i < len(targets) - 1 else 0.0
+            assert client.moveJ(t, speed=0.5, r=r, wait=False) >= 0
 
         # Wait for everything to finish
         assert client.wait_motion_complete(timeout=15.0)
@@ -77,7 +79,7 @@ class TestCartesianBlendLookahead:
     """Cartesian (moveL) blending with N-command lookahead."""
 
     def test_three_moveL_blended_reaches_final_target(self, client, server_proc):
-        """Three moveL with r>0 should blend and reach the last target."""
+        """Three moveL with blend zones should reach the last target."""
         start = client.get_pose_rpy()
         assert start is not None
 
@@ -88,8 +90,12 @@ class TestCartesianBlendLookahead:
             [start[0], start[1] + 45, start[2], start[3], start[4], start[5]],
         ]
 
-        for t in targets:
-            assert client.moveL(t, speed=0.5, r=20.0, wait=False) >= 0
+        # r>0 on intermediate commands creates blend zones; r=0 on the last
+        # command terminates the blend chain and triggers immediate flush
+        # (avoids a planner-timeout race with wait_motion_complete on slow CI).
+        for i, t in enumerate(targets):
+            r = 20.0 if i < len(targets) - 1 else 0.0
+            assert client.moveL(t, speed=0.5, r=r, wait=False) >= 0
 
         assert client.wait_motion_complete(timeout=15.0)
 
