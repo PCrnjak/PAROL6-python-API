@@ -13,6 +13,7 @@ import pkgutil
 from collections.abc import Callable
 from enum import Enum
 from importlib import import_module
+from typing import TypeVar
 
 import msgspec
 
@@ -290,9 +291,12 @@ class CommandRegistry:
 _registry = CommandRegistry()
 
 
+_CmdT = TypeVar("_CmdT", bound=CommandBase)
+
+
 def register_command(
     cmd_type: CmdType,
-) -> Callable[[type[CommandBase]], type[CommandBase]]:
+) -> Callable[[type[_CmdT]], type[_CmdT]]:
     """
     Decorator to register a command class.
 
@@ -308,7 +312,7 @@ def register_command(
         Decorator function that registers the class
     """
 
-    def decorator(cls: type[CommandBase]) -> type[CommandBase]:
+    def decorator(cls: type[_CmdT]) -> type[_CmdT]:
         # Verify it's a CommandBase subclass
         if not issubclass(cls, CommandBase):
             raise TypeError(f"Class {cls.__name__} must inherit from CommandBase")

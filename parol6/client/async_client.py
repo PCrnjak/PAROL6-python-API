@@ -17,6 +17,8 @@ import numpy as np
 
 from .. import config as cfg
 from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
+from ..utils.error_catalog import RobotError
+from ..utils.errors import MotionError
 from ..protocol.wire import (
     STRUCT_TO_CMDTYPE,
     decode_status_bin_into,
@@ -562,7 +564,7 @@ class AsyncRobotClient:
                             case OkMsg() as ok:
                                 return ok
                             case ErrorMsg(message):
-                                raise RuntimeError(f"ERROR|{message}")
+                                raise MotionError(RobotError.from_wire(message))
                     except msgspec.ValidationError:
                         pass  # Ignore non-matching datagrams
                 except (asyncio.TimeoutError, TimeoutError):
@@ -1095,6 +1097,40 @@ class AsyncRobotClient:
                 except Exception:
                     pass
         return False
+
+    async def wait_command_complete(
+        self, command_index: int, timeout: float = 10.0
+    ) -> bool:
+        """Wait until a specific command index has been completed.
+
+        Uses status broadcasts to monitor the server's completed_command_index.
+        Raises MotionError if the pipeline reports a planning/execution failure
+        at or before the awaited command index.
+
+        Args:
+            command_index: The command index to wait for (returned by motion commands).
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            True if the command completed within timeout, False otherwise.
+
+        Raises:
+            MotionError: If the pipeline errored at or before command_index.
+        """
+
+        def _done(s: StatusBuffer) -> bool:
+            if s.completed_index >= command_index:
+                return True
+            if s.error is not None and s.error.command_index <= command_index:
+                return True
+            return False
+
+        ok = await self.wait_for_status(_done, timeout=timeout)
+        if ok:
+            s = self._shared_status
+            if s.error is not None and s.error.command_index <= command_index:
+                raise MotionError(s.error)
+        return ok
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 

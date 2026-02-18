@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, gripper, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, gripper, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -26,6 +26,8 @@ from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import LIMITS
 from parol6.tools import TOOL_CONFIGS, list_tools
+from parol6.utils.error_catalog import RobotError, make_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -973,9 +975,9 @@ class ErrorMsg(
     frozen=True,
     gc=False,
 ):
-    """Error response with message."""
+    """Error response carrying a RobotError wire representation."""
 
-    message: str
+    message: list
 
 
 class ResponseMsg(
@@ -1023,9 +1025,14 @@ def decode(data: bytes) -> object:
 # Pre-packed common responses (avoid repeated packing)
 OK_PACKED = _encoder.encode(OkMsg())
 
-# Cache for common error messages (3x faster for repeated errors)
-_ERROR_CACHE: dict[str, bytes] = {
-    "Unknown command": _encoder.encode(ErrorMsg("Unknown command")),
+# Cache for common error responses (3x faster for repeated errors)
+_UNKNOWN_CMD_ERROR = make_error(ErrorCode.COMM_UNKNOWN_COMMAND)
+_QUEUE_FULL_ERROR = make_error(ErrorCode.COMM_QUEUE_FULL)
+_ERROR_CACHE: dict[int, bytes] = {
+    ErrorCode.COMM_UNKNOWN_COMMAND: _encoder.encode(
+        ErrorMsg(_UNKNOWN_CMD_ERROR.to_wire())
+    ),
+    ErrorCode.COMM_QUEUE_FULL: _encoder.encode(ErrorMsg(_QUEUE_FULL_ERROR.to_wire())),
 }
 
 
@@ -1039,15 +1046,15 @@ def pack_ok_index(index: int) -> bytes:
     return _encoder.encode(OkMsg(index=index))
 
 
-def pack_error(message: str) -> bytes:
-    """Pack an error response: [ERROR, message].
+def pack_error(error: RobotError) -> bytes:
+    """Pack an error response: [ERROR, [command_index, code, title, cause, effect, remedy]].
 
-    Common error messages are cached for performance.
+    Common errors are cached by ErrorCode for performance.
     """
-    cached = _ERROR_CACHE.get(message)
+    cached = _ERROR_CACHE.get(error.code)
     if cached is not None:
         return cached
-    return _encoder.encode(ErrorMsg(message))
+    return _encoder.encode(ErrorMsg(error.to_wire()))
 
 
 def pack_response(query_type: QueryType, value: Any) -> bytes:
@@ -1069,6 +1076,9 @@ def pack_status(
     executing_index: int = -1,
     completed_index: int = -1,
     last_checkpoint: str = "",
+    error: RobotError | None = None,
+    queued_segments: int = 0,
+    queued_duration: float = 0.0,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1091,6 +1101,9 @@ def pack_status(
             executing_index,
             completed_index,
             last_checkpoint,
+            error.to_wire() if error is not None else None,
+            queued_segments,
+            queued_duration,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1122,6 +1135,9 @@ class StatusBuffer:
     executing_index: int = -1
     completed_index: int = -1
     last_checkpoint: str = ""
+    error: RobotError | None = None
+    queued_segments: int = 0
+    queued_duration: float = 0.0
 
     @property
     def cart_en(self) -> dict[str, np.ndarray]:
@@ -1144,6 +1160,9 @@ class StatusBuffer:
             executing_index=self.executing_index,
             completed_index=self.completed_index,
             last_checkpoint=self.last_checkpoint,
+            error=self.error,
+            queued_segments=self.queued_segments,
+            queued_duration=self.queued_duration,
         )
 
 
@@ -1152,7 +1171,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
     Message format: [MsgType.STATUS, pose, angles, speeds, io, gripper,
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
-                     executing_index, completed_index, last_checkpoint]
+                     executing_index, completed_index, last_checkpoint,
+                     error, queued_segments, queued_duration]
 
     Args:
         data: Raw msgpack bytes
@@ -1165,12 +1185,11 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         msg = _decoder.decode(data)
         if (
             not isinstance(msg, (list, tuple))
-            or len(msg) < 14
+            or len(msg) < 17
             or msg[0] != MsgType.STATUS
         ):
             return False
 
-        # [type, pose, angles, speeds, io, gripper, ac, as, je, cw, ct, ei, ci, lc]
         buf.pose[:] = msg[1]
         buf.angles[:] = msg[2]
         buf.speeds[:] = msg[3]
@@ -1184,6 +1203,10 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         buf.executing_index = msg[11]
         buf.completed_index = msg[12]
         buf.last_checkpoint = msg[13]
+        raw_error = msg[14]
+        buf.error = RobotError.from_wire(raw_error) if raw_error is not None else None
+        buf.queued_segments = msg[15]
+        buf.queued_duration = msg[16]
 
         return True
     except Exception:
@@ -1239,7 +1262,9 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
 
 
 @njit(cache=True)
-def _pack_positions(out: np.ndarray, values: np.ndarray, offset: int) -> None:
+def _pack_positions(
+    out: np.ndarray | memoryview, values: np.ndarray, offset: int
+) -> None:
     for i in range(6):
         v = int(values[i]) & 0xFFFFFF
         j = offset + i * 3
@@ -1249,7 +1274,7 @@ def _pack_positions(out: np.ndarray, values: np.ndarray, offset: int) -> None:
 
 
 @njit(cache=True)
-def _unpack_positions(data: np.ndarray, out: np.ndarray) -> None:
+def _unpack_positions(data: np.ndarray | memoryview, out: np.ndarray) -> None:
     for i in range(6):
         j = i * 3
         val = (int(data[j]) << 16) | (int(data[j + 1]) << 8) | int(data[j + 2])

@@ -23,6 +23,9 @@ from .protocol.wire import (
 )
 from .protocol.types import PingResult
 from .robot import Robot
+from .utils.error_catalog import RobotError, extract_robot_error, make_error
+from .utils.error_codes import ErrorCode
+from .utils.errors import MotionError
 
 # Type aliases for backward compatibility
 CurrentActionResult = CurrentActionResultStruct
@@ -49,4 +52,10 @@ __all__ = [
     "ToolResult",
     # Other types
     "PingResult",
+    # Errors
+    "ErrorCode",
+    "RobotError",
+    "extract_robot_error",
+    "make_error",
+    "MotionError",
 ]

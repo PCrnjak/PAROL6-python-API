@@ -28,8 +28,10 @@ from parol6.protocol.wire import (
 )
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 from parol6.utils.ik import solve_ik
-from pinokin import se3_exp_ws, se3_from_rpy, se3_interp, se3_mul
+from pinokin import se3_exp_ws, se3_from_rpy, se3_interp, se3_mul, se3_rpy
 
 from .base import (
     ExecutionStatusCode,
@@ -313,7 +315,11 @@ class JogLCommand(MotionCommand[JogLCmd]):
         _smoothed_pose, smoothed_vel, _finished = cse.tick()
         self._compute_target_pose_from_velocity(state, smoothed_vel)
 
-        ik_result = solve_ik(PAROL6_ROBOT.robot, self._target_pose_buf, self._q_rad_buf)
+        ik_result = solve_ik(
+            PAROL6_ROBOT.robot,
+            self._target_pose_buf,
+            self._q_rad_buf,
+        )
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
                 now = time.monotonic()
@@ -368,14 +374,18 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
     __slots__ = (
         "initial_pose",
         "target_pose",
+        "cartesian_diagnostic",
         "_interp_buf",
+        "_cart_poses_buf",
     )
 
     def __init__(self, p: MoveLCmd):
         super().__init__(p)
         self.initial_pose: np.ndarray | None = None
         self.target_pose: np.ndarray | None = None
+        self.cartesian_diagnostic: dict | None = None
         self._interp_buf = np.zeros((4, 4), dtype=np.float64)
+        self._cart_poses_buf = np.empty((PATH_SAMPLES, 4, 4), dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Set up the move - compute target pose and pre-compute trajectory."""
@@ -385,17 +395,47 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
 
     def _precompute_trajectory(self, state: "ControllerState") -> None:
         """Pre-compute joint trajectory that follows straight-line Cartesian path."""
+        from parol6.utils.errors import IKError
+
         assert self.initial_pose is not None and self.target_pose is not None
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
         current_rad = self._q_rad_buf
 
-        cart_poses = np.empty((PATH_SAMPLES, 4, 4), dtype=np.float64)
+        cart_poses = self._cart_poses_buf
         for i in range(PATH_SAMPLES):
             s = i / (PATH_SAMPLES - 1)
             se3_interp(self.initial_pose, self.target_pose, s, cart_poses[i])
 
-        joint_path = JointPath.from_poses(cart_poses, current_rad, quiet_logging=True)
+        stop_on_failure = state.stop_on_failure
+        joint_path = JointPath.from_poses(
+            cart_poses,
+            current_rad,
+            stop_on_failure=stop_on_failure,
+        )
+
+        if joint_path.is_partial:
+            ik_valid = joint_path.valid
+            assert ik_valid is not None
+            # Extract TCP poses (x,y,z,rx,ry,rz) in meters+radians from SE3
+            n = len(cart_poses)
+            tcp_poses = np.empty((n, 6), dtype=np.float64)
+            _rpy_buf = np.empty(3, dtype=np.float64)
+            for i in range(n):
+                tcp_poses[i, :3] = cart_poses[i][:3, 3]
+                se3_rpy(cart_poses[i], _rpy_buf)
+                tcp_poses[i, 3:] = _rpy_buf
+            self.cartesian_diagnostic = {
+                "tcp_poses": tcp_poses,
+                "ik_valid": ik_valid,
+            }
+            raise IKError(
+                make_error(
+                    ErrorCode.IK_PARTIAL_PATH,
+                    valid=str(int(ik_valid.sum())),
+                    total=str(len(ik_valid)),
+                )
+            )
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -515,12 +555,18 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
         try:
-            joint_path = JointPath.from_poses(
-                composite_poses, self._q_rad_buf, quiet_logging=True
-            )
+            joint_path = JointPath.from_poses(composite_poses, self._q_rad_buf)
         except Exception:
             self.log_warning(
                 "Blend IK failed for %d-segment Cartesian path, falling back",
+                len(waypoints) - 1,
+            )
+            self.do_setup(state)
+            return 0
+
+        if joint_path.is_partial:
+            self.log_warning(
+                "Blend IK partial for %d-segment Cartesian path, falling back",
                 len(waypoints) - 1,
             )
             self.do_setup(state)

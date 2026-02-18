@@ -17,7 +17,6 @@ import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import (
     INTERVAL_S,
     LIMITS,
-    _rad_to_steps_jit,
     rad_to_steps,
     steps_to_rad,
 )
@@ -31,56 +30,28 @@ from .base import ExecutionStatusCode, MotionCommand
 
 logger = logging.getLogger(__name__)
 
-# Wrist-flip velocity limiting constants (module globals → numba compile-time constants)
+# Velocity ratio uses hardware limits (jog limits only apply to jogJ/jogL)
 _JOINT_MAX_STEP_INV = 1.0 / (
-    np.array(LIMITS.joint.jog.velocity, dtype=np.float64) * INTERVAL_S
+    np.array(LIMITS.joint.hard.velocity, dtype=np.float64) * INTERVAL_S
 )
-_RAD_STEP_INV = 1.0 / PAROL6_ROBOT.radian_per_step_constant
-_JOINT_RATIO = np.ascontiguousarray(PAROL6_ROBOT.joint.ratio, dtype=np.float64)
-
 # Rate-limiting for IK failure warnings
 _IK_WARN_INTERVAL: float = 1.0
 _last_servo_ik_warn: float = 0.0
 
 
 @njit(cache=True)
-def _vel_scale_and_convert_jit(
+def _max_vel_ratio_jit(
     target_q: np.ndarray,
     current_q: np.ndarray,
-    scratch: np.ndarray,
-    out_steps: np.ndarray,
-    flip_target_q: np.ndarray,
-) -> bool:
-    """Velocity-limit joint step and convert to motor steps. Zero-allocation.
-
-    If any joint exceeds its per-tick jog velocity limit, uniformly scales
-    so the worst joint is exactly at its limit, and copies target_q into
-    flip_target_q. Converts the result to motor steps via _rad_to_steps_jit.
-
-    Always writes final motor steps into out_steps.
-    Returns True if scaling was applied (flip detected), False otherwise.
-    """
-    n = target_q.shape[0]
+) -> float:
+    """Max per-tick velocity ratio across all joints. >1.0 means limit exceeded."""
     max_ratio = 0.0
-
+    n = target_q.shape[0]
     for i in range(n):
-        d = target_q[i] - current_q[i]
-        scratch[i] = d
-        r = abs(d) * _JOINT_MAX_STEP_INV[i]
+        r = abs(target_q[i] - current_q[i]) * _JOINT_MAX_STEP_INV[i]
         if r > max_ratio:
             max_ratio = r
-
-    if max_ratio > 1.0:
-        inv = 1.0 / max_ratio
-        for i in range(n):
-            scratch[i] = current_q[i] + scratch[i] * inv
-            flip_target_q[i] = target_q[i]
-    else:
-        for i in range(n):
-            scratch[i] = target_q[i]
-
-    _rad_to_steps_jit(scratch, out_steps, scratch, _RAD_STEP_INV, _JOINT_RATIO)
-    return max_ratio > 1.0
+    return max_ratio
 
 
 @register_command(CmdType.SERVOJ)
@@ -214,9 +185,10 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
 class ServoLCommand(MotionCommand[ServoLCmd]):
     """Streaming Cartesian position target.
 
-    Uses CartesianStreamingExecutor for smooth Ruckig-interpolated motion
-    along a straight-line Cartesian path. Each tick: CSE smoothing, IK solve,
-    wrist-flip velocity limiting.
+    CSE drives the Cartesian path (with its own internal Ruckig for smooth
+    TCP motion).  IK converts each smoothed pose to joint space.  If any
+    joint's per-tick delta exceeds its hardware velocity limit, all deltas
+    are scaled proportionally and CSE speed is reduced by the same ratio.
     """
 
     PARAMS_TYPE = ServoLCmd
@@ -226,10 +198,10 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         "_initialized",
         "_ik_stopping",
         "_target_se3",
-        # Wrist-flip handling buffers
-        "_flip_target_q",
-        "_flipping",
-        "_scratch_buf",
+        "_pos_rad_buf",
+        "_q_commanded",
+        "_q_ik_seed",
+        "_dq_buf",
     )
 
     def __init__(self, p: ServoLCmd):
@@ -237,9 +209,10 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         self._initialized = False
         self._ik_stopping = False
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
-        self._flip_target_q = np.zeros(6, dtype=np.float64)
-        self._flipping = False
-        self._scratch_buf = np.zeros(6, dtype=np.float64)
+        self._pos_rad_buf = np.zeros(6, dtype=np.float64)
+        self._q_commanded = np.zeros(6, dtype=np.float64)
+        self._q_ik_seed = np.zeros(6, dtype=np.float64)
+        self._dq_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
         pose = self.p.pose
@@ -258,69 +231,74 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         cse = state.cartesian_streaming_executor
 
-        steps_to_rad(state.Position_in, self._q_rad_buf)
-
-        # Initialize on first tick or if executor not active
         if not self._initialized or not cse.active:
+            steps_to_rad(state.Position_in, self._q_rad_buf)
             cse.sync_pose(get_fkine_se3(state))
             cse.set_limits(self.p.speed, self.p.accel)
+            self._q_commanded[:] = self._q_rad_buf
+            self._q_ik_seed[:] = self._q_rad_buf
             self._initialized = True
-            self._ik_stopping = False
-            self._flipping = False
 
+        # CSE drives Cartesian path
         cse.set_pose_target(self._target_se3)
         smoothed_pose, vel, finished = cse.tick()
 
-        # Solve IK for the smoothed Cartesian pose
-        ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_rad_buf)
-        if not ik_result.success or ik_result.q is None:
-            return self._handle_ik_failure(state, cse, vel, smoothed_pose)
-
-        # IK succeeded — if we were stopping, recover
-        if self._ik_stopping:
-            logger.info("[SERVOL] IK recovered — resuming motion")
-            cse.sync_pose(get_fkine_se3(state))
-            cse.set_pose_target(self._target_se3)
-            self._ik_stopping = False
-
-        # Velocity-limit and convert to steps (wrist-flip safe)
-        self._flipping = _vel_scale_and_convert_jit(
-            ik_result.q,
-            self._q_rad_buf,
-            self._scratch_buf,
-            self._steps_buf,
-            self._flip_target_q,
+        # Solve IK seeded from previous IK result (branch continuity)
+        ik_result = solve_ik(
+            PAROL6_ROBOT.robot,
+            smoothed_pose,
+            self._q_ik_seed,
         )
+        if ik_result.success and ik_result.q is not None:
+            # IK recovered after failure — re-sync from encoder
+            if self._ik_stopping:
+                logger.info("[SERVOL] IK recovered — resuming")
+                steps_to_rad(state.Position_in, self._q_rad_buf)
+                cse.sync_pose(get_fkine_se3(state))
+                self._q_commanded[:] = self._q_rad_buf
+                self._q_ik_seed[:] = self._q_rad_buf
+                self._ik_stopping = False
+                # Let next tick handle normal tracking
+            else:
+                self._q_ik_seed[:] = ik_result.q
+
+                # Compute per-joint delta from commanded position
+                dq = self._dq_buf
+                for i in range(6):
+                    dq[i] = float(ik_result.q[i]) - self._q_commanded[i]
+
+                # Velocity ratio: worst-case joint vs its per-tick hard limit
+                ratio = _max_vel_ratio_jit(ik_result.q, self._q_commanded)
+
+                if ratio > 1.0:
+                    # Scale all deltas proportionally
+                    for i in range(6):
+                        self._q_commanded[i] += dq[i] / ratio
+                    cse.set_limits(max(0.01, self.p.speed / ratio), self.p.accel)
+                else:
+                    self._q_commanded[:] = ik_result.q
+                    cse.set_limits(self.p.speed, self.p.accel)
+        else:
+            # IK failed — graceful deceleration
+            if not self._ik_stopping:
+                global _last_servo_ik_warn
+                now = time.monotonic()
+                if now - _last_servo_ik_warn > _IK_WARN_INTERVAL:
+                    logger.warning(
+                        "[SERVOL] IK failed — decelerating: pos=%s",
+                        smoothed_pose[:3, 3],
+                    )
+                    _last_servo_ik_warn = now
+                cse.stop()
+                self._ik_stopping = True
+
+        self._pos_rad_buf[:] = self._q_commanded
+        rad_to_steps(self._pos_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 
-        if finished and not self._flipping:
+        if finished and not self._ik_stopping:
             self.finish()
             cse.active = False
             return ExecutionStatusCode.COMPLETED
-
-        return ExecutionStatusCode.EXECUTING
-
-    def _handle_ik_failure(
-        self, state: ControllerState, cse, vel, smoothed_pose
-    ) -> ExecutionStatusCode:
-        """Handle IK failure with graceful stop and rate-limited warnings."""
-        global _last_servo_ik_warn
-
-        if not self._ik_stopping:
-            now = time.monotonic()
-            if now - _last_servo_ik_warn > _IK_WARN_INTERVAL:
-                logger.warning(
-                    "[SERVOL] IK failed — initiating graceful stop: pos=%s",
-                    smoothed_pose[:3, 3],
-                )
-                _last_servo_ik_warn = now
-            cse.stop()
-            self._ik_stopping = True
-        else:
-            # Still failing, check if deceleration complete
-            if np.dot(vel, vel) < 1e-8:
-                cse.sync_pose(get_fkine_se3(state))
-                self.finish()
-                return ExecutionStatusCode.COMPLETED
 
         return ExecutionStatusCode.EXECUTING

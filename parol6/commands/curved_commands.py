@@ -24,6 +24,8 @@ from parol6.protocol.wire import (
 from parol6.motion.geometry import compute_circle_from_3_points
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_se3
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError
 from pinokin import se3_from_rpy, se3_interp, se3_rpy
 
@@ -123,18 +125,21 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
         cartesian_trajectory = self.generate_main_trajectory(current_pose)
         if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
-            self.fail("Trajectory generation returned empty result")
+            self.fail(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
             return
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
         try:
-            joint_path = JointPath.from_poses(
-                cartesian_trajectory, self._q_rad_buf, quiet_logging=True
-            )
+            joint_path = JointPath.from_poses(cartesian_trajectory, self._q_rad_buf)
         except IKError as e:
             self.log_error("  -> ERROR: IK failed during trajectory generation: %s", e)
-            self.fail(str(e))
+            self.fail(e.robot_error)
+            return
+
+        if joint_path.is_partial:
+            self.log_error("  -> ERROR: Partial IK during trajectory generation")
+            self.fail(make_error(ErrorCode.IK_PARTIAL_PATH, valid="?", total="?"))
             return
 
         builder = TrajectoryBuilder(
@@ -294,18 +299,21 @@ class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
 
         cartesian_trajectory = self.generate_main_trajectory(current_pose)
         if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
-            self.fail("Trajectory generation returned empty result")
+            self.fail(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
             return
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
         try:
-            joint_path = JointPath.from_poses(
-                cartesian_trajectory, self._q_rad_buf, quiet_logging=True
-            )
+            joint_path = JointPath.from_poses(cartesian_trajectory, self._q_rad_buf)
         except IKError as e:
             self.log_error("  -> ERROR: IK failed during trajectory generation: %s", e)
-            self.fail(str(e))
+            self.fail(e.robot_error)
+            return
+
+        if joint_path.is_partial:
+            self.log_error("  -> ERROR: Partial IK during trajectory generation")
+            self.fail(make_error(ErrorCode.IK_PARTIAL_PATH, valid="?", total="?"))
             return
 
         builder = TrajectoryBuilder(

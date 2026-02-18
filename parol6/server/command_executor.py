@@ -10,9 +10,8 @@ from parol6.commands.base import (
     CommandBase,
     ExecutionStatusCode,
     MotionCommand,
-    TrajectoryMoveCommandBase,
 )
-from parol6.config import MAX_BLEND_LOOKAHEAD, MAX_COMMAND_QUEUE_SIZE, TRACE
+from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
 from parol6.protocol.wire import Command, decode_command
 
 if TYPE_CHECKING:
@@ -36,7 +35,6 @@ class QueuedCommand:
     queued_time: float = field(default_factory=time.time)
     activated: bool = False
     first_tick_logged: bool = False
-    blend_consumed_max_index: int = -1
 
 
 class CommandExecutor:
@@ -237,47 +235,8 @@ class CommandExecutor:
         return True
 
     def _setup_active(self, ac: QueuedCommand, state: "ControllerState") -> None:
-        """Run one-time setup for a command, attempting blend if applicable."""
-        consumed = 0
-        cmd = ac.command
-
-        # Blend peek-ahead: if command has r > 0, collect up to
-        # MAX_BLEND_LOOKAHEAD compatible trajectory commands and
-        # build a composite blended trajectory.
-        if (
-            isinstance(cmd, TrajectoryMoveCommandBase)
-            and cmd.blend_radius > 0
-            and self.command_queue
-        ):
-            next_cmds: list[TrajectoryMoveCommandBase] = []
-            for i in range(min(MAX_BLEND_LOOKAHEAD, len(self.command_queue))):
-                candidate = self.command_queue[i]
-                if not isinstance(candidate.command, TrajectoryMoveCommandBase):
-                    break
-                next_cmds.append(candidate.command)
-                if candidate.command.blend_radius <= 0:
-                    break
-
-            if next_cmds:
-                try:
-                    consumed = cmd.do_setup_with_blend(state, next_cmds)
-                except Exception:
-                    consumed = 0
-                max_consumed_idx = -1
-                for _ in range(consumed):
-                    popped = self.command_queue.popleft()
-                    if popped.command_index > max_consumed_idx:
-                        max_consumed_idx = popped.command_index
-                    logger.log(
-                        TRACE,
-                        "Blend consumed: %s (index=%d)",
-                        type(popped.command).__name__,
-                        popped.command_index,
-                    )
-                ac.blend_consumed_max_index = max_consumed_idx
-
-        if consumed == 0:
-            cmd.setup(state)
+        """Run one-time setup for a command."""
+        ac.command.setup(state)
 
     def _process_tick_result(
         self,
@@ -298,10 +257,7 @@ class CommandExecutor:
 
             state.action_current = ""
             state.action_state = "IDLE"
-            final_idx = ac.command_index
-            if ac.blend_consumed_max_index > final_idx:
-                final_idx = ac.blend_consumed_max_index
-            state.completed_command_index = final_idx
+            state.completed_command_index = ac.command_index
             self._update_queue_state(state)
             self.active_command = None
 
@@ -310,7 +266,7 @@ class CommandExecutor:
                 "Command failed: %s (id=%s) - %s at t=%.6f",
                 type(ac.command).__name__,
                 ac.command_id,
-                ac.command.error_message,
+                ac.command.robot_error,
                 time.time(),
             )
 
@@ -322,7 +278,7 @@ class CommandExecutor:
                 ac.command, "streamable", False
             ):
                 removed = self.clear_streamable_commands(
-                    f"Active streamable command failed: {ac.command.error_message}"
+                    f"Active streamable command failed: {ac.command.robot_error}"
                 )
                 if removed > 0:
                     logger.info(

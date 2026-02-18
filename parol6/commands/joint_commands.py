@@ -19,12 +19,15 @@ import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.commands.base import TrajectoryMoveCommandBase
 from parol6.config import (
     INTERVAL_S,
+    MAX_BLEND_LOOKAHEAD,
     steps_to_rad,
 )
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.protocol.wire import CmdType, MoveJCmd, MoveJPoseCmd, MotionParamsMixin
 from parol6.server.command_registry import register_command
-from parol6.utils.errors import IKError
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import IKError, TrajectoryPlanningError
 from parol6.utils.ik import solve_ik
 from pinokin import se3_from_rpy
 
@@ -47,7 +50,22 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
     - execute_step(): Inherited from TrajectoryMoveCommandBase (uses MotionExecutor)
     """
 
-    __slots__ = ()
+    __slots__ = (
+        "_T_buf",
+        "_q_full_buf",
+        "_diff_buf",
+        "_current_rad_buf",
+        "_tcp_mm_buf",
+    )
+
+    def __init__(self, p: _MP) -> None:
+        super().__init__(p)
+        nq = PAROL6_ROBOT.robot.nq
+        self._T_buf = np.zeros((4, 4), dtype=np.float64, order="F")
+        self._q_full_buf = np.zeros(nq, dtype=np.float64)
+        self._diff_buf = np.empty(3, dtype=np.float64)
+        self._current_rad_buf = np.zeros(6, dtype=np.float64)
+        self._tcp_mm_buf = np.empty((MAX_BLEND_LOOKAHEAD + 2, 3), dtype=np.float64)
 
     @abstractmethod
     def _get_target_rad(
@@ -82,7 +100,9 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         self._duration = trajectory.duration
 
         if len(self.trajectory_steps) == 0:
-            raise ValueError("Trajectory calculation resulted in no steps.")
+            raise TrajectoryPlanningError(
+                make_error(ErrorCode.TRAJ_NO_STEPS, detail="")
+            )
 
         self.log_trace(
             "  -> Using profile: %s, duration: %.3fs, steps: %d",
@@ -114,7 +134,8 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         from parol6.motion.geometry import build_composite_joint_path
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
-        current_rad = self._q_rad_buf.copy()
+        self._current_rad_buf[:] = self._q_rad_buf
+        current_rad = self._current_rad_buf
 
         waypoints_rad: list[np.ndarray] = [current_rad]
         blend_radii_mm: list[float] = []
@@ -132,10 +153,12 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         # FK at each waypoint for TCP positions (zone sizing)
         nq = PAROL6_ROBOT.robot.nq
-        T_buf = np.zeros((4, 4), dtype=np.float64, order="F")
-        q_full = np.zeros(nq, dtype=np.float64)
+        T_buf = self._T_buf
+        T_buf.fill(0)
+        q_full = self._q_full_buf
+        q_full.fill(0)
         n_wp = len(waypoints_rad)
-        tcp_mm = np.empty((n_wp, 3), dtype=np.float64)
+        tcp_mm = self._tcp_mm_buf[:n_wp]
         for wi, q in enumerate(waypoints_rad):
             nj = min(len(q), nq)
             q_full[:nj] = q[:nj]
@@ -147,7 +170,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         # Convert mm blend radii to segment fractions via TCP distances
         blend_fracs: list[tuple[float, float]] = []
-        diff_buf = np.empty(3, dtype=np.float64)
+        diff_buf = self._diff_buf
         for i in range(len(blend_radii_mm)):
             wp_idx = i + 1
             np.subtract(tcp_mm[wp_idx], tcp_mm[wp_idx - 1], diff_buf)
@@ -265,9 +288,7 @@ class MoveJPoseCommand(JointMoveCommandBase[MoveJPoseCmd]):
 
         ik_solution = solve_ik(PAROL6_ROBOT.robot, target_pose, current_rad)
         if not ik_solution.success:
-            error_str = "Target pose is unreachable."
-            if ik_solution.violations:
-                error_str += f" Reason: {ik_solution.violations}"
-            raise IKError(error_str)
+            detail = ik_solution.violations or ""
+            raise IKError(make_error(ErrorCode.IK_TARGET_UNREACHABLE, detail=detail))
 
         return np.asarray(ik_solution.q, dtype=np.float64)

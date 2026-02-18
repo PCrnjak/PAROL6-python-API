@@ -13,6 +13,7 @@ from pinokin import arrays_equal_6
 from parol6.config import CONTROL_RATE_HZ, steps_to_rad
 from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 from parol6.protocol.wire import CommandCode
+from parol6.utils.error_catalog import RobotError
 
 
 @dataclass
@@ -131,6 +132,16 @@ class ControllerState:
     completed_command_index: int = -1
     last_checkpoint: str = ""
 
+    # Planning behavior (stop on first IK failure vs solve all for diagnostic)
+    stop_on_failure: bool = True
+
+    # Error state (set by segment player on planning failure)
+    error: RobotError | None = None
+
+    # Pipeline depth (maintained by segment player)
+    queued_segments: int = 0
+    queued_duration: float = 0.0
+
     # Network setup and uptime
     ip: str = "127.0.0.1"
     port: int = 5001
@@ -239,6 +250,11 @@ class ControllerState:
         self.executing_command_index = -1
         self.completed_command_index = -1
         self.last_checkpoint = ""
+
+        # Error and pipeline depth
+        self.error = None
+        self.queued_segments = 0
+        self.queued_duration = 0.0
 
         # Gripper mode tracker
         self.gripper_mode_tracker = GripperModeResetTracker()

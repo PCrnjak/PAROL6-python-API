@@ -23,6 +23,8 @@ from parol6.protocol.wire import (
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 
 from .base import (
     ExecutionStatusCode,
@@ -86,9 +88,9 @@ class HomeCommand(MotionCommand[HomeCmd]):
                 self.state = HomeState.WAITING_FOR_HOMED
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                raise TimeoutError(
-                    "Timeout waiting for robot to start homing sequence."
-                )
+                self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
+                self.stop_and_idle(state)
+                return ExecutionStatusCode.FAILED
             return ExecutionStatusCode.EXECUTING
 
         if self.state == HomeState.WAITING_FOR_HOMED:

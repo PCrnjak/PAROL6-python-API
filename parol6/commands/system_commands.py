@@ -24,6 +24,8 @@ from parol6.protocol.wire import (
 )
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -100,7 +102,7 @@ class SetSerialPortCommand(SystemCommand[SetPortCmd]):
         """Persist the serial port selection and signal controller to reconnect."""
         ok = save_com_port(self.p.port_str)
         if not ok:
-            self.fail("Failed to save COM port")
+            self.fail(make_error(ErrorCode.SYS_PORT_SAVE_FAILED))
             return ExecutionStatusCode.FAILED
 
         self._switch_port = self.p.port_str
@@ -156,10 +158,11 @@ class SetProfileCommand(SystemCommand[SetProfileCmd]):
         """Validate profile name against VALID_PROFILES."""
         profile = self.p.profile.upper()
         if profile not in VALID_PROFILES:
-            valid_list = ", ".join(sorted(VALID_PROFILES))
-            raise ValueError(
-                f"Invalid profile '{self.p.profile}'. Valid profiles: {valid_list}"
+            err = ValueError(f"Invalid profile '{self.p.profile}'")
+            err.robot_error = make_error(  # type: ignore[attr-defined]
+                ErrorCode.SYS_PROFILE_INVALID, detail=self.p.profile
             )
+            raise err
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         """Execute profile change."""

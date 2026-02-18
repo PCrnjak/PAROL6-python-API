@@ -21,6 +21,8 @@ import numpy as np
 from numpy.typing import NDArray
 from ruckig import InputParameter, OutputParameter, Result, Ruckig
 
+from scipy.interpolate import PPoly
+
 import toppra as ta
 import toppra.algorithm as algo
 import toppra.constraint as constraint
@@ -46,6 +48,33 @@ def _rad_to_steps_alloc(rad: NDArray) -> NDArray[np.int32]:
         for i in range(rad.shape[0]):
             rad_to_steps(rad[i], out[i])
     return out
+
+
+class _LinearPath:
+    """Piecewise linear path wrapper for TOPPRA compatibility.
+
+    Wraps a scipy PPoly (degree-1) to satisfy the toppra path interface:
+    __call__(s, order), .dof, .path_interval.  Linear segments prevent
+    overshoot between waypoints — critical near wrist singularities where
+    cubic spline bulge amplifies orientation error.
+    """
+
+    __slots__ = ("_pp", "dof", "path_interval")
+
+    def __init__(self, ppoly: PPoly, dof: int) -> None:
+        self._pp = ppoly
+        self.dof = dof
+        self.path_interval = [float(ppoly.x[0]), float(ppoly.x[-1])]
+
+    def __call__(self, s_in: float | NDArray, order: int = 0) -> NDArray[np.float64]:
+        scalar = np.isscalar(s_in)
+        s = np.atleast_1d(np.asarray(s_in, dtype=float))
+        if order <= 1:
+            result = self._pp(s, order)
+        else:
+            # Second+ derivative of piecewise linear is zero
+            result = np.zeros((len(s), self.dof))
+        return result[0] if scalar and result.ndim > 1 else result
 
 
 class ProfileType(Enum):
@@ -80,9 +109,16 @@ class JointPath:
 
     Attributes:
         positions: (N, 6) array of joint angles in radians
+        valid: Per-row IK validity. None means all rows are valid.
     """
 
     positions: NDArray[np.float64]  # (N, 6) joint angles in radians
+    valid: NDArray[np.bool_] | None = None  # (N,) per-row validity, None = all valid
+
+    @property
+    def is_partial(self) -> bool:
+        """True if some IK solutions failed."""
+        return self.valid is not None
 
     def __len__(self) -> int:
         return len(self.positions)
@@ -95,7 +131,7 @@ class JointPath:
         cls,
         poses: NDArray[np.float64] | list[np.ndarray],
         seed_q: NDArray[np.float64],
-        quiet_logging: bool = True,
+        stop_on_failure: bool = True,
     ) -> JointPath:
         """
         Solve IK for poses with seeded chain.
@@ -106,22 +142,24 @@ class JointPath:
             poses: Either (N, 6) array of [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
                    or list of SE3 poses
             seed_q: Initial joint angles for IK seeding (radians)
-            quiet_logging: Suppress IK logging
+            stop_on_failure: If True, stop solving after first IK failure
+                (real controller). If False, solve all poses (diagnostic).
 
         Returns:
-            JointPath with solved joint positions
+            JointPath with solved joint positions. If some poses failed,
+            ``valid`` is set to a per-row bool array (``is_partial`` is True).
 
         Raises:
-            IKError: If any pose is unreachable
+            IKError: If fewer than 2 consecutive valid poses from the start.
         """
+        from parol6.utils.error_catalog import make_error
+        from parol6.utils.error_codes import ErrorCode
         from parol6.utils.errors import IKError
 
         # Convert to list of SE3 (4x4) matrices for batch_ik
         if isinstance(poses, np.ndarray) and poses.ndim == 3:
-            # (N, 4, 4) SE3 matrices — create list of views (no data copy)
             se3_poses = [poses[i] for i in range(len(poses))]
         elif isinstance(poses, np.ndarray):
-            # (N, 6) [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] — convert to SE3
             n = len(poses)
             se3_poses = [np.empty((4, 4), dtype=np.float64) for _ in range(n)]
             for i, p in enumerate(poses):
@@ -145,15 +183,31 @@ class JointPath:
             max_iter=10,
             max_restarts=10,
         )
-        result = solver.batch_ik(se3_poses, np.asarray(seed_q, dtype=np.float64))
+        result = solver.batch_ik(
+            se3_poses,
+            np.asarray(seed_q, dtype=np.float64),
+            stop_on_failure=stop_on_failure,
+        )
 
-        if not result.all_valid:
-            failed = [i for i, v in enumerate(result.valid) if not v]
-            raise IKError(
-                f"Cartesian path points {failed}/{len(se3_poses)} are unreachable."
-            )
+        if result.all_valid:
+            return cls(positions=result.joint_positions)
 
-        return cls(positions=result.joint_positions)
+        valid = np.array(result.valid, dtype=np.bool_)
+        # Count consecutive valid from start
+        first_fail = int(np.argmin(valid))  # first False index
+        if first_fail < 2:
+            if stop_on_failure:
+                raise IKError(
+                    make_error(
+                        ErrorCode.IK_PARTIAL_PATH,
+                        valid=str(first_fail),
+                        total=str(len(se3_poses)),
+                    )
+                )
+            # Diagnostic mode: return partial data for visualization
+            return cls(positions=result.joint_positions, valid=valid)
+
+        return cls(positions=result.joint_positions, valid=valid)
 
     @classmethod
     def interpolate(
@@ -376,17 +430,26 @@ class TrajectoryBuilder:
         """
         Build trajectory using TOPP-RA's time-optimal path parameterization.
 
-        Uses cubic spline interpolation through waypoints and computes
-        time-optimal velocity profile respecting joint limits and optional
-        Cartesian velocity limits.
+        Uses piecewise linear interpolation through waypoints (no overshoot)
+        and computes time-optimal velocity profile respecting joint limits
+        and optional Cartesian velocity limits.
         """
         positions = self.joint_path.positions
         n_points = len(positions)
 
-        # Uniform parameterization for spline knots
+        # Uniform parameterization for path knots
         ss_waypoints = np.linspace(0.0, 1.0, n_points)
 
-        path = ta.SplineInterpolator(ss_waypoints, positions)
+        # Piecewise linear PPoly — prevents cubic spline overshoot that
+        # amplifies orientation error near wrist singularities
+        n_seg = n_points - 1
+        dof = positions.shape[1]
+        c = np.zeros((2, n_seg, dof))
+        for i in range(n_seg):
+            dx = ss_waypoints[i + 1] - ss_waypoints[i]
+            c[0, i, :] = (positions[i + 1] - positions[i]) / dx
+            c[1, i, :] = positions[i]
+        path = _LinearPath(PPoly(c, ss_waypoints), dof)
 
         # Use pre-computed limit arrays for constraints
         joint_vel_constraint = constraint.JointVelocityConstraint(self._vlim)
@@ -992,7 +1055,7 @@ class TrajectoryBuilder:
         return Trajectory(steps=steps, duration=duration)
 
     def _build_cart_vel_constraint(
-        self, path: ta.SplineInterpolator, ss_waypoints: NDArray
+        self, path: ta.SplineInterpolator | _LinearPath, ss_waypoints: NDArray
     ) -> constraint.JointVelocityConstraintVarying | None:
         """
         Build Cartesian velocity constraint for TOPP-RA using path-tangent method.

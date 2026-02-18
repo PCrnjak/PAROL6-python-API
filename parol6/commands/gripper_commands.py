@@ -10,6 +10,8 @@ from parol6.commands.base import Debouncer, ExecutionStatusCode, MotionCommand
 from parol6.protocol.wire import CmdType, ElectricGripperCmd, PneumaticGripperCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,8 @@ class PneumaticGripperCommand(MotionCommand[PneumaticGripperCmd]):
         """Execute pneumatic gripper command."""
         self.timeout_counter -= 1
         if self.timeout_counter <= 0:
-            raise TimeoutError(f"Gripper command timed out in state {self.state}.")
+            self.fail(make_error(ErrorCode.MOTN_GRIPPER_TIMEOUT, state=str(self.state)))
+            return ExecutionStatusCode.FAILED
 
         state.InOut_out[self._port_index] = self._state_to_set
         logger.info("  -> Pneumatic gripper command sent.")
@@ -102,7 +105,8 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperCmd]):
         """State-based execution for electric gripper."""
         self.timeout_counter -= 1
         if self.timeout_counter <= 0:
-            raise TimeoutError(f"Gripper command timed out in state {self.state}.")
+            self.fail(make_error(ErrorCode.MOTN_GRIPPER_TIMEOUT, state=str(self.state)))
+            return ExecutionStatusCode.FAILED
 
         if self.state == GripperState.START:
             if self.p.action == "calibrate":
@@ -170,5 +174,5 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperCmd]):
 
             return ExecutionStatusCode.EXECUTING
 
-        self.fail("Unknown gripper state")
+        self.fail(make_error(ErrorCode.MOTN_GRIPPER_UNKNOWN))
         return ExecutionStatusCode.FAILED

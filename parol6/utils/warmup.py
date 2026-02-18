@@ -14,7 +14,7 @@ from parol6.commands.cartesian_commands import (
     _apply_velocity_delta_trf_jit,
     _apply_velocity_delta_wrf_jit,
 )
-from parol6.commands.servo_commands import _vel_scale_and_convert_jit
+from parol6.commands.servo_commands import _max_vel_ratio_jit
 from parol6.config import (
     deg_to_steps,
     deg_to_steps_scalar,
@@ -334,13 +334,7 @@ def warmup_jit() -> float:
         R_ws,  # R_ws
         V_ws,  # V_ws
     )
-    _vel_scale_and_convert_jit(
-        dummy_6f,  # target_q
-        dummy_6f,  # current_q
-        out_6f,  # scratch
-        out_6i,  # out_steps
-        dummy_6f.copy(),  # flip_target_q
-    )
+    _max_vel_ratio_jit(dummy_6f, dummy_6f)
 
     elapsed = time.perf_counter() - start
     logger.info(f"\tJIT warmup completed in {elapsed * 1000:.1f}ms")

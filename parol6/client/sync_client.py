@@ -428,6 +428,21 @@ class RobotClient:
         """
         return _run(self._inner.wait_for_status(predicate, timeout=timeout))
 
+    def wait_command_complete(self, command_index: int, timeout: float = 10.0) -> bool:
+        """Wait until a specific command index has been completed.
+
+        Args:
+            command_index: The command index to wait for (returned by motion commands).
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            True if the command completed within timeout, False otherwise.
+
+        Raises:
+            MotionError: If the pipeline errored at or before command_index.
+        """
+        return _run(self._inner.wait_command_complete(command_index, timeout=timeout))
+
     # ---------- motion ----------
 
     @overload

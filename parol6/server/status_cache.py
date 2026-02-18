@@ -18,6 +18,7 @@ from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
+from parol6.utils.error_catalog import RobotError
 from parol6.server.ik_layout import (
     IK_INPUT_Q_OFFSET,
     IK_INPUT_SIZE,
@@ -148,6 +149,13 @@ class StatusCache:
         self._executing_index: int = -1
         self._completed_index: int = -1
         self._last_checkpoint: str = ""
+
+        # Error tracking field
+        self._error: RobotError | None = None
+
+        # Pipeline depth fields
+        self._queued_segments: int = 0
+        self._queued_duration: float = 0.0
 
         # Binary cache
         self._binary_cache: bytes = b""
@@ -357,6 +365,18 @@ class StatusCache:
             self._completed_index = state.completed_command_index
             self._last_checkpoint = state.last_checkpoint
 
+        error_changed = self._error is not state.error
+        if error_changed:
+            self._error = state.error
+
+        depth_changed = (
+            self._queued_segments != state.queued_segments
+            or self._queued_duration != state.queued_duration
+        )
+        if depth_changed:
+            self._queued_segments = state.queued_segments
+            self._queued_duration = state.queued_duration
+
         # Mark binary cache dirty if anything changed
         if (
             pos_changed
@@ -367,6 +387,8 @@ class StatusCache:
             or ik_changed
             or action_changed
             or queue_changed
+            or error_changed
+            or depth_changed
         ):
             self._binary_dirty = True
 
@@ -387,6 +409,9 @@ class StatusCache:
                 self._executing_index,
                 self._completed_index,
                 self._last_checkpoint,
+                self._error,
+                self._queued_segments,
+                self._queued_duration,
             )
             self._binary_dirty = False
         return self._binary_cache

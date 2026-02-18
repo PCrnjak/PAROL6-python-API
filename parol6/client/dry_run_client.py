@@ -1,9 +1,9 @@
 """
-Dry-run client that executes commands through the real command pipeline locally.
+Dry-run client that executes commands through the trajectory planner locally.
 
-Uses a ControllerState with simulated Position_in. ALL commands go through
-msgspec struct creation (validation) and command lookup. Motion commands
-run do_setup() (same as real controller) to produce identical trajectories.
+Delegates trajectory planning to TrajectoryPlanner (diagnostic=True) —
+the same logic used by the real PlannerWorker subprocess. Jog commands
+are simulated separately since the planner doesn't handle streaming.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import numpy as np
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from ..commands.base import (
     MotionCommand,
-    SystemCommand,
     TrajectoryMoveCommandBase,
 )
 from ..commands.cartesian_commands import (
@@ -32,7 +31,6 @@ from ..commands.basic_commands import JogJCommand
 from ..config import (
     CONTROL_RATE_HZ,
     HOME_ANGLES_DEG,
-    MAX_BLEND_LOOKAHEAD,
     deg_to_steps,
     rad_to_steps,
     steps_to_rad,
@@ -80,7 +78,14 @@ from ..protocol.wire import (
     SimulatorCmd,
 )
 from ..server.command_registry import CommandRegistry
+from ..server.motion_planner import (
+    ErrorSegment,
+    Segment,
+    TrajectoryPlanner,
+    TrajectorySegment,
+)
 from ..server.state import ControllerState, get_fkine_se3
+from ..utils.error_catalog import RobotError
 
 # Method name → (struct class, default kwargs applied before caller kwargs)
 CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
@@ -167,16 +172,17 @@ class DryRunResult:
     tcp_poses: np.ndarray  # (N, 6) [x_m, y_m, z_m, rx_rad, ry_rad, rz_rad]
     end_joints_rad: np.ndarray  # (6,) final joint angles
     duration: float  # trajectory duration in seconds
-    error: str | None = None  # IK failure message etc.
+    error: RobotError | None = None
+    valid: np.ndarray | None = None  # (N,) per-pose bool; None = all valid
 
 
-def _error_result(msg: str) -> DryRunResult:
+def _error_result(error: RobotError) -> DryRunResult:
     """Build a DryRunResult for an error (empty trajectory)."""
     return DryRunResult(
         tcp_poses=np.empty((0, 6)),
         end_joints_rad=np.empty(6),
         duration=0.0,
-        error=msg,
+        error=error,
     )
 
 
@@ -196,11 +202,11 @@ def _build_result(radians: np.ndarray, duration: float) -> DryRunResult:
 
 
 class DryRunRobotClient:
-    """Runs commands through the real command pipeline without UDP/serial.
+    """Runs commands through the trajectory planner without UDP/serial.
 
-    Uses a ControllerState with simulated Position_in. ALL commands go through
-    msgspec struct creation (validation) and command lookup. Motion commands
-    run do_setup() (same as real controller) to produce identical trajectories.
+    Trajectory dispatch (including blend buffering and error handling) is
+    delegated to TrajectoryPlanner in diagnostic mode. Jog commands are
+    simulated separately since the planner doesn't handle streaming.
 
     Most methods are auto-dispatched via __getattr__ using CMD_MAP.
     Explicit methods exist only for get_angles/get_pose (read from state)
@@ -210,7 +216,7 @@ class DryRunRobotClient:
     def __init__(
         self,
         initial_joints_deg: list[float] | None = None,
-        max_snapshot_points: int = 50,
+        max_snapshot_points: int = 200,
     ) -> None:
         self._state = ControllerState()
         init_deg = np.asarray(
@@ -219,11 +225,13 @@ class DryRunRobotClient:
         )
         deg_to_steps(init_deg, self._state.Position_in)
 
+        self._planner = TrajectoryPlanner(diagnostic=True)
+        self._planner.state.Position_in[:] = self._state.Position_in
+
         self._registry = CommandRegistry()
         self._q_rad_buf = np.zeros(6, dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._max_snapshot_points = max_snapshot_points
-        self._blend_buffer: list[TrajectoryMoveCommandBase] = []
 
     @property
     def state(self) -> ControllerState:
@@ -231,120 +239,62 @@ class DryRunRobotClient:
         return self._state
 
     def flush(self) -> list[DryRunResult]:
-        """Flush all pending blend commands. Call after script completion."""
+        """Flush pending blend buffer. Call after script completion."""
+        segments = self._planner.flush()
+        self._state.Position_in[:] = self._planner.state.Position_in
         results: list[DryRunResult] = []
-        while self._blend_buffer:
-            r = self._flush_blend()
+        for seg in segments:
+            r = self._segment_to_result(seg)
             if r is not None:
                 results.append(r)
-            else:
-                break
         return results
 
-    def _setup_and_snapshot(
-        self,
-        cmd: TrajectoryMoveCommandBase,
-        blend_cmds: list[TrajectoryMoveCommandBase] | None = None,
-    ) -> DryRunResult:
-        """Run setup (with optional blend), snapshot trajectory, update state.
-
-        Shared by _flush_blend and _dispatch_trajectory for single-command dispatch.
-        """
-        try:
-            if blend_cmds:
-                cmd.do_setup_with_blend(self._state, blend_cmds)
-            else:
-                cmd.setup(self._state)
-        except Exception as e:
-            return _error_result(str(e))
-
-        if len(cmd.trajectory_steps) == 0:
-            return _error_result(cmd.error_message or "Empty trajectory")
-
-        result = self._snapshot_trajectory(cmd)
-        self._state.Position_in[:] = cmd.trajectory_steps[-1]
-        return result
-
-    def _flush_blend(self) -> DryRunResult | None:
-        """Flush one composite trajectory from the blend buffer.
-
-        Uses the consumed count from do_setup_with_blend to keep unconsumed
-        commands in the buffer (e.g. mixed-type chains where only compatible
-        commands are blended together).
-        """
-        if not self._blend_buffer:
-            return None
-        head = self._blend_buffer[0]
-        rest = self._blend_buffer[1:]
-        consumed = 0
-        try:
-            if rest:
-                consumed = head.do_setup_with_blend(self._state, rest)
-            else:
-                head.setup(self._state)
-        except Exception as e:
-            self._blend_buffer.clear()
-            return _error_result(str(e))
-        if len(head.trajectory_steps) == 0:
-            self._blend_buffer.clear()
-            return _error_result(head.error_message or "Empty trajectory")
-        result = self._snapshot_trajectory(head)
-        self._state.Position_in[:] = head.trajectory_steps[-1]
-        del self._blend_buffer[: 1 + consumed]
-        return result
-
     def _dispatch(self, params: Any) -> DryRunResult | None:
-        """Route a command struct through the real pipeline locally."""
+        """Route a command struct through the trajectory planner."""
+        # Detect jog commands — planner doesn't handle streaming
         cmd_cls = self._registry.get_command_for_struct(type(params))
-        if cmd_cls is None:
-            logger.warning("No handler for %s", type(params).__name__)
+        if (
+            cmd_cls is not None
+            and issubclass(cmd_cls, MotionCommand)
+            and not issubclass(cmd_cls, TrajectoryMoveCommandBase)
+        ):
+            # Flush blend buffer, sync state, simulate jog
+            self._planner.flush()
+            self._state.Position_in[:] = self._planner.state.Position_in
+            cmd = cmd_cls(params)
+            assert isinstance(cmd, MotionCommand)
+            result = self._simulate_jog(cmd)
+            self._planner.state.Position_in[:] = self._state.Position_in
+            return result
+
+        # Everything else → planner
+        segments = self._planner.process(params)
+        self._state.Position_in[:] = self._planner.state.Position_in
+
+        results: list[DryRunResult] = []
+        for seg in segments:
+            r = self._segment_to_result(seg)
+            if r is not None:
+                results.append(r)
+
+        if not results:
             return None
+        if len(results) == 1:
+            return results[0]
+        return self._merge_results(results)
 
-        cmd = cmd_cls(params)
-
-        if isinstance(cmd, MotionCommand):
-            if isinstance(cmd, TrajectoryMoveCommandBase):
-                return self._dispatch_trajectory(cmd)
-            # Non-trajectory motion (jog): flush blend buffer first
-            while self._blend_buffer:
-                self._flush_blend()
-            return self._simulate_jog(cmd)
-
-        # System/Query: flush blend buffer first
-        while self._blend_buffer:
-            self._flush_blend()
-
-        if isinstance(cmd, SystemCommand):
-            try:
-                cmd.setup(self._state)
-                cmd.execute_step(self._state)
-            except Exception as e:
-                logger.debug("System command %s failed: %s", type(params).__name__, e)
-            return None
-
+    def _segment_to_result(self, seg: Segment) -> DryRunResult | None:
+        """Convert a planner segment to a DryRunResult."""
+        if isinstance(seg, TrajectorySegment):
+            return self._trajectory_segment_to_result(seg)
+        if isinstance(seg, ErrorSegment):
+            return self._error_segment_to_result(seg)
+        # InlineSegments (SetTool, Home, etc.) — no visualization
         return None
 
-    def _dispatch_trajectory(
-        self, cmd: TrajectoryMoveCommandBase
-    ) -> DryRunResult | None:
-        """Dispatch a trajectory command, buffering if blend radius > 0."""
-        if cmd.blend_radius > 0:
-            self._blend_buffer.append(cmd)
-            if len(self._blend_buffer) > MAX_BLEND_LOOKAHEAD:
-                return self._flush_blend()
-            return None
-
-        if self._blend_buffer:
-            # r=0 terminates the chain (included in composite, same as real executor)
-            self._blend_buffer.append(cmd)
-            return self._flush_blend()
-
-        # No blending, single command dispatch
-        return self._setup_and_snapshot(cmd)
-
-    def _snapshot_trajectory(self, cmd: TrajectoryMoveCommandBase) -> DryRunResult:
-        """Extract TCP poses from pre-computed trajectory steps."""
-        steps = cmd.trajectory_steps
+    def _trajectory_segment_to_result(self, seg: TrajectorySegment) -> DryRunResult:
+        """Convert a TrajectorySegment to a DryRunResult."""
+        steps = seg.trajectory_steps
         stride = max(1, len(steps) // self._max_snapshot_points)
         sampled = steps[::stride]
         if not np.array_equal(sampled[-1], steps[-1]):
@@ -354,7 +304,57 @@ class DryRunRobotClient:
         for i in range(len(sampled)):
             steps_to_rad(sampled[i], radians[i])
 
-        return _build_result(radians, cmd._duration)
+        return _build_result(radians, seg.duration)
+
+    def _error_segment_to_result(self, seg: ErrorSegment) -> DryRunResult:
+        """Convert an ErrorSegment to a DryRunResult with per-pose validity."""
+        if seg.cartesian_path is not None and seg.ik_valid is not None:
+            return DryRunResult(
+                tcp_poses=seg.cartesian_path,
+                end_joints_rad=np.empty((0,), dtype=np.float64),
+                duration=0.0,
+                error=seg.error,
+                valid=seg.ik_valid,
+            )
+        return _error_result(seg.error)
+
+    def _merge_results(self, results: list[DryRunResult]) -> DryRunResult:
+        """Merge multiple DryRunResults into one (for multi-segment blends)."""
+        non_empty = [r for r in results if r.tcp_poses.shape[0] > 0]
+        first_error = next((r.error for r in results if r.error is not None), None)
+        if not non_empty:
+            if first_error is not None:
+                return _error_result(first_error)
+            from ..utils.error_catalog import make_error
+            from ..utils.error_codes import ErrorCode
+
+            return _error_result(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
+
+        tcp_all = np.vstack([r.tcp_poses for r in non_empty])
+        total_duration = sum(r.duration for r in results)
+        last = non_empty[-1]
+
+        has_any_valid = any(r.valid is not None for r in non_empty)
+        if has_any_valid:
+            valids = [
+                r.valid
+                if r.valid is not None
+                else np.ones(r.tcp_poses.shape[0], dtype=np.bool_)
+                for r in non_empty
+            ]
+            merged_valid = np.concatenate(valids)
+        else:
+            merged_valid = None
+
+        return DryRunResult(
+            tcp_poses=tcp_all,
+            end_joints_rad=last.end_joints_rad,
+            duration=total_duration,
+            error=first_error,
+            valid=merged_valid,
+        )
+
+    # ---- Jog simulation (planner doesn't handle streaming) ----
 
     def _simulate_jog(self, cmd: MotionCommand) -> DryRunResult | None:
         """Simulate jog commands by computing linear displacement."""

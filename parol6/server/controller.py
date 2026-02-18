@@ -18,7 +18,11 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
+from parol6.commands.system_commands import SetProfileCommand
+from parol6.commands.utility_commands import ResetCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
+from parol6.server.motion_planner import MotionPlanner, PlanCommand
+from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
     CommandCode,
     pack_error,
@@ -26,6 +30,8 @@ from parol6.protocol.wire import (
     pack_ok_index,
     unpack_rx_frame_into,
 )
+from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
+from parol6.utils.error_codes import ErrorCode
 from parol6.server.command_registry import (
     CommandCategory,
     create_command,
@@ -137,6 +143,12 @@ class Controller:
             state_manager=self.state_manager,
         )
 
+        # Motion pipeline: planner subprocess computes trajectories,
+        # segment player consumes them in the control loop
+        self._planner = MotionPlanner()
+        self._segment_player = SegmentPlayer(self._planner)
+        self._planner_needs_sync: bool = True  # first command always carries position
+
         # Initialize components on construction
         self._initialize_components()
 
@@ -209,6 +221,9 @@ class Controller:
         # Start async logging to move I/O off the control loop thread
         self._async_log.start()
 
+        # Start motion planner subprocess
+        self._planner.start()
+
         # Start main control loop
         logger.info("Starting main control loop")
         self._timer.metrics.mark_started(time.perf_counter())
@@ -219,6 +234,12 @@ class Controller:
         logger.info("Stopping controller...")
         self.running = False
         self.shutdown_event.set()
+
+        # Stop motion planner subprocess
+        try:
+            self._planner.stop()
+        except Exception:
+            logger.warning("Error stopping motion planner", exc_info=True)
 
         # Close status broadcaster
         try:
@@ -281,11 +302,15 @@ class Controller:
             if not self.estop_active:
                 logger.warning("E-STOP activated")
                 self.estop_active = True
+                self._segment_player.cancel(state)
+                self._planner_needs_sync = True
+                self._planner.sync_tool(state.current_tool)
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
                 self._executor.clear_queue("E-Stop activated")
                 state.Command_out = CommandCode.DISABLE
                 state.Speed_out.fill(0)
+                state.error = make_error(ErrorCode.SYS_ESTOP_ACTIVE)
         elif state.InOut_in[4] == 1:  # E-stop released
             if self.estop_active:
                 logger.info("E-STOP released - automatic recovery")
@@ -294,9 +319,19 @@ class Controller:
                 state.disabled_reason = ""
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
+                if (
+                    state.error is not None
+                    and state.error.code == ErrorCode.SYS_ESTOP_ACTIVE
+                ):
+                    state.error = None
 
     def _execute_commands(self, state: ControllerState) -> None:
         """Phase 3: Execute active command."""
+        # Segment player handles trajectory + inline commands from planner
+        if self._segment_player.tick(state):
+            return
+
+        # Streaming command executor (jog/servo)
         if self._executor.active_command or self._executor.command_queue:
             self._executor.execute_active_command()
         else:
@@ -446,10 +481,10 @@ class Controller:
         for data, addr in msgs:
             self._process_command(data, addr, state)
 
-    def _reply_error(self, addr: tuple[str, int], msg: str) -> None:
+    def _reply_error(self, addr: tuple[str, int], error: RobotError) -> None:
         """Send error response to client. Caller must ensure udp_transport is not None."""
         assert self.udp_transport is not None
-        self.udp_transport.send(pack_error(msg), addr)
+        self.udp_transport.send(pack_error(error), addr)
 
     def _reply_ok(self, addr: tuple[str, int]) -> None:
         """Send OK response to client. Caller must ensure udp_transport is not None."""
@@ -487,10 +522,12 @@ class Controller:
         if not command or category is None:
             if error:
                 logger.warning(f"Command validation failed: {error}")
-                self._reply_error(addr, error)
+                self._reply_error(
+                    addr, make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=error)
+                )
             else:
                 logger.warning("Unknown command")
-                self._reply_error(addr, "Unknown command")
+                self._reply_error(addr, make_error(ErrorCode.COMM_UNKNOWN_COMMAND))
             return
 
         cmd_name = type(command).__name__
@@ -515,12 +552,16 @@ class Controller:
         if not state.enabled:
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
                 reason = state.disabled_reason or "Controller disabled"
-                self._reply_error(addr, reason)
+                self._reply_error(
+                    addr, make_error(ErrorCode.SYS_CONTROLLER_DISABLED, detail=reason)
+                )
             logger.warning(f"Motion command rejected - controller disabled: {cmd_name}")
             return
 
-        # Streaming commands: cancel active streamable + clear queued streamable
+        # Streaming commands: cancel segment playback + existing streamable handling
         if getattr(command, "streamable", False):
+            self._segment_player.cancel(state)
+            self._planner_needs_sync = True
             if self.udp_transport:
                 drained = self.udp_transport.drain_buffer()
                 if drained > 0:
@@ -531,15 +572,40 @@ class Controller:
             )
             if removed:
                 logger.log(TRACE, "queued_streamables_removed count=%d", removed)
+            try:
+                cmd_index = self._executor.queue_command(addr, command, None)
+                logger.log(TRACE, "Command %s queued (index=%d)", cmd_name, cmd_index)
+                if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                    self._reply_ok_index(addr, cmd_index)
+            except QueueFullError:
+                if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                    self._reply_error(addr, make_error(ErrorCode.COMM_QUEUE_FULL))
+            return
 
-        try:
-            cmd_index = self._executor.queue_command(addr, command, None)
-            logger.log(TRACE, "Command %s queued (index=%d)", cmd_name, cmd_index)
-            if cmd_type and self._ack_policy.requires_ack(cmd_type):
-                self._reply_ok_index(addr, cmd_index)
-        except QueueFullError:
-            if cmd_type and self._ack_policy.requires_ack(cmd_type):
-                self._reply_error(addr, "Queue full")
+        # Non-streaming commands → planner
+        # Cancel active streaming command to avoid Position_in race
+        if self._executor.cancel_active_streamable():
+            self._planner_needs_sync = True
+
+        # Clear error state from previous pipeline failure
+        if state.error is not None:
+            state.error = None
+            state.action_state = "IDLE"
+            self._planner_needs_sync = True
+
+        cmd_index = self._assign_command_index(state)
+        position_in = state.Position_in.copy() if self._planner_needs_sync else None
+        self._planner.submit(
+            PlanCommand(
+                command_index=cmd_index,
+                params=command.p,
+                position_in=position_in,
+            )
+        )
+        self._planner_needs_sync = False
+        logger.log(TRACE, "Command %s → planner (index=%d)", cmd_name, cmd_index)
+        if cmd_type and self._ack_policy.requires_ack(cmd_type):
+            self._reply_ok_index(addr, cmd_index)
 
     def _handle_query(
         self,
@@ -555,7 +621,9 @@ class Controller:
             self.udp_transport.send(response, addr)
         except Exception as e:
             logger.error("Query error: %s", e)
-            self._reply_error(addr, str(e))
+            self._reply_error(
+                addr, make_error(ErrorCode.COMM_DECODE_ERROR, detail=str(e))
+            )
 
     def _handle_system_command(
         self,
@@ -568,10 +636,19 @@ class Controller:
             command.setup(state)
             code = command.tick(state)
 
+            # Reset: cancel motion pipeline so stale segments don't play
+            if isinstance(command, ResetCommand):
+                self._segment_player.cancel(state)
+                self._planner_needs_sync = True
+                self._executor.cancel_active_command("Reset")
+                self._executor.clear_queue("Reset")
+
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
+                self._segment_player.cancel(state)
+                self._planner_needs_sync = True
                 self._executor.cancel_active_command("Simulator mode toggle")
                 self._executor.clear_queue("Simulator mode toggle")
                 success, error = self._transport_mgr.switch_simulator_mode(
@@ -584,16 +661,29 @@ class Controller:
             if command._sync_mock:
                 self._transport_mgr.sync_mock_from_state(state)
 
+            # Sync motion profile to planner (SetProfile is a SystemCommand)
+            if isinstance(command, SetProfileCommand):
+                self._planner.sync_profile(state.motion_profile)
+
             if code == ExecutionStatusCode.COMPLETED:
                 self._reply_ok(addr)
             else:
-                self._reply_error(
-                    addr, command.error_message or "System command failed"
+                robot_error = command.robot_error or make_error(
+                    ErrorCode.MOTN_TICK_FAILED, detail="System command failed"
                 )
+                self._reply_error(addr, robot_error)
 
         except Exception as e:
             logger.error("System command error: %s", e)
-            self._reply_error(addr, str(e))
+            self._reply_error(
+                addr, extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+            )
+
+    def _assign_command_index(self, state: ControllerState) -> int:
+        """Assign a monotonically increasing command index."""
+        idx = state.next_command_index
+        state.next_command_index += 1
+        return idx
 
     def _set_high_priority(self) -> None:
         """Set highest non-privileged process priority and pin to CPU core."""

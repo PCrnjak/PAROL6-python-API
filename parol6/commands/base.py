@@ -13,6 +13,8 @@ import numpy as np
 from parol6.config import TRACE
 from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType
 from parol6.server.state import ControllerState
+from parol6.utils.error_catalog import RobotError, extract_robot_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,7 @@ class CommandBase(ABC, Generic[P]):
         "p",
         "is_finished",
         "error_state",
-        "error_message",
+        "robot_error",
         "_t0",
         "_t_end",
         "_q_rad_buf",
@@ -99,7 +101,7 @@ class CommandBase(ABC, Generic[P]):
         self.p = p
         self.is_finished: bool = False
         self.error_state: bool = False
-        self.error_message: str = ""
+        self.robot_error: RobotError | None = None
         self._t0: float | None = None
         self._t_end: float | None = None
         # Pre-allocated buffers for zero-allocation unit conversions
@@ -157,7 +159,9 @@ class CommandBase(ABC, Generic[P]):
             self.log_trace("setup ok")
         except Exception as e:
             # Mark invalid and propagate for higher-level lifecycle logging
-            self.fail(f"Setup error: {e}")
+            self.fail(
+                extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+            )
             self.log_error("Setup error: %s", e)
             raise
 
@@ -177,7 +181,9 @@ class CommandBase(ABC, Generic[P]):
 
     def _on_tick_error(self, state: ControllerState, error: Exception) -> None:
         """Error-path cleanup. Override in subclasses for specialized behavior."""
-        self.fail(str(error))
+        self.fail(
+            extract_robot_error(error, ErrorCode.MOTN_TICK_FAILED, detail=str(error))
+        )
         self.log_error(str(error))
 
     @abstractmethod
@@ -199,10 +205,10 @@ class CommandBase(ABC, Generic[P]):
         """Mark command as finished."""
         self.is_finished = True
 
-    def fail(self, message: str) -> None:
-        """Mark command as failed with an error message."""
+    def fail(self, error: RobotError) -> None:
+        """Mark command as failed with a structured error."""
         self.error_state = True
-        self.error_message = message
+        self.robot_error = error
         self.is_finished = True
 
     # ---- timing helpers ----
@@ -256,8 +262,8 @@ class MotionCommand(CommandBase[P]):
 
     streamable: bool = False
 
-    def fail_and_idle(self, state: ControllerState, message: str) -> None:
-        self.fail(message)
+    def fail_and_idle(self, state: ControllerState, error: RobotError) -> None:
+        self.fail(error)
         self.stop_and_idle(state)
 
     def set_move_position(self, state: ControllerState, steps: np.ndarray) -> None:
@@ -268,7 +274,10 @@ class MotionCommand(CommandBase[P]):
 
     def _on_tick_error(self, state: ControllerState, error: Exception) -> None:
         """Zero speeds and set IDLE on error."""
-        self.fail_and_idle(state, str(error))
+        self.fail_and_idle(
+            state,
+            extract_robot_error(error, ErrorCode.MOTN_TICK_FAILED, detail=str(error)),
+        )
         self.log_error(str(error))
 
 

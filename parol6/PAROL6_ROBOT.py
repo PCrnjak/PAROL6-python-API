@@ -104,15 +104,8 @@ _joint_max_speed_hw: Vec6i = np.array(
 )
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
-# Scale factors to normalize apparent angular velocity across joints.
-# J4 (gear ratio 4.0) is 2.27x faster than J6 (gear ratio 10.0) in deg/s.
-# Scale J4 down so it matches J6's apparent speed during coupled wrist motions.
-_joint_speed_scale: NDArray[np.float64] = np.array(
-    [1.0, 1.0, 1.0, 0.44, 1.0, 1.0], dtype=np.float64
-)
-
 # Effective max speeds with scaling applied
-_joint_max_speed: Vec6i = (_joint_max_speed_hw * _joint_speed_scale).astype(np.int32)
+_joint_max_speed: Vec6i = _joint_max_speed_hw.astype(np.int32)
 
 # Jog speeds (steps/s) - 80% of scaled max for safety margin during jogging
 _joint_max_jog_speed: Vec6i = (_joint_max_speed * 0.8).astype(np.int32)
