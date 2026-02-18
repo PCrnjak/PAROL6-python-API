@@ -1,7 +1,7 @@
 """Integration tests for N-command blend lookahead.
 
-Tests the full pipeline: client → UDP → controller → executor blend peek →
-composite trajectory → mock serial execution → final position verification.
+Tests the full pipeline: client → UDP → controller → planner subprocess →
+composite trajectory → segment player → mock serial → final position.
 """
 
 import pytest
@@ -98,6 +98,61 @@ class TestCartesianBlendLookahead:
         for i in range(3):
             assert abs(final[i] - targets[-1][i]) < 2.0, (
                 f"Axis {i}: expected {targets[-1][i]:.1f}, got {final[i]:.1f}"
+            )
+
+    def test_square_with_rounded_corners(self, client, server_proc):
+        """Trace a 20mm square in YZ plane with r=5 rounded corners.
+
+        Path: home → right → down → left → up → right (closed loop + return).
+        Verifies position accuracy and orientation preservation through
+        4 blended 90-degree direction changes.
+        """
+        start = client.get_pose_rpy()
+        assert start is not None
+
+        side = 20.0
+        r = 5.0
+
+        # Build absolute waypoints for the square (Y=right, Z=up)
+        def offset(dy: float, dz: float) -> list[float]:
+            return [
+                start[0],
+                start[1] + dy,
+                start[2] + dz,
+                start[3],
+                start[4],
+                start[5],
+            ]
+
+        right = offset(side, 0)
+        down_right = offset(side, -side)
+        down_left = offset(0, -side)
+        back_home = offset(0, 0)
+        back_right = offset(side, 0)  # same as right — closes the loop
+
+        # 5 moveL commands: 4 corners blended (r=5), last terminates chain (r=0)
+        assert client.moveL(right, speed=0.3, r=r, wait=False) >= 0
+        assert client.moveL(down_right, speed=0.3, r=r, wait=False) >= 0
+        assert client.moveL(down_left, speed=0.3, r=r, wait=False) >= 0
+        assert client.moveL(back_home, speed=0.3, r=r, wait=False) >= 0
+        assert client.moveL(back_right, speed=0.3, r=0.0, wait=False) >= 0
+
+        assert client.wait_motion_complete(timeout=20.0)
+
+        final = client.get_pose_rpy()
+        assert final is not None
+
+        # Position: should match back_right within 2mm
+        for i in range(3):
+            assert abs(final[i] - back_right[i]) < 2.0, (
+                f"Axis {i}: expected {back_right[i]:.1f}, got {final[i]:.1f}"
+            )
+
+        # Orientation: should be unchanged (pure translation moves)
+        for i in range(3, 6):
+            diff = abs((final[i] - start[i] + 180) % 360 - 180)
+            assert diff < 1.0, (
+                f"Orientation axis {i - 3}: drifted {diff:.2f}° (start={start[i]:.1f}, end={final[i]:.1f})"
             )
 
     def test_moveL_r0_stops_blend_chain(self, client, server_proc):

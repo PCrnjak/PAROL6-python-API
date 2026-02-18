@@ -199,8 +199,10 @@ class TestErrorHandling:
             resp = decode(data)
             assert isinstance(resp, (list, tuple))
             assert resp[0] == MsgType.ERROR
-            # msgspec validation produces "Invalid value 9999" error
-            assert "9999" in resp[1] or "Invalid" in resp[1] or "Unknown" in resp[1]
+            # resp[1] is a RobotError wire list: [cmd_idx, code, title, cause, effect, remedy]
+            error_wire = resp[1]
+            assert isinstance(error_wire, list)
+            assert any("9999" in str(f) or "Invalid" in str(f) for f in error_wire)
 
         # Server should remain responsive after handling the error
         client = RobotClient(ports.server_ip, ports.server_port)

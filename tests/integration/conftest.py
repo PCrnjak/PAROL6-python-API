@@ -14,6 +14,7 @@ def clean_state(server_proc, client):
     """
     client.reset()
     client.set_profile("LINEAR")
-    # Use short timeouts - simulator homing is instant
-    client.home(wait=True, motion_start_timeout=0.2, settle_window=0.1)
+    idx = client.home()
+    assert idx >= 0, "Home command failed to send"
+    assert client.wait_command_complete(idx, timeout=5.0), "Home did not complete"
     return client

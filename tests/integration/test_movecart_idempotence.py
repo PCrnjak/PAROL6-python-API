@@ -14,8 +14,9 @@ class TestMoveLIdempotence:
     def test_moveL_to_current_pose_no_rotation(self, client, server_proc):
         """Test that moving to the current pose results in no rotation."""
         # Home the robot first
-        assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        idx = client.home()
+        assert idx >= 0
+        assert client.wait_command_complete(idx, timeout=15.0)
 
         # Get current pose (should be home position)
         current_pose = client.get_pose_rpy()

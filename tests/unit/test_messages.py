@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import msgspec
 
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 from parol6.protocol.wire import (
     ErrorMsg,
     MsgType,
@@ -37,9 +39,17 @@ class TestPackUnpack:
         assert msg.index == 42
 
     def test_pack_error(self):
-        msg = decode_message(pack_error("Something went wrong"))
+        error = make_error(
+            ErrorCode.COMM_VALIDATION_ERROR, detail="Something went wrong"
+        )
+        msg = decode_message(pack_error(error))
         assert isinstance(msg, ErrorMsg)
-        assert msg.message == "Something went wrong"
+        assert isinstance(msg.message, list)
+        from parol6.utils.error_catalog import RobotError
+
+        recovered = RobotError.from_wire(msg.message)
+        assert recovered.code == ErrorCode.COMM_VALIDATION_ERROR
+        assert "Something went wrong" in recovered.cause
 
     def test_pack_response(self):
         msg = decode_message(
