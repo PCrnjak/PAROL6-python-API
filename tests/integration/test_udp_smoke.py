@@ -167,16 +167,18 @@ class TestBasicMotionCommands:
 
     def test_cartesian_move_validation(self, client, server_proc):
         """Test cartesian movement with proper validation."""
+        from parol6.utils.errors import MotionError
+
         # Test that move requires either duration or speed (struct validates)
         with pytest.raises(ValueError):
             client.moveL([50, 50, 50, 0, 0, 0])  # No duration or speed
 
-        # Valid cartesian move (may still fail IK in FAKE_SERIAL)
-        result = client.moveL(
-            [50, 50, 50, 0, 0, 0],
-            duration=2.0,
-        )
-        assert result >= 0
+        # Unreachable pose — planner surfaces IK failure via MotionError
+        with pytest.raises(MotionError):
+            client.moveL(
+                [50, 50, 50, 0, 0, 0],
+                duration=2.0,
+            )
 
 
 @pytest.mark.integration

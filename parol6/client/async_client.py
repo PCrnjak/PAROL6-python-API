@@ -573,7 +573,7 @@ class AsyncRobotClient:
 
     # --------------- Motion / Control ---------------
 
-    async def home(self, wait: bool = False, **wait_kwargs) -> int:
+    async def home(self, wait: bool = False, timeout: float = 10.0) -> int:
         """Home the robot to its home position.
 
         Returns the command index (≥ 0) on success, -1 on failure.
@@ -585,12 +585,12 @@ class AsyncRobotClient:
 
         Args:
             wait: If True, block until motion completes
-            **wait_kwargs: Arguments passed to wait_motion_complete() (timeout, settle_window, etc.)
+            timeout: Maximum time to wait in seconds (only used when wait=True)
         """
         index = await self._send(HomeCmd())
         assert isinstance(index, int)
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def resume(self) -> int:
@@ -1145,7 +1145,7 @@ class AsyncRobotClient:
         r: float = ...,
         rel: bool = ...,
         wait: bool = ...,
-        **wait_kwargs,
+        timeout: float = ...,
     ) -> int:
         """Joint-space move to target angles."""
         ...
@@ -1161,7 +1161,7 @@ class AsyncRobotClient:
         accel: float = ...,
         r: float = ...,
         wait: bool = ...,
-        **wait_kwargs,
+        timeout: float = ...,
     ) -> int:
         """Joint-space move to Cartesian target via IK."""
         ...
@@ -1177,7 +1177,7 @@ class AsyncRobotClient:
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Joint-space move. Positional arg = joint angles; pose= kwarg = Cartesian target with IK.
 
@@ -1216,7 +1216,7 @@ class AsyncRobotClient:
                 )
             )
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def moveL(
@@ -1230,7 +1230,7 @@ class AsyncRobotClient:
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Linear Cartesian move to target pose.
 
@@ -1262,7 +1262,7 @@ class AsyncRobotClient:
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def moveC(
@@ -1276,7 +1276,7 @@ class AsyncRobotClient:
         accel: float = 1.0,
         r: float = 0.0,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Circular arc through current position -> via -> end.
 
@@ -1308,7 +1308,7 @@ class AsyncRobotClient:
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def moveS(
@@ -1320,7 +1320,7 @@ class AsyncRobotClient:
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Cubic spline through waypoints.
 
@@ -1348,7 +1348,7 @@ class AsyncRobotClient:
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def moveP(
@@ -1360,7 +1360,7 @@ class AsyncRobotClient:
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Process move — constant TCP speed with auto-blending at corners.
 
@@ -1388,7 +1388,7 @@ class AsyncRobotClient:
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(index, timeout=timeout)
         return index
 
     async def checkpoint(self, label: str) -> int:
@@ -1681,7 +1681,7 @@ class AsyncRobotClient:
         return result
 
     async def control_pneumatic_gripper(
-        self, action: str, port: int, wait: bool = False, **wait_kwargs
+        self, action: str, port: int, wait: bool = False, timeout: float = 10.0
     ) -> int:
         """Control pneumatic gripper via digital outputs.
 
@@ -1698,7 +1698,7 @@ class AsyncRobotClient:
         cmd = PneumaticGripperCmd(action=action, port=port)
         result = await self._send(cmd)
         if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(result, timeout=timeout)
         return result
 
     async def control_electric_gripper(
@@ -1708,7 +1708,7 @@ class AsyncRobotClient:
         speed: float = 0.5,
         current: int = 500,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Control electric gripper.
 
@@ -1725,5 +1725,5 @@ class AsyncRobotClient:
         )
         result = await self._send(cmd)
         if wait and result:
-            await self.wait_motion_complete(**wait_kwargs)
+            await self.wait_command_complete(result, timeout=timeout)
         return result

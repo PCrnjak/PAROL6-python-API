@@ -21,12 +21,9 @@ class TestJointBlendLookahead:
 
         # r>0 on intermediate commands creates blend zones; r=0 on the last
         # command terminates the chain and triggers immediate planner flush.
-        for i, t in enumerate(targets):
-            r = 30.0 if i < len(targets) - 1 else 0.0
-            assert client.moveJ(t, speed=0.5, r=r, wait=False) >= 0
-
-        # Wait for everything to finish
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.moveJ(targets[0], speed=0.5, r=30.0, wait=False) >= 0
+        assert client.moveJ(targets[1], speed=0.5, r=30.0, wait=False) >= 0
+        assert client.moveJ(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
 
         # Verify final position matches last target
         angles = client.get_angles()
@@ -91,13 +88,10 @@ class TestCartesianBlendLookahead:
         ]
 
         # r>0 on intermediate commands creates blend zones; r=0 on the last
-        # command terminates the blend chain and triggers immediate flush
-        # (avoids a planner-timeout race with wait_motion_complete on slow CI).
-        for i, t in enumerate(targets):
-            r = 20.0 if i < len(targets) - 1 else 0.0
-            assert client.moveL(t, speed=0.5, r=r, wait=False) >= 0
-
-        assert client.wait_motion_complete(timeout=15.0)
+        # command terminates the blend chain and triggers immediate flush.
+        assert client.moveL(targets[0], speed=0.5, r=20.0, wait=False) >= 0
+        assert client.moveL(targets[1], speed=0.5, r=20.0, wait=False) >= 0
+        assert client.moveL(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
 
         final = client.get_pose_rpy()
         assert final is not None

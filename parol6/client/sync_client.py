@@ -152,16 +152,16 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def home(self, wait: bool = False, **wait_kwargs) -> int:
+    def home(self, wait: bool = False, timeout: float = 10.0) -> int:
         """Home the robot to its home position.
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
             wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
+            timeout: Maximum time to wait in seconds (only used when wait=True).
         """
-        return _run(self._inner.home(wait=wait, **wait_kwargs))
+        return _run(self._inner.home(wait=wait, timeout=timeout))
 
     def resume(self) -> int:
         """Re-enable the robot controller, allowing motion commands.
@@ -456,7 +456,7 @@ class RobotClient:
         r: float = ...,
         rel: bool = ...,
         wait: bool = ...,
-        **wait_kwargs,
+        timeout: float = ...,
     ) -> int: ...
 
     @overload
@@ -470,7 +470,7 @@ class RobotClient:
         accel: float = ...,
         r: float = ...,
         wait: bool = ...,
-        **wait_kwargs,
+        timeout: float = ...,
     ) -> int: ...
 
     def moveJ(
@@ -484,7 +484,7 @@ class RobotClient:
         r: float = 0.0,
         rel: bool = False,
         wait: bool = True,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         if pose is not None:
             return _run(
@@ -496,7 +496,7 @@ class RobotClient:
                     accel=accel,
                     r=r,
                     wait=wait,
-                    **wait_kwargs,
+                    timeout=timeout,
                 )
             )
         if target is None:
@@ -510,7 +510,7 @@ class RobotClient:
                 r=r,
                 rel=rel,
                 wait=wait,
-                **wait_kwargs,
+                timeout=timeout,
             )
         )
 
@@ -525,7 +525,7 @@ class RobotClient:
         r: float = 0.0,
         rel: bool = False,
         wait: bool = True,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         return _run(
             self._inner.moveL(
@@ -537,7 +537,7 @@ class RobotClient:
                 r=r,
                 rel=rel,
                 wait=wait,
-                **wait_kwargs,
+                timeout=timeout,
             )
         )
 
@@ -552,7 +552,7 @@ class RobotClient:
         accel: float = 1.0,
         r: float = 0.0,
         wait: bool = True,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         return _run(
             self._inner.moveC(
@@ -564,7 +564,7 @@ class RobotClient:
                 accel=accel,
                 r=r,
                 wait=wait,
-                **wait_kwargs,
+                timeout=timeout,
             )
         )
 
@@ -577,7 +577,7 @@ class RobotClient:
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = True,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         return _run(
             self._inner.moveS(
@@ -587,7 +587,7 @@ class RobotClient:
                 speed=speed,
                 accel=accel,
                 wait=wait,
-                **wait_kwargs,
+                timeout=timeout,
             )
         )
 
@@ -600,7 +600,7 @@ class RobotClient:
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = True,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         return _run(
             self._inner.moveP(
@@ -610,7 +610,7 @@ class RobotClient:
                 speed=speed,
                 accel=accel,
                 wait=wait,
-                **wait_kwargs,
+                timeout=timeout,
             )
         )
 
@@ -769,22 +769,22 @@ class RobotClient:
         action: str,
         port: int,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Control pneumatic gripper via digital outputs.
 
         Args:
             action: 'open' or 'close'.
             port: Port number (1 or 2).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
+            wait: If True, block until command completes.
+            timeout: Max seconds to wait for completion.
 
         Returns:
             True if command sent successfully.
         """
         return _run(
             self._inner.control_pneumatic_gripper(
-                action, port, wait=wait, **wait_kwargs
+                action, port, wait=wait, timeout=timeout
             )
         )
 
@@ -795,7 +795,7 @@ class RobotClient:
         speed: float = 0.5,
         current: int = 500,
         wait: bool = False,
-        **wait_kwargs,
+        timeout: float = 10.0,
     ) -> int:
         """Control electric gripper.
 
@@ -804,14 +804,14 @@ class RobotClient:
             position: 0.0-1.0 (0=open, 1=closed).
             speed: 0.0-1.0 fraction of max speed.
             current: Current limit in mA (100-1000).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
+            wait: If True, block until command completes.
+            timeout: Max seconds to wait for completion.
 
         Returns:
             True if command sent successfully.
         """
         return _run(
             self._inner.control_electric_gripper(
-                action, position, speed, current, wait=wait, **wait_kwargs
+                action, position, speed, current, wait=wait, timeout=timeout
             )
         )
