@@ -104,9 +104,9 @@ class TestCurvedMotionCommands:
     def test_moveP_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test process move through waypoints with constant TCP speed."""
         waypoints = [
-            self._offset(home_pose),
-            self._offset(home_pose, dx=5, dy=3),
-            self._offset(home_pose),
+            self._offset(home_pose, dz=-5),
+            self._offset(home_pose, dx=10, dy=5, dz=-5),
+            self._offset(home_pose, dz=-5),
         ]
         result = client.moveP(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0

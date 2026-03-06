@@ -454,7 +454,10 @@ class TrajectoryBuilder:
         # Use pre-computed limit arrays for constraints
         joint_vel_constraint = constraint.JointVelocityConstraint(self._vlim)
         joint_acc_constraint = constraint.JointAccelerationConstraint(self._alim)
-        constraints = [joint_vel_constraint, joint_acc_constraint]
+        constraints: list[constraint.Constraint] = [
+            joint_vel_constraint,
+            joint_acc_constraint,
+        ]
 
         # Add Cartesian velocity constraint if specified
         if self.cart_vel_limit is not None and self.cart_vel_limit > 0:
