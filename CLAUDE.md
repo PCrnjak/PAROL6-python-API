@@ -41,7 +41,7 @@ pre-commit install
 # Linting & formatting
 ruff check .
 ruff format .
-mypy parol6/
+ty check parol6/
 
 # Run all pre-commit hooks
 pre-commit run -a
@@ -71,16 +71,16 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 
 - **`parol6/client/async_client.py`**: Primary API - async UDP client with motion commands, queries, and status streaming
 - **`parol6/server/controller.py`**: Controller with fixed-rate loop and command execution
-- **`parol6/commands/`**: Polymorphic command classes using `@register_command("NAME")` decorator
-- **`parol6/protocol/wire.py`**: Binary frame packing/unpacking (START=0xFFFFFF, END=0x0102)
+- **`parol6/commands/`**: Polymorphic command classes using `@register_command(CmdType.XXX)` decorator
+- **`parol6/protocol/wire.py`**: Msgpack message encoding/decoding, command structs (tagged union)
 - **`parol6/PAROL6_ROBOT.py`**: Robot kinematics config, DH parameters, joint limits, tool transforms
 
 ## Adding a New Command
 
-1. Create a class in `parol6/commands/` and decorate with `@register_command("NAME")`
-2. Implement `match(parts)`, `setup(state)`, and `tick(state)` lifecycle methods
-3. For motion commands, set `streamable=True` if supporting high-rate streaming
-4. Use helpers from `parol6/commands/base.py` (parsers, motion profiles)
+1. Create a class in `parol6/commands/` and decorate with `@register_command(CmdType.YOUR_CMD)`
+2. Define a `PARAMS_TYPE` msgspec Struct for wire validation
+3. Implement `do_setup(state)` and `execute_step(state)` lifecycle methods
+4. For motion commands, set `streamable=True` if supporting high-rate streaming
 
 ## Environment Variables
 
@@ -136,14 +136,12 @@ For streamable commands (`streamable = True`), `do_setup()` also runs at high fr
 - **Type annotations**: Fix type errors properly instead of using `# type: ignore`. Prefer:
   - `@overload` decorators for functions with different return types based on input
   - `assert` statements to narrow types after None checks
-  - `cast()` from typing when the type is known but mypy can't infer it
+  - `cast()` from typing when the type is known but the checker can't infer it
   - `np.atleast_1d()` or similar to guarantee array returns from numpy functions
-  - Only use `# type: ignore` as a last resort for genuine mypy/library limitations (e.g., numpy's `ArrayLike` being too broad)
+  - Only use `# type: ignore` as a last resort for genuine type checker limitations (e.g., numpy's `ArrayLike` being too broad)
 
 ## Testing Guidelines
 
 Prefer fewer, comprehensive integration tests that mimic manual testing over a large number of unit tests. We have no code coverage requirements—the goal is working features, not metrics.
-- **NEVER** run long test suites and only capture a few lines of output (e.g. `| tail -5` or `| grep passed`). This wastes time when you have to re-run to see failures.
-- Always capture enough output to see BOTH the summary line AND any failure tracebacks in a single run. Use `tail -40` or similar.
-- For background test runs, just let the full output come through.
+- **NEVER truncate test output.** Do not pipe pytest through `tail`, `head`, `grep`, or any other filter. Always let the full output come through so failures and tracebacks are visible. This applies to both foreground and background test runs.
 - **NEVER run parol6 and web commander test suites in parallel** — no proper isolation, they share resources and have timing issues when resource-constrained. Always run sequentially.

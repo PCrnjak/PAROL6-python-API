@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Literal, cast, overload
 
 import msgspec
 import numpy as np
+from waldoctl import RobotClient as _RobotClientABC, ToolStatus
+from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
 from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
@@ -21,15 +23,19 @@ from ..utils.error_catalog import RobotError
 from ..utils.errors import MotionError
 from ..protocol.wire import (
     STRUCT_TO_CMDTYPE,
+    AnglesResultStruct,
     decode_status_bin_into,
     CheckpointCmd,
     CurrentActionResultStruct,
     DelayCmd,
-    ElectricGripperCmd,
+    EnablementResultStruct,
+    ErrorResultStruct,
     ErrorMsg,
+    IOResultStruct,
     GetAnglesCmd,
     GetCurrentActionCmd,
-    GetGripperCmd,
+    GetEnablementCmd,
+    GetErrorCmd,
     GetIOCmd,
     GetLoopStatsCmd,
     GetPoseCmd,
@@ -37,7 +43,9 @@ from ..protocol.wire import (
     GetQueueCmd,
     GetSpeedsCmd,
     GetStatusCmd,
+    GetTcpSpeedCmd,
     GetToolCmd,
+    GetToolStatusCmd,
     HaltCmd,
     HomeCmd,
     JogJCmd,
@@ -51,10 +59,14 @@ from ..protocol.wire import (
     MoveSCmd,
     OkMsg,
     PingCmd,
-    PneumaticGripperCmd,
+    PingResultStruct,
+    PoseResultStruct,
+    ProfileResultStruct,
+    QueueResultStruct,
     ResetCmd,
     ResetLoopStatsCmd,
     ResumeCmd,
+    Response,
     ResponseMsg,
     ServoJCmd,
     ServoJPoseCmd,
@@ -64,18 +76,19 @@ from ..protocol.wire import (
     SetProfileCmd,
     SetToolCmd,
     SimulatorCmd,
+    SpeedsResultStruct,
     StatusBuffer,
     StatusResultStruct,
+    TcpSpeedResultStruct,
+    ToolActionCmd,
     ToolResultStruct,
+    ToolStatusResultStruct,
     decode_message,
     encode_command,
     encode_command_into,
 )
-from ..protocol.types import (
-    Axis,
-    Frame,
-    PingResult,
-)
+from ..protocol.types import Axis, Frame
+from waldoctl import PingResult
 from pinokin import so3_rpy
 
 logger = logging.getLogger(__name__)
@@ -206,7 +219,7 @@ class _StatusProtocol(asyncio.DatagramProtocol):
         pass
 
 
-class AsyncRobotClient:
+class AsyncRobotClient(_RobotClientABC):
     """
     Async UDP client for the PAROL6 headless controller.
 
@@ -258,8 +271,24 @@ class AsyncRobotClient:
         # Last command index returned by server for queued commands
         self._last_command_index: int | None = None
 
+        # Active tool key (set by set_tool)
+        self._active_tool_key: str | None = None
+
+        # Bound tool specs (populated by Robot.create_async_client)
+        self._bound_tools: dict[str, ToolSpec] = {}
+
         # Lifecycle flag
         self._closed: bool = False
+
+    # --------------- Tool access ---------------
+
+    @property
+    def tool(self) -> ToolSpec:
+        """Active bound tool. Raises if no tool has been set."""
+        key = (self._active_tool_key or "").upper()
+        if not key:
+            raise RuntimeError("No tool set. Call set_tool() first.")
+        return self._bound_tools[key]
 
     # --------------- Endpoint configuration properties ---------------
 
@@ -485,8 +514,7 @@ class AsyncRobotClient:
             try:
                 await self._request_ok_raw(encode_command(cmd), self.timeout)
                 return True
-            except RuntimeError:
-                # Server rejected command
+            except TimeoutError:
                 return False
 
         # Motion and other non-query commands
@@ -496,7 +524,7 @@ class AsyncRobotClient:
                     ok = await self._request_ok_raw(encode_command(cmd), self.timeout)
                     self._last_command_index = ok.index
                     return ok.index if ok.index is not None else 0
-                except RuntimeError:
+                except TimeoutError:
                     return -1
             # Fire-and-forget: reuse pre-allocated buffer (sendto copies)
             encode_command_into(cmd, self._tx_buf)
@@ -508,14 +536,20 @@ class AsyncRobotClient:
         self._transport.sendto(self._tx_buf)
         return True
 
-    async def _request(self, cmd: msgspec.Struct) -> ResponseMsg | None:
-        """Send a request and wait for a response.
+    async def _request(self, cmd: msgspec.Struct) -> Response | None:
+        """Send a query command and wait for a typed response.
+
+        Drains the receive queue until a ResponseMsg is found or timeout.
+        Non-ResponseMsg datagrams (e.g. status broadcasts) are discarded.
 
         Args:
             cmd: Typed command struct
 
         Returns:
-            ResponseMsg with query_type and value, or None on timeout/error.
+            Typed Response struct, or None on timeout.
+
+        Raises:
+            MotionError: If the server responds with an error.
         """
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -524,23 +558,36 @@ class AsyncRobotClient:
             try:
                 async with self._req_lock:
                     self._transport.sendto(data)
-                    resp_data, _ = await asyncio.wait_for(
-                        self._rx_queue.get(), timeout=self.timeout
-                    )
-                    try:
-                        parsed = decode_message(resp_data)
-                        if isinstance(parsed, ResponseMsg):
-                            return parsed
-                        return None
-                    except Exception:
-                        return None
+                    end_time = time.monotonic() + self.timeout
+                    while time.monotonic() < end_time:
+                        try:
+                            resp_data, _ = await asyncio.wait_for(
+                                self._rx_queue.get(),
+                                timeout=max(0.0, end_time - time.monotonic()),
+                            )
+                            try:
+                                parsed = decode_message(resp_data)
+                                if isinstance(parsed, ResponseMsg):
+                                    return parsed.result
+                                if isinstance(parsed, ErrorMsg):
+                                    raise MotionError(
+                                        RobotError.from_wire(parsed.message)
+                                    )
+                            except MotionError:
+                                raise
+                            except Exception:
+                                pass  # Ignore non-matching datagrams
+                        except (asyncio.TimeoutError, TimeoutError):
+                            break
+            except MotionError:
+                raise
             except (asyncio.TimeoutError, TimeoutError):
-                if attempt < self.retries:
-                    backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
-                    await asyncio.sleep(backoff)
-                    continue
+                pass
             except Exception:
                 break
+            if attempt < self.retries:
+                backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
+                await asyncio.sleep(backoff)
         return None
 
     async def _request_ok_raw(self, data: bytes, timeout: float) -> OkMsg:
@@ -690,7 +737,7 @@ class AsyncRobotClient:
 
     # --------------- Status / Queries ---------------
     async def ping(self) -> PingResult | None:
-        """Return parsed ping result with serial_connected status.
+        """Return parsed ping result with hardware_connected status.
 
         Category: Query
 
@@ -698,10 +745,9 @@ class AsyncRobotClient:
             rbt.ping()
         """
         resp = await self._request(PingCmd())
-        if resp is None:
+        if not isinstance(resp, PingResultStruct):
             return None
-        serial = int(resp.value) if resp.value is not None else 0
-        return PingResult(serial_connected=bool(serial), raw=str(resp))
+        return PingResult(hardware_connected=bool(resp.hardware_connected))
 
     async def get_angles(self) -> list[float] | None:
         """Get current joint angles in degrees [J1, J2, J3, J4, J5, J6].
@@ -712,7 +758,7 @@ class AsyncRobotClient:
             angles = rbt.get_angles()
         """
         resp = await self._request(GetAnglesCmd())
-        return cast(list[float], resp.value) if resp else None
+        return resp.angles if isinstance(resp, AnglesResultStruct) else None
 
     async def get_io(self) -> list[int] | None:
         """Get digital I/O status [in1, in2, out1, out2, estop].
@@ -723,18 +769,7 @@ class AsyncRobotClient:
             io = rbt.get_io()
         """
         resp = await self._request(GetIOCmd())
-        return cast(list[int], resp.value) if resp else None
-
-    async def get_gripper_status(self) -> list[int] | None:
-        """Get electric gripper status [id, pos, speed, current, status, obj_detected].
-
-        Category: Query
-
-        Example:
-            gs = rbt.get_gripper_status()
-        """
-        resp = await self._request(GetGripperCmd())
-        return cast(list[int], resp.value) if resp else None
+        return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def get_speeds(self) -> list[float] | None:
         """Get current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
@@ -745,7 +780,7 @@ class AsyncRobotClient:
             speeds = rbt.get_speeds()
         """
         resp = await self._request(GetSpeedsCmd())
-        return cast(list[float], resp.value) if resp else None
+        return resp.speeds if isinstance(resp, SpeedsResultStruct) else None
 
     async def get_pose(
         self, frame: Literal["WRF", "TRF"] = "WRF"
@@ -758,20 +793,10 @@ class AsyncRobotClient:
             pose = rbt.get_pose()
         """
         resp = await self._request(GetPoseCmd(frame=frame))
-        return cast(list[float], resp.value) if resp else None
-
-    async def get_gripper(self) -> list[int] | None:
-        """Alias for get_gripper_status.
-
-        Category: Query
-
-        Example:
-            gripper = rbt.get_gripper()
-        """
-        return await self.get_gripper_status()
+        return resp.pose if isinstance(resp, PoseResultStruct) else None
 
     async def get_status(self) -> StatusResultStruct | None:
-        """Get aggregate status (pose, angles, speeds, io, gripper).
+        """Get aggregate status (pose, angles, speeds, io, tool_status).
 
         Category: Query
 
@@ -779,7 +804,7 @@ class AsyncRobotClient:
             status = rbt.get_status()
         """
         resp = await self._request(GetStatusCmd())
-        return StatusResultStruct(*resp.value) if resp else None
+        return resp if isinstance(resp, StatusResultStruct) else None
 
     async def get_loop_stats(self) -> LoopStatsResultStruct | None:
         """Fetch control-loop runtime metrics.
@@ -790,7 +815,7 @@ class AsyncRobotClient:
             stats = rbt.get_loop_stats()
         """
         resp = await self._request(GetLoopStatsCmd())
-        return LoopStatsResultStruct(*resp.value) if resp else None
+        return resp if isinstance(resp, LoopStatsResultStruct) else None
 
     async def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count.
@@ -811,12 +836,13 @@ class AsyncRobotClient:
             rbt.set_tool("NONE")
 
         Args:
-            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
 
         Returns:
             True if successful
         """
-        return await self._send(SetToolCmd(tool_name=tool_name.upper()))
+        self._active_tool_key = tool_name.upper()
+        return await self._send(SetToolCmd(tool_name=self._active_tool_key))
 
     async def set_profile(self, profile: str) -> int:
         """Set the motion profile for all moves.
@@ -844,7 +870,7 @@ class AsyncRobotClient:
             profile = rbt.get_profile()
         """
         resp = await self._request(GetProfileCmd())
-        return str(resp.value).upper() if resp and resp.value else None
+        return resp.profile.upper() if isinstance(resp, ProfileResultStruct) else None
 
     async def get_tool(self) -> ToolResultStruct | None:
         """Get the current tool and available tools.
@@ -855,12 +881,10 @@ class AsyncRobotClient:
             tool = rbt.get_tool()
         """
         resp = await self._request(GetToolCmd())
-        if resp and isinstance(resp.value, (list, tuple)) and len(resp.value) >= 2:
-            return ToolResultStruct(*resp.value)
-        return None
+        return resp if isinstance(resp, ToolResultStruct) else None
 
     async def get_current_action(self) -> CurrentActionResultStruct | None:
-        """Get the current executing action (current, state, next).
+        """Get the current executing action (current, state, next, params).
 
         Category: Query
 
@@ -868,12 +892,10 @@ class AsyncRobotClient:
             action = rbt.get_current_action()
         """
         resp = await self._request(GetCurrentActionCmd())
-        if resp and isinstance(resp.value, (list, tuple)) and len(resp.value) >= 3:
-            return CurrentActionResultStruct(*resp.value)
-        return None
+        return resp if isinstance(resp, CurrentActionResultStruct) else None
 
-    async def get_queue(self) -> list[str] | None:
-        """Get the list of queued non-streamable commands.
+    async def get_queue(self) -> QueueResultStruct | None:
+        """Get queue status with progress tracking.
 
         Category: Query
 
@@ -881,7 +903,63 @@ class AsyncRobotClient:
             queue = rbt.get_queue()
         """
         resp = await self._request(GetQueueCmd())
-        return cast(list, resp.value) if resp else None
+        return resp if isinstance(resp, QueueResultStruct) else None
+
+    async def get_tool_status(self) -> ToolStatus | None:
+        """Get current tool status (key, state, engaged, positions, channels, etc.).
+
+        Category: Query
+
+        Example:
+            ts = rbt.get_tool_status()
+        """
+        resp = await self._request(GetToolStatusCmd())
+        if not isinstance(resp, ToolStatusResultStruct):
+            return None
+        return ToolStatus(
+            key=resp.tool_key,
+            state=resp.state,
+            engaged=resp.engaged,
+            part_detected=resp.part_detected,
+            fault_code=resp.fault_code,
+            positions=tuple(resp.positions),
+            channels=tuple(resp.channels),
+        )
+
+    async def get_enablement(self) -> EnablementResultStruct | None:
+        """Get joint and Cartesian enablement flags.
+
+        Category: Query
+
+        Example:
+            en = rbt.get_enablement()
+        """
+        resp = await self._request(GetEnablementCmd())
+        return resp if isinstance(resp, EnablementResultStruct) else None
+
+    async def get_error(self) -> RobotError | None:
+        """Get the current error state, or None if no error.
+
+        Category: Query
+
+        Example:
+            err = rbt.get_error()
+        """
+        resp = await self._request(GetErrorCmd())
+        if not isinstance(resp, ErrorResultStruct) or resp.error is None:
+            return None
+        return RobotError.from_wire(resp.error)
+
+    async def get_tcp_speed(self) -> float | None:
+        """Get current TCP linear speed in mm/s.
+
+        Category: Query
+
+        Example:
+            speed = rbt.get_tcp_speed()
+        """
+        resp = await self._request(GetTcpSpeedCmd())
+        return resp.speed if isinstance(resp, TcpSpeedResultStruct) else None
 
     # --------------- Helper methods ---------------
 
@@ -944,6 +1022,10 @@ class AsyncRobotClient:
 
         Category: Query
 
+        Prefer ``wait_command_complete()`` for waiting on specific commands.
+        This method polls raw joint speeds and is mainly useful for
+        diagnostics or manual stopping logic.
+
         Example:
             stopped = rbt.is_robot_stopped()
 
@@ -962,7 +1044,7 @@ class AsyncRobotClient:
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
-        speed_threshold: float = 2.0,
+        speed_threshold: float = 0.01,
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
     ) -> bool:
@@ -981,7 +1063,7 @@ class AsyncRobotClient:
         Args:
             timeout: Maximum time to wait in seconds
             settle_window: How long robot must be stable to be considered stopped
-            speed_threshold: Max joint speed to be considered stopped (steps/sec)
+            speed_threshold: Max joint speed to be considered stopped (rad/s)
             angle_threshold: Max angle change to be considered stopped (degrees)
             motion_start_timeout: Max time to wait for motion to start (seconds)
 
@@ -1078,7 +1160,7 @@ class AsyncRobotClient:
                     if predicate(self._shared_status):
                         return True
                 except Exception:
-                    pass
+                    logger.debug("Status predicate raised", exc_info=True)
                 continue
 
             # Wait for next update with timeout
@@ -1101,7 +1183,7 @@ class AsyncRobotClient:
                     if predicate(self._shared_status):
                         return True
                 except Exception:
-                    pass
+                    logger.debug("Status predicate raised", exc_info=True)
         return False
 
     async def wait_command_complete(
@@ -1655,20 +1737,25 @@ class AsyncRobotClient:
     # --------------- IO / Gripper / Utility ---------------
 
     async def set_io(self, index: int, value: int) -> int:
-        """Set a digital I/O output bit.
+        """Set digital output by logical index (0 = first output pin).
+
+        The firmware I/O byte layout is ``[in0, in1, out0, out1, estop, ...]``
+        so logical output index 0 maps to bit position 2.
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Category: IO
 
         Example:
-            rbt.set_io(0, 1)
+            rbt.set_io(0, 1)   # Set first output HIGH
         """
-        if index < 0 or index > 7:
-            raise ValueError("I/O index must be 0..7")
+        if index < 0 or index > 1:
+            raise ValueError("Output index must be 0 or 1")
         if value not in (0, 1):
             raise ValueError("I/O value must be 0 or 1")
-        result = await self._send(SetIOCmd(port_index=index, value=value))
+        # Firmware bit layout: [in0, in1, out0, out1, estop, ...]
+        firmware_index = index + 2
+        result = await self._send(SetIOCmd(port_index=firmware_index, value=value))
         return result
 
     async def delay(self, seconds: float) -> int:
@@ -1686,50 +1773,37 @@ class AsyncRobotClient:
         result = await self._send(DelayCmd(seconds=seconds))
         return result
 
-    async def control_pneumatic_gripper(
-        self, action: str, port: int, wait: bool = False, timeout: float = 10.0
-    ) -> int:
-        """Control pneumatic gripper via digital outputs.
-
-        Category: Gripper
-
-        Example:
-            rbt.control_pneumatic_gripper("open", port=1)
-        """
-        action = action.lower()
-        if action not in ("open", "close"):
-            raise ValueError("Invalid pneumatic action")
-        if port not in (1, 2):
-            raise ValueError("Invalid pneumatic port")
-        cmd = PneumaticGripperCmd(action=action, port=port)
-        result = await self._send(cmd)
-        if wait and result:
-            await self.wait_command_complete(result, timeout=timeout)
-        return result
-
-    async def control_electric_gripper(
+    async def tool_action(
         self,
+        tool_key: str,
         action: str,
-        position: float = 0.0,
-        speed: float = 0.5,
-        current: int = 500,
+        params: list | None = None,
+        *,
         wait: bool = False,
         timeout: float = 10.0,
     ) -> int:
-        """Control electric gripper.
+        """Send a generic tool action command.
 
-        Category: Gripper
+        Returns the command index (>= 0) on success, -1 on failure.
+
+        Category: I/O
 
         Example:
-            rbt.control_electric_gripper("move", position=0.5)
+            rbt.tool_action("PNEUMATIC", "open")
+
+        Args:
+            tool_key: Tool registry key (e.g. "PNEUMATIC", "SSG-48", "MSG")
+            action: Action name (e.g. "open", "close", "move", "calibrate")
+            params: Positional parameters (meaning defined by tool config)
+            wait: If True, block until action completes
+            timeout: Maximum time to wait in seconds (only used when wait=True)
         """
-        action = action.lower()
-        if action not in ("move", "calibrate"):
-            raise ValueError("Invalid electric gripper action")
-        cmd = ElectricGripperCmd(
-            action=action, position=position, speed=speed, current=current
+        cmd = ToolActionCmd(
+            tool_key=tool_key.strip().upper(),
+            action=action.strip().lower(),
+            params=params or [],
         )
         result = await self._send(cmd)
-        if wait and result:
+        if wait and result >= 0:
             await self.wait_command_complete(result, timeout=timeout)
         return result

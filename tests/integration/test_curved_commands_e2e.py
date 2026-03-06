@@ -21,11 +21,22 @@ class TestCurvedMotionCommands:
         assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
-    def test_moveC_basic(self, client, server_proc, robot_api_env, homed_robot):
+    @pytest.fixture
+    def home_pose(self, client, homed_robot) -> list[float]:
+        """Return the TCP pose at home [x, y, z, rx, ry, rz] (mm, degrees)."""
+        pose = client.get_pose_rpy()
+        assert pose is not None and len(pose) == 6
+        return pose
+
+    def _offset(self, pose: list[float], dx=0, dy=0, dz=0, drz=0) -> list[float]:
+        """Small position offset from a base pose, preserving orientation."""
+        return [pose[0] + dx, pose[1] + dy, pose[2] + dz, pose[3], pose[4], pose[5] + drz]
+
+    def test_moveC_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test circular arc through current → via → end."""
         result = client.moveC(
-            via=[10, 10, 100, 0, 0, 0],
-            end=[20, 0, 100, 0, 0, 0],
+            via=self._offset(home_pose, dx=10, dy=10, dz=-5),
+            end=self._offset(home_pose, dx=20),
             duration=2.0,
             frame="WRF",
         )
@@ -34,12 +45,12 @@ class TestCurvedMotionCommands:
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_moveC_with_orientation(
-        self, client, server_proc, robot_api_env, homed_robot
+        self, client, server_proc, robot_api_env, home_pose
     ):
-        """Test arc with orientation interpolation."""
+        """Test arc with small orientation change."""
         result = client.moveC(
-            via=[50, 100, 150, 0, 0, 45],
-            end=[100, 100, 150, 0, 0, 90],
+            via=self._offset(home_pose, dx=10, dy=10, dz=-5, drz=10),
+            end=self._offset(home_pose, dx=20, drz=20),
             duration=2.0,
             frame="WRF",
         )
@@ -49,7 +60,6 @@ class TestCurvedMotionCommands:
 
     def test_moveC_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that moveC with frame=TRF is accepted and completes."""
-        # Small offsets relative to tool frame
         result = client.moveC(
             via=[10, 5, 0, 0, 0, 0],
             end=[20, 0, 0, 0, 0, 0],
@@ -60,13 +70,12 @@ class TestCurvedMotionCommands:
         assert client.wait_motion_complete(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveS_basic(self, client, server_proc, robot_api_env, homed_robot):
+    def test_moveS_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test spline motion through waypoints."""
-        # Near home position [-0.8, 262.0, 335.2]
         waypoints = [
-            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
-            [20.0, 270.0, 340.0, 0.0, 0.0, 5.0],
-            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
+            self._offset(home_pose),
+            self._offset(home_pose, dx=20, dy=8, dz=5),
+            self._offset(home_pose),
         ]
         result = client.moveS(waypoints=waypoints, duration=3.0, frame="WRF")
         assert result >= 0
@@ -85,12 +94,12 @@ class TestCurvedMotionCommands:
         assert client.wait_motion_complete(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveP_basic(self, client, server_proc, robot_api_env, homed_robot):
+    def test_moveP_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test process move through waypoints with constant TCP speed."""
         waypoints = [
-            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
-            [15.0, 270.0, 335.0, 0.0, 0.0, 0.0],
-            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
+            self._offset(home_pose),
+            self._offset(home_pose, dx=15, dy=8),
+            self._offset(home_pose),
         ]
         result = client.moveP(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0

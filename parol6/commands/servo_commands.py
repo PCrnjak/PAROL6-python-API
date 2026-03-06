@@ -23,6 +23,9 @@ from parol6.config import (
 from parol6.protocol.wire import CmdType, ServoJCmd, ServoJPoseCmd, ServoLCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import IKError
 from parol6.utils.ik import solve_ik
 from pinokin import se3_from_rpy
 
@@ -88,15 +91,14 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
         # Sync position on first tick or if executor not active
         if not self._initialized or not se.active:
             steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(list(self._q_rad_buf))
+            se.sync_position(self._q_rad_buf)
             se.set_limits(self.p.speed, self.p.accel)
             self._initialized = True
 
         se.set_position_target(self._target_rad)
         pos_rad, _vel, finished = se.tick()
 
-        for i in range(6):
-            self._pos_rad_buf[i] = pos_rad[i]
+        self._pos_rad_buf[:] = pos_rad
         rad_to_steps(self._pos_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 
@@ -149,8 +151,11 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
         steps_to_rad(state.Position_in, self._q_rad_buf)
         ik_result = solve_ik(PAROL6_ROBOT.robot, self._target_se3, self._q_rad_buf)
         if not ik_result.success or ik_result.q is None:
-            raise ValueError(
-                f"SERVOJ_POSE: IK failed for pose {[round(v, 1) for v in pose]}"
+            raise IKError(
+                make_error(
+                    ErrorCode.IK_TARGET_UNREACHABLE,
+                    detail=f"SERVOJ_POSE: IK failed for pose {[round(v, 1) for v in pose]}",
+                )
             )
 
         for i in range(6):
@@ -162,15 +167,14 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
         # Sync position on first tick or if executor not active
         if not self._initialized or not se.active:
             steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(list(self._q_rad_buf))
+            se.sync_position(self._q_rad_buf)
             se.set_limits(self.p.speed, self.p.accel)
             self._initialized = True
 
         se.set_position_target(self._target_rad)
         pos_rad, _vel, finished = se.tick()
 
-        for i in range(6):
-            self._pos_rad_buf[i] = pos_rad[i]
+        self._pos_rad_buf[:] = pos_rad
         rad_to_steps(self._pos_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 

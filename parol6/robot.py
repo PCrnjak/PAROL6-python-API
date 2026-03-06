@@ -1,6 +1,6 @@
 """Unified PAROL6 robot — lifecycle, configuration, kinematics, and factories.
 
-This class directly satisfies the web commander's ``Robot`` Protocol.
+Inherits from ``waldoctl.Robot`` ABC.
 All parol6-specific details (subprocess management, pinokin, IK solver, etc.)
 are encapsulated here.
 """
@@ -25,6 +25,25 @@ import numpy as np
 from numpy.typing import NDArray
 from pinokin import Robot as PinokinRobot
 from pinokin import se3_from_rpy, so3_rpy
+from waldoctl import (
+    CartesianKinodynamicLimits,
+    ElectricGripperTool,
+    GripperType,
+    HomePosition,
+    JointLimits,
+    JointsSpec,
+    KinodynamicLimits,
+    LinearAngularLimits,
+    MeshSpec,
+    PartMotion,
+    PneumaticGripperTool,
+    PositionLimits,
+    Robot as _RobotABC,
+    ToolSpec,
+    ToolVariant,
+    ToolsSpec,
+    ToolType,
+)
 
 from parol6.client.async_client import AsyncRobotClient
 from parol6.client.dry_run_client import DryRunRobotClient
@@ -32,7 +51,11 @@ from parol6.client.sync_client import RobotClient as SyncRobotClient
 from parol6.config import HOME_ANGLES_DEG, LIMITS
 from parol6.motion.trajectory import ProfileType
 from parol6.protocol.wire import CmdType, MsgType, decode, encode
-from parol6.tools import TOOL_CONFIGS
+from parol6.tools import (
+    ElectricGripperConfig,
+    PneumaticGripperConfig,
+    get_registry,
+)
 from parol6.utils.ik import check_limits, solve_ik
 
 logger = logging.getLogger(__name__)
@@ -245,93 +268,69 @@ class _ServerManager:
 
 
 # ===========================================================================
-# Concrete joint / tool dataclass implementations
+# Concrete tool implementations (inherit waldoctl ABCs)
 # ===========================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class _PositionLimits:
-    deg: NDArray[np.float64]
-    rad: NDArray[np.float64]
+class _ToolImpl(ToolSpec):
+    """Concrete ToolSpec for passive/no-action tools."""
+
+    def __init__(self, *, tool_type: ToolType = ToolType.NONE, **kwargs: Any) -> None:
+        super().__init__(tool_type=tool_type, **kwargs)
 
 
-@dataclass(frozen=True, slots=True)
-class _KinodynamicLimits:
-    velocity: NDArray[np.float64]
-    acceleration: NDArray[np.float64]
-    jerk: NDArray[np.float64] | None = None
+class _PneumaticGripperImpl(PneumaticGripperTool):
+    """Concrete PneumaticGripperTool for PAROL6."""
+
+    def __init__(self, *, io_port: int = 1, **kwargs: Any) -> None:
+        super().__init__(io_port=io_port, **kwargs)
 
 
-@dataclass(frozen=True, slots=True)
-class _JointLimits:
-    position: _PositionLimits
-    hard: _KinodynamicLimits
-    jog: _KinodynamicLimits
+class _ElectricGripperImpl(ElectricGripperTool):
+    """Concrete ElectricGripperTool for PAROL6."""
+
+    def __init__(
+        self,
+        *,
+        position_range: tuple[float, float] = (0.0, 1.0),
+        speed_range: tuple[float, float] = (0.0, 1.0),
+        current_range: tuple[int, int] = (100, 1000),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            position_range=position_range,
+            speed_range=speed_range,
+            current_range=current_range,
+            **kwargs,
+        )
 
 
-@dataclass(frozen=True, slots=True)
-class _HomePosition:
-    deg: NDArray[np.float64]
-    rad: NDArray[np.float64]
-
-
-@dataclass(frozen=True, slots=True)
-class _JointsSpec:
-    count: int
-    names: tuple[str, ...]
-    limits: _JointLimits
-    home: _HomePosition
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolData:
-    """Concrete ToolSpec for PAROL6 tools."""
-
-    key: str
-    display_name: str
-    description: str
-    tool_type: Any  # ToolType enum — imported lazily to avoid circular deps
-    tcp_origin: tuple[float, float, float]
-    tcp_rpy: tuple[float, float, float]
-
-
-@dataclass(frozen=True, slots=True)
-class _PneumaticGripperData(_ToolData):
-    """Concrete PneumaticGripperTool."""
-
-    gripper_type: Any = None  # GripperType.PNEUMATIC
-    io_port: int = 1
-
-
-class _ToolsCollection:
+class _ToolsCollection(ToolsSpec):
     """Concrete ToolsSpec for PAROL6."""
 
-    def __init__(self, tools: tuple[_ToolData, ...]) -> None:
+    def __init__(self, tools: tuple[ToolSpec, ...]) -> None:
         self._tools = tools
         self._by_key = {t.key: t for t in tools}
 
     @property
-    def available(self) -> tuple[_ToolData, ...]:
+    def available(self) -> tuple[ToolSpec, ...]:
         return self._tools
 
     @property
-    def default(self) -> _ToolData:
+    def default(self) -> ToolSpec:
         return self._by_key.get("NONE", self._tools[0])
 
-    def __getitem__(self, key: str) -> _ToolData:
+    def __getitem__(self, key: str) -> ToolSpec:
         return self._by_key[key]
 
     def __contains__(self, item: object) -> bool:
         if isinstance(item, str):
             return item in self._by_key
-        # Cross-enum comparison by .value for structural typing compatibility
-        if hasattr(item, "value"):
-            return any(t.tool_type.value == item.value for t in self._tools)
+        if isinstance(item, ToolType):
+            return any(t.tool_type == item for t in self._tools)
         return False
 
-    def by_type(self, tool_type: object) -> tuple[_ToolData, ...]:
-        if hasattr(tool_type, "value"):
-            return tuple(t for t in self._tools if t.tool_type.value == tool_type.value)
+    def by_type(self, tool_type: ToolType) -> tuple[ToolSpec, ...]:
         return tuple(t for t in self._tools if t.tool_type == tool_type)
 
 
@@ -340,29 +339,29 @@ class _ToolsCollection:
 # ===========================================================================
 
 
-def _build_joints() -> _JointsSpec:
+def _build_joints() -> JointsSpec:
     """Build JointsSpec from parol6 LIMITS and HOME_ANGLES_DEG."""
     home_deg = np.array(HOME_ANGLES_DEG, dtype=np.float64)
-    return _JointsSpec(
+    return JointsSpec(
         count=6,
-        names=("J1", "J2", "J3", "J4", "J5", "J6"),
-        limits=_JointLimits(
-            position=_PositionLimits(
+        names=("Base", "Shoulder", "Elbow", "Wrist 1", "Wrist 2", "Wrist 3"),
+        limits=JointLimits(
+            position=PositionLimits(
                 deg=LIMITS.joint.position.deg,
                 rad=LIMITS.joint.position.rad,
             ),
-            hard=_KinodynamicLimits(
+            hard=KinodynamicLimits(
                 velocity=LIMITS.joint.hard.velocity,
                 acceleration=LIMITS.joint.hard.acceleration,
                 jerk=LIMITS.joint.hard.jerk,
             ),
-            jog=_KinodynamicLimits(
+            jog=KinodynamicLimits(
                 velocity=LIMITS.joint.jog.velocity,
                 acceleration=LIMITS.joint.jog.acceleration,
                 jerk=LIMITS.joint.jog.jerk,
             ),
         ),
-        home=_HomePosition(
+        home=HomePosition(
             deg=home_deg,
             rad=np.deg2rad(home_deg),
         ),
@@ -381,63 +380,34 @@ def _decompose_transform(
 
 
 def _build_tools() -> _ToolsCollection:
-    """Build typed tool specs from parol6 TOOL_CONFIGS."""
-    # Import enums here to avoid circular imports at module level.
-    # The web commander defines these; parol6 just uses matching values.
-    from enum import Enum
+    """Build typed tool specs from the parol6 tool registry."""
+    tools: list[ToolSpec] = []
+    for key, cfg in get_registry().items():
+        origin, rpy = _decompose_transform(cfg.transform)
+        common = dict(
+            key=key,
+            display_name=cfg.name,
+            description=cfg.description,
+            tcp_origin=origin,
+            tcp_rpy=rpy,
+            meshes=cfg.meshes,
+            motions=cfg.motions,
+            variants=cfg.variants,
+        )
 
-    class _ToolType(Enum):
-        NONE = "none"
-        GRIPPER = "gripper"
-
-    class _GripperType(Enum):
-        PNEUMATIC = "pneumatic"
-        ELECTRIC = "electric"
-        PARALLEL = "parallel"
-
-    tools: list[_ToolData] = []
-    for key, cfg in TOOL_CONFIGS.items():
-        transform = cfg.get("transform", np.eye(4, dtype=np.float64))
-        origin, rpy = _decompose_transform(transform)
-        name_str = cfg.get("name", key)
-        desc = cfg.get("description", "")
-
-        if key == "NONE":
+        if isinstance(cfg, PneumaticGripperConfig):
+            tools.append(_PneumaticGripperImpl(**common, io_port=cfg.io_port))
+        elif isinstance(cfg, ElectricGripperConfig):
             tools.append(
-                _ToolData(
-                    key=key,
-                    display_name=name_str,
-                    description=desc,
-                    tool_type=_ToolType.NONE,
-                    tcp_origin=origin,
-                    tcp_rpy=rpy,
-                )
-            )
-        elif key == "PNEUMATIC":
-            tools.append(
-                _PneumaticGripperData(
-                    key=key,
-                    display_name=name_str,
-                    description=desc,
-                    tool_type=_ToolType.GRIPPER,
-                    tcp_origin=origin,
-                    tcp_rpy=rpy,
-                    gripper_type=_GripperType.PNEUMATIC,
-                    io_port=1,
+                _ElectricGripperImpl(
+                    **common,
+                    position_range=cfg.position_range,
+                    speed_range=cfg.speed_range,
+                    current_range=cfg.current_range,
                 )
             )
         else:
-            # Default: treat unknown tools as NONE type
-            tools.append(
-                _ToolData(
-                    key=key,
-                    display_name=name_str,
-                    description=desc,
-                    tool_type=_ToolType.NONE,
-                    tcp_origin=origin,
-                    tcp_rpy=rpy,
-                )
-            )
+            tools.append(_ToolImpl(**common, tool_type=ToolType.NONE))
 
     return _ToolsCollection(tuple(tools))
 
@@ -473,8 +443,8 @@ class Parol6IKResult:
 # ===========================================================================
 
 
-class Robot:
-    """Unified PAROL6 robot — satisfies the web commander's Robot Protocol.
+class Robot(_RobotABC):
+    """Unified PAROL6 robot — inherits from waldoctl.Robot ABC.
 
     Combines identity, configuration, FK/IK kinematics, controller lifecycle,
     and client factories. Supports both sync and async context managers::
@@ -485,7 +455,7 @@ class Robot:
 
         # Async
         async with Robot() as robot:
-            client = robot.create_client()
+            client = robot.create_async_client()
     """
 
     def __init__(
@@ -508,6 +478,18 @@ class Robot:
         self._mesh_dir = _resolve_mesh_dir()
         self._motion_profiles = tuple(p.value.upper() for p in ProfileType)
 
+        cj = LIMITS.cart.jog
+        self._cartesian_limits = CartesianKinodynamicLimits(
+            velocity=LinearAngularLimits(
+                linear=cj.velocity.linear,
+                angular=cj.velocity.angular,
+            ),
+            acceleration=LinearAngularLimits(
+                linear=cj.acceleration.linear,
+                angular=cj.acceleration.angular,
+            ),
+        )
+
         # Initialize pinokin for FK/IK
         self._pinokin = PinokinRobot(self._urdf_path)
 
@@ -515,7 +497,6 @@ class Robot:
         self._q_buf = np.zeros(self._pinokin.nq, dtype=np.float64)
         self._T_buf = np.asfortranarray(np.zeros((4, 4), dtype=np.float64))
         self._rpy_buf = np.zeros(3, dtype=np.float64)
-        self._fk_out = np.zeros(6, dtype=np.float64)
         self._T_target_buf = np.zeros((4, 4), dtype=np.float64)
 
     # -- Identity -----------------------------------------------------------
@@ -527,12 +508,16 @@ class Robot:
     # -- Structured sub-objects ---------------------------------------------
 
     @property
-    def joints(self) -> _JointsSpec:
+    def joints(self) -> JointsSpec:
         return self._joints
 
     @property
     def tools(self) -> _ToolsCollection:
         return self._tools
+
+    @property
+    def cartesian_limits(self) -> CartesianKinodynamicLimits:
+        return self._cartesian_limits
 
     # -- Unit preferences ---------------------------------------------------
 
@@ -604,17 +589,49 @@ class Robot:
         self._q_buf[:n] = q_rad[:n]
         self._q_buf[n:] = 0.0
 
-    def fk(self, q_rad: NDArray[np.float64]) -> NDArray[np.float64]:
+    def set_active_tool(
+        self,
+        tool_key: str,
+        tcp_offset_m: tuple[float, float, float] | None = None,
+        variant_key: str | None = None,
+    ) -> None:
+        """Apply tool transform to the local FK/IK model.
+
+        When set, ``fk()`` returns TCP position instead of flange position.
+
+        *tcp_offset_m*: optional (x, y, z) user offset in meters, composed
+        on top of the tool's registered transform.
+        *variant_key*: optional variant whose TCP overrides the tool default.
+        """
+        from parol6.tools import get_tool_transform
+
+        T_tool = get_tool_transform(tool_key, variant_key=variant_key)
+
+        if tcp_offset_m is not None and any(v != 0 for v in tcp_offset_m):
+            T_offset = np.eye(4)
+            T_offset[0, 3] = tcp_offset_m[0]
+            T_offset[1, 3] = tcp_offset_m[1]
+            T_offset[2, 3] = tcp_offset_m[2]
+            T_tool = T_tool @ T_offset
+
+        if tool_key != "NONE" and not np.allclose(T_tool, np.eye(4)):
+            self._pinokin.set_tool_transform(T_tool)
+        else:
+            self._pinokin.clear_tool_transform()
+
+    def fk(
+        self, q_rad: NDArray[np.float64], out: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         self._load_q_buf(q_rad)
         self._pinokin.fkine_into(self._q_buf, self._T_buf)
         so3_rpy(self._T_buf[:3, :3], self._rpy_buf)
-        self._fk_out[0] = self._T_buf[0, 3]
-        self._fk_out[1] = self._T_buf[1, 3]
-        self._fk_out[2] = self._T_buf[2, 3]
-        self._fk_out[3] = self._rpy_buf[0]
-        self._fk_out[4] = self._rpy_buf[1]
-        self._fk_out[5] = self._rpy_buf[2]
-        return self._fk_out
+        out[0] = self._T_buf[0, 3]
+        out[1] = self._T_buf[1, 3]
+        out[2] = self._T_buf[2, 3]
+        out[3] = self._rpy_buf[0]
+        out[4] = self._rpy_buf[1]
+        out[5] = self._rpy_buf[2]
+        return out
 
     def ik(
         self, pose: NDArray[np.float64], q_seed_rad: NDArray[np.float64]
@@ -744,17 +761,44 @@ class Robot:
 
     # -- Factories ----------------------------------------------------------
 
-    def create_client(self, **kwargs: Any) -> AsyncRobotClient:
+    def create_async_client(self, **kwargs: Any) -> AsyncRobotClient:
+        import copy
+
         host: str = kwargs.get("host", self._host)
         port: int = kwargs.get("port", self._port)
         timeout: float = kwargs.get("timeout", 5.0)
-        return AsyncRobotClient(host=host, port=port, timeout=timeout)
+        client = AsyncRobotClient(host=host, port=port, timeout=timeout)
+        bound: dict[str, ToolSpec] = {}
+        for spec in self.tools.available:
+            bound_spec = copy.copy(spec)
+            bound_spec._execute = client.tool_action
+            bound[spec.key] = bound_spec
+        client._bound_tools = bound
+        return client
 
     def create_sync_client(self, **kwargs: Any) -> SyncRobotClient:
+        import copy
+
+        from parol6.client.sync_client import _run
+        from waldoctl.sync_tools import make_sync_tool
+
         host: str = kwargs.get("host", self._host)
         port: int = kwargs.get("port", self._port)
         timeout: float = kwargs.get("timeout", 5.0)
-        return SyncRobotClient(host=host, port=port, timeout=timeout)
+        client = SyncRobotClient(host=host, port=port, timeout=timeout)
+        # Bind async tools to the inner async client
+        async_bound: dict[str, ToolSpec] = {}
+        for spec in self.tools.available:
+            bound_spec = copy.copy(spec)
+            bound_spec._execute = client._inner.tool_action
+            async_bound[spec.key] = bound_spec
+        client._inner._bound_tools = async_bound
+        # Wrap async-bound tools in sync adapters
+        bound: dict[str, ToolSpec] = {}
+        for key, async_tool in async_bound.items():
+            bound[key] = make_sync_tool(async_tool, _run)
+        client._bound_tools = bound
+        return client
 
     def create_dry_run_client(self, **kwargs: Any) -> DryRunRobotClient:
         initial_joints_deg: list[float] | None = kwargs.get("initial_joints_deg")

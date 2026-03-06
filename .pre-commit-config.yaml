@@ -16,9 +16,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy (parol6)
-        entry: mypy parol6
+      - id: ty
+        name: ty (parol6)
+        entry: ty check parol6
         language: system
         files: ^parol6/
         pass_filenames: false

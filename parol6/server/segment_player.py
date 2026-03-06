@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from parol6.commands.base import CommandBase, ExecutionStatusCode
 from parol6.protocol.wire import CommandCode
+from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
 from parol6.server.motion_planner import (
     ErrorSegment,
@@ -28,6 +29,7 @@ from parol6.server.motion_planner import (
 )
 from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
+from waldoctl import ActionState
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
@@ -111,8 +113,9 @@ class SegmentPlayer:
                     "Command %d failed: %s", active.command_index, active.error
                 )
                 state.error = active.error
-                state.action_state = "ERROR"
+                state.action_state = ActionState.ERROR
                 state.action_current = ""
+                state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
                 self._buffer.clear()
@@ -135,7 +138,7 @@ class SegmentPlayer:
         self._inline_cmd = None
         self._inline_activated = False
         state.executing_command_index = self._active.command_index
-        state.action_state = "EXECUTING"
+        state.action_state = ActionState.EXECUTING
 
     def _tick_inline(self, seg: InlineSegment, state: ControllerState) -> bool | None:
         """Tick an inline command. Returns True (executing), False (failed), or None (completed)."""
@@ -157,6 +160,7 @@ class SegmentPlayer:
         if not self._inline_activated:
             cmd.setup(state)
             state.action_current = type(cmd).__name__
+            state.action_params = _format_cmd_params(seg.params)
             self._inline_activated = True
 
         code = cmd.tick(state)
@@ -190,7 +194,8 @@ class SegmentPlayer:
         state.queued_segments -= 1
         state.completed_command_index = final_idx
         state.action_current = ""
-        state.action_state = "IDLE"
+        state.action_params = ""
+        state.action_state = ActionState.IDLE
         self._active = None
 
     def _on_failure(
@@ -199,7 +204,8 @@ class SegmentPlayer:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
         state.error = error
         state.action_current = ""
-        state.action_state = "ERROR"
+        state.action_params = ""
+        state.action_state = ActionState.ERROR
         self._active = None
         self._buffer.clear()
         self._planner.cancel()

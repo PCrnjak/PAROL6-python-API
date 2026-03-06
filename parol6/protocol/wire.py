@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, gripper, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -17,7 +17,7 @@ Wire format uses msgpack arrays with integer type codes:
 import logging
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
-from typing import Annotated, Any, TypeAlias, Union, cast
+from typing import Annotated, TypeAlias, Union, cast
 
 import msgspec
 import numpy as np
@@ -25,7 +25,10 @@ import ormsgpack
 from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import LIMITS
-from parol6.tools import TOOL_CONFIGS, list_tools
+from waldoctl import ActionState, ToolStatus
+from waldoctl.tools import ToolState
+
+from parol6.tools import get_registry, list_tools
 from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
 
@@ -75,13 +78,16 @@ class QueryType(IntEnum):
     ANGLES = auto()
     POSE = auto()
     IO = auto()
-    GRIPPER = auto()
     SPEEDS = auto()
     TOOL = auto()
     QUEUE = auto()
     CURRENT_ACTION = auto()
     LOOP_STATS = auto()
     PROFILE = auto()
+    TOOL_STATUS = auto()
+    ENABLEMENT = auto()
+    ERROR = auto()
+    TCP_SPEED = auto()
 
 
 class CmdType(IntEnum):
@@ -96,13 +102,15 @@ class CmdType(IntEnum):
     GET_ANGLES = auto()
     GET_POSE = auto()
     GET_IO = auto()
-    GET_GRIPPER = auto()
     GET_SPEEDS = auto()
     GET_TOOL = auto()
     GET_QUEUE = auto()
     GET_CURRENT_ACTION = auto()
     GET_LOOP_STATS = auto()
     GET_PROFILE = auto()
+    GET_ENABLEMENT = auto()
+    GET_ERROR = auto()
+    GET_TCP_SPEED = auto()
 
     # System commands (execute regardless of enable state)
     RESUME = auto()
@@ -133,9 +141,9 @@ class CmdType(IntEnum):
     JOGJ = auto()
     JOGL = auto()
 
-    # Gripper commands
-    PNEUMATICGRIPPER = auto()
-    ELECTRICGRIPPER = auto()
+    # Tool commands
+    TOOL_ACTION = auto()
+    GET_TOOL_STATUS = auto()
 
 
 # =============================================================================
@@ -364,6 +372,8 @@ class MovePCmd(
             raise ValueError("MOVEP requires either duration > 0 or speed > 0")
         if has_duration and has_speed:
             raise ValueError("MOVEP requires only one of duration or speed")
+        if self.speed is not None:
+            _check_speed_accel(self.speed, self.accel)
         waypoints = self.waypoints
         for i in range(len(waypoints)):
             if len(waypoints[i]) != 6:
@@ -566,7 +576,7 @@ class SetToolCmd(
 
     def __post_init__(self) -> None:
         name = self.tool_name.strip().upper()
-        if name not in TOOL_CONFIGS:
+        if name not in get_registry():
             raise ValueError(f"Unknown tool '{name}'. Available: {list_tools()}")
 
 
@@ -578,32 +588,76 @@ class SetProfileCmd(
     profile: Annotated[str, msgspec.Meta(min_length=1, max_length=32)]
 
 
-class PneumaticGripperCmd(
+class ToolActionCmd(
     msgspec.Struct,
-    tag=int(CmdType.PNEUMATICGRIPPER),
+    tag=int(CmdType.TOOL_ACTION),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """PNEUMATICGRIPPER: [CmdType.PNEUMATICGRIPPER, action, port]"""
+    """TOOL_ACTION: [CmdType.TOOL_ACTION, tool_key, action, params]
 
-    action: Annotated[str, msgspec.Meta(pattern=r"^(open|close)$")]
-    port: Annotated[int, msgspec.Meta(ge=1, le=2)]  # Output port 1 or 2
+    Generic tool action command.  The controller validates *tool_key*
+    against the registry and delegates to the appropriate 100 Hz command.
+    """
+
+    tool_key: Annotated[str, msgspec.Meta(min_length=1, max_length=64)]
+    action: Annotated[str, msgspec.Meta(min_length=1, max_length=64)]
+    params: list = []
+
+    def __post_init__(self) -> None:
+        key = self.tool_key.strip().upper()
+        registry = get_registry()
+        if key not in registry:
+            raise ValueError(f"Unknown tool '{key}'. Available: {list(registry)}")
 
 
-class ElectricGripperCmd(
+class GetToolStatusCmd(
     msgspec.Struct,
-    tag=int(CmdType.ELECTRICGRIPPER),
+    tag=int(CmdType.GET_TOOL_STATUS),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """ELECTRICGRIPPER: [CmdType.ELECTRICGRIPPER, action, position, speed, current]"""
+    """GET_TOOL_STATUS: [CmdType.GET_TOOL_STATUS]"""
 
-    action: Annotated[str, msgspec.Meta(pattern=r"^(move|calibrate)$")]
-    position: Annotated[float, msgspec.Meta(ge=0.0, le=1.0)] = 0.0
-    speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 0.5
-    current: Annotated[int, msgspec.Meta(ge=100, le=1000)] = 500
+    pass
+
+
+class GetEnablementCmd(
+    msgspec.Struct,
+    tag=int(CmdType.GET_ENABLEMENT),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """GET_ENABLEMENT: [CmdType.GET_ENABLEMENT]"""
+
+    pass
+
+
+class GetErrorCmd(
+    msgspec.Struct,
+    tag=int(CmdType.GET_ERROR),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """GET_ERROR: [CmdType.GET_ERROR]"""
+
+    pass
+
+
+class GetTcpSpeedCmd(
+    msgspec.Struct,
+    tag=int(CmdType.GET_TCP_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """GET_TCP_SPEED: [CmdType.GET_TCP_SPEED]"""
+
+    pass
 
 
 # Query commands (no params, just the tag)
@@ -643,14 +697,6 @@ class GetIOCmd(
     msgspec.Struct, tag=int(CmdType.GET_IO), array_like=True, frozen=True, gc=False
 ):
     """GET_IO: [CmdType.GET_IO]"""
-
-    pass
-
-
-class GetGripperCmd(
-    msgspec.Struct, tag=int(CmdType.GET_GRIPPER), array_like=True, frozen=True, gc=False
-):
-    """GET_GRIPPER: [CmdType.GET_GRIPPER]"""
 
     pass
 
@@ -825,7 +871,7 @@ class StatusResultStruct(
     angles: list[float]
     speeds: list[float]
     io: list[int]
-    gripper: list[int]
+    tool_status: list
 
 
 class LoopStatsResultStruct(
@@ -870,14 +916,15 @@ class CurrentActionResultStruct(
     current: str
     state: str
     next: str
+    params: str = ""
 
 
 class PingResultStruct(
     msgspec.Struct, tag=int(QueryType.PING), array_like=True, frozen=True, gc=False
 ):
-    """Ping response with serial connectivity status."""
+    """Ping response with hardware connectivity status."""
 
-    serial_connected: int  # 0 or 1
+    hardware_connected: int  # 0 or 1
 
 
 class AnglesResultStruct(
@@ -904,14 +951,6 @@ class IOResultStruct(
     io: list[int]
 
 
-class GripperResultStruct(
-    msgspec.Struct, tag=int(QueryType.GRIPPER), array_like=True, frozen=True, gc=False
-):
-    """Gripper status response."""
-
-    gripper: list[int]
-
-
 class SpeedsResultStruct(
     msgspec.Struct, tag=int(QueryType.SPEEDS), array_like=True, frozen=True, gc=False
 ):
@@ -931,9 +970,69 @@ class ProfileResultStruct(
 class QueueResultStruct(
     msgspec.Struct, tag=int(QueryType.QUEUE), array_like=True, frozen=True, gc=False
 ):
-    """Queue status response."""
+    """Queue status response with progress tracking."""
 
     queue: list
+    executing_index: int = -1
+    completed_index: int = -1
+    last_checkpoint: str = ""
+    queued_duration: float = 0.0
+
+
+class ToolStatusResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.TOOL_STATUS),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Tool status response — full 7-field ToolStatus."""
+
+    tool_key: str
+    state: ToolState
+    engaged: bool
+    part_detected: bool
+    fault_code: int
+    positions: list[float]
+    channels: list[float]
+
+
+class EnablementResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.ENABLEMENT),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Joint and Cartesian enablement flags."""
+
+    joint_en: list[int]
+    cart_en_wrf: list[int]
+    cart_en_trf: list[int]
+
+
+class ErrorResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.ERROR),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Current error state (None-safe wire representation)."""
+
+    error: list | None
+
+
+class TcpSpeedResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.TCP_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """TCP linear speed in mm/s."""
+
+    speed: float
 
 
 # Tagged Union for responses
@@ -946,10 +1045,13 @@ Response = (
     | AnglesResultStruct
     | PoseResultStruct
     | IOResultStruct
-    | GripperResultStruct
     | SpeedsResultStruct
     | ProfileResultStruct
     | QueueResultStruct
+    | ToolStatusResultStruct
+    | EnablementResultStruct
+    | ErrorResultStruct
+    | TcpSpeedResultStruct
 )
 
 
@@ -987,10 +1089,9 @@ class ResponseMsg(
     frozen=True,
     gc=False,
 ):
-    """Query response with type and value."""
+    """Query response carrying a typed result struct."""
 
-    query_type: QueryType
-    value: Any
+    result: Response
 
 
 # Tagged union for single-pass decode of server replies
@@ -1057,9 +1158,9 @@ def pack_error(error: RobotError) -> bytes:
     return _encoder.encode(ErrorMsg(error.to_wire()))
 
 
-def pack_response(query_type: QueryType, value: Any) -> bytes:
-    """Pack a query response: [RESPONSE, query_type, value]."""
-    return _encoder.encode(ResponseMsg(query_type, value))
+def pack_response(result: Response) -> bytes:
+    """Pack a query response: [RESPONSE, [query_type_tag, ...fields]]."""
+    return _encoder.encode(ResponseMsg(result))
 
 
 def pack_status(
@@ -1067,9 +1168,8 @@ def pack_status(
     angles: np.ndarray,
     speeds: np.ndarray,
     io: np.ndarray,
-    gripper: np.ndarray,
     action_current: str,
-    action_state: str,
+    action_state: ActionState,
     joint_en: np.ndarray,
     cart_en_wrf: np.ndarray,
     cart_en_trf: np.ndarray,
@@ -1079,12 +1179,16 @@ def pack_status(
     error: RobotError | None = None,
     queued_segments: int = 0,
     queued_duration: float = 0.0,
+    action_params: str = "",
+    tool_status: ToolStatus | None = None,
+    tcp_speed: float = 0.0,
 ) -> bytes:
     """Pack a status broadcast message.
 
     Uses ormsgpack with OPT_SERIALIZE_NUMPY for ~80x fewer allocations
     compared to msgspec with enc_hook (reads numpy buffers directly via C API).
     """
+    ts = tool_status
     return ormsgpack.packb(
         (
             MsgType.STATUS,
@@ -1092,7 +1196,6 @@ def pack_status(
             angles,
             speeds,
             io,
-            gripper,
             action_current,
             action_state,
             joint_en,
@@ -1104,6 +1207,17 @@ def pack_status(
             error.to_wire() if error is not None else None,
             queued_segments,
             queued_duration,
+            action_params,
+            (
+                ts.key,
+                ts.state,
+                ts.engaged,
+                ts.part_detected,
+                ts.fault_code,
+                ts.positions,
+                ts.channels,
+            ) if ts is not None else None,
+            tcp_speed,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1126,36 +1240,50 @@ class StatusBuffer:
     angles: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     speeds: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     io: np.ndarray = field(default_factory=lambda: np.zeros(5, dtype=np.int32))
-    gripper: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    tool_status: ToolStatus = field(default_factory=ToolStatus)
     joint_en: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
     cart_en_wrf: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
     cart_en_trf: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
     action_current: str = ""
-    action_state: str = ""
+    action_params: str = ""
+    action_state: ActionState = ActionState.IDLE
     executing_index: int = -1
     completed_index: int = -1
     last_checkpoint: str = ""
     error: RobotError | None = None
     queued_segments: int = 0
     queued_duration: float = 0.0
+    tcp_speed: float = 0.0
+
+    def __post_init__(self) -> None:
+        self._cart_en_dict: dict[str, np.ndarray] = {
+            "WRF": self.cart_en_wrf,
+            "TRF": self.cart_en_trf,
+        }
 
     @property
     def cart_en(self) -> dict[str, np.ndarray]:
         """Frame name → (12,) int32 Cartesian enable envelope."""
-        return {"WRF": self.cart_en_wrf, "TRF": self.cart_en_trf}
+        return self._cart_en_dict
 
     def copy(self) -> "StatusBuffer":
         """Return a deep copy with all arrays copied."""
+        ts = self.tool_status
         return StatusBuffer(
             pose=self.pose.copy(),
             angles=self.angles.copy(),
             speeds=self.speeds.copy(),
             io=self.io.copy(),
-            gripper=self.gripper.copy(),
+            tool_status=ToolStatus(
+                key=ts.key, state=ts.state, engaged=ts.engaged,
+                part_detected=ts.part_detected, fault_code=ts.fault_code,
+                positions=ts.positions, channels=ts.channels,
+            ),
             joint_en=self.joint_en.copy(),
             cart_en_wrf=self.cart_en_wrf.copy(),
             cart_en_trf=self.cart_en_trf.copy(),
             action_current=self.action_current,
+            action_params=self.action_params,
             action_state=self.action_state,
             executing_index=self.executing_index,
             completed_index=self.completed_index,
@@ -1163,16 +1291,18 @@ class StatusBuffer:
             error=self.error,
             queued_segments=self.queued_segments,
             queued_duration=self.queued_duration,
+            tcp_speed=self.tcp_speed,
         )
 
 
 def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
     """Zero-allocation decode of STATUS message into preallocated buffer.
 
-    Message format: [MsgType.STATUS, pose, angles, speeds, io, gripper,
+    Message format: [MsgType.STATUS, pose, angles, speeds, io,
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
                      executing_index, completed_index, last_checkpoint,
-                     error, queued_segments, queued_duration]
+                     error, queued_segments, queued_duration, action_params,
+                     tool_status_tuple, tcp_speed]
 
     Args:
         data: Raw msgpack bytes
@@ -1194,22 +1324,37 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         buf.angles[:] = msg[2]
         buf.speeds[:] = msg[3]
         buf.io[:] = msg[4]
-        buf.gripper[:] = msg[5]
-        buf.action_current = msg[6]
-        buf.action_state = msg[7]
-        buf.joint_en[:] = msg[8]
-        buf.cart_en_wrf[:] = msg[9]
-        buf.cart_en_trf[:] = msg[10]
-        buf.executing_index = msg[11]
-        buf.completed_index = msg[12]
-        buf.last_checkpoint = msg[13]
-        raw_error = msg[14]
+        buf.action_current = msg[5]
+        buf.action_state = ActionState(msg[6])
+        buf.joint_en[:] = msg[7]
+        buf.cart_en_wrf[:] = msg[8]
+        buf.cart_en_trf[:] = msg[9]
+        buf.executing_index = msg[10]
+        buf.completed_index = msg[11]
+        buf.last_checkpoint = msg[12]
+        raw_error = msg[13]
         buf.error = RobotError.from_wire(raw_error) if raw_error is not None else None
-        buf.queued_segments = msg[15]
-        buf.queued_duration = msg[16]
+        buf.queued_segments = msg[14]
+        buf.queued_duration = msg[15]
+        buf.action_params = msg[16]
+
+        raw_ts = msg[17] if len(msg) > 17 else None
+        ts = buf.tool_status
+        if raw_ts is not None and isinstance(raw_ts, (list, tuple)) and len(raw_ts) >= 7:
+            ts.key = raw_ts[0]
+            ts.state = ToolState(raw_ts[1])
+            ts.engaged = raw_ts[2]
+            ts.part_detected = raw_ts[3]
+            ts.fault_code = raw_ts[4]
+            ts.positions = tuple(raw_ts[5]) if raw_ts[5] else ()
+            ts.channels = tuple(raw_ts[6]) if raw_ts[6] else ()
+
+        if len(msg) > 18:
+            buf.tcp_speed = float(msg[18])
 
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("decode_status_bin_into: %s", e)
         return False
 
 
@@ -1458,14 +1603,16 @@ __all__ = [
     "DelayCmd",
     "SetToolCmd",
     "SetProfileCmd",
-    "PneumaticGripperCmd",
-    "ElectricGripperCmd",
+    "ToolActionCmd",
+    "GetToolStatusCmd",
+    "GetEnablementCmd",
+    "GetErrorCmd",
+    "GetTcpSpeedCmd",
     "PingCmd",
     "GetStatusCmd",
     "GetAnglesCmd",
     "GetPoseCmd",
     "GetIOCmd",
-    "GetGripperCmd",
     "GetSpeedsCmd",
     "GetToolCmd",
     "GetQueueCmd",
@@ -1484,10 +1631,13 @@ __all__ = [
     "AnglesResultStruct",
     "PoseResultStruct",
     "IOResultStruct",
-    "GripperResultStruct",
     "SpeedsResultStruct",
     "ProfileResultStruct",
     "QueueResultStruct",
+    "ToolStatusResultStruct",
+    "EnablementResultStruct",
+    "ErrorResultStruct",
+    "TcpSpeedResultStruct",
     "Response",
     # Message types
     "OkMsg",
@@ -1497,6 +1647,7 @@ __all__ = [
     # Encode/decode
     "decode_command",
     "encode_command",
+    "encode_command_into",
     "STRUCT_TO_CMDTYPE",
     "decode_message",
     "encode",

@@ -1,6 +1,7 @@
 """Command queue management and execution."""
 
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -13,11 +14,27 @@ from parol6.commands.base import (
 )
 from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
 from parol6.protocol.wire import Command, decode_command
+from waldoctl import ActionState
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState, StateManager
 
 logger = logging.getLogger("parol6.server.command_executor")
+
+_LONG_FLOAT_RE = re.compile(r"-?\d+\.\d{3,}")
+_MAX_ACTION_PARAMS_LEN = 100
+
+
+def _format_cmd_params(p: object) -> str:
+    """Format wire command params for action log display.
+
+    Strips the class name prefix and rounds long floats to 2 decimal places.
+    """
+    s = repr(p)
+    i = s.find("(")
+    if i >= 0:
+        s = s[i:]
+    return _LONG_FLOAT_RE.sub(lambda m: f"{float(m.group()):.2f}", s)[:_MAX_ACTION_PARAMS_LEN]
 
 
 class QueueFullError(Exception):
@@ -62,7 +79,7 @@ class CommandExecutor:
         for qc in self.command_queue:
             if not (
                 isinstance(qc.command, MotionCommand)
-                and getattr(qc.command, "streamable", False)
+                and qc.command.streamable
             ):
                 state.queue_nonstreamable.append(type(qc.command).__name__)
         state.action_next = (
@@ -198,7 +215,8 @@ class CommandExecutor:
             if not ac.activated:
                 self._setup_active(ac, state)
                 state.action_current = type(ac.command).__name__
-                state.action_state = "EXECUTING"
+                state.action_params = _format_cmd_params(ac.command.p)
+                state.action_state = ActionState.EXECUTING
                 state.executing_command_index = ac.command_index
                 ac.activated = True
                 logger.log(
@@ -219,6 +237,10 @@ class CommandExecutor:
 
         except Exception as e:
             logger.error("Command execution error: %s", e)
+            state.action_current = ""
+            state.action_params = ""
+            state.action_state = ActionState.IDLE
+            self._update_queue_state(state)
             self.active_command = None
 
     def _activate_next(self) -> bool:
@@ -256,7 +278,8 @@ class CommandExecutor:
             )
 
             state.action_current = ""
-            state.action_state = "IDLE"
+            state.action_params = ""
+            state.action_state = ActionState.IDLE
             state.completed_command_index = ac.command_index
             self._update_queue_state(state)
             self.active_command = None
@@ -271,12 +294,11 @@ class CommandExecutor:
             )
 
             state.action_current = ""
-            state.action_state = "IDLE"
+            state.action_params = ""
+            state.action_state = ActionState.IDLE
 
             # Clear queued streamable commands on failure to prevent pileup
-            if isinstance(ac.command, MotionCommand) and getattr(
-                ac.command, "streamable", False
-            ):
+            if isinstance(ac.command, MotionCommand) and ac.command.streamable:
                 removed = self.clear_streamable_commands(
                     f"Active streamable command failed: {ac.command.robot_error}"
                 )
@@ -304,7 +326,8 @@ class CommandExecutor:
 
         state = self._state_manager.get_state()
         state.action_current = ""
-        state.action_state = "IDLE"
+        state.action_params = ""
+        state.action_state = ActionState.IDLE
 
         self.active_command = None
 
@@ -318,11 +341,12 @@ class CommandExecutor:
         if (
             ac
             and isinstance(ac.command, MotionCommand)
-            and getattr(ac.command, "streamable", False)
+            and ac.command.streamable
         ):
             state = self._state_manager.get_state()
             state.action_current = ""
-            state.action_state = "IDLE"
+            state.action_params = ""
+            state.action_state = ActionState.IDLE
             self.active_command = None
             return True
         return False
@@ -335,7 +359,7 @@ class CommandExecutor:
         logger.info("Cleared %d commands from queue: %s", count, reason)
 
         state = self._state_manager.get_state()
-        state.queue_nonstreamable = []
+        state.queue_nonstreamable.clear()
         state.action_next = ""
 
     def clear_streamable_commands(
@@ -346,9 +370,7 @@ class CommandExecutor:
         to_remove: list[QueuedCommand] = []
 
         for queued_cmd in self.command_queue:
-            if isinstance(queued_cmd.command, MotionCommand) and getattr(
-                queued_cmd.command, "streamable", False
-            ):
+            if isinstance(queued_cmd.command, MotionCommand) and queued_cmd.command.streamable:
                 to_remove.append(queued_cmd)
 
         for queued_cmd in to_remove:

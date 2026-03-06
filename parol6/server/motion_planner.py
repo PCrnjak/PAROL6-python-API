@@ -272,8 +272,21 @@ class TrajectoryPlanner:
             try:
                 consumed = head_cmd.do_setup_with_blend(state, rest_cmds)
             except Exception as e:
-                buf.clear()
+                if not self._diagnostic:
+                    buf.clear()
+                    self._emit_error(head_idx, head_cmd, e)
+                    return
+                # Diagnostic mode: emit error for head, process rest individually
                 self._emit_error(head_idx, head_cmd, e)
+                remaining = list(buf[1:])
+                buf.clear()
+                for uc_idx, uc_cmd in remaining:
+                    try:
+                        uc_cmd.do_setup(state)
+                    except Exception as e2:
+                        self._emit_error(uc_idx, uc_cmd, e2)
+                        continue
+                    self._emit_trajectory(uc_idx, uc_cmd)
                 return
 
             if consumed < len(rest_cmds):
@@ -301,9 +314,12 @@ class TrajectoryPlanner:
                 try:
                     uc_cmd.do_setup(state)
                 except Exception as e:
-                    buf.clear()
+                    if not self._diagnostic:
+                        buf.clear()
+                        self._emit_error(uc_idx, uc_cmd, e)
+                        return
                     self._emit_error(uc_idx, uc_cmd, e)
-                    return
+                    continue
                 self._emit_trajectory(uc_idx, uc_cmd)
 
         buf.clear()
@@ -344,6 +360,46 @@ class TrajectoryPlanner:
                 ik_valid=ik_valid,
             )
         )
+
+        if self._diagnostic:
+            self._try_advance_past_error(cmd)
+
+    def _try_advance_past_error(self, cmd: TrajectoryMoveCommandBase) -> None:
+        """Best-effort advance Position_in to intended target after a failed command.
+
+        Only used in diagnostic mode so subsequent commands start from the
+        intended position even when the current command failed.
+        """
+        from parol6.commands.joint_commands import JointMoveCommandBase
+        from parol6.config import rad_to_steps, steps_to_rad
+
+        state = cast(ControllerState, self.state)
+        q_rad = np.zeros(6, dtype=np.float64)
+        steps_to_rad(state.Position_in, q_rad)
+
+        try:
+            if isinstance(cmd, JointMoveCommandBase):
+                target_rad = cmd._get_target_rad(state, q_rad)
+            else:
+                # Cartesian commands: try IK on just the endpoint.
+                # Use best-effort solution even if IK reports failure —
+                # for preview, an approximate position is better than
+                # staying at the previous position.
+                target_pose = getattr(cmd, "target_pose", None)
+                if target_pose is None:
+                    return
+                from parol6.utils.ik import solve_ik
+
+                ik_result = solve_ik(
+                    self._robot_module.robot, target_pose, q_rad, quiet_logging=True,
+                )
+                target_rad = ik_result.q
+        except Exception:
+            return
+
+        target_steps = np.zeros(6, dtype=np.int32)
+        rad_to_steps(target_rad, target_steps)
+        self.state.Position_in[:] = target_steps
 
     # -- inline command handling --
 
@@ -420,6 +476,8 @@ def motion_planner_main(
 ) -> None:
     """Worker process main loop — compute trajectories and forward inline commands."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    from parol6.server import set_pdeathsig
+    set_pdeathsig()
 
     worker = PlannerWorker(segment_queue)
 
@@ -455,12 +513,20 @@ def motion_planner_main(
             if isinstance(msg, PlanCommand):
                 try:
                     worker.process_command(msg)
-                except Exception:
+                except Exception as e:
                     logger.exception(
                         "Planner failed on command index=%d (%s)",
                         msg.command_index,
                         type(msg.params).__name__,
                     )
+                    robot_error = extract_robot_error(
+                        e, ErrorCode.MOTN_SETUP_FAILED, msg.command_index,
+                        detail=str(e),
+                    )
+                    segment_queue.put(ErrorSegment(
+                        command_index=msg.command_index,
+                        error=robot_error,
+                    ))
                     worker.cancel()
                     _drain_queue(command_queue)
 

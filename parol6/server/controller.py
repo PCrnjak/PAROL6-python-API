@@ -1,5 +1,8 @@
 """
 Main controller for PAROL6 robot server.
+
+Runs the fixed-rate control loop, dispatches UDP commands to the command
+executor, and manages serial/simulator transport and status broadcasting.
 """
 
 import logging
@@ -39,6 +42,7 @@ from parol6.server.command_registry import (
     discover_commands,
 )
 from parol6.server.state import ControllerState, StateManager
+from waldoctl import ActionState
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.async_logging import AsyncLogHandler
 from parol6.server.loop_timer import (
@@ -48,7 +52,7 @@ from parol6.server.loop_timer import (
     PhaseTimer,
     format_hz_summary,
 )
-from parol6.server.status_cache import get_cache
+from parol6.server.status_cache import close_cache, get_cache
 from parol6.server.transport_manager import TransportManager
 from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
@@ -224,6 +228,9 @@ class Controller:
         # Start motion planner subprocess
         self._planner.start()
 
+        # Disable automatic GC — collections are deferred to slack time
+        self._gc_tracker.take_control()
+
         # Start main control loop
         logger.info("Starting main control loop")
         self._timer.metrics.mark_started(time.perf_counter())
@@ -231,6 +238,8 @@ class Controller:
 
     def stop(self):
         """Stop the controller and clean up resources."""
+        if not self.running:
+            return
         logger.info("Stopping controller...")
         self.running = False
         self.shutdown_event.set()
@@ -241,18 +250,27 @@ class Controller:
         except Exception:
             logger.warning("Error stopping motion planner", exc_info=True)
 
+        # Stop IK worker subprocess
+        try:
+            close_cache()
+        except Exception:
+            logger.warning("Error stopping IK worker", exc_info=True)
+
         # Close status broadcaster
         try:
             if self._status_broadcaster:
                 self._status_broadcaster.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Error closing status broadcaster: %s", e)
 
         # Clean up transports
         if self.udp_transport:
             self.udp_transport.close_socket()
 
         self._transport_mgr.disconnect()
+
+        # Re-enable automatic GC and remove tracker callback
+        self._gc_tracker.shutdown()
 
         # Stop async logging (flushes queued messages)
         self._async_log.stop()
@@ -459,11 +477,14 @@ class Controller:
                     self._write_to_firmware(state)
 
                 with pt.phase("sim"):
-                    self._transport_mgr.tick_simulation()
+                    self._transport_mgr.tick_simulation(state.current_tool)
 
                 pt.tick()
                 self._sync_timer_metrics(state)
                 self._log_periodic_status(state)
+                self._gc_tracker.collect_deferred(
+                    self._timer.time_to_next_deadline(), tick_count
+                )
                 self._timer.wait_for_next_tick()
 
             except KeyboardInterrupt:
@@ -472,6 +493,8 @@ class Controller:
                 break
             except Exception as e:
                 logger.error(f"Error in main control loop: {e}", exc_info=True)
+                state.Command_out = CommandCode.IDLE
+                state.Speed_out.fill(0)
 
     def _poll_commands(self, state: ControllerState) -> None:
         """Poll and process UDP commands (non-blocking)."""
@@ -555,7 +578,7 @@ class Controller:
                 self._reply_error(
                     addr, make_error(ErrorCode.SYS_CONTROLLER_DISABLED, detail=reason)
                 )
-            logger.warning(f"Motion command rejected - controller disabled: {cmd_name}")
+            logger.warning("Motion command rejected - controller disabled: %s", cmd_name)
             return
 
         # Streaming commands: cancel segment playback + existing streamable handling
@@ -590,7 +613,7 @@ class Controller:
         # Clear error state from previous pipeline failure
         if state.error is not None:
             state.error = None
-            state.action_state = "IDLE"
+            state.action_state = ActionState.IDLE
             self._planner_needs_sync = True
 
         cmd_index = self._assign_command_index(state)

@@ -7,7 +7,6 @@ for true CPU parallelism, communicating via shared memory.
 
 import logging
 import multiprocessing
-import sys
 import time
 from multiprocessing import Process
 from multiprocessing.shared_memory import SharedMemory
@@ -15,23 +14,25 @@ from multiprocessing.synchronize import Event
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
+from pinokin import arrays_equal_6
+from waldoctl import ActionState, ToolStatus
 
-from parol6.config import steps_to_deg, steps_to_rad
+from parol6.config import speed_steps_to_rad, steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
+from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError
 from parol6.server.ik_layout import (
     IK_INPUT_Q_OFFSET,
     IK_INPUT_SIZE,
     IK_INPUT_T_OFFSET,
     IK_OUTPUT_SIZE,
+    SHM_EXTRA_KWARGS,
+    unregister_shm,
 )
 from parol6.server.ik_worker import ik_enablement_worker_main
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
 
 logger = logging.getLogger(__name__)
-
-# track parameter added in Python 3.13
-_SHM_EXTRA_KWARGS = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 def _cleanup_shm(shm: SharedMemory | None) -> None:
@@ -86,22 +87,19 @@ def _update_arrays(
     pos_in: np.ndarray,
     io_in: np.ndarray,
     spd_in: np.ndarray,
-    grip_in: np.ndarray,
     pos_last: np.ndarray,
     angles_deg: np.ndarray,
     q_rad_buf: np.ndarray,
     io_cached: np.ndarray,
     spd_cached: np.ndarray,
-    grip_cached: np.ndarray,
-) -> tuple[bool, bool, bool, bool]:
+) -> tuple[bool, bool, bool]:
     """
     Check for changes and update cached arrays.
-    Returns (pos_changed, io_changed, spd_changed, grip_changed).
+    Returns (pos_changed, io_changed, spd_changed).
     """
     pos_changed = not np.array_equal(pos_in, pos_last)
     io_changed = not np.array_equal(io_in, io_cached)
     spd_changed = not np.array_equal(spd_in, spd_cached)
-    grip_changed = not np.array_equal(grip_in, grip_cached)
 
     if pos_changed:
         pos_last[:] = pos_in
@@ -111,39 +109,43 @@ def _update_arrays(
         io_cached[:] = io_in
     if spd_changed:
         spd_cached[:] = spd_in
-    if grip_changed:
-        grip_cached[:] = grip_in
 
-    return pos_changed, io_changed, spd_changed, grip_changed
+    return pos_changed, io_changed, spd_changed
 
 
 class StatusCache:
     """
-    Cache of the aggregate STATUS payload components and formatted ASCII.
+    Cache of the aggregate STATUS payload components.
 
     Fields:
       - angles_deg: 6 floats
       - speeds: 6 ints (steps/sec)
       - io: 5 ints [in1,in2,out1,out2,estop]
-      - gripper: >=6 ints [id,pos,spd,cur,status,obj]
+      - tool_status: pre-allocated ToolStatus (mutated in-place)
       - pose: 16 floats (flattened transform)
-      - last_update_s: wall clock time of last cache update
+      - last_serial_s: wall clock time of last cache update
     """
 
     def __init__(self) -> None:
         # Public snapshots (materialized only when they change)
         self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self.speeds_rad_s: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.io: np.ndarray = np.zeros((5,), dtype=np.uint8)
-        self.gripper: np.ndarray = np.zeros((6,), dtype=np.int32)
         self.pose: np.ndarray = np.zeros((16,), dtype=np.float64)
+        self.tcp_speed: float = 0.0  # TCP linear velocity in mm/s
+
+        # Pre-allocated ToolStatus — mutated in-place by populate_status()
+        self.tool_status: ToolStatus = ToolStatus()
 
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
         self._last_tool_name: str = "NONE"  # Track tool changes
+        self._last_tool_positions: tuple[float, ...] = ()  # Track tool DOF changes
 
         # Action tracking fields
         self._action_current: str = ""
-        self._action_state: str = "IDLE"
+        self._action_params: str = ""
+        self._action_state: ActionState = ActionState.IDLE
 
         # Queue tracking fields
         self._executing_index: int = -1
@@ -167,6 +169,15 @@ class StatusCache:
 
         # Pre-allocated buffer for IK request (avoids allocation per position change)
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
+        # Dirty-check: last q_rad submitted to the IK worker
+        self._ik_last_q_rad: np.ndarray = np.full(6, np.nan, dtype=np.float64)
+
+        # TCP speed computation state
+        self._prev_tcp_pos: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tcp_pos_initialized: bool = False
+        from parol6 import config as _cfg
+        self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
 
         # IK enablement results (pre-allocated for zero-alloc reads)
         self._joint_en = np.ones(12, dtype=np.uint8)
@@ -182,11 +193,13 @@ class StatusCache:
 
         # Create shared memory segments
         self._ik_input_shm = SharedMemory(
-            name=input_name, create=True, size=IK_INPUT_SIZE, **_SHM_EXTRA_KWARGS
+            name=input_name, create=True, size=IK_INPUT_SIZE, **SHM_EXTRA_KWARGS
         )
         self._ik_output_shm = SharedMemory(
-            name=output_name, create=True, size=IK_OUTPUT_SIZE, **_SHM_EXTRA_KWARGS
+            name=output_name, create=True, size=IK_OUTPUT_SIZE, **SHM_EXTRA_KWARGS
         )
+        unregister_shm(self._ik_input_shm)
+        unregister_shm(self._ik_output_shm)
 
         # SharedMemory.buf is always non-None after successful __init__
         input_buf = self._ik_input_shm.buf
@@ -279,9 +292,15 @@ class StatusCache:
         logger.info("IK worker stopped")
 
     def _submit_ik_request(self, q_rad: np.ndarray, T_matrix: np.ndarray) -> None:
-        """Submit an IK enablement request (non-blocking, zero-alloc)."""
+        """Submit an IK enablement request (non-blocking, zero-alloc).
+
+        Skips submission if q_rad hasn't changed since the last request.
+        """
         if self._ik_stopped:
             return
+        if arrays_equal_6(q_rad[:6], self._ik_last_q_rad):
+            return
+        self._ik_last_q_rad[:] = q_rad[:6]
         self._ik_input_q_view[:] = q_rad[:6]
         self._ik_input_T_view[:] = T_matrix.flat[:16]
         self._ik_request_event.set()
@@ -314,29 +333,53 @@ class StatusCache:
         """
         Update cache from current controller state with change gating:
           - Only recompute angles/pose when Position_in changes
-          - Only refresh IO/speeds/gripper when their inputs actually change
+          - Only refresh IO/speeds when their inputs actually change
+          - Tool status populated via tool config's populate_status()
           - IK enablement is computed asynchronously in a subprocess
         """
         # Do change detection
         self._last_io_buf[:] = state.InOut_in[:5]
-        pos_changed, io_changed, spd_changed, grip_changed = _update_arrays(
+        pos_changed, io_changed, spd_changed = _update_arrays(
             state.Position_in,
             self._last_io_buf,
             state.Speed_in,
-            state.Gripper_data_in,
             self._last_pos_in,
             self.angles_deg,
             self._q_rad_buf,
             self.io,
             self.speeds,
-            self.gripper,
         )
         tool_changed = state.current_tool != self._last_tool_name
 
+        # Convert speeds from steps/s to rad/s when they change
+        if spd_changed:
+            speed_steps_to_rad(self.speeds, self.speeds_rad_s)
+
+        if tool_changed:
+            self._last_tool_name = state.current_tool
+            self._tcp_pos_initialized = False  # avoid speed spike from TCP offset change
+
         if pos_changed or tool_changed:
-            if tool_changed:
-                self._last_tool_name = state.current_tool
             self.pose[:] = get_fkine_flat_mm(state)
+
+            # Compute TCP speed from consecutive FK positions (mm/s)
+            # pose is row-major 4x4: translation at indices 3,7,11
+            self._tcp_pos_buf[0] = self.pose[3]
+            self._tcp_pos_buf[1] = self.pose[7]
+            self._tcp_pos_buf[2] = self.pose[11]
+            if self._tcp_pos_initialized:
+                dt = 1.0 / self._status_rate_hz
+                dx = self._tcp_pos_buf[0] - self._prev_tcp_pos[0]
+                dy = self._tcp_pos_buf[1] - self._prev_tcp_pos[1]
+                dz = self._tcp_pos_buf[2] - self._prev_tcp_pos[2]
+                self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
+            else:
+                self._tcp_pos_initialized = True
+            self._prev_tcp_pos[:] = self._tcp_pos_buf
+        else:
+            # Robot not moving — reset TCP speed to zero
+            self.tcp_speed = 0.0
+
             # Submit IK request asynchronously
             try:
                 T_matrix = get_fkine_se3(state)
@@ -344,15 +387,29 @@ class StatusCache:
             except (ValueError, OSError):
                 pass
 
+        # Populate tool status from hardware state via the tool config
+        ts = self.tool_status
+        ts.key = state.current_tool
+        cfg = get_registry().get(state.current_tool)
+        if cfg is not None:
+            cfg.populate_status(state, ts)
+
+        # Track tool DOF position changes (gripper jaw, spindle, etc.)
+        tool_status_changed = ts.positions != self._last_tool_positions
+        if tool_status_changed:
+            self._last_tool_positions = ts.positions
+
         # Poll for async IK results (non-blocking, zero-alloc)
         ik_changed = self._poll_ik_results()
 
         action_changed = (
             self._action_current != state.action_current
+            or self._action_params != state.action_params
             or self._action_state != state.action_state
         )
         if action_changed:
             self._action_current = state.action_current
+            self._action_params = state.action_params
             self._action_state = state.action_state
 
         queue_changed = (
@@ -381,9 +438,9 @@ class StatusCache:
         if (
             pos_changed
             or tool_changed
+            or tool_status_changed
             or io_changed
             or spd_changed
-            or grip_changed
             or ik_changed
             or action_changed
             or queue_changed
@@ -398,9 +455,8 @@ class StatusCache:
             self._binary_cache = pack_status(
                 self.pose,
                 self.angles_deg,
-                self.speeds,
+                self.speeds_rad_s,
                 self.io,
-                self.gripper,
                 self._action_current,
                 self._action_state,
                 self._joint_en,
@@ -412,6 +468,9 @@ class StatusCache:
                 self._error,
                 self._queued_segments,
                 self._queued_duration,
+                self._action_params,
+                self.tool_status,
+                self.tcp_speed,
             )
             self._binary_dirty = False
         return self._binary_cache
@@ -451,3 +510,11 @@ def get_cache() -> StatusCache:
     if _status_cache is None:
         _status_cache = StatusCache()
     return _status_cache
+
+
+def close_cache() -> None:
+    """Shut down the global cache if it exists."""
+    global _status_cache
+    if _status_cache is not None:
+        _status_cache.close()
+        _status_cache = None

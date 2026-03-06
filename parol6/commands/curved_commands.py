@@ -26,7 +26,7 @@ from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.errors import IKError
+from parol6.utils.errors import IKError, TrajectoryPlanningError
 from pinokin import se3_from_rpy, se3_interp, se3_rpy
 
 _MP = TypeVar("_MP", bound=MotionParamsMixin)
@@ -125,8 +125,9 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
         cartesian_trajectory = self.generate_main_trajectory(current_pose)
         if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
-            self.fail(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
-            return
+            raise TrajectoryPlanningError(
+                make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail="empty cartesian trajectory")
+            )
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
@@ -134,13 +135,18 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             joint_path = JointPath.from_poses(cartesian_trajectory, self._q_rad_buf)
         except IKError as e:
             self.log_error("  -> ERROR: IK failed during trajectory generation: %s", e)
-            self.fail(e.robot_error)
-            return
+            raise
 
         if joint_path.is_partial:
-            self.log_error("  -> ERROR: Partial IK during trajectory generation")
-            self.fail(make_error(ErrorCode.IK_PARTIAL_PATH, valid="?", total="?"))
-            return
+            n_valid = int(joint_path.valid.sum())
+            n_total = len(joint_path)
+            self.log_error(
+                "  -> ERROR: Partial IK during trajectory generation (%d/%d valid)",
+                n_valid, n_total,
+            )
+            raise TrajectoryPlanningError(
+                make_error(ErrorCode.IK_PARTIAL_PATH, valid=str(n_valid), total=str(n_total))
+            )
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -163,7 +169,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             trajectory.duration,
         )
 
-    def generate_main_trajectory(self, effective_start_pose):
+    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
         """Override this in subclasses to generate the specific motion trajectory."""
         raise NotImplementedError("Subclasses must implement generate_main_trajectory")
 
@@ -193,7 +199,7 @@ class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd]):
             _pose6_trf_to_wrf(self.p.end, tool_pose, out=self._end)
         return super().do_setup(state)
 
-    def generate_main_trajectory(self, effective_start_pose):
+    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
         """Generate arc geometry from current position through via to end."""
         start_xyz = effective_start_pose[:3]
         via_xyz = self._via[:3]
@@ -231,7 +237,7 @@ class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
         )
         return super().do_setup(state)
 
-    def generate_main_trajectory(self, effective_start_pose):
+    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
         """Generate spline starting from actual position."""
         assert self._waypoints is not None
 
@@ -274,70 +280,22 @@ class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
 
     PARAMS_TYPE = MovePCmd
 
-    __slots__ = ("_waypoints", "_se3_buf_a", "_se3_buf_b", "_interp_buf")
+    __slots__ = ("_waypoints", "_se3_buf_a", "_se3_buf_b")
 
     def __init__(self, p: MovePCmd) -> None:
         super().__init__(p)
         self._waypoints: np.ndarray | None = None
         self._se3_buf_a = np.zeros((4, 4), dtype=np.float64)
         self._se3_buf_b = np.zeros((4, 4), dtype=np.float64)
-        self._interp_buf = np.zeros((4, 4), dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Transform parameters if TRF, build trajectory with constant TCP speed."""
         self._waypoints = _transform_waypoints_trf_to_wrf(
             self.p.waypoints, self.p.frame, state
         )
+        return super().do_setup(state)
 
-        self.log_debug("  -> Preparing %s...", self.name)
-        current_pose = self.get_current_pose(state)
-        self.log_info(
-            "  -> Generating %s from position: %s",
-            self.name,
-            [round(p, 1) for p in current_pose[:3]],
-        )
-
-        cartesian_trajectory = self.generate_main_trajectory(current_pose)
-        if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
-            self.fail(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
-            return
-
-        steps_to_rad(state.Position_in, self._q_rad_buf)
-
-        try:
-            joint_path = JointPath.from_poses(cartesian_trajectory, self._q_rad_buf)
-        except IKError as e:
-            self.log_error("  -> ERROR: IK failed during trajectory generation: %s", e)
-            self.fail(e.robot_error)
-            return
-
-        if joint_path.is_partial:
-            self.log_error("  -> ERROR: Partial IK during trajectory generation")
-            self.fail(make_error(ErrorCode.IK_PARTIAL_PATH, valid="?", total="?"))
-            return
-
-        builder = TrajectoryBuilder(
-            joint_path=joint_path,
-            profile=state.motion_profile,
-            velocity_frac=self.p.resolved_speed,
-            accel_frac=self.p.accel,
-            duration=self.p.resolved_duration,
-            dt=INTERVAL_S,
-            cart_vel_limit=LIMITS.cart.hard.velocity.linear * self.p.resolved_speed,
-            cart_acc_limit=LIMITS.cart.hard.acceleration.linear * self.p.accel,
-        )
-
-        trajectory = builder.build()
-        self.trajectory_steps = trajectory.steps
-        self._duration = trajectory.duration
-
-        self.log_info(
-            "  -> Trajectory prepared: %d steps, %.2fs duration",
-            len(self.trajectory_steps),
-            trajectory.duration,
-        )
-
-    def generate_main_trajectory(self, effective_start_pose):
+    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
         """Generate piecewise-linear Cartesian path through waypoints.
 
         Each segment is linearly interpolated in SE3 space.

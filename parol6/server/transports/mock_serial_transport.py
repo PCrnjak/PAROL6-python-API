@@ -10,6 +10,7 @@ controller code.
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -24,7 +25,17 @@ from parol6.protocol.wire import (
 )
 from parol6.server.state import ControllerState
 
+if TYPE_CHECKING:
+    from parol6.tools import ToolSimulator
+
 logger = logging.getLogger(__name__)
+
+# Gripper ramp array indices and flag values (used in @njit functions)
+_RAMP_TARGET = 0   # target position byte (0–255)
+_RAMP_SPEED = 1    # speed byte (0–255)
+_RAMP_ACTIVE = 2   # active flag: _RAMP_ON or _RAMP_OFF
+_RAMP_ON = 1.0
+_RAMP_OFF = 0.0
 
 
 @njit(cache=True)
@@ -164,6 +175,7 @@ def _write_frame_jit(
     position_out: np.ndarray,
     speed_out: np.ndarray,
     gripper_data_out: np.ndarray,
+    gripper_ramp: np.ndarray,
 ) -> None:
     """JIT-compiled frame write processing."""
     state_position_out[:] = position_out
@@ -177,9 +189,56 @@ def _write_frame_jit(
         state_gripper_data_in[4] &= ~0x20
 
     if gripper_data_out[3] != 0:
-        state_gripper_data_in[1] = gripper_data_out[0]
+        new_target = float(gripper_data_out[0])
+        new_speed = float(gripper_data_out[1])
+        # Only (re-)activate ramp when target or speed changes, or ramp is idle.
+        # ElectricGripperCommand sends command_bits every tick — without this
+        # guard, the ramp would be re-activated every tick with the same target.
+        if (
+            gripper_ramp[_RAMP_ACTIVE] < _RAMP_ON
+            or gripper_ramp[_RAMP_TARGET] != new_target
+            or gripper_ramp[_RAMP_SPEED] != new_speed
+        ):
+            gripper_ramp[_RAMP_TARGET] = new_target
+            gripper_ramp[_RAMP_SPEED] = new_speed
+            gripper_ramp[_RAMP_ACTIVE] = _RAMP_ON
+        # Echo speed and current to feedback (not position — ramp handles that)
         state_gripper_data_in[2] = gripper_data_out[1]
         state_gripper_data_in[3] = gripper_data_out[2]
+
+
+@njit(cache=True)
+def _simulate_gripper_ramp_jit(
+    gripper_ramp: np.ndarray,
+    gripper_data_in: np.ndarray,
+    gripper_pos_f: float,
+    dt: float,
+    tick_range: float,
+    min_speed: float,
+    max_speed: float,
+) -> float:
+    """Ramp gripper feedback_position toward target at speed-dependent rate.
+
+    Returns updated gripper_pos_f. Zero heap allocations.
+    """
+    if gripper_ramp[_RAMP_ACTIVE] < _RAMP_ON:
+        return gripper_pos_f
+    if tick_range == 0.0:
+        return gripper_pos_f
+    target = gripper_ramp[_RAMP_TARGET]
+    speed_byte = gripper_ramp[_RAMP_SPEED]
+    velocity_tps = min_speed + (speed_byte / 255.0) * (max_speed - min_speed)
+    pos_delta = (velocity_tps / tick_range) * 255.0 * dt
+    error = target - gripper_pos_f
+    if abs(error) <= pos_delta:
+        gripper_pos_f = target
+        gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+    elif error > 0:
+        gripper_pos_f += pos_delta
+    else:
+        gripper_pos_f -= pos_delta
+    gripper_data_in[1] = int(gripper_pos_f + 0.5)  # round to int
+    return gripper_pos_f
 
 
 @njit(cache=True)
@@ -242,6 +301,9 @@ class MockRobotState:
     io_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )  # E-stop released
+    io_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )  # Commanded outputs (echoed from controller)
     # Error states
     temperature_error_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
@@ -253,6 +315,15 @@ class MockRobotState:
     gripper_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
+    # Gripper ramp state: [target_pos_byte, speed_byte, active_flag(0.0|1.0)]
+    gripper_ramp: np.ndarray = field(
+        default_factory=lambda: np.zeros((3,), dtype=np.float64)
+    )
+    gripper_pos_f: float = 0.0  # float accumulator for smooth ramp (0.0–255.0)
+
+    # Generalized tool ramp for binary-activation tools (pneumatic grippers, etc.)
+    tool_ramp_target: float = 0.0   # target normalized position (0..1)
+    tool_ramp_current: float = 0.0  # current ramp progress (0..1)
     # Timing data
     timing_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((1,), dtype=np.int32)
@@ -260,7 +331,7 @@ class MockRobotState:
 
     # Simulation parameters
     update_rate: float = cfg.INTERVAL_S  # match control loop cadence
-    last_update: float = field(default_factory=time.time)
+    last_update: float = field(default_factory=time.perf_counter)
     homing_countdown: int = 0
 
     # Command state from controller
@@ -315,7 +386,6 @@ class MockSerialTransport:
         self._state = MockRobotState()
 
         # Frame generation tracking
-        self._last_frame_time = time.time()
         self._frame_interval = cfg.INTERVAL_S  # match control loop cadence
 
         # Connection state
@@ -339,6 +409,10 @@ class MockSerialTransport:
 
         # Scratch buffer for motion simulation (stores previous position)
         self._prev_pos_f = np.zeros((6,), dtype=np.float64)
+
+        # Tool simulator (resolved on tool change, not per-tick)
+        self._simulator: ToolSimulator | None = None
+        self._simulator_tool_name: str = ""
 
         self._state.last_update = time.perf_counter()
 
@@ -364,6 +438,8 @@ class MockSerialTransport:
 
         self._connected = True
         self._state = MockRobotState()  # Reset state on connect
+        self._simulator = None  # Force re-resolve on next tick
+        self._simulator_tool_name = ""
         # Initialize time base to perf_counter for consistent scheduling
         self._state.last_update = time.perf_counter()
         logger.info(f"MockSerialTransport connected to simulated port: {self.port}")
@@ -441,10 +517,13 @@ class MockSerialTransport:
             position_out,
             speed_out,
             gripper_data_out,
+            self._state.gripper_ramp,
         )
+        n = min(len(inout_out), len(self._state.io_out))
+        self._state.io_out[:n] = inout_out[:n]
         return True
 
-    def tick_simulation(self) -> None:
+    def tick_simulation(self, tool_name: str = "NONE") -> None:
         """
         Run one physics simulation step. Called by controller each tick.
 
@@ -480,6 +559,32 @@ class MockSerialTransport:
                 dt,
                 state.homing_countdown,
             )
+
+            # Tool simulation: resolve params on change, then tick
+            if tool_name != self._simulator_tool_name:
+                self._simulator_tool_name = tool_name
+                # Clear stale ramp state from the previous tool
+                state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+                state.tool_ramp_current = 0.0
+                state.tool_ramp_target = 0.0
+
+                from parol6.tools import get_registry
+
+                tool_cfg = get_registry().get(tool_name)
+                if tool_cfg is not None:
+                    self._simulator = tool_cfg.create_simulator()
+                    if self._simulator is not None:
+                        self._simulator.resolve_params(tool_cfg)
+                else:
+                    self._simulator = None
+
+            if self._simulator is not None:
+                self._simulator.tick(state, dt)
+
+            # Echo commanded outputs into io_in (firmware packs
+            # IO_var[] = {In1, In2, Out1, Out2, Estop, ...})
+            state.io_in[2] = state.io_out[2]
+            state.io_in[3] = state.io_out[3]
 
         self._encode_payload_into(self._frame_mv)
         self._frame_version += 1
@@ -517,24 +622,3 @@ class MockSerialTransport:
         mv = self._frame_mv if self._frame_version > 0 else None
         return (mv, self._frame_version, self._frame_ts)
 
-    def get_info(self) -> dict:
-        """
-        Get information about the mock transport.
-
-        Returns:
-            Dictionary with transport information
-        """
-        return {
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "connected": self._connected,
-            "timeout": self.timeout,
-            "mode": "MOCK_SERIAL",
-            "frames_received": self._frames_received,
-            "simulation_rate_hz": int(1.0 / self._frame_interval),
-            "robot_state": {
-                "homed": all(self._state.homed_in[i] == 1 for i in range(6)),
-                "estop": self._state.io_in[4] == 0,
-                "command": self._state.command_out,
-            },
-        }

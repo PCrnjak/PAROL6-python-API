@@ -61,13 +61,6 @@ class TestGetEndpoints:
         # Test helper method too
         assert not client.is_estop_pressed()  # Should be False in FAKE_SERIAL
 
-    def test_get_gripper(self, client, server_proc):
-        """Test GET_GRIPPER command."""
-        gripper = client.get_gripper_status()
-        assert gripper is not None
-        assert isinstance(gripper, list)
-        assert len(gripper) == 6  # ID, Position, Speed, Current, Status, ObjDetection
-
     def test_get_speeds(self, client, server_proc):
         """Test GET_SPEEDS command."""
         speeds = client.get_speeds()
@@ -91,7 +84,7 @@ class TestGetEndpoints:
         assert hasattr(status, "pose")
         assert hasattr(status, "angles")
         assert hasattr(status, "io")
-        assert hasattr(status, "gripper")
+        assert hasattr(status, "tool_status")
 
 
 @pytest.mark.integration
@@ -149,10 +142,10 @@ class TestBasicMotionCommands:
         assert angles is not None
         assert client.ping() is not None
 
-    def test_basic_pose_move(self, client, server_proc):
-        """Test basic pose movement command with validation."""
+    def test_joint_move_with_speed(self, client, server_proc):
+        """Test basic joint movement command with validation."""
         result = client.moveJ(
-            pose=[100, 100, 100, 0, 0, 0],
+            [80, -80, 170, 5, 5, 190],
             speed=0.5,
         )
         assert result >= 0
@@ -209,6 +202,19 @@ class TestErrorHandling:
         # Server should remain responsive after handling the error
         client = RobotClient(ports.server_ip, ports.server_port)
         assert client.ping() is not None
+
+    def test_halted_motion_raises_motion_error(self, client, server_proc):
+        """Motion commands on a halted controller raise MotionError, not -1."""
+        from parol6.utils.errors import MotionError
+
+        client.halt()
+        try:
+            with pytest.raises(MotionError) as exc_info:
+                client.home()
+            assert exc_info.value.robot_error.code > 0
+            assert exc_info.value.robot_error.title
+        finally:
+            client.resume()
 
     def test_rapid_command_sequence(self, server_proc, ports):
         """Test server stability under rapid command sequence."""

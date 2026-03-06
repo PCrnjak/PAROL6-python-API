@@ -21,7 +21,7 @@ from .protocol.wire import (
     StatusResultStruct,
     ToolResultStruct,
 )
-from .protocol.types import PingResult
+from waldoctl.status import PingResult
 from .robot import Robot
 from .utils.error_catalog import RobotError, extract_robot_error, make_error
 from .utils.error_codes import ErrorCode

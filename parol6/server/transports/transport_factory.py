@@ -31,7 +31,8 @@ def is_simulation_mode() -> bool:
 def create_transport(
     transport_type: str | None = None,
     port: str | None = None,
-    baudrate: int = 2000000,
+    *,
+    baudrate: int,
     **kwargs: Any,
 ) -> SerialTransport | MockSerialTransport:
     """
@@ -78,7 +79,8 @@ def create_transport(
 def create_and_connect_transport(
     transport_type: str | None = None,
     port: str | None = None,
-    baudrate: int = 2000000,
+    *,
+    baudrate: int,
     auto_find_port: bool = True,
     **kwargs: Any,
 ) -> SerialTransport | MockSerialTransport | None:

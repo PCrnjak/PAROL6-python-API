@@ -1,15 +1,15 @@
 from unittest.mock import AsyncMock
 
 from parol6 import RobotClient
-from parol6.protocol.wire import QueryType, ResponseMsg
+from parol6.protocol.wire import PoseResultStruct
 
 
-def _pose_response(matrix: list) -> ResponseMsg:
-    """Create ResponseMsg with flattened pose matrix."""
+def _pose_result(matrix: list) -> PoseResultStruct:
+    """Create PoseResultStruct with flattened pose matrix."""
     flat = []
     for row in matrix:
         flat.extend(row)
-    return ResponseMsg(QueryType.POSE, flat)
+    return PoseResultStruct(pose=flat)
 
 
 def test_get_pose_rpy_identity_translation(monkeypatch):
@@ -26,9 +26,9 @@ def test_get_pose_rpy_identity_translation(monkeypatch):
         [0, 0, 1, 30],
         [0, 0, 0, 1],
     ]
-    response = _pose_response(mat)
+    result = _pose_result(mat)
 
-    mock_request = AsyncMock(return_value=response)
+    mock_request = AsyncMock(return_value=result)
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
     pose_rpy = client.get_pose_rpy()
@@ -48,8 +48,7 @@ def test_get_pose_rpy_malformed_payload(monkeypatch):
     """
     client = RobotClient()
 
-    # Not 16 elements - ResponseMsg with too few values
-    mock_request = AsyncMock(return_value=ResponseMsg(QueryType.POSE, [1, 2, 3]))
+    mock_request = AsyncMock(return_value=PoseResultStruct(pose=[1, 2, 3]))
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
     pose_rpy = client.get_pose_rpy()

@@ -362,7 +362,7 @@ class SerialTransport:
         if not self.is_connected():
             return False
         ser = self.serial
-        if not ser or not getattr(ser, "is_open", False):
+        if not ser or not ser.is_open:
             return False
 
         try:
@@ -421,29 +421,6 @@ class SerialTransport:
         """
         mv = self._frame_mv if self._frame_version > 0 else None
         return (mv, self._frame_version, self._frame_ts)
-
-    def get_info(self) -> dict:
-        """
-        Get information about the current serial connection.
-
-        Returns:
-            Dictionary with connection information
-        """
-        info = {
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "connected": self.is_connected(),
-            "timeout": self.timeout,
-        }
-
-        if self.serial and self.serial.is_open:
-            try:
-                info["in_waiting"] = self.serial.in_waiting
-                info["out_waiting"] = self.serial.out_waiting
-            except Exception as e:
-                logger.debug("Failed to read serial wait counts: %s", e)
-
-        return info
 
     def _update_hz_tracking(self) -> None:
         """

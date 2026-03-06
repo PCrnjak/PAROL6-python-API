@@ -41,10 +41,10 @@ from pinokin import se3_from_rpy, se3_rpy
 from ..protocol.wire import (
     CheckpointCmd,
     DelayCmd,
-    ElectricGripperCmd,
     GetAnglesCmd,
     GetCurrentActionCmd,
-    GetGripperCmd,
+    GetEnablementCmd,
+    GetErrorCmd,
     GetIOCmd,
     GetLoopStatsCmd,
     GetPoseCmd,
@@ -52,7 +52,9 @@ from ..protocol.wire import (
     GetQueueCmd,
     GetSpeedsCmd,
     GetStatusCmd,
+    GetTcpSpeedCmd,
     GetToolCmd,
+    GetToolStatusCmd,
     HaltCmd,
     HomeCmd,
     JogJCmd,
@@ -64,7 +66,6 @@ from ..protocol.wire import (
     MovePCmd,
     MoveSCmd,
     PingCmd,
-    PneumaticGripperCmd,
     ResetCmd,
     ResetLoopStatsCmd,
     ResumeCmd,
@@ -76,16 +77,19 @@ from ..protocol.wire import (
     SetProfileCmd,
     SetToolCmd,
     SimulatorCmd,
+    ToolActionCmd,
 )
 from ..server.command_registry import CommandRegistry
 from ..server.motion_planner import (
     ErrorSegment,
+    InlineSegment,
     Segment,
     TrajectoryPlanner,
     TrajectorySegment,
 )
 from ..server.state import ControllerState, get_fkine_se3
-from ..utils.error_catalog import RobotError
+from ..utils.error_catalog import RobotError, make_error
+from ..utils.error_codes import ErrorCode
 
 # Method name → (struct class, default kwargs applied before caller kwargs)
 CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
@@ -112,12 +116,10 @@ CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
     "set_serial_port": (SetPortCmd, {}),
     "simulator_on": (SimulatorCmd, {"on": True}),
     "simulator_off": (SimulatorCmd, {"on": False}),
-    "control_pneumatic_gripper": (PneumaticGripperCmd, {}),
-    "control_electric_gripper": (ElectricGripperCmd, {}),
+    "tool_action": (ToolActionCmd, {}),
     "ping": (PingCmd, {}),
     "get_angles": (GetAnglesCmd, {}),
     "get_io": (GetIOCmd, {}),
-    "get_gripper": (GetGripperCmd, {}),
     "get_speeds": (GetSpeedsCmd, {}),
     "get_pose": (GetPoseCmd, {}),
     "get_status": (GetStatusCmd, {}),
@@ -127,10 +129,13 @@ CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
     "get_tool": (GetToolCmd, {}),
     "get_current_action": (GetCurrentActionCmd, {}),
     "get_queue": (GetQueueCmd, {}),
+    "get_tool_status": (GetToolStatusCmd, {}),
+    "get_enablement": (GetEnablementCmd, {}),
+    "get_error": (GetErrorCmd, {}),
+    "get_tcp_speed": (GetTcpSpeedCmd, {}),
 }
 
-# Client param names → struct field names (only applied when the struct
-# has the target field, so "speed" won't rename on ElectricGripperCmd).
+# Client param names → struct field names.
 _FIELD_RENAMES: dict[str, str] = {
     "joint_angles": "angles",
     "joint_index": "joint",
@@ -138,7 +143,7 @@ _FIELD_RENAMES: dict[str, str] = {
     "program_lines": "lines",
 }
 
-_UPPER_FIELDS: frozenset[str] = frozenset({"tool_name", "profile"})
+_UPPER_FIELDS: frozenset[str] = frozenset({"tool_name", "tool_key", "profile"})
 
 
 def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
@@ -201,6 +206,20 @@ def _build_result(radians: np.ndarray, duration: float) -> DryRunResult:
     )
 
 
+class _DryRunTool:
+    """Tool proxy for dry-run. Routes actions through the planner."""
+
+    def __init__(self, client: DryRunRobotClient) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        def method(*args: Any, **kwargs: Any) -> DryRunResult | None:
+            return self._client.tool_action(
+                self._client._active_tool_key, name, list(args), **kwargs
+            )
+        return method
+
+
 class DryRunRobotClient:
     """Runs commands through the trajectory planner without UDP/serial.
 
@@ -232,11 +251,18 @@ class DryRunRobotClient:
         self._q_rad_buf = np.zeros(6, dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._max_snapshot_points = max_snapshot_points
+        self._active_tool_key: str = ""
+        self._tool_proxy = _DryRunTool(self)
 
     @property
     def state(self) -> ControllerState:
         """Access the simulated controller state."""
         return self._state
+
+    @property
+    def tool(self) -> _DryRunTool:
+        """Tool proxy that routes actions through the planner."""
+        return self._tool_proxy
 
     def flush(self) -> list[DryRunResult]:
         """Flush pending blend buffer. Call after script completion."""
@@ -251,6 +277,8 @@ class DryRunRobotClient:
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
+        if isinstance(params, SetToolCmd):
+            self._active_tool_key = params.tool_name.strip().upper()
         # Detect jog commands — planner doesn't handle streaming
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if (
@@ -289,7 +317,9 @@ class DryRunRobotClient:
             return self._trajectory_segment_to_result(seg)
         if isinstance(seg, ErrorSegment):
             return self._error_segment_to_result(seg)
-        # InlineSegments (SetTool, Home, etc.) — no visualization
+        if isinstance(seg, InlineSegment) and isinstance(seg.params, ToolActionCmd):
+            return self._tool_action_segment_to_result()
+        # Other InlineSegments (SetTool, Home, etc.) — no visualization
         return None
 
     def _trajectory_segment_to_result(self, seg: TrajectorySegment) -> DryRunResult:
@@ -318,6 +348,11 @@ class DryRunRobotClient:
             )
         return _error_result(seg.error)
 
+    def _tool_action_segment_to_result(self) -> DryRunResult:
+        """Return a single-point DryRunResult at the current TCP pose."""
+        steps_to_rad(self._state.Position_in, self._q_rad_buf)
+        return _build_result(self._q_rad_buf[np.newaxis], 0.0)
+
     def _merge_results(self, results: list[DryRunResult]) -> DryRunResult:
         """Merge multiple DryRunResults into one (for multi-segment blends)."""
         non_empty = [r for r in results if r.tcp_poses.shape[0] > 0]
@@ -325,9 +360,6 @@ class DryRunRobotClient:
         if not non_empty:
             if first_error is not None:
                 return _error_result(first_error)
-            from ..utils.error_catalog import make_error
-            from ..utils.error_codes import ErrorCode
-
             return _error_result(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
 
         tcp_all = np.vstack([r.tcp_poses for r in non_empty])

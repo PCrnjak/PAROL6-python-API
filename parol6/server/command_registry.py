@@ -178,7 +178,7 @@ class CommandRegistry:
 
         # Iterate through all modules in the commands package
         package_path = commands_package.__path__
-        for importer, modname, ispkg in pkgutil.iter_modules(package_path):
+        for _, modname, ispkg in pkgutil.iter_modules(package_path):
             if ispkg:
                 continue  # Skip subpackages
 

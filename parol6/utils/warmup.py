@@ -65,6 +65,7 @@ from parol6.server.status_cache import _update_arrays
 from parol6.server.transport_manager import _arrays_changed
 from parol6.server.transports.mock_serial_transport import (
     _encode_payload_jit,
+    _simulate_gripper_ramp_jit,
     _simulate_motion_jit,
     _write_frame_jit,
 )
@@ -144,16 +145,14 @@ def warmup_jit() -> float:
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)
     _update_arrays(
-        dummy_6i,
-        dummy_5u8,
-        dummy_6i,
-        dummy_6i,
-        dummy_6i,
-        dummy_6f,
-        dummy_6f,
-        dummy_5u8,
-        dummy_6i,
-        dummy_6i,
+        dummy_6i,   # pos_in
+        dummy_5u8,  # io_in
+        dummy_6i,   # spd_in
+        dummy_6i,   # pos_last
+        dummy_6f,   # angles_deg
+        dummy_6f,   # q_rad_buf
+        dummy_5u8,  # io_cached
+        dummy_6i,   # spd_cached
     )
 
     # Dummy SE3 matrices for jit warmups below
@@ -211,18 +210,16 @@ def warmup_jit() -> float:
         dummy_grip_out,  # grip_out
     )
 
-    # parol6/server/transport_manager.py
+    # parol6/server/transport_manager.py — _arrays_changed
+    # Dtypes must match TxCoalesceState fields: pos/spd/grip=int32, aff/io=uint8
+    _wm_pos = np.zeros(6, dtype=np.int32)
+    _wm_aff = np.zeros(8, dtype=np.uint8)
     _arrays_changed(
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_6f,
-        dummy_grip_3f,
-        dummy_grip_3f,
+        _wm_pos, _wm_pos,   # pos  (int32[6])
+        _wm_pos, _wm_pos,   # spd  (int32[6])
+        _wm_aff, _wm_aff,   # aff  (uint8[8])
+        _wm_aff, _wm_aff,   # io   (uint8[8])
+        _wm_pos, _wm_pos,   # grip (int32[6])
     )
 
     # parol6/server/loop_timer.py - stats computation
@@ -257,6 +254,7 @@ def warmup_jit() -> float:
         0.004,  # dt
         0,  # homing_countdown
     )
+    dummy_gripper_ramp = np.zeros(3, dtype=np.float64)
     _write_frame_jit(
         dummy_6i,  # state_position_out
         dummy_6i,  # state_speed_out
@@ -264,6 +262,16 @@ def warmup_jit() -> float:
         dummy_6i,  # position_out
         dummy_6i,  # speed_out
         dummy_gripper_6i,  # gripper_data_out
+        dummy_gripper_ramp,  # gripper_ramp
+    )
+    _simulate_gripper_ramp_jit(
+        dummy_gripper_ramp,  # gripper_ramp
+        dummy_gripper_6i,  # gripper_data_in
+        0.0,  # gripper_pos_f
+        0.004,  # dt
+        10432.0,  # tick_range
+        40.0,  # min_speed
+        80000.0,  # max_speed
     )
     dummy_payload = memoryview(bytearray(64))
     dummy_timing = np.zeros(1, dtype=np.int32)

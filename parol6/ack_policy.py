@@ -10,6 +10,7 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
     CmdType.SIMULATOR,
     CmdType.SET_PROFILE,
     CmdType.RESET,
+    CmdType.SET_IO,
 }
 
 # Query command types (use request/response, not ACK)
@@ -17,14 +18,17 @@ QUERY_CMD_TYPES: set[CmdType] = {
     CmdType.GET_POSE,
     CmdType.GET_ANGLES,
     CmdType.GET_IO,
-    CmdType.GET_GRIPPER,
     CmdType.GET_SPEEDS,
     CmdType.GET_STATUS,
     CmdType.GET_LOOP_STATS,
     CmdType.GET_CURRENT_ACTION,
     CmdType.GET_QUEUE,
     CmdType.GET_TOOL,
+    CmdType.GET_TOOL_STATUS,
     CmdType.GET_PROFILE,
+    CmdType.GET_ENABLEMENT,
+    CmdType.GET_ERROR,
+    CmdType.GET_TCP_SPEED,
     CmdType.PING,
 }
 
@@ -35,6 +39,7 @@ FIRE_AND_FORGET: set[CmdType] = {
     CmdType.SERVOL,
     CmdType.JOGJ,
     CmdType.JOGL,
+    CmdType.RESET_LOOP_STATS,
 }
 
 # Queued motion commands that return a command index in their ACK
@@ -49,8 +54,7 @@ QUEUED_CMD_TYPES: set[CmdType] = {
     CmdType.SET_TOOL,
     CmdType.DELAY,
     CmdType.CHECKPOINT,
-    CmdType.PNEUMATICGRIPPER,
-    CmdType.ELECTRICGRIPPER,
+    CmdType.TOOL_ACTION,
 }
 
 

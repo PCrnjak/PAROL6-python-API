@@ -1107,7 +1107,7 @@ class TrajectoryBuilder:
                     # Near-zero path tangent (at waypoint or singular), use joint limits
                     vlim_buffer[:, 0] = -v_max_joint
                     vlim_buffer[:, 1] = v_max_joint
-                    return vlim_buffer
+                    return vlim_buffer.copy()
 
                 # Maximum s_dot to satisfy Cartesian velocity constraint
                 max_sdot = v_max_m_s / cart_vel_per_sdot
@@ -1142,7 +1142,7 @@ class TrajectoryBuilder:
                 vlim_buffer[:, 0] = -q_dot_max
                 vlim_buffer[:, 1] = q_dot_max
 
-                return vlim_buffer
+                return vlim_buffer.copy()
 
             return constraint.JointVelocityConstraintVarying(vlim_func)
 
@@ -1186,8 +1186,11 @@ class TrajectoryBuilder:
 
         while result == Result.Working:
             result = gen.update(inp, out)
-            if count < max_iters:
-                trajectory_rad[count] = out.new_position
+            if count >= len(trajectory_rad):
+                new_buf = np.empty((len(trajectory_rad) * 2, n_dofs), dtype=np.float64)
+                new_buf[:count] = trajectory_rad[:count]
+                trajectory_rad = new_buf
+            trajectory_rad[count] = out.new_position
             count += 1
             out.pass_to_input(inp)
 

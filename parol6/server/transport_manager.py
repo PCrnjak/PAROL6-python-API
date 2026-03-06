@@ -173,6 +173,12 @@ class TransportManager:
         Returns:
             True if switch was successful.
         """
+        if self.transport is not None:
+            try:
+                self.transport.disconnect()
+            except Exception as e:
+                logger.debug("Error disconnecting transport before switch: %s", e)
+
         self.serial_port = port
 
         try:
@@ -219,8 +225,8 @@ class TransportManager:
             if self.transport:
                 try:
                     self.transport.disconnect()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Transport disconnect: %s", e)
 
             # Recreate transport according to new mode
             self.transport = create_and_connect_transport(
@@ -283,7 +289,7 @@ class TransportManager:
         command_value: int,
         affected_joint_out: np.ndarray,
         inout_out: np.ndarray,
-        timeout_out: float,
+        timeout_out: int,
         gripper_data_out: np.ndarray,
         keepalive_s: float = 0.2,
     ) -> bool:
@@ -311,7 +317,7 @@ class TransportManager:
         now = time.perf_counter()
         dirty = (
             (command_value != self._last_tx.cmd)
-            or (int(timeout_out) != self._last_tx.tout)
+            or (timeout_out != self._last_tx.tout)
             or _arrays_changed(
                 position_out,
                 self._last_tx.pos,
@@ -337,7 +343,7 @@ class TransportManager:
                 command_value,
                 affected_joint_out,
                 inout_out,
-                int(timeout_out),
+                timeout_out,
                 gripper_data_out,
             )
             if ok:
@@ -347,7 +353,7 @@ class TransportManager:
                 self._last_tx.spd[:] = speed_out
                 self._last_tx.aff[:] = affected_joint_out
                 self._last_tx.io[:] = inout_out
-                self._last_tx.tout = int(timeout_out)
+                self._last_tx.tout = timeout_out
                 self._last_tx.grip[:] = gripper_data_out
                 self._last_tx.last_sent = now
             return ok
@@ -376,14 +382,14 @@ class TransportManager:
             _, ver, _ = self.transport.get_latest_frame_view()
             self._last_version = ver
 
-    def tick_simulation(self) -> None:
+    def tick_simulation(self, tool_name: str = "NONE") -> None:
         """Tick mock transport simulation if using MockSerialTransport.
 
         Called by controller each loop iteration for lockstep simulation.
         No-op for real serial transport.
         """
         if isinstance(self.transport, MockSerialTransport):
-            self.transport.tick_simulation()
+            self.transport.tick_simulation(tool_name)
 
     def _reset_tx_keepalive(self) -> None:
         """Reset TX keepalive to force prompt write."""

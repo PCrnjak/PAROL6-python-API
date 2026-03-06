@@ -303,7 +303,7 @@ Streaming mode (`client.stream_on()` / `client.stream_off()`) enables high-rate 
 | **Planned motion** | MOVEJ, MOVEL, MOVEC, MOVES, MOVEP, HOME | Yes | With command_index | MotionPlanner subprocess → SegmentPlayer |
 | **Streaming motion** | JOGJ, JOGL, SERVOJ, SERVOL | Yes | Fire-and-forget | StreamingExecutor in main loop |
 | **Utility** | DELAY, CHECKPOINT, SET_TOOL | Yes | With command_index | Inline via MotionPlanner (preserves ordering) |
-| **Gripper** | PNEUMATICGRIPPER, ELECTRICGRIPPER | Yes | With command_index | Inline via MotionPlanner |
+| **Tool action** | TOOL_ACTION | Yes | With command_index | Inline via MotionPlanner |
 
 ### Command lifecycle
 
@@ -326,7 +326,10 @@ Uses numerical IK via pinokin (C++/Pinocchio bindings). Some Cartesian targets m
 
 Currently supported tools (see `parol6/tools.py`):
 - `NONE` (bare flange)
-- `PNEUMATIC` (pneumatic gripper)
+- `PNEUMATIC` (pneumatic gripper — vertical/horizontal variants)
+- `SSG-48` (adaptive electric gripper — finger/pinch variants)
+- `MSG` (compliant AI stepper gripper — 100mm/150mm/200mm rail variants)
+- `VACUUM` (vacuum gripper)
 
 Set tool at runtime from the client:
 ```python
@@ -335,7 +338,7 @@ with RobotClient() as c:
     c.set_tool("PNEUMATIC")
 ```
 
-Add a new tool by extending `TOOL_CONFIGS` with a name, description, and `transform` (SE3 → 4×4 matrix).
+Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` directly) and calling `register_tool("KEY", config)` in `parol6/tools.py`.
 
 
 **Security note:** The controller has no authentication — it accepts any correctly parsed command on its UDP port. Multiple senders are supported by design (e.g., GUI + orchestrator), but deploy only on trusted networks.

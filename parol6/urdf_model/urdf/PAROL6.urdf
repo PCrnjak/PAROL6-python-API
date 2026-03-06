@@ -347,7 +347,7 @@
     name="L6">
     <inertial>
       <origin
-        xyz="0.00632955087228015 -0.000453856352095022 -0.0554441567386594"
+        xyz="0.00632955087228015 -0.000453856352095022 -0.0764441567386594"
         rpy="0 0 0" />
       <mass
         value="0.0703261410665101" />
@@ -361,7 +361,7 @@
     </inertial>
     <visual>
       <origin
-        xyz="0 0 0"
+        xyz="0 0 -0.021"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -375,7 +375,7 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
+        xyz="0 0 -0.021"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -387,7 +387,7 @@
     name="L6"
     type="revolute">
     <origin
-      xyz="0 0.0628 0"
+      xyz="0 0.044 0"
       rpy="1.5707963267949 0 0" />
     <parent
       link="L5" />

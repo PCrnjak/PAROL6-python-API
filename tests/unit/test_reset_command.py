@@ -66,19 +66,6 @@ class TestResetCommandExecution:
 
         assert state._current_tool == "NONE"
 
-    def test_reset_clears_queues(self):
-        """Reset should clear command queues."""
-        state = ControllerState()
-        state.command_queue.append("cmd1")
-        state.command_queue.append("cmd2")
-        state.incoming_command_buffer.append(("msg", ("addr", 123)))
-
-        cmd = ResetCommand(ResetCmd())
-        cmd.tick(state)
-
-        assert len(state.command_queue) == 0
-        assert len(state.incoming_command_buffer) == 0
-
     def test_reset_preserves_connection_state(self):
         """Reset should NOT reset connection-related state."""
         state = ControllerState()

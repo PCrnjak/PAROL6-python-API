@@ -375,7 +375,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         "initial_pose",
         "target_pose",
         "cartesian_diagnostic",
-        "_interp_buf",
         "_cart_poses_buf",
     )
 
@@ -384,7 +383,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         self.initial_pose: np.ndarray | None = None
         self.target_pose: np.ndarray | None = None
         self.cartesian_diagnostic: dict | None = None
-        self._interp_buf = np.zeros((4, 4), dtype=np.float64)
         self._cart_poses_buf = np.empty((PATH_SAMPLES, 4, 4), dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:

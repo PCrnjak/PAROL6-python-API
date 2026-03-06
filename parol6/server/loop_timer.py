@@ -257,10 +257,14 @@ class EventRateMetrics:
 
 
 class GCTracker:
-    """Track garbage collection frequency and duration.
+    """Track garbage collection frequency and duration, with optional deferred collection.
 
     Registers a callback with gc.callbacks to record GC events.
     Provides rate (collections/sec) and duration statistics.
+
+    When ``take_control()`` is called, automatic GC is disabled and the caller
+    is responsible for calling ``collect_deferred()`` each loop iteration.
+    Collections are scheduled during slack time to avoid disrupting the hot path.
     """
 
     __slots__ = (
@@ -271,6 +275,7 @@ class GCTracker:
         "_buffer_mask",
         "_gc_start",
         "_last_duration",
+        "_controlled",
         "total_count",
         "total_time",
     )
@@ -287,6 +292,7 @@ class GCTracker:
         self._count = 0
         self._gc_start = 0.0
         self._last_duration = 0.0
+        self._controlled = False
         self.total_count = 0
         self.total_time = 0.0
         gc.callbacks.append(self._callback)
@@ -340,8 +346,41 @@ class GCTracker:
         """Duration of most recent GC in milliseconds."""
         return self._last_duration * 1000.0
 
+    def take_control(self) -> None:
+        """Disable automatic GC. Caller must call collect_deferred() each iteration."""
+        gc.disable()
+        gc.collect()  # clean slate before entering controlled mode
+        self._controlled = True
+
+    def release_control(self) -> None:
+        """Re-enable automatic GC and run a full collection."""
+        if self._controlled:
+            self._controlled = False
+            gc.enable()
+            gc.collect()
+
+    def collect_deferred(self, slack_s: float, tick_count: int) -> None:
+        """Run a deferred GC collection if there is enough slack time.
+
+        Call once per loop iteration after all work phases complete.
+
+        Strategy:
+          - gen-0 every tick if slack > 0.5ms  (~50-100µs typical)
+          - gen-1 every 1000 ticks (~10s) if slack > 2ms
+          - gen-2 every 10000 ticks (~100s) if slack > 3ms
+        """
+        if not self._controlled or slack_s < 0.0005:
+            return
+        if tick_count % 10000 == 0 and slack_s > 0.003:
+            gc.collect(2)
+        elif tick_count % 1000 == 0 and slack_s > 0.002:
+            gc.collect(1)
+        else:
+            gc.collect(0)
+
     def shutdown(self) -> None:
-        """Remove callback on shutdown."""
+        """Remove callback and re-enable GC on shutdown."""
+        self.release_control()
         try:
             gc.callbacks.remove(self._callback)
         except ValueError:
@@ -701,7 +740,7 @@ class LoopTimer:
         Args:
             interval_s: Target loop interval in seconds.
             busy_threshold_s: Time before deadline to switch from sleep to busy-loop.
-                             Default from PAROL6_BUSY_THRESHOLD_MS env var (2ms).
+                             Default from PAROL6_BUSY_THRESHOLD_MS env var (1ms).
             stats_interval: Compute stats every N loops (default 50 = 5Hz at 250Hz loop).
         """
         self._interval = interval_s
@@ -726,6 +765,14 @@ class LoopTimer:
         now = time.perf_counter()
         self._next_deadline = now
         self._prev_t = now
+
+    def time_to_next_deadline(self) -> float:
+        """Remaining seconds until the next tick deadline.
+
+        Call after work phases complete, before ``wait_for_next_tick()``.
+        Positive means ahead of schedule (slack time available).
+        """
+        return (self._next_deadline + self._interval) - time.perf_counter()
 
     def wait_for_next_tick(self) -> None:
         """Wait until next deadline using hybrid sleep + busy-loop.

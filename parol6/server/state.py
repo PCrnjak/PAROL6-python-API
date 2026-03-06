@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import logging
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +13,128 @@ from parol6.config import CONTROL_RATE_HZ, steps_to_rad
 from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 from parol6.protocol.wire import CommandCode
 from parol6.utils.error_catalog import RobotError
+from waldoctl import ActionState
+
+
+class GripperHWState:
+    """Named wrapper over the raw gripper numpy arrays.
+
+    Provides human-readable property access while keeping the underlying
+    int32 arrays intact for serial frame packing (zero-copy).
+
+    ``data_out`` layout: [target_position, target_speed, target_current,
+                          command_bits, mode, device_id]
+    ``data_in``  layout: [device_id, feedback_position, feedback_speed,
+                          feedback_current, status_byte, object_detection]
+    """
+
+    __slots__ = ("_out", "_in")
+
+    def __init__(self, data_out: np.ndarray, data_in: np.ndarray) -> None:
+        self._out = data_out
+        self._in = data_in
+
+    # -- Output (commands to gripper) --
+
+    @property
+    def target_position(self) -> int:
+        return int(self._out[0])
+
+    @target_position.setter
+    def target_position(self, v: int) -> None:
+        self._out[0] = v
+
+    @property
+    def target_speed(self) -> int:
+        return int(self._out[1])
+
+    @target_speed.setter
+    def target_speed(self, v: int) -> None:
+        self._out[1] = v
+
+    @property
+    def target_current(self) -> int:
+        return int(self._out[2])
+
+    @target_current.setter
+    def target_current(self, v: int) -> None:
+        self._out[2] = v
+
+    @property
+    def command_bits(self) -> int:
+        return int(self._out[3])
+
+    @command_bits.setter
+    def command_bits(self, v: int) -> None:
+        self._out[3] = v
+
+    # -- Command bit helpers (MSB-first 8-bit field) --
+    #
+    # Bit layout: [enable, move_active, estop, grip_enable, 0, 0, 0, 0]
+    #   bit 7 (0x80): enable        — always 1
+    #   bit 6 (0x40): move_active   — 1 while moving, 0 when idle
+    #   bit 5 (0x20): estop         — inverted e-stop sense
+    #   bit 4 (0x10): grip_enable   — always 1
+    #   bits 3-0:     reserved (0)
+
+    _CMD_ENABLE: int = 0x80
+    _CMD_MOVE_ACTIVE: int = 0x40
+    _CMD_ESTOP: int = 0x20
+    _CMD_GRIP_ENABLE: int = 0x10
+
+    def set_command_bits(self, *, move_active: bool, estop: bool) -> None:
+        """Pack and write the command bits byte.
+
+        ``enable`` and ``grip_enable`` are always set.
+        """
+        v = self._CMD_ENABLE | self._CMD_GRIP_ENABLE
+        if move_active:
+            v |= self._CMD_MOVE_ACTIVE
+        if estop:
+            v |= self._CMD_ESTOP
+        self._out[3] = v
+
+    @property
+    def mode(self) -> int:
+        return int(self._out[4])
+
+    @mode.setter
+    def mode(self, v: int) -> None:
+        self._out[4] = v
+
+    @property
+    def device_id_out(self) -> int:
+        return int(self._out[5])
+
+    @device_id_out.setter
+    def device_id_out(self, v: int) -> None:
+        self._out[5] = v
+
+    # -- Input (feedback from gripper) --
+
+    @property
+    def device_id(self) -> int:
+        return int(self._in[0])
+
+    @property
+    def feedback_position(self) -> int:
+        return int(self._in[1])
+
+    @property
+    def feedback_speed(self) -> int:
+        return int(self._in[2])
+
+    @property
+    def feedback_current(self) -> int:
+        return int(self._in[3])
+
+    @property
+    def status_byte(self) -> int:
+        return int(self._in[4])
+
+    @property
+    def object_detection(self) -> int:
+        return int(self._in[5])
 
 
 @dataclass
@@ -56,16 +177,6 @@ class ControllerState:
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
-
-    # I/O buffers and protocol tracking (serial frame parsing state)
-    input_byte: int = 0
-    start_cond1: int = 0
-    start_cond2: int = 0
-    start_cond3: int = 0
-    good_start: int = 0
-    data_len: int = 0
-    data_buffer: list[bytes] = field(default_factory=lambda: [b""] * 255)
-    data_counter: int = 0
 
     # Robot telemetry and command buffers - using ndarray for efficiency
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
@@ -111,18 +222,10 @@ class ControllerState:
     Timeout_out: int = 0
     XTR_data: int = 0
 
-    # Command queueing and tracking
-    command_queue: deque[Any] = field(default_factory=deque)
-    incoming_command_buffer: deque[tuple[str, tuple[str, int]]] = field(
-        default_factory=deque
-    )
-    command_id_map: dict[Any, tuple[str, tuple[str, int]]] = field(default_factory=dict)
-    active_command: Any = None
-    active_command_id: str | None = None
-
     # Action tracking for status broadcast and queries
     action_current: str = ""
-    action_state: str = "IDLE"  # IDLE, EXECUTING, COMPLETED, FAILED
+    action_params: str = ""
+    action_state: ActionState = ActionState.IDLE  # IDLE, EXECUTING, ERROR
     action_next: str = ""
     queue_nonstreamable: list[str] = field(default_factory=list)
 
@@ -181,9 +284,13 @@ class ControllerState:
         default_factory=lambda: np.zeros((6,), dtype=np.float64)
     )
 
+    # Named wrapper over raw gripper arrays (initialized in __post_init__)
+    gripper_hw: GripperHWState = field(init=False, repr=False)
+
     def __post_init__(self) -> None:
-        """Initialize E-stop to released state after field initialization."""
+        """Initialize E-stop to released state and named gripper wrapper."""
         self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
+        self.gripper_hw = GripperHWState(self.Gripper_data_out, self.Gripper_data_in)
 
     def reset(self) -> None:
         """
@@ -202,16 +309,6 @@ class ControllerState:
         # Tool back to none
         self._current_tool = "NONE"
         PAROL6_ROBOT.apply_tool("NONE")
-
-        # Serial frame parsing state
-        self.input_byte = 0
-        self.start_cond1 = 0
-        self.start_cond2 = 0
-        self.start_cond3 = 0
-        self.good_start = 0
-        self.data_len = 0
-        self.data_buffer = [b""] * 255
-        self.data_counter = 0
 
         # Command and telemetry buffers - zero out
         self.Command_out = CommandCode.IDLE
@@ -232,16 +329,10 @@ class ControllerState:
         self.Timeout_out = 0
         self.XTR_data = 0
 
-        # Command queues - clear
-        self.command_queue.clear()
-        self.incoming_command_buffer.clear()
-        self.command_id_map.clear()
-        self.active_command = None
-        self.active_command_id = None
-
         # Action tracking
         self.action_current = ""
-        self.action_state = "IDLE"
+        self.action_params = ""
+        self.action_state = ActionState.IDLE
         self.action_next = ""
         self.queue_nonstreamable.clear()
 
@@ -288,22 +379,14 @@ logger = logging.getLogger(__name__)
 
 
 class StateManager:
-    """Singleton manager for ControllerState."""
+    """Manager for ControllerState."""
 
-    _instance: StateManager | None = None
     _state: ControllerState | None = None
 
-    def __new__(cls) -> StateManager:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self):
-        """Initialize the state manager (only runs once due to singleton)."""
-        if not hasattr(self, "_initialized"):
-            self._state = ControllerState()
-            self._initialized = True
-            logger.info("StateManager initialized with NumPy buffers")
+        """Initialize the state manager."""
+        self._state = ControllerState()
+        logger.info("StateManager initialized with NumPy buffers")
 
     def get_state(self) -> ControllerState:
         """
@@ -334,6 +417,8 @@ _state_manager: StateManager | None = None
 @atexit.register
 def _cleanup_state_manager() -> None:
     global _state_manager
+    if _state_manager is not None:
+        _state_manager._state = None
     _state_manager = None
 
 
@@ -359,12 +444,18 @@ def get_state() -> ControllerState:
 # -----------------------------
 
 
-def invalidate_fkine_cache() -> None:
+def invalidate_fkine_cache(state: ControllerState | None = None) -> None:
     """
     Invalidate the fkine cache, forcing recomputation on next access.
     Called when the robot model changes (e.g., tool change).
+
+    Parameters
+    ----------
+    state : ControllerState, optional
+        The controller state to invalidate. If not provided, uses the global state.
     """
-    state = get_state()
+    if state is None:
+        state = get_state()
     state._fkine_last_tool = ""
     logger.debug("fkine cache invalidated")
 
@@ -387,7 +478,7 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         PAROL6_ROBOT.robot.fkine_into(state._fkine_q_rad, state._fkine_mat)
 
         # Cache as flattened 16-vector with mm translation (zero-allocation)
-        state._fkine_flat_mm[:] = state._fkine_mat.ravel()
+        state._fkine_flat_mm.reshape(4, 4)[:] = state._fkine_mat
         state._fkine_flat_mm[3] *= 1000.0  # X translation to mm
         state._fkine_flat_mm[7] *= 1000.0  # Y translation to mm
         state._fkine_flat_mm[11] *= 1000.0  # Z translation to mm

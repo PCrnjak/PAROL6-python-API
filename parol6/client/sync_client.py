@@ -11,14 +11,21 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, overload
 
-from ..protocol.types import Axis, Frame, PingResult
+from waldoctl.tools import ToolSpec
+
+from waldoctl import PingResult, ToolStatus
+
+from ..protocol.types import Axis, Frame
 from ..protocol.wire import (
     CurrentActionResultStruct,
+    EnablementResultStruct,
     LoopStatsResultStruct,
+    QueueResultStruct,
     StatusBuffer,
     StatusResultStruct,
     ToolResultStruct,
 )
+from ..utils.error_catalog import RobotError
 from .async_client import AsyncRobotClient
 
 T = TypeVar("T")
@@ -125,6 +132,17 @@ class RobotClient:
         self._inner = AsyncRobotClient(
             host=host, port=port, timeout=timeout, retries=retries
         )
+        self._bound_tools: dict[str, ToolSpec] = {}
+
+    # ---------- tool access ----------
+
+    @property
+    def tool(self) -> ToolSpec:
+        """Active bound tool. Raises if no tool has been set."""
+        key = (self._inner._active_tool_key or "").upper()
+        if not key:
+            raise RuntimeError("No tool set. Call set_tool() first.")
+        return self._bound_tools[key]
 
     def close(self) -> None:
         """Close underlying AsyncRobotClient and release resources."""
@@ -215,7 +233,7 @@ class RobotClient:
         """Ping the controller to check connectivity.
 
         Returns:
-            PingResult with serial_connected status, or None on timeout.
+            PingResult with hardware_connected status, or None on timeout.
         """
         return _run(self._inner.ping())
 
@@ -235,15 +253,6 @@ class RobotClient:
         """
         return _run(self._inner.get_io())
 
-    def get_gripper_status(self) -> list[int] | None:
-        """Get electric gripper status.
-
-        Returns:
-            List of integers [id, pos, speed, current, status, obj_detected],
-            or None on timeout.
-        """
-        return _run(self._inner.get_gripper_status())
-
     def get_speeds(self) -> list[float] | None:
         """Get current joint speeds in steps per second.
 
@@ -252,24 +261,23 @@ class RobotClient:
         """
         return _run(self._inner.get_speeds())
 
-    def get_pose(self) -> list[float] | None:
+    def get_pose(self, frame: str = "WRF") -> list[float] | None:
         """Get current robot pose as a 4x4 transformation matrix.
+
+        Args:
+            frame: Reference frame - "WRF" (world) or "TRF" (tool).
 
         Returns:
             16-element flattened transformation matrix (row-major) with
             translation in mm, or None on timeout.
         """
-        return _run(self._inner.get_pose())
-
-    def get_gripper(self) -> list[int] | None:
-        """Alias for get_gripper_status()."""
-        return _run(self._inner.get_gripper())
+        return _run(self._inner.get_pose(frame=frame))
 
     def get_status(self) -> StatusResultStruct | None:
         """Get aggregate robot status.
 
         Returns:
-            StatusResultStruct with pose, angles, speeds, io, gripper, or None on timeout.
+            StatusResultStruct with pose, angles, speeds, io, tool_status, or None on timeout.
         """
         return _run(self._inner.get_status())
 
@@ -299,7 +307,7 @@ class RobotClient:
         Set the current end-effector tool configuration.
 
         Args:
-            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'ELECTRIC')
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
 
         Returns:
             True if successful
@@ -333,18 +341,50 @@ class RobotClient:
         Get the current executing action/command and its state.
 
         Returns:
-            Struct with current action name, state, and next action.
+            Struct with current action name, state, next action, and params.
         """
         return _run(self._inner.get_current_action())
 
-    def get_queue(self) -> list[str] | None:
+    def get_queue(self) -> QueueResultStruct | None:
         """
-        Get the list of queued non-streamable commands.
+        Get queue status with progress tracking.
 
         Returns:
-            List of queued command names.
+            QueueResultStruct with queue, indices, checkpoint, and duration.
         """
         return _run(self._inner.get_queue())
+
+    def get_tool_status(self) -> ToolStatus | None:
+        """Get current tool status.
+
+        Returns:
+            ToolStatus with key, state, engaged, positions, channels, etc.
+        """
+        return _run(self._inner.get_tool_status())
+
+    def get_enablement(self) -> EnablementResultStruct | None:
+        """Get joint and Cartesian enablement flags.
+
+        Returns:
+            EnablementResultStruct with joint_en, cart_en_wrf, cart_en_trf.
+        """
+        return _run(self._inner.get_enablement())
+
+    def get_error(self) -> RobotError | None:
+        """Get the current error state.
+
+        Returns:
+            RobotError if an error is active, None otherwise.
+        """
+        return _run(self._inner.get_error())
+
+    def get_tcp_speed(self) -> float | None:
+        """Get current TCP linear speed in mm/s.
+
+        Returns:
+            TCP speed as float, or None on timeout.
+        """
+        return _run(self._inner.get_tcp_speed())
 
     # ---------- helper methods ----------
 
@@ -375,6 +415,10 @@ class RobotClient:
     def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
         """Check if robot has stopped moving.
 
+        Prefer ``wait_command_complete()`` for waiting on specific commands.
+        This method polls raw joint speeds and is mainly useful for
+        diagnostics or manual stopping logic.
+
         Args:
             threshold_speed: Speed threshold in steps/sec.
 
@@ -387,7 +431,7 @@ class RobotClient:
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
-        speed_threshold: float = 2.0,
+        speed_threshold: float = 0.01,
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
     ) -> bool:
@@ -396,7 +440,7 @@ class RobotClient:
         Args:
             timeout: Maximum time to wait in seconds.
             settle_window: How long robot must be stable.
-            speed_threshold: Max joint speed to be considered stopped.
+            speed_threshold: Max joint speed to be considered stopped (rad/s).
             angle_threshold: Max angle change to be considered stopped.
             motion_start_timeout: Max time to wait for motion to start.
 
@@ -755,63 +799,26 @@ class RobotClient:
         return _run(self._inner.wait_for_checkpoint(label, timeout=timeout))
 
     def set_io(self, index: int, value: int) -> int:
-        """Set digital I/O bit (0..7) to 0 or 1."""
+        """Set digital output by logical index (0 = first output pin)."""
         return _run(self._inner.set_io(index, value))
 
     def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue."""
         return _run(self._inner.delay(seconds))
 
-    # ---------- IO / gripper ----------
+    # ---------- IO / tool ----------
 
-    def control_pneumatic_gripper(
+    def tool_action(
         self,
+        tool_key: str,
         action: str,
-        port: int,
+        params: list | None = None,
+        *,
         wait: bool = False,
         timeout: float = 10.0,
     ) -> int:
-        """Control pneumatic gripper via digital outputs.
-
-        Args:
-            action: 'open' or 'close'.
-            port: Port number (1 or 2).
-            wait: If True, block until command completes.
-            timeout: Max seconds to wait for completion.
-
-        Returns:
-            True if command sent successfully.
-        """
         return _run(
-            self._inner.control_pneumatic_gripper(
-                action, port, wait=wait, timeout=timeout
-            )
-        )
-
-    def control_electric_gripper(
-        self,
-        action: str,
-        position: float = 0.0,
-        speed: float = 0.5,
-        current: int = 500,
-        wait: bool = False,
-        timeout: float = 10.0,
-    ) -> int:
-        """Control electric gripper.
-
-        Args:
-            action: 'move' or 'calibrate'.
-            position: 0.0-1.0 (0=open, 1=closed).
-            speed: 0.0-1.0 fraction of max speed.
-            current: Current limit in mA (100-1000).
-            wait: If True, block until command completes.
-            timeout: Max seconds to wait for completion.
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.control_electric_gripper(
-                action, position, speed, current, wait=wait, timeout=timeout
+            self._inner.tool_action(
+                tool_key, action, params, wait=wait, timeout=timeout
             )
         )

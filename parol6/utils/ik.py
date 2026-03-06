@@ -93,17 +93,6 @@ def _ensure_cache(robot: Robot) -> None:
     )
 
 
-# Unsigned axis vectors — direction comes from signed speed.
-# Format: ([x, y, z], [rx, ry, rz])
-AXIS_MAP = {
-    "X": ([1, 0, 0], [0, 0, 0]),
-    "Y": ([0, 1, 0], [0, 0, 0]),
-    "Z": ([0, 0, 1], [0, 0, 0]),
-    "RX": ([0, 0, 0], [1, 0, 0]),
-    "RY": ([0, 0, 0], [0, 1, 0]),
-    "RZ": ([0, 0, 0], [0, 0, 1]),
-}
-
 
 @njit(cache=True)
 def _ik_safety_check(
@@ -149,6 +138,8 @@ def solve_ik(
     Per-joint safety margins (IK_SAFETY_MARGINS_RAD) are always enforced.
     Joints like J3 (elbow) have larger margins because backwards bend creates
     trap configurations that are hard to recover from.
+
+    Returns shared result -- copy result.q if storing across calls.
 
     Parameters
     ----------
@@ -253,25 +244,26 @@ def _check_limits_core(
     t_above_out: NDArray[np.bool_],
 ) -> bool:
     """JIT-compiled core of check_limits. Writes masks to output buffers."""
-    for i in range(6):
+    n = q_arr.shape[0]
+    for i in range(n):
         below_out[i] = q_arr[i] < mn[i]
         above_out[i] = q_arr[i] > mx[i]
         cur_viol_out[i] = below_out[i] or above_out[i]
 
     if not has_target:
         all_ok = True
-        for i in range(6):
+        for i in range(n):
             viol_out[i] = cur_viol_out[i]
             if viol_out[i]:
                 all_ok = False
         return all_ok
 
-    for i in range(6):
+    for i in range(n):
         t_below_out[i] = t_arr[i] < mn[i]
         t_above_out[i] = t_arr[i] > mx[i]
 
     all_ok = True
-    for i in range(6):
+    for i in range(n):
         t_viol = t_below_out[i] or t_above_out[i]
         if allow_recovery:
             rec_ok = (above_out[i] and t_arr[i] <= q_arr[i]) or (

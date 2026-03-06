@@ -49,7 +49,7 @@ _joint_limits_degree: Limits2f = np.array(
     dtype=np.float64,
 )
 
-_joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree).astype(np.float64)
+_joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree)
 
 
 # URDF path for pinokin Robot
@@ -68,7 +68,7 @@ def apply_tool(tool_name: str) -> None:
     Parameters
     ----------
     tool_name : str
-        Name of the tool from tools.TOOL_CONFIGS
+        Name of the tool from the tool registry
     """
     T_tool = get_tool_transform(tool_name)
 

@@ -6,7 +6,6 @@ import sys
 import time
 
 from parol6 import config as cfg
-from parol6.server.loop_timer import LoopMetrics
 from parol6.server.state import StateManager
 from parol6.server.status_cache import get_cache
 
@@ -37,10 +36,10 @@ class StatusBroadcaster:
     def __init__(
         self,
         state_mgr: StateManager,
-        group: str = "239.255.0.101",
-        port: int = 50510,
-        ttl: int = 1,
-        iface_ip: str = "127.0.0.1",
+        group: str = cfg.MCAST_GROUP,
+        port: int = cfg.MCAST_PORT,
+        ttl: int = cfg.MCAST_TTL,
+        iface_ip: str = cfg.MCAST_IF,
         rate_hz: float = cfg.STATUS_RATE_HZ,
         stale_s: float = cfg.STATUS_STALE_S,
     ) -> None:
@@ -56,11 +55,6 @@ class StatusBroadcaster:
 
         self._sock: socket.socket | None = None
 
-        # Rolling metrics for TX timing
-        self._metrics = LoopMetrics()
-        self._metrics.configure(1.0 / rate_hz, int(cfg.STATUS_RATE_HZ))
-        self._metrics.mark_started(time.monotonic())
-
         # Failure tracking for runtime fallback
         self._send_failures = 0
         self._max_send_failures = 3
@@ -74,7 +68,8 @@ class StatusBroadcaster:
         try:
             tmp.connect(("1.1.1.1", 80))
             return tmp.getsockname()[0]
-        except Exception:
+        except Exception as e:
+            logger.debug("IP detect: %s", e)
             return "127.0.0.1"
         finally:
             try:
@@ -227,7 +222,9 @@ class StatusBroadcaster:
         try:
             sock.sendto(payload, dest)
             self._send_failures = 0
-            self._metrics.tick(time.monotonic())
+
+        except BlockingIOError:
+            pass  # Transient kernel buffer pressure — not a multicast failure
         except OSError as e:
             self._handle_send_failure(e)
 

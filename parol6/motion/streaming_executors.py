@@ -19,10 +19,13 @@ from numpy.typing import NDArray
 from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import LIMITS
+from parol6.config import INTERVAL_S, LIMITS
 from pinokin import se3_exp_ws, se3_inverse, se3_log_ws, se3_mul
 
 logger = logging.getLogger(__name__)
+
+_IDENTITY_SE3: np.ndarray = np.eye(4, dtype=np.float64)
+_IDENTITY_SE3.flags.writeable = False
 
 
 @njit(cache=True)
@@ -108,7 +111,7 @@ class RuckigExecutorBase(ABC):
     if they need to retain values across ticks.
     """
 
-    def __init__(self, num_dofs: int, dt: float = 0.004):
+    def __init__(self, num_dofs: int, dt: float = INTERVAL_S):
         self._lock = threading.Lock()
         self.num_dofs = num_dofs
         self.dt = dt
@@ -195,13 +198,13 @@ class StreamingExecutor(RuckigExecutorBase):
     - Preserves velocity/acceleration state across ticks
     """
 
-    def __init__(self, num_dofs: int = 6, dt: float = 0.004):
+    def __init__(self, num_dofs: int = 6, dt: float = INTERVAL_S):
         """
         Initialize streaming executor.
 
         Args:
             num_dofs: Number of degrees of freedom (joints)
-            dt: Control cycle time in seconds (default 0.004 = 250Hz)
+            dt: Control cycle time in seconds
         """
         # Cartesian velocity limit (mm/s), None = no cart limiting
         # Must be set before super().__init__ calls _init_limits/_init_state
@@ -265,7 +268,7 @@ class StreamingExecutor(RuckigExecutorBase):
         """
         self._cart_vel_limit = limit_mm_s
 
-    def sync_position(self, pos: list[float]) -> None:
+    def sync_position(self, pos: list[float] | np.ndarray) -> None:
         """
         Sync current position from robot feedback.
 
@@ -447,12 +450,12 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
     - WRF/TRF frame support for jogging
     """
 
-    def __init__(self, dt: float = 0.004):
+    def __init__(self, dt: float = INTERVAL_S):
         """
         Initialize Cartesian streaming executor.
 
         Args:
-            dt: Control cycle time in seconds (default 0.004 = 250Hz)
+            dt: Control cycle time in seconds
         """
         # Reference pose for tangent space computations
         # Must be set before super().__init__ calls _init_limits/_init_state
@@ -496,12 +499,12 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
     def _init_state(self) -> None:
         """Initialize Ruckig input parameters."""
-        self.inp.current_position = [0.0] * 6
-        self.inp.current_velocity = [0.0] * 6
-        self.inp.current_acceleration = [0.0] * 6
-        self.inp.target_position = [0.0] * 6
-        self.inp.target_velocity = [0.0] * 6
-        self.inp.target_acceleration = [0.0] * 6
+        self.inp.current_position = self._zeros
+        self.inp.current_velocity = self._zeros
+        self.inp.current_acceleration = self._zeros
+        self.inp.target_position = self._zeros
+        self.inp.target_velocity = self._zeros
+        self.inp.target_acceleration = self._zeros
         self._apply_limits()
 
     def _apply_limits(self) -> None:
@@ -539,10 +542,10 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
                 current_pose.copy()
             )  # Copy to avoid aliasing with cached FK
             # Reset Ruckig state to origin (relative to reference)
-            self.inp.current_position = [0.0] * 6
-            self.inp.current_velocity = [0.0] * 6
-            self.inp.current_acceleration = [0.0] * 6
-            self.inp.target_position = [0.0] * 6
+            self.inp.current_position = self._zeros
+            self.inp.current_velocity = self._zeros
+            self.inp.current_acceleration = self._zeros
+            self.inp.target_position = self._zeros
             self.active = False
 
     def _pose_to_tangent(self, pose: np.ndarray) -> np.ndarray:
@@ -719,7 +722,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
                 return (
                     self.reference_pose
                     if self.reference_pose is not None
-                    else np.eye(4, dtype=np.float64),
+                    else _IDENTITY_SE3,
                     self._vel_np_buf,
                     True,
                 )
@@ -731,7 +734,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
                 return (
                     self.reference_pose
                     if self.reference_pose is not None
-                    else np.eye(4, dtype=np.float64),
+                    else _IDENTITY_SE3,
                     self._vel_np_buf,
                     True,
                 )

@@ -7,7 +7,6 @@ in a separate process, communicating with the main process via shared memory.
 
 import logging
 import signal
-import sys
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
@@ -23,12 +22,11 @@ from parol6.server.ik_layout import (
     IK_OUTPUT_CART_WRF_OFFSET,
     IK_OUTPUT_JOINT_OFFSET,
     IK_OUTPUT_VERSION_OFFSET,
+    SHM_EXTRA_KWARGS,
+    unregister_shm,
 )
 
 logger = logging.getLogger(__name__)
-
-# track parameter added in Python 3.13
-_SHM_EXTRA_KWARGS = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 def ik_enablement_worker_main(
@@ -53,8 +51,10 @@ def ik_enablement_worker_main(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Attach to shared memory
-    input_shm = SharedMemory(name=input_shm_name, create=False, **_SHM_EXTRA_KWARGS)
-    output_shm = SharedMemory(name=output_shm_name, create=False, **_SHM_EXTRA_KWARGS)
+    input_shm = SharedMemory(name=input_shm_name, create=False, **SHM_EXTRA_KWARGS)
+    output_shm = SharedMemory(name=output_shm_name, create=False, **SHM_EXTRA_KWARGS)
+    unregister_shm(input_shm)
+    unregister_shm(output_shm)
     assert input_shm.buf is not None
     assert output_shm.buf is not None
     input_mv = memoryview(input_shm.buf)

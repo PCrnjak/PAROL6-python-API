@@ -9,14 +9,11 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import Union
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
-
-if TYPE_CHECKING:
-    pass
 
 TRACE: int = 5
 logging.addLevelName(TRACE, "TRACE")

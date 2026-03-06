@@ -108,7 +108,7 @@ class CommandBase(ABC, Generic[P]):
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
         self._steps_buf: np.ndarray = np.zeros(6, dtype=np.int32)
 
-    # Ensure command objects are usable as dict keys (e.g., in server command_id_map)
+    # Ensure command objects are usable as dict keys (identity-based)
     def __hash__(self) -> int:
         # Identity-based hash is appropriate for ephemeral command instances
         return id(self)

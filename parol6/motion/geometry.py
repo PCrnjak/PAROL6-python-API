@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
-from pinokin import batch_se3_interp, se3_interp
+from pinokin import batch_se3_interp, se3_from_rpy, se3_interp
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
@@ -57,15 +57,15 @@ class CircularMotion(_ShapeGenerator):
         """Generate a 3D circular arc trajectory (uniformly sampled geometry).
 
         Args:
-            start_pose: Start pose [x, y, z, rx, ry, rz]
-            end_pose: End pose [x, y, z, rx, ry, rz]
-            center: Arc center point [x, y, z]
+            start_pose: Start pose [x, y, z, rx, ry, rz] (mm, degrees)
+            end_pose: End pose [x, y, z, rx, ry, rz] (mm, degrees)
+            center: Arc center point [x, y, z] (mm)
             normal: Normal vector defining arc plane (auto-computed if None)
             clockwise: If True, arc goes clockwise when viewed from normal
             n_samples: Number of sample points along the arc
 
         Returns:
-            (N, 6) array of poses along the arc
+            (N, 4, 4) array of SE3 poses along the arc (meters, radians).
         """
         start_pos = start_pose[:3]
         end_pos = end_pose[:3]
@@ -92,24 +92,34 @@ class CircularMotion(_ShapeGenerator):
 
         num_points = max(2, n_samples)
 
-        # Vectorized arc generation using scipy Rotation
+        # Vectorized arc position generation using scipy Rotation
         t_values = np.linspace(0, 1, num_points) if num_points > 1 else np.array([1.0])
         angles = t_values * arc_angle
 
-        # Batch rotation using rotvec (axis-angle)
         rotvecs = np.outer(angles, normal_unit)  # (num_points, 3)
         rotations = Rotation.from_rotvec(rotvecs)
-        positions = center + rotations.apply(r1)  # (num_points, 3)
+        positions = center + rotations.apply(r1)  # (num_points, 3) in mm
 
-        # Batch orientation interpolation (slerp)
-        r_start = Rotation.from_euler("xyz", start_pose[3:], degrees=True)
-        r_end = Rotation.from_euler("xyz", end_pose[3:], degrees=True)
-        key_rots = Rotation.from_quat(np.stack([r_start.as_quat(), r_end.as_quat()]))
-        slerp = Slerp(np.array([0.0, 1.0]), key_rots)
-        orientations = slerp(t_values).as_euler("xyz", degrees=True)  # (num_points, 3)
+        # Build SE3 start/end from 6D poses, then interpolate orientation in
+        # SE3 space (Lie-algebra geodesic) to avoid gimbal-lock Euler issues.
+        start_se3 = np.empty((4, 4), dtype=np.float64)
+        end_se3 = np.empty((4, 4), dtype=np.float64)
+        se3_from_rpy(
+            start_pose[0] / 1000.0, start_pose[1] / 1000.0, start_pose[2] / 1000.0,
+            np.radians(start_pose[3]), np.radians(start_pose[4]), np.radians(start_pose[5]),
+            start_se3,
+        )
+        se3_from_rpy(
+            end_pose[0] / 1000.0, end_pose[1] / 1000.0, end_pose[2] / 1000.0,
+            np.radians(end_pose[3]), np.radians(end_pose[4]), np.radians(end_pose[5]),
+            end_se3,
+        )
 
-        # Combine positions and orientations
-        trajectory = np.concatenate([positions, orientations], axis=1)
+        trajectory = np.empty((num_points, 4, 4), dtype=np.float64)
+        batch_se3_interp(start_se3, end_se3, t_values, trajectory)
+
+        # Override translations with the arc-geometry positions (mm → meters)
+        trajectory[:, :3, 3] = positions / 1000.0
 
         return trajectory
 

@@ -73,7 +73,7 @@ class HomeCommand(MotionCommand[HomeCmd]):
         """Manages the homing command and monitors for completion using a state machine."""
         if self.state == HomeState.START:
             logger.debug(
-                f"  -> Sending home signal (100)... Countdown: {self.start_cmd_counter}"
+                "  -> Sending home signal (100)... Countdown: %d", self.start_cmd_counter
             )
             state.Command_out = CommandCode.HOME
             self.start_cmd_counter -= 1
@@ -100,6 +100,11 @@ class HomeCommand(MotionCommand[HomeCmd]):
                 self.finish()
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.COMPLETED
+            self.timeout_counter -= 1
+            if self.timeout_counter <= 0:
+                self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
+                self.stop_and_idle(state)
+                return ExecutionStatusCode.FAILED
 
         return ExecutionStatusCode.EXECUTING
 
@@ -153,7 +158,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         # Sync position on first tick
         if not self._jog_initialized:
             steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(list(self._q_rad_buf))
+            se.sync_position(self._q_rad_buf)
             self._jog_initialized = True
 
         stop_reason = self._check_stop_conditions(state)
