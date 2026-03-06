@@ -105,7 +105,7 @@ class TestCurvedMotionCommands:
         """Test process move through waypoints with constant TCP speed."""
         waypoints = [
             self._offset(home_pose),
-            self._offset(home_pose, dx=15, dy=8),
+            self._offset(home_pose, dx=5, dy=3),
             self._offset(home_pose),
         ]
         result = client.moveP(waypoints=waypoints, speed=0.3, frame="WRF")

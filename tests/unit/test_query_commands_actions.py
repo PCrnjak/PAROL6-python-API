@@ -7,6 +7,8 @@ Uses minimal state objects to test command logic in isolation.
 
 from types import SimpleNamespace
 
+from waldoctl import ActionState
+
 from parol6.commands.query_commands import GetCurrentActionCommand, GetQueueCommand
 from parol6.protocol.wire import (
     CurrentActionResultStruct,
@@ -39,7 +41,7 @@ def test_get_current_action_returns_details():
     """Test that GET_CURRENT_ACTION compute() returns correct data."""
     state = SimpleNamespace(
         action_current="MoveJPoseCommand",
-        action_state="EXECUTING",
+        action_state=ActionState.EXECUTING,
         action_next="HomeCommand",
         action_params="angles=[10,20,30,40,50,60]",
     )
@@ -58,7 +60,10 @@ def test_get_current_action_returns_details():
 def test_get_current_action_with_idle_state():
     """Test GET_CURRENT_ACTION when robot is idle."""
     state = SimpleNamespace(
-        action_current="", action_state="IDLE", action_next="", action_params=""
+        action_current="",
+        action_state=ActionState.IDLE,
+        action_next="",
+        action_params="",
     )
 
     cmd = GetCurrentActionCommand(GetCurrentActionCmd())

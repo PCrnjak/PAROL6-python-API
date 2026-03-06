@@ -245,7 +245,7 @@ class GetCurrentActionCommand(QueryCommand[GetCurrentActionCmd]):
         return pack_response(
             CurrentActionResultStruct(
                 current=state.action_current,
-                state=state.action_state.value,
+                state=state.action_state.name,
                 next=state.action_next,
                 params=state.action_params,
             )
