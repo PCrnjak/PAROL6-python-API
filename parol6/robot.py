@@ -25,22 +25,22 @@ import numpy as np
 from numpy.typing import NDArray
 from pinokin import Robot as PinokinRobot
 from pinokin import se3_from_rpy, so3_rpy
+from collections.abc import Callable
 from waldoctl import (
     CartesianKinodynamicLimits,
+    ChannelDescriptor,
+    DryRunClient,
     ElectricGripperTool,
-    GripperType,
     HomePosition,
+    IKResult,
     JointLimits,
     JointsSpec,
     KinodynamicLimits,
     LinearAngularLimits,
-    MeshSpec,
-    PartMotion,
     PneumaticGripperTool,
     PositionLimits,
     Robot as _RobotABC,
     ToolSpec,
-    ToolVariant,
     ToolsSpec,
     ToolType,
 )
@@ -272,21 +272,52 @@ class _ServerManager:
 # ===========================================================================
 
 
-class _ToolImpl(ToolSpec):
+class _ToolBase:
+    """Dispatch infrastructure for concrete tool implementations.
+
+    Provides ``_execute`` callback binding and ``_cmd()`` dispatch.
+    The ``_execute`` callback is set by ``create_async_client()`` via
+    shallow copy to bind the tool to a client's ``tool_action`` method.
+    """
+
+    _execute: Callable[..., Any] | None = None
+    key: str  # provided by ToolSpec (mixed in by concrete subclasses)
+
+    async def _cmd(
+        self, action: str, params: list[Any] | None = None, **kwargs: object
+    ) -> int:
+        if self._execute is None:
+            raise RuntimeError("Tool not bound to a client. Access via client.tool.")
+        return await self._execute(self.key, action, params or [], **kwargs)
+
+
+class _ToolImpl(_ToolBase, ToolSpec):
     """Concrete ToolSpec for passive/no-action tools."""
 
     def __init__(self, *, tool_type: ToolType = ToolType.NONE, **kwargs: Any) -> None:
         super().__init__(tool_type=tool_type, **kwargs)
 
 
-class _PneumaticGripperImpl(PneumaticGripperTool):
+class _PneumaticGripperImpl(_ToolBase, PneumaticGripperTool):
     """Concrete PneumaticGripperTool for PAROL6."""
 
     def __init__(self, *, io_port: int = 1, **kwargs: Any) -> None:
         super().__init__(io_port=io_port, **kwargs)
 
+    async def set_position(self, position: float, **kwargs: float | int) -> int:
+        """Binary position: < 0.5 opens, >= 0.5 closes."""
+        if position < 0.5:
+            return await self.open(**kwargs)
+        return await self.close(**kwargs)
 
-class _ElectricGripperImpl(ElectricGripperTool):
+    async def open(self, **kwargs: float | int) -> int:
+        return await self._cmd("open")
+
+    async def close(self, **kwargs: float | int) -> int:
+        return await self._cmd("close")
+
+
+class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
     """Concrete ElectricGripperTool for PAROL6."""
 
     def __init__(
@@ -302,6 +333,33 @@ class _ElectricGripperImpl(ElectricGripperTool):
             speed_range=speed_range,
             current_range=current_range,
             **kwargs,
+        )
+
+    async def set_position(self, position: float, **kwargs: float | int) -> int:
+        speed = float(kwargs.get("speed", 0.5))
+        current = int(kwargs.get("current", self.current_range[0]))
+        return await self._cmd("move", [position, speed, current])
+
+    async def calibrate(self, **kwargs: object) -> int:
+        return await self._cmd("calibrate")
+
+    async def open(self, **kwargs: float | int) -> int:
+        return await self.set_position(0.0, **kwargs)
+
+    async def close(self, **kwargs: float | int) -> int:
+        return await self.set_position(1.0, **kwargs)
+
+    @property
+    def force_jog_step(self) -> int:
+        """Default current step: ~10% of range, rounded to nearest 10 mA."""
+        lo, hi = self.current_range
+        return max(10, round((hi - lo) / 10 / 10) * 10)
+
+    @property
+    def channel_descriptors(self) -> tuple[ChannelDescriptor, ...]:
+        return (
+            ChannelDescriptor(name="Force", unit="N"),
+            ChannelDescriptor(name="Current", unit="mA"),
         )
 
 
@@ -681,8 +739,8 @@ class Robot(_RobotABC):
         self,
         poses: NDArray[np.float64],
         q_start_rad: NDArray[np.float64],
-    ) -> list[Parol6IKResult]:
-        results: list[Parol6IKResult] = []
+    ) -> list[IKResult]:
+        results: list[IKResult] = []
         q_current = q_start_rad.copy()
         for i in range(poses.shape[0]):
             p = poses[i]
@@ -771,7 +829,7 @@ class Robot(_RobotABC):
         bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client.tool_action
+            bound_spec._execute = client.tool_action  # type: ignore[attr-defined]
             bound[spec.key] = bound_spec
         client._bound_tools = bound
         return client
@@ -790,7 +848,7 @@ class Robot(_RobotABC):
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client._inner.tool_action
+            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
         # Wrap async-bound tools in sync adapters
@@ -800,6 +858,6 @@ class Robot(_RobotABC):
         client._bound_tools = bound
         return client
 
-    def create_dry_run_client(self, **kwargs: Any) -> DryRunRobotClient:
+    def create_dry_run_client(self, **kwargs: Any) -> DryRunClient | None:
         initial_joints_deg: list[float] | None = kwargs.get("initial_joints_deg")
-        return DryRunRobotClient(initial_joints_deg=initial_joints_deg)
+        return DryRunRobotClient(initial_joints_deg=initial_joints_deg)  # ty: ignore[invalid-return-type]

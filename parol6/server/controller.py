@@ -68,7 +68,7 @@ from parol6.config import (
     STATUS_BROADCAST_INTERVAL,
 )
 
-import psutil  # type: ignore[import-untyped]
+import psutil
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -578,7 +578,9 @@ class Controller:
                 self._reply_error(
                     addr, make_error(ErrorCode.SYS_CONTROLLER_DISABLED, detail=reason)
                 )
-            logger.warning("Motion command rejected - controller disabled: %s", cmd_name)
+            logger.warning(
+                "Motion command rejected - controller disabled: %s", cmd_name
+            )
             return
 
         # Streaming commands: cancel segment playback + existing streamable handling
@@ -725,16 +727,17 @@ class Controller:
                     logger.debug("Cannot set negative nice value without privileges")
 
             # Pin to last CPU core (usually less contention from system tasks)
-            try:
-                cpus = p.cpu_affinity()
-                if cpus and len(cpus) > 1:
-                    target_core = cpus[-1]
-                    p.cpu_affinity([target_core])
-                    logger.info(f"Pinned process to CPU core {target_core}")
-            except (AttributeError, NotImplementedError):
-                logger.debug("CPU affinity not supported on this platform")
-            except psutil.AccessDenied:
-                logger.debug("Cannot set CPU affinity without privileges")
+            if hasattr(p, "cpu_affinity"):
+                try:
+                    cpus = p.cpu_affinity()
+                    if cpus and len(cpus) > 1:
+                        target_core = cpus[-1]
+                        p.cpu_affinity([target_core])
+                        logger.info(f"Pinned process to CPU core {target_core}")
+                except (AttributeError, NotImplementedError):
+                    logger.debug("CPU affinity not supported on this platform")
+                except psutil.AccessDenied:
+                    logger.debug("Cannot set CPU affinity without privileges")
 
         except Exception as e:
             logger.warning(f"Failed to set process priority/affinity: {e}")

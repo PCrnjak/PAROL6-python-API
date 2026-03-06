@@ -105,13 +105,21 @@ class CircularMotion(_ShapeGenerator):
         start_se3 = np.empty((4, 4), dtype=np.float64)
         end_se3 = np.empty((4, 4), dtype=np.float64)
         se3_from_rpy(
-            start_pose[0] / 1000.0, start_pose[1] / 1000.0, start_pose[2] / 1000.0,
-            np.radians(start_pose[3]), np.radians(start_pose[4]), np.radians(start_pose[5]),
+            start_pose[0] / 1000.0,
+            start_pose[1] / 1000.0,
+            start_pose[2] / 1000.0,
+            np.radians(start_pose[3]),
+            np.radians(start_pose[4]),
+            np.radians(start_pose[5]),
             start_se3,
         )
         se3_from_rpy(
-            end_pose[0] / 1000.0, end_pose[1] / 1000.0, end_pose[2] / 1000.0,
-            np.radians(end_pose[3]), np.radians(end_pose[4]), np.radians(end_pose[5]),
+            end_pose[0] / 1000.0,
+            end_pose[1] / 1000.0,
+            end_pose[2] / 1000.0,
+            np.radians(end_pose[3]),
+            np.radians(end_pose[4]),
+            np.radians(end_pose[5]),
             end_se3,
         )
 

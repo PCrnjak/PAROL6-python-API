@@ -34,4 +34,5 @@ def unregister_shm(shm: SharedMemory) -> None:
     if sys.version_info >= (3, 13):
         return
     from multiprocessing.resource_tracker import unregister
+
     unregister("/" + shm.name, "shared_memory")

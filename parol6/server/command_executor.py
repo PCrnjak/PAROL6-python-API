@@ -34,7 +34,9 @@ def _format_cmd_params(p: object) -> str:
     i = s.find("(")
     if i >= 0:
         s = s[i:]
-    return _LONG_FLOAT_RE.sub(lambda m: f"{float(m.group()):.2f}", s)[:_MAX_ACTION_PARAMS_LEN]
+    return _LONG_FLOAT_RE.sub(lambda m: f"{float(m.group()):.2f}", s)[
+        :_MAX_ACTION_PARAMS_LEN
+    ]
 
 
 class QueueFullError(Exception):
@@ -77,10 +79,7 @@ class CommandExecutor:
         # Reuse list to avoid allocation (clear + extend pattern)
         state.queue_nonstreamable.clear()
         for qc in self.command_queue:
-            if not (
-                isinstance(qc.command, MotionCommand)
-                and qc.command.streamable
-            ):
+            if not (isinstance(qc.command, MotionCommand) and qc.command.streamable):
                 state.queue_nonstreamable.append(type(qc.command).__name__)
         state.action_next = (
             state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
@@ -338,11 +337,7 @@ class CommandExecutor:
             True if a command was cancelled.
         """
         ac = self.active_command
-        if (
-            ac
-            and isinstance(ac.command, MotionCommand)
-            and ac.command.streamable
-        ):
+        if ac and isinstance(ac.command, MotionCommand) and ac.command.streamable:
             state = self._state_manager.get_state()
             state.action_current = ""
             state.action_params = ""
@@ -370,7 +365,10 @@ class CommandExecutor:
         to_remove: list[QueuedCommand] = []
 
         for queued_cmd in self.command_queue:
-            if isinstance(queued_cmd.command, MotionCommand) and queued_cmd.command.streamable:
+            if (
+                isinstance(queued_cmd.command, MotionCommand)
+                and queued_cmd.command.streamable
+            ):
                 to_remove.append(queued_cmd)
 
         for queued_cmd in to_remove:

@@ -10,11 +10,12 @@ import socket
 import struct
 import time
 from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 import msgspec
 import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, ToolStatus
+from waldoctl.status import ToolResult
 from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
@@ -87,7 +88,7 @@ from ..protocol.wire import (
     encode_command,
     encode_command_into,
 )
-from ..protocol.types import Axis, Frame
+from waldoctl.types import Axis, Frame
 from waldoctl import PingResult
 from pinokin import so3_rpy
 
@@ -383,7 +384,7 @@ class AsyncRobotClient(_RobotClientABC):
         # Create the datagram endpoint with the status protocol
         loop = asyncio.get_running_loop()
         self._status_transport, _ = await loop.create_datagram_endpoint(
-            lambda: _StatusProtocol(self),  # type: ignore[arg-type]
+            lambda: _StatusProtocol(self),
             sock=self._status_sock,
         )
 
@@ -626,7 +627,9 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- Motion / Control ---------------
 
-    async def home(self, wait: bool = False, timeout: float = 10.0) -> int:
+    async def home(
+        self, wait: bool = False, timeout: float = 10.0, **wait_kwargs: Any
+    ) -> int:
         """Home the robot to its home position.
 
         Returns the command index (≥ 0) on success, -1 on failure.
@@ -782,9 +785,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(GetSpeedsCmd())
         return resp.speeds if isinstance(resp, SpeedsResultStruct) else None
 
-    async def get_pose(
-        self, frame: Literal["WRF", "TRF"] = "WRF"
-    ) -> list[float] | None:
+    async def get_pose(self, frame: Frame = "WRF") -> list[float] | None:
         """Get 16-element transformation matrix (flattened) with translation in mm.
 
         Category: Query
@@ -872,7 +873,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(GetProfileCmd())
         return resp.profile.upper() if isinstance(resp, ProfileResultStruct) else None
 
-    async def get_tool(self) -> ToolResultStruct | None:
+    async def get_tool(self) -> ToolResult | None:
         """Get the current tool and available tools.
 
         Category: Query
@@ -881,7 +882,9 @@ class AsyncRobotClient(_RobotClientABC):
             tool = rbt.get_tool()
         """
         resp = await self._request(GetToolCmd())
-        return resp if isinstance(resp, ToolResultStruct) else None
+        if not isinstance(resp, ToolResultStruct):
+            return None
+        return ToolResult(tool=resp.tool, available=resp.available)
 
     async def get_current_action(self) -> CurrentActionResultStruct | None:
         """Get the current executing action (current, state, next, params).
@@ -894,7 +897,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(GetCurrentActionCmd())
         return resp if isinstance(resp, CurrentActionResultStruct) else None
 
-    async def get_queue(self) -> QueueResultStruct | None:
+    async def get_queue(self) -> list[str] | None:
         """Get queue status with progress tracking.
 
         Category: Query
@@ -903,7 +906,7 @@ class AsyncRobotClient(_RobotClientABC):
             queue = rbt.get_queue()
         """
         resp = await self._request(GetQueueCmd())
-        return resp if isinstance(resp, QueueResultStruct) else None
+        return resp.queue if isinstance(resp, QueueResultStruct) else None
 
     async def get_tool_status(self) -> ToolStatus | None:
         """Get current tool status (key, state, engaged, positions, channels, etc.).
@@ -1047,6 +1050,7 @@ class AsyncRobotClient(_RobotClientABC):
         speed_threshold: float = 0.01,
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
+        **kwargs: Any,
     ) -> bool:
         """Wait for robot to stop moving using multicast status broadcasts.
 
@@ -1234,6 +1238,7 @@ class AsyncRobotClient(_RobotClientABC):
         rel: bool = ...,
         wait: bool = ...,
         timeout: float = ...,
+        **wait_kwargs: Any,
     ) -> int:
         """Joint-space move to target angles."""
         ...
@@ -1250,6 +1255,7 @@ class AsyncRobotClient(_RobotClientABC):
         r: float = ...,
         wait: bool = ...,
         timeout: float = ...,
+        **wait_kwargs: Any,
     ) -> int:
         """Joint-space move to Cartesian target via IK."""
         ...
@@ -1266,6 +1272,7 @@ class AsyncRobotClient(_RobotClientABC):
         rel: bool = False,
         wait: bool = False,
         timeout: float = 10.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Joint-space move. Positional arg = joint angles; pose= kwarg = Cartesian target with IK.
 
@@ -1311,7 +1318,7 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         pose: list[float],
         *,
-        frame: Literal["WRF", "TRF"] = "WRF",
+        frame: Frame = "WRF",
         duration: float = 0.0,
         speed: float = 0.0,
         accel: float = 1.0,
@@ -1319,6 +1326,7 @@ class AsyncRobotClient(_RobotClientABC):
         rel: bool = False,
         wait: bool = False,
         timeout: float = 10.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Linear Cartesian move to target pose.
 
@@ -1358,13 +1366,14 @@ class AsyncRobotClient(_RobotClientABC):
         via: list[float],
         end: list[float],
         *,
-        frame: Literal["WRF", "TRF"] = "WRF",
+        frame: Frame = "WRF",
         duration: float | None = None,
         speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         wait: bool = False,
         timeout: float = 10.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Circular arc through current position -> via -> end.
 
@@ -1403,12 +1412,13 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         waypoints: list[list[float]],
         *,
-        frame: Literal["WRF", "TRF"] = "WRF",
+        frame: Frame = "WRF",
         duration: float | None = None,
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = False,
         timeout: float = 10.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Cubic spline through waypoints.
 
@@ -1443,12 +1453,13 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         waypoints: list[list[float]],
         *,
-        frame: Literal["WRF", "TRF"] = "WRF",
+        frame: Frame = "WRF",
         duration: float | None = None,
         speed: float | None = None,
         accel: float = 1.0,
         wait: bool = False,
         timeout: float = 10.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Process move — constant TCP speed with auto-blending at corners.
 
@@ -1531,29 +1542,6 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- Servo commands (streaming position) ---------------
 
-    @overload
-    async def servoJ(
-        self,
-        target: list[float],
-        *,
-        speed: float = ...,
-        accel: float = ...,
-    ) -> int:
-        """Stream joint position target."""
-        ...
-
-    @overload
-    async def servoJ(
-        self,
-        target: list[float],
-        *,
-        pose: list[float],
-        speed: float = ...,
-        accel: float = ...,
-    ) -> int:
-        """Stream Cartesian position target via IK."""
-        ...
-
     async def servoJ(
         self,
         target: list[float],
@@ -1602,33 +1590,9 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- Jog commands (streaming velocity) ---------------
 
-    @overload
     async def jogJ(
         self,
-        joint: int,
-        speed: float,
-        duration: float = ...,
-        *,
-        accel: float = ...,
-    ) -> int:
-        """Jog a single joint."""
-        ...
-
-    @overload
-    async def jogJ(
-        self,
-        *,
-        joints: list[int],
-        speeds: list[float],
-        duration: float = ...,
-        accel: float = ...,
-    ) -> int:
-        """Jog multiple joints simultaneously."""
-        ...
-
-    async def jogJ(
-        self,
-        joint: int | None = None,
+        joint: int = -1,
         speed: float = 0.0,
         duration: float = 0.1,
         *,
@@ -1658,39 +1622,13 @@ class AsyncRobotClient(_RobotClientABC):
         if joints is not None and speeds is not None:
             for j, s in zip(joints, speeds):
                 speed_arr[j] = s
-        elif joint is not None:
+        elif joint >= 0:
             speed_arr[joint] = speed
         else:
             raise ValueError("jogJ requires either joint= or joints=/speeds=")
         return await self._send(
             JogJCmd(speeds=speed_arr, duration=duration, accel=accel)
         )
-
-    @overload
-    async def jogL(
-        self,
-        frame: Frame,
-        axis: Axis,
-        speed: float,
-        duration: float = ...,
-        *,
-        accel: float = ...,
-    ) -> int:
-        """Jog a single Cartesian axis."""
-        ...
-
-    @overload
-    async def jogL(
-        self,
-        frame: Frame,
-        *,
-        axes: list[Axis],
-        speeds_list: list[float],
-        duration: float = ...,
-        accel: float = ...,
-    ) -> int:
-        """Jog multiple Cartesian axes simultaneously."""
-        ...
 
     async def jogL(
         self,

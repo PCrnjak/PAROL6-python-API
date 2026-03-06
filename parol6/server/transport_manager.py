@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 
 from parol6.config import get_com_port_with_fallback
 from parol6.server.transports import create_and_connect_transport, is_simulation_mode

@@ -145,14 +145,14 @@ def warmup_jit() -> float:
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)
     _update_arrays(
-        dummy_6i,   # pos_in
+        dummy_6i,  # pos_in
         dummy_5u8,  # io_in
-        dummy_6i,   # spd_in
-        dummy_6i,   # pos_last
-        dummy_6f,   # angles_deg
-        dummy_6f,   # q_rad_buf
+        dummy_6i,  # spd_in
+        dummy_6i,  # pos_last
+        dummy_6f,  # angles_deg
+        dummy_6f,  # q_rad_buf
         dummy_5u8,  # io_cached
-        dummy_6i,   # spd_cached
+        dummy_6i,  # spd_cached
     )
 
     # Dummy SE3 matrices for jit warmups below
@@ -178,7 +178,6 @@ def warmup_jit() -> float:
 
     # parol6/protocol/wire.py - frame packing/unpacking
     dummy_tx_frame = memoryview(bytearray(64))
-    dummy_grip_3f = np.zeros(3, dtype=np.float64)
     dummy_gripper_data = np.zeros(6, dtype=np.int32)
     pack_tx_frame_into(
         dummy_tx_frame,  # out
@@ -215,11 +214,16 @@ def warmup_jit() -> float:
     _wm_pos = np.zeros(6, dtype=np.int32)
     _wm_aff = np.zeros(8, dtype=np.uint8)
     _arrays_changed(
-        _wm_pos, _wm_pos,   # pos  (int32[6])
-        _wm_pos, _wm_pos,   # spd  (int32[6])
-        _wm_aff, _wm_aff,   # aff  (uint8[8])
-        _wm_aff, _wm_aff,   # io   (uint8[8])
-        _wm_pos, _wm_pos,   # grip (int32[6])
+        _wm_pos,
+        _wm_pos,  # pos  (int32[6])
+        _wm_pos,
+        _wm_pos,  # spd  (int32[6])
+        _wm_aff,
+        _wm_aff,  # aff  (uint8[8])
+        _wm_aff,
+        _wm_aff,  # io   (uint8[8])
+        _wm_pos,
+        _wm_pos,  # grip (int32[6])
     )
 
     # parol6/server/loop_timer.py - stats computation

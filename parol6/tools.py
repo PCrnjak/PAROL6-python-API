@@ -16,13 +16,23 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
 from pinokin import se3_from_trans, se3_mul, se3_rx
-from waldoctl import LinearMotion, MeshRole, MeshSpec, PartMotion, ToolState, ToolVariant
+from waldoctl import (
+    LinearMotion,
+    MeshRole,
+    MeshSpec,
+    PartMotion,
+    ToolState,
+    ToolVariant,
+)
 
 if TYPE_CHECKING:
     from waldoctl import ToolStatus
 
     from parol6.commands.base import MotionCommand
-    from parol6.commands.gripper_commands import ElectricGripperCommand, PneumaticGripperCommand
+    from parol6.commands.gripper_commands import (
+        ElectricGripperCommand,
+        PneumaticGripperCommand,
+    )
     from parol6.server.state import ControllerState
     from parol6.server.transports.mock_serial_transport import MockRobotState
 
@@ -115,7 +125,9 @@ class PneumaticGripperConfig(ToolConfig):
         if action == "move":
             position = float(params[0]) if params and len(params) > 0 else 0.0
             action = "open" if position < 0.5 else "close"
-        return PneumaticGripperCommand.from_tool_action(action=action, port=self.io_port)
+        return PneumaticGripperCommand.from_tool_action(
+            action=action, port=self.io_port
+        )
 
     def create_simulator(self) -> PneumaticToolSimulator:
         return PneumaticToolSimulator()
@@ -133,7 +145,10 @@ class ElectricGripperConfig(ToolConfig):
     # Motor controller / mechanical properties
     encoder_cpr: int = 16_384  # encoder counts per revolution
     gear_pd_mm: float = 12.0  # rack-and-pinion gear pitch diameter (mm)
-    firmware_speed_range_tps: tuple[int, int] = (40, 80_000)  # CAN byte 0..255 → ticks/s
+    firmware_speed_range_tps: tuple[int, int] = (
+        40,
+        80_000,
+    )  # CAN byte 0..255 → ticks/s
     motor_kt: float = 0.0  # motor torque constant (Nm/A); 0 = force estimation disabled
 
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
@@ -305,7 +320,8 @@ def list_tools() -> list[str]:
 
 
 def get_tool_transform(
-    tool_name: str, variant_key: str | None = None,
+    tool_name: str,
+    variant_key: str | None = None,
 ) -> np.ndarray:
     """Get the 4x4 transformation matrix for a tool or variant.
 
@@ -332,7 +348,9 @@ def get_tool_transform(
 
 
 def _make_tcp_transform(
-    x: float = 0.0, y: float = 0.0, z: float = 0.0,
+    x: float = 0.0,
+    y: float = 0.0,
+    z: float = 0.0,
 ) -> np.ndarray:
     """TCP transform for a tool mounted on the flange.
 
@@ -372,8 +390,14 @@ _PNEUMATIC_VERTICAL_MESHES = (
     MeshSpec(file="pneumatic_gripper_vertical_left_jaw.stl", role=MeshRole.JAW),
 )
 _PNEUMATIC_VERTICAL_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0035, symmetric=True,
-                 estimated_speed_m_s=0.023, estimated_accel_m_s2=2.0),
+    LinearMotion(
+        role=MeshRole.JAW,
+        axis=(0.0, 1.0, 0.0),
+        travel_m=0.0035,
+        symmetric=True,
+        estimated_speed_m_s=0.023,
+        estimated_accel_m_s2=2.0,
+    ),
 )
 
 _PNEUMATIC_HORIZONTAL_MESHES = (
@@ -382,8 +406,14 @@ _PNEUMATIC_HORIZONTAL_MESHES = (
     MeshSpec(file="pneumatic_gripper_horizontal_left_jaw.stl", role=MeshRole.JAW),
 )
 _PNEUMATIC_HORIZONTAL_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(1.0, 0.0, 0.0), travel_m=0.01045, symmetric=True,
-                 estimated_speed_m_s=0.07, estimated_accel_m_s2=2.0),
+    LinearMotion(
+        role=MeshRole.JAW,
+        axis=(1.0, 0.0, 0.0),
+        travel_m=0.01045,
+        symmetric=True,
+        estimated_speed_m_s=0.07,
+        estimated_accel_m_s2=2.0,
+    ),
 )
 
 register_tool(
@@ -422,7 +452,9 @@ register_tool(
 # ---------------------------------------------------------------------------
 
 _SSG48_JAW_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.024, symmetric=True),
+    LinearMotion(
+        role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.024, symmetric=True
+    ),
 )
 
 _SSG48_FINGER_MESHES = (
@@ -475,13 +507,19 @@ register_tool(
 # ---------------------------------------------------------------------------
 
 _MSG_100_JAW_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0267, symmetric=True),
+    LinearMotion(
+        role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0267, symmetric=True
+    ),
 )
 _MSG_150_JAW_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0514, symmetric=True),
+    LinearMotion(
+        role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0514, symmetric=True
+    ),
 )
 _MSG_200_JAW_MOTION = (
-    LinearMotion(role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0767, symmetric=True),
+    LinearMotion(
+        role=MeshRole.JAW, axis=(0.0, 1.0, 0.0), travel_m=0.0767, symmetric=True
+    ),
 )
 
 _MSG_100_MESHES = (
@@ -511,12 +549,30 @@ register_tool(
         meshes=_MSG_100_MESHES,
         motions=_MSG_100_JAW_MOTION,
         variants=(
-            ToolVariant(key="100mm", display_name="100mm Rail", meshes=_MSG_100_MESHES, motions=_MSG_100_JAW_MOTION,
-                        tcp_origin=(-0.029, 0.0, -0.103), tcp_rpy=_TCP_RPY),
-            ToolVariant(key="150mm", display_name="150mm Rail", meshes=_MSG_150_MESHES, motions=_MSG_150_JAW_MOTION,
-                        tcp_origin=(-0.029, 0.0, -0.103), tcp_rpy=_TCP_RPY),
-            ToolVariant(key="200mm", display_name="200mm Rail", meshes=_MSG_200_MESHES, motions=_MSG_200_JAW_MOTION,
-                        tcp_origin=(-0.029, 0.0, -0.103), tcp_rpy=_TCP_RPY),
+            ToolVariant(
+                key="100mm",
+                display_name="100mm Rail",
+                meshes=_MSG_100_MESHES,
+                motions=_MSG_100_JAW_MOTION,
+                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_rpy=_TCP_RPY,
+            ),
+            ToolVariant(
+                key="150mm",
+                display_name="150mm Rail",
+                meshes=_MSG_150_MESHES,
+                motions=_MSG_150_JAW_MOTION,
+                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_rpy=_TCP_RPY,
+            ),
+            ToolVariant(
+                key="200mm",
+                display_name="200mm Rail",
+                meshes=_MSG_200_MESHES,
+                motions=_MSG_200_JAW_MOTION,
+                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_rpy=_TCP_RPY,
+            ),
         ),
         position_range=(0.0, 1.0),
         speed_range=(0.0, 1.0),
@@ -537,9 +593,7 @@ register_tool(
         name="Vacuum Gripper",
         description="Vacuum gripper (pneumatic valve I/O)",
         transform=_make_tcp_transform(z=-0.037),
-        meshes=(
-            MeshSpec(file="vacuum_gripper_body.stl", role=MeshRole.BODY),
-        ),
+        meshes=(MeshSpec(file="vacuum_gripper_body.stl", role=MeshRole.BODY),),
         motions=(),
         io_port=1,
     ),

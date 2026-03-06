@@ -73,7 +73,8 @@ class HomeCommand(MotionCommand[HomeCmd]):
         """Manages the homing command and monitors for completion using a state machine."""
         if self.state == HomeState.START:
             logger.debug(
-                "  -> Sending home signal (100)... Countdown: %d", self.start_cmd_counter
+                "  -> Sending home signal (100)... Countdown: %d",
+                self.start_cmd_counter,
             )
             state.Command_out = CommandCode.HOME
             self.start_cmd_counter -= 1

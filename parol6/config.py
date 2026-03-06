@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 from numpy.typing import ArrayLike, NDArray
 
 TRACE: int = 5

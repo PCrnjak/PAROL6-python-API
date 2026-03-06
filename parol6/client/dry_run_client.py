@@ -217,6 +217,7 @@ class _DryRunTool:
             return self._client.tool_action(
                 self._client._active_tool_key, name, list(args), **kwargs
             )
+
         return method
 
 

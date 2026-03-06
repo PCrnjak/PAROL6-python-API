@@ -25,25 +25,37 @@ class TestGripperRampJit:
     """Test _simulate_gripper_ramp_jit directly with known inputs."""
 
     def _make_state(self, target=128.0, speed_byte=255.0, active=True, pos_f=0.0):
-        ramp = np.array(
-            [target, speed_byte, 1.0 if active else 0.0], dtype=np.float64
-        )
+        ramp = np.array([target, speed_byte, 1.0 if active else 0.0], dtype=np.float64)
         data_in = np.zeros(6, dtype=np.int32)
         return ramp, data_in, pos_f
 
     def test_inactive_ramp_is_noop(self):
         ramp, data_in, pos_f = self._make_state(active=False, pos_f=50.0)
         result = _simulate_gripper_ramp_jit(
-            ramp, data_in, pos_f, 0.01, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+            ramp,
+            data_in,
+            pos_f,
+            0.01,
+            SSG48_TICK_RANGE,
+            SSG48_MIN_SPEED,
+            SSG48_MAX_SPEED,
         )
         assert result == 50.0
         assert data_in[1] == 0  # unchanged
 
     def test_ramp_is_gradual_not_instant(self):
         """After one tick at moderate speed, position should not yet reach target."""
-        ramp, data_in, pos_f = self._make_state(target=200.0, speed_byte=128.0, pos_f=0.0)
+        ramp, data_in, pos_f = self._make_state(
+            target=200.0, speed_byte=128.0, pos_f=0.0
+        )
         result = _simulate_gripper_ramp_jit(
-            ramp, data_in, pos_f, 0.01, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+            ramp,
+            data_in,
+            pos_f,
+            0.01,
+            SSG48_TICK_RANGE,
+            SSG48_MIN_SPEED,
+            SSG48_MAX_SPEED,
         )
         # Should have moved but not arrived
         assert result > 0.0
@@ -52,11 +64,19 @@ class TestGripperRampJit:
 
     def test_ramp_converges_to_target(self):
         """Running enough ticks should reach the target."""
-        ramp, data_in, pos_f = self._make_state(target=200.0, speed_byte=255.0, pos_f=0.0)
+        ramp, data_in, pos_f = self._make_state(
+            target=200.0, speed_byte=255.0, pos_f=0.0
+        )
         dt = 0.01  # 100 Hz
         for _ in range(200):  # 2 seconds — well beyond max travel time
             pos_f = _simulate_gripper_ramp_jit(
-                ramp, data_in, pos_f, dt, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+                ramp,
+                data_in,
+                pos_f,
+                dt,
+                SSG48_TICK_RANGE,
+                SSG48_MIN_SPEED,
+                SSG48_MAX_SPEED,
             )
         assert pos_f == pytest.approx(200.0)
         assert ramp[2] < 0.5  # deactivated
@@ -71,18 +91,32 @@ class TestGripperRampJit:
         ticks_slow = 0
         for _ in range(500):
             pos_slow = _simulate_gripper_ramp_jit(
-                ramp_slow, data_slow, pos_slow, dt, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+                ramp_slow,
+                data_slow,
+                pos_slow,
+                dt,
+                SSG48_TICK_RANGE,
+                SSG48_MIN_SPEED,
+                SSG48_MAX_SPEED,
             )
             ticks_slow += 1
             if ramp_slow[2] < 0.5:
                 break
 
         # Fast speed (byte=255)
-        ramp_fast, data_fast, pos_fast = self._make_state(target=200.0, speed_byte=255.0)
+        ramp_fast, data_fast, pos_fast = self._make_state(
+            target=200.0, speed_byte=255.0
+        )
         ticks_fast = 0
         for _ in range(500):
             pos_fast = _simulate_gripper_ramp_jit(
-                ramp_fast, data_fast, pos_fast, dt, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+                ramp_fast,
+                data_fast,
+                pos_fast,
+                dt,
+                SSG48_TICK_RANGE,
+                SSG48_MIN_SPEED,
+                SSG48_MAX_SPEED,
             )
             ticks_fast += 1
             if ramp_fast[2] < 0.5:
@@ -94,7 +128,9 @@ class TestGripperRampJit:
         """Ramp should work for both increasing and decreasing positions."""
         dt = 0.01
         # Start at 200, target 50 (decreasing)
-        ramp, data_in, pos_f = self._make_state(target=50.0, speed_byte=200.0, pos_f=200.0)
+        ramp, data_in, pos_f = self._make_state(
+            target=50.0, speed_byte=200.0, pos_f=200.0
+        )
         result = _simulate_gripper_ramp_jit(
             ramp, data_in, pos_f, dt, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
         )
@@ -103,11 +139,19 @@ class TestGripperRampJit:
     def test_ssg48_full_travel_time(self):
         """SSG-48 full travel at max speed should take ~0.13s (13 ticks at 100Hz)."""
         dt = 0.01
-        ramp, data_in, pos_f = self._make_state(target=255.0, speed_byte=255.0, pos_f=0.0)
+        ramp, data_in, pos_f = self._make_state(
+            target=255.0, speed_byte=255.0, pos_f=0.0
+        )
         ticks = 0
         for _ in range(100):
             pos_f = _simulate_gripper_ramp_jit(
-                ramp, data_in, pos_f, dt, SSG48_TICK_RANGE, SSG48_MIN_SPEED, SSG48_MAX_SPEED
+                ramp,
+                data_in,
+                pos_f,
+                dt,
+                SSG48_TICK_RANGE,
+                SSG48_MIN_SPEED,
+                SSG48_MAX_SPEED,
             )
             ticks += 1
             if ramp[2] < 0.5:

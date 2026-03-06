@@ -195,7 +195,7 @@ class TrajectoryPlanner:
 
         cmd_class = self._registry.get_command_for_struct(type(params))
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
-            self._handle_trajectory(command_index, params, cmd_class)
+            self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type]
         else:
             if self._blend_buffer:
                 self._flush_blend()
@@ -391,7 +391,10 @@ class TrajectoryPlanner:
                 from parol6.utils.ik import solve_ik
 
                 ik_result = solve_ik(
-                    self._robot_module.robot, target_pose, q_rad, quiet_logging=True,
+                    self._robot_module.robot,
+                    target_pose,
+                    q_rad,
+                    quiet_logging=True,
                 )
                 target_rad = ik_result.q
         except Exception:
@@ -477,6 +480,7 @@ def motion_planner_main(
     """Worker process main loop — compute trajectories and forward inline commands."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from parol6.server import set_pdeathsig
+
     set_pdeathsig()
 
     worker = PlannerWorker(segment_queue)
@@ -520,13 +524,17 @@ def motion_planner_main(
                         type(msg.params).__name__,
                     )
                     robot_error = extract_robot_error(
-                        e, ErrorCode.MOTN_SETUP_FAILED, msg.command_index,
+                        e,
+                        ErrorCode.MOTN_SETUP_FAILED,
+                        msg.command_index,
                         detail=str(e),
                     )
-                    segment_queue.put(ErrorSegment(
-                        command_index=msg.command_index,
-                        error=robot_error,
-                    ))
+                    segment_queue.put(
+                        ErrorSegment(
+                            command_index=msg.command_index,
+                            error=robot_error,
+                        )
+                    )
                     worker.cancel()
                     _drain_queue(command_queue)
 

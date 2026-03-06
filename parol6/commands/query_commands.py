@@ -68,8 +68,8 @@ class GetPoseCommand(QueryCommand[GetPoseCmd]):
             T = get_fkine_se3(state)
             T_inv = np.linalg.inv(T)
             T_inv[0:3, 3] *= 1000.0
-            return pack_response(PoseResultStruct(pose=T_inv.reshape(-1)))
-        return pack_response(PoseResultStruct(pose=get_fkine_flat_mm(state)))
+            return pack_response(PoseResultStruct(pose=T_inv.reshape(-1).tolist()))
+        return pack_response(PoseResultStruct(pose=get_fkine_flat_mm(state).tolist()))
 
 
 @register_command(CmdType.GET_ANGLES)
@@ -83,7 +83,9 @@ class GetAnglesCommand(QueryCommand[GetAnglesCmd]):
 
     def compute(self, state: "ControllerState") -> bytes:
         cfg.steps_to_rad(state.Position_in, self._q_rad_buf)
-        return pack_response(AnglesResultStruct(angles=np.rad2deg(self._q_rad_buf)))
+        return pack_response(
+            AnglesResultStruct(angles=np.rad2deg(self._q_rad_buf).tolist())
+        )
 
 
 @register_command(CmdType.GET_IO)
@@ -96,7 +98,7 @@ class GetIOCommand(QueryCommand[GetIOCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(IOResultStruct(io=state.InOut_in[:5]))
+        return pack_response(IOResultStruct(io=state.InOut_in[:5].tolist()))
 
 
 @register_command(CmdType.GET_SPEEDS)
@@ -109,7 +111,7 @@ class GetSpeedsCommand(QueryCommand[GetSpeedsCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(SpeedsResultStruct(speeds=state.Speed_in))
+        return pack_response(SpeedsResultStruct(speeds=state.Speed_in.tolist()))
 
 
 @register_command(CmdType.GET_STATUS)
@@ -125,21 +127,23 @@ class GetStatusCommand(QueryCommand[GetStatusCmd]):
         cache = get_cache()
         cache.update_from_state(state)
         ts = cache.tool_status
-        return pack_response(StatusResultStruct(
-            pose=cache.pose,
-            angles=cache.angles_deg,
-            speeds=cache.speeds_rad_s,
-            io=cache.io,
-            tool_status=[
-                ts.key,
-                ts.state,
-                ts.engaged,
-                ts.part_detected,
-                ts.fault_code,
-                list(ts.positions),
-                list(ts.channels),
-            ],
-        ))
+        return pack_response(
+            StatusResultStruct(
+                pose=cache.pose.tolist(),
+                angles=cache.angles_deg.tolist(),
+                speeds=cache.speeds_rad_s.tolist(),
+                io=cache.io.tolist(),
+                tool_status=[
+                    ts.key,
+                    ts.state,
+                    ts.engaged,
+                    ts.part_detected,
+                    ts.fault_code,
+                    list(ts.positions),
+                    list(ts.channels),
+                ],
+            )
+        )
 
 
 @register_command(CmdType.GET_LOOP_STATS)
@@ -154,18 +158,20 @@ class GetLoopStatsCommand(QueryCommand[GetLoopStatsCmd]):
     def compute(self, state: "ControllerState") -> bytes:
         target_hz = 1.0 / max(cfg.INTERVAL_S, 1e-9)
         mean_hz = (1.0 / state.mean_period_s) if state.mean_period_s > 0.0 else 0.0
-        return pack_response(LoopStatsResultStruct(
-            target_hz=target_hz,
-            loop_count=state.loop_count,
-            overrun_count=state.overrun_count,
-            mean_period_s=state.mean_period_s,
-            std_period_s=state.std_period_s,
-            min_period_s=state.min_period_s,
-            max_period_s=state.max_period_s,
-            p95_period_s=state.p95_period_s,
-            p99_period_s=state.p99_period_s,
-            mean_hz=mean_hz,
-        ))
+        return pack_response(
+            LoopStatsResultStruct(
+                target_hz=target_hz,
+                loop_count=state.loop_count,
+                overrun_count=state.overrun_count,
+                mean_period_s=state.mean_period_s,
+                std_period_s=state.std_period_s,
+                min_period_s=state.min_period_s,
+                max_period_s=state.max_period_s,
+                p95_period_s=state.p95_period_s,
+                p99_period_s=state.p99_period_s,
+                mean_hz=mean_hz,
+            )
+        )
 
 
 @register_command(CmdType.PING)
@@ -195,7 +201,9 @@ class GetToolCommand(QueryCommand[GetToolCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(ToolResultStruct(tool=state.current_tool, available=list_tools()))
+        return pack_response(
+            ToolResultStruct(tool=state.current_tool, available=list_tools())
+        )
 
 
 @register_command(CmdType.GET_TOOL_STATUS)
@@ -211,15 +219,17 @@ class GetToolStatusCommand(QueryCommand[GetToolStatusCmd]):
         cache = get_cache()
         cache.update_from_state(state)
         ts = cache.tool_status
-        return pack_response(ToolStatusResultStruct(
-            tool_key=ts.key,
-            state=ts.state,
-            engaged=ts.engaged,
-            part_detected=ts.part_detected,
-            fault_code=ts.fault_code,
-            positions=list(ts.positions),
-            channels=list(ts.channels),
-        ))
+        return pack_response(
+            ToolStatusResultStruct(
+                tool_key=ts.key,
+                state=ts.state,
+                engaged=ts.engaged,
+                part_detected=ts.part_detected,
+                fault_code=ts.fault_code,
+                positions=list(ts.positions),
+                channels=list(ts.channels),
+            )
+        )
 
 
 @register_command(CmdType.GET_CURRENT_ACTION)
@@ -232,12 +242,14 @@ class GetCurrentActionCommand(QueryCommand[GetCurrentActionCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(CurrentActionResultStruct(
-            current=state.action_current,
-            state=state.action_state,
-            next=state.action_next,
-            params=state.action_params,
-        ))
+        return pack_response(
+            CurrentActionResultStruct(
+                current=state.action_current,
+                state=state.action_state.value,
+                next=state.action_next,
+                params=state.action_params,
+            )
+        )
 
 
 @register_command(CmdType.GET_QUEUE)
@@ -250,13 +262,15 @@ class GetQueueCommand(QueryCommand[GetQueueCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(QueueResultStruct(
-            queue=state.queue_nonstreamable,
-            executing_index=state.executing_command_index,
-            completed_index=state.completed_command_index,
-            last_checkpoint=state.last_checkpoint,
-            queued_duration=state.queued_duration,
-        ))
+        return pack_response(
+            QueueResultStruct(
+                queue=state.queue_nonstreamable,
+                executing_index=state.executing_command_index,
+                completed_index=state.completed_command_index,
+                last_checkpoint=state.last_checkpoint,
+                queued_duration=state.queued_duration,
+            )
+        )
 
 
 @register_command(CmdType.GET_PROFILE)
@@ -284,11 +298,13 @@ class GetEnablementCommand(QueryCommand[GetEnablementCmd]):
     def compute(self, state: "ControllerState") -> bytes:
         cache = get_cache()
         cache.update_from_state(state)
-        return pack_response(EnablementResultStruct(
-            joint_en=cache.joint_en,
-            cart_en_wrf=cache.cart_en_wrf,
-            cart_en_trf=cache.cart_en_trf,
-        ))
+        return pack_response(
+            EnablementResultStruct(
+                joint_en=cache.joint_en.tolist(),
+                cart_en_wrf=cache.cart_en_wrf.tolist(),
+                cart_en_trf=cache.cart_en_trf.tolist(),
+            )
+        )
 
 
 @register_command(CmdType.GET_ERROR)
@@ -302,9 +318,11 @@ class GetErrorCommand(QueryCommand[GetErrorCmd]):
 
     def compute(self, state: "ControllerState") -> bytes:
         error = state.error
-        return pack_response(ErrorResultStruct(
-            error=error.to_wire() if error is not None else None,
-        ))
+        return pack_response(
+            ErrorResultStruct(
+                error=error.to_wire() if error is not None else None,
+            )
+        )
 
 
 @register_command(CmdType.GET_TCP_SPEED)

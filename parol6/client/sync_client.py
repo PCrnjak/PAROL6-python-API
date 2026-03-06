@@ -14,16 +14,15 @@ from typing import Any, TypeVar, overload
 from waldoctl.tools import ToolSpec
 
 from waldoctl import PingResult, ToolStatus
+from waldoctl.status import ToolResult
 
-from ..protocol.types import Axis, Frame
+from waldoctl.types import Axis, Frame
 from ..protocol.wire import (
     CurrentActionResultStruct,
     EnablementResultStruct,
     LoopStatsResultStruct,
-    QueueResultStruct,
     StatusBuffer,
     StatusResultStruct,
-    ToolResultStruct,
 )
 from ..utils.error_catalog import RobotError
 from .async_client import AsyncRobotClient
@@ -293,12 +292,12 @@ class RobotClient:
         """Reset control-loop min/max metrics and overrun count."""
         return _run(self._inner.reset_loop_stats())
 
-    def get_tool(self) -> ToolResultStruct | None:
+    def get_tool(self) -> ToolResult | None:
         """
         Get the current tool configuration and available tools.
 
         Returns:
-            ToolResultStruct with tool (current) and available (list), or None.
+            ToolResult with tool (current) and available (list), or None.
         """
         return _run(self._inner.get_tool())
 
@@ -345,12 +344,12 @@ class RobotClient:
         """
         return _run(self._inner.get_current_action())
 
-    def get_queue(self) -> QueueResultStruct | None:
+    def get_queue(self) -> list[str] | None:
         """
         Get queue status with progress tracking.
 
         Returns:
-            QueueResultStruct with queue, indices, checkpoint, and duration.
+            List of queued command names, or None on timeout.
         """
         return _run(self._inner.get_queue())
 

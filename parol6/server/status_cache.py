@@ -13,7 +13,7 @@ from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 from pinokin import arrays_equal_6
 from waldoctl import ActionState, ToolStatus
 
@@ -177,6 +177,7 @@ class StatusCache:
         self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_initialized: bool = False
         from parol6 import config as _cfg
+
         self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
 
         # IK enablement results (pre-allocated for zero-alloc reads)
@@ -357,7 +358,9 @@ class StatusCache:
 
         if tool_changed:
             self._last_tool_name = state.current_tool
-            self._tcp_pos_initialized = False  # avoid speed spike from TCP offset change
+            self._tcp_pos_initialized = (
+                False  # avoid speed spike from TCP offset change
+            )
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)

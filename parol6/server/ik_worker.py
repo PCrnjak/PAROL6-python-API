@@ -11,7 +11,7 @@ from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 
 from pinokin import se3_from_trans, se3_mul, se3_rx, se3_ry, se3_rz
 

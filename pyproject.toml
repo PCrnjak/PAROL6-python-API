@@ -110,6 +110,19 @@ filterwarnings = [
     "ignore::PendingDeprecationWarning",
 ]
 
+[tool.ty]
+# Dynamic Command union (built at import time from tagged structs)
+# generates invalid-type-form in all files that reference it.
+[[tool.ty.overrides]]
+include = [
+    "parol6/protocol/wire.py",
+    "parol6/commands/base.py",
+    "parol6/server/command_registry.py",
+    "parol6/server/command_executor.py",
+]
+[tool.ty.overrides.rules]
+invalid-type-form = "ignore"
+
 [tool.setuptools]
 include-package-data = true
 

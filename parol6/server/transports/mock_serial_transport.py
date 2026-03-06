@@ -16,7 +16,7 @@ import numpy as np
 
 from parol6 import config as cfg
 from parol6.config import LIMITS
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 
 from parol6.protocol.wire import (
     CommandCode,
@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Gripper ramp array indices and flag values (used in @njit functions)
-_RAMP_TARGET = 0   # target position byte (0–255)
-_RAMP_SPEED = 1    # speed byte (0–255)
-_RAMP_ACTIVE = 2   # active flag: _RAMP_ON or _RAMP_OFF
+_RAMP_TARGET = 0  # target position byte (0–255)
+_RAMP_SPEED = 1  # speed byte (0–255)
+_RAMP_ACTIVE = 2  # active flag: _RAMP_ON or _RAMP_OFF
 _RAMP_ON = 1.0
 _RAMP_OFF = 0.0
 
@@ -322,7 +322,7 @@ class MockRobotState:
     gripper_pos_f: float = 0.0  # float accumulator for smooth ramp (0.0–255.0)
 
     # Generalized tool ramp for binary-activation tools (pneumatic grippers, etc.)
-    tool_ramp_target: float = 0.0   # target normalized position (0..1)
+    tool_ramp_target: float = 0.0  # target normalized position (0..1)
     tool_ramp_current: float = 0.0  # current ramp progress (0..1)
     # Timing data
     timing_data_in: np.ndarray = field(
@@ -621,4 +621,3 @@ class MockSerialTransport:
         """
         mv = self._frame_mv if self._frame_version > 0 else None
         return (mv, self._frame_version, self._frame_ts)
-

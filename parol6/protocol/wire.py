@@ -22,7 +22,7 @@ from typing import Annotated, TypeAlias, Union, cast
 import msgspec
 import numpy as np
 import ormsgpack
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 
 from parol6.config import LIMITS
 from waldoctl import ActionState, ToolStatus
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 def _enc_hook(obj: object) -> object:
     """Custom encoder hook for numpy types."""
     if isinstance(obj, np.ndarray):
-        return obj.tolist()
+        return obj.tolist()  # type: ignore[no-matching-overload]
     if isinstance(obj, (np.integer, np.floating)):
         return obj.item()  # Convert numpy scalar to Python native type
     raise NotImplementedError(f"Cannot encode {type(obj)}")
@@ -805,7 +805,7 @@ _COMMAND_STRUCTS = _collect_command_structs()
 STRUCT_TO_CMDTYPE: dict[type, CmdType] = _build_struct_to_cmdtype(_COMMAND_STRUCTS)
 
 # Build Command union dynamically from collected structs
-Command: TypeAlias = Union[tuple(_COMMAND_STRUCTS)]  # type: ignore[valid-type]
+Command: TypeAlias = Union[tuple(_COMMAND_STRUCTS)]
 
 # Module-level decoder for single-pass command decode
 _command_decoder = msgspec.msgpack.Decoder(Command)
@@ -1216,7 +1216,9 @@ def pack_status(
                 ts.fault_code,
                 ts.positions,
                 ts.channels,
-            ) if ts is not None else None,
+            )
+            if ts is not None
+            else None,
             tcp_speed,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
@@ -1275,9 +1277,13 @@ class StatusBuffer:
             speeds=self.speeds.copy(),
             io=self.io.copy(),
             tool_status=ToolStatus(
-                key=ts.key, state=ts.state, engaged=ts.engaged,
-                part_detected=ts.part_detected, fault_code=ts.fault_code,
-                positions=ts.positions, channels=ts.channels,
+                key=ts.key,
+                state=ts.state,
+                engaged=ts.engaged,
+                part_detected=ts.part_detected,
+                fault_code=ts.fault_code,
+                positions=ts.positions,
+                channels=ts.channels,
             ),
             joint_en=self.joint_en.copy(),
             cart_en_wrf=self.cart_en_wrf.copy(),
@@ -1340,7 +1346,11 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
         raw_ts = msg[17] if len(msg) > 17 else None
         ts = buf.tool_status
-        if raw_ts is not None and isinstance(raw_ts, (list, tuple)) and len(raw_ts) >= 7:
+        if (
+            raw_ts is not None
+            and isinstance(raw_ts, (list, tuple))
+            and len(raw_ts) >= 7
+        ):
             ts.key = raw_ts[0]
             ts.state = ToolState(raw_ts[1])
             ts.engaged = raw_ts[2]

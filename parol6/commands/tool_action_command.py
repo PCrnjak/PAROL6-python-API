@@ -5,7 +5,6 @@ Generic tool action command — dispatches to gripper commands by config type.
 import logging
 
 from parol6.commands.base import ExecutionStatusCode, MotionCommand
-from parol6.commands.gripper_commands import ElectricGripperCommand, PneumaticGripperCommand
 from parol6.protocol.wire import CmdType, ToolActionCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
@@ -26,7 +25,7 @@ class ToolActionCommand(MotionCommand[ToolActionCmd]):
 
     def __init__(self, p: ToolActionCmd) -> None:
         super().__init__(p)
-        self._delegate: PneumaticGripperCommand | ElectricGripperCommand | None = None
+        self._delegate: MotionCommand | None = None
 
     def do_setup(self, state: ControllerState) -> None:
         key = self.p.tool_key.strip().upper()

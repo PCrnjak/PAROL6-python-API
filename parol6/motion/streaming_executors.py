@@ -14,9 +14,9 @@ import threading
 from abc import ABC, abstractmethod
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 from numpy.typing import NDArray
-from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig
+from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import]
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS

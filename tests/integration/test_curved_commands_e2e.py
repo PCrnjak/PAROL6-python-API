@@ -30,7 +30,14 @@ class TestCurvedMotionCommands:
 
     def _offset(self, pose: list[float], dx=0, dy=0, dz=0, drz=0) -> list[float]:
         """Small position offset from a base pose, preserving orientation."""
-        return [pose[0] + dx, pose[1] + dy, pose[2] + dz, pose[3], pose[4], pose[5] + drz]
+        return [
+            pose[0] + dx,
+            pose[1] + dy,
+            pose[2] + dz,
+            pose[3],
+            pose[4],
+            pose[5] + drz,
+        ]
 
     def test_moveC_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test circular arc through current → via → end."""

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 from numpy.typing import ArrayLike, NDArray
 from pinokin import Damping as _Damping, IKSolver as _IKSolver, Robot
 
@@ -91,7 +91,6 @@ def _ensure_cache(robot: Robot) -> None:
         iterations=0,
         residual=0.0,
     )
-
 
 
 @njit(cache=True)
@@ -182,9 +181,9 @@ def solve_ik(
             result.q,
             current_q,
             _cached_buffered_min,
-            _cached_buffered_max,  # type: ignore[arg-type]
+            _cached_buffered_max,
             _cached_qlim_min,
-            _cached_qlim_max,  # type: ignore[arg-type]
+            _cached_qlim_max,
         )
         if not ok:
             result.success = False

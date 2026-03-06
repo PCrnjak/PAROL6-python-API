@@ -118,13 +118,13 @@ class TestPackUnpack:
         # tool_status at index 17 is a 7-element tuple:
         # (key, state, engaged, part_detected, fault_code, positions, channels)
         ts = unpacked[17]
-        assert ts[0] == "ssg48"        # key
-        assert ts[1] == 2              # state (ToolState.ACTIVE)
-        assert ts[2] is True           # engaged
-        assert ts[3] is True           # part_detected
-        assert ts[4] == 0              # fault_code
-        assert ts[5] == [0.75, 0.25]   # positions (tuple -> list via msgpack)
-        assert ts[6] == [5.5, 3.14]    # channels (tuple -> list via msgpack)
+        assert ts[0] == "ssg48"  # key
+        assert ts[1] == 2  # state (ToolState.ACTIVE)
+        assert ts[2] is True  # engaged
+        assert ts[3] is True  # part_detected
+        assert ts[4] == 0  # fault_code
+        assert ts[5] == [0.75, 0.25]  # positions (tuple -> list via msgpack)
+        assert ts[6] == [5.5, 3.14]  # channels (tuple -> list via msgpack)
 
         # tcp_speed at index 18
         assert unpacked[18] == pytest.approx(123.456)
@@ -149,10 +149,15 @@ class TestPackUnpack:
         )
 
         packed = pack_status(
-            pose, angles, speeds, io,
+            pose,
+            angles,
+            speeds,
+            io,
             "HomeCommand",
             ActionState.IDLE,
-            joint_en, cart_en_wrf, cart_en_trf,
+            joint_en,
+            cart_en_wrf,
+            cart_en_trf,
             tool_status=tool_status,
             tcp_speed=55.5,
         )

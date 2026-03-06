@@ -108,9 +108,18 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
 
     @classmethod
     def from_tool_action(
-        cls, *, action: str, position: float = 0.0, speed: float = 0.5, current: int = 500
+        cls,
+        *,
+        action: str,
+        position: float = 0.0,
+        speed: float = 0.5,
+        current: int = 500,
     ) -> ElectricGripperCommand:
-        return cls(ElectricGripperParams(action=action, position=position, speed=speed, current=current))
+        return cls(
+            ElectricGripperParams(
+                action=action, position=position, speed=speed, current=current
+            )
+        )
 
     def do_setup(self, state: ControllerState) -> None:
         self._hw_position = int(round(self.p.position * 255))

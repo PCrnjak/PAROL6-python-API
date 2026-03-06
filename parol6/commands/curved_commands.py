@@ -126,7 +126,9 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
         cartesian_trajectory = self.generate_main_trajectory(current_pose)
         if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
             raise TrajectoryPlanningError(
-                make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail="empty cartesian trajectory")
+                make_error(
+                    ErrorCode.TRAJ_EMPTY_RESULT, detail="empty cartesian trajectory"
+                )
             )
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
@@ -138,14 +140,18 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             raise
 
         if joint_path.is_partial:
+            assert joint_path.valid is not None
             n_valid = int(joint_path.valid.sum())
             n_total = len(joint_path)
             self.log_error(
                 "  -> ERROR: Partial IK during trajectory generation (%d/%d valid)",
-                n_valid, n_total,
+                n_valid,
+                n_total,
             )
             raise TrajectoryPlanningError(
-                make_error(ErrorCode.IK_PARTIAL_PATH, valid=str(n_valid), total=str(n_total))
+                make_error(
+                    ErrorCode.IK_PARTIAL_PATH, valid=str(n_valid), total=str(n_total)
+                )
             )
 
         builder = TrajectoryBuilder(

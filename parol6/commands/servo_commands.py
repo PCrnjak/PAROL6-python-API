@@ -11,7 +11,7 @@ import math
 import time
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import (

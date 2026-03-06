@@ -19,7 +19,7 @@ from enum import Enum
 
 import numpy as np
 from numpy.typing import NDArray
-from ruckig import InputParameter, OutputParameter, Result, Ruckig
+from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import]
 
 from scipy.interpolate import PPoly
 
