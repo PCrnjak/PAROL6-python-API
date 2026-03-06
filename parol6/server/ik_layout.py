@@ -30,8 +30,9 @@ def unregister_shm(shm: SharedMemory) -> None:
 
     On Python 3.13+ with track=False this is a no-op. On older versions, this
     prevents the resource_tracker daemon from lingering as an orphan process.
+    Skipped on Windows where the resource_tracker uses _posixsubprocess.
     """
-    if sys.version_info >= (3, 13):
+    if sys.version_info >= (3, 13) or sys.platform == "win32":
         return
     from multiprocessing.resource_tracker import unregister
 

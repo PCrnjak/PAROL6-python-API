@@ -13,8 +13,34 @@ if multiprocessing.get_start_method(allow_none=True) is None:
 
 
 def set_pdeathsig() -> None:
-    """Ask the kernel to send SIGTERM when the parent process exits (Linux only)."""
-    if sys.platform != "linux":
+    """Arrange for SIGTERM when the parent process exits.
+
+    Linux: instant kernel-level notification via prctl(PR_SET_PDEATHSIG).
+    macOS/Windows: daemon thread polls parent liveness every second.
+    """
+    import os
+
+    if sys.platform == "linux":
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6").prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
         return
-    PR_SET_PDEATHSIG = 1
-    ctypes.CDLL("libc.so.6").prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+
+    import threading
+    import time
+
+    parent_pid = os.getppid()
+
+    def _watch_parent() -> None:
+        while True:
+            time.sleep(1.0)
+            if sys.platform == "win32":
+                try:
+                    os.kill(parent_pid, 0)
+                except OSError:
+                    break
+            else:
+                if os.getppid() != parent_pid:
+                    break
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_watch_parent, daemon=True).start()

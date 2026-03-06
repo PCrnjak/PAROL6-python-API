@@ -142,6 +142,8 @@ For streamable commands (`streamable = True`), `do_setup()` also runs at high fr
 
 ## Testing Guidelines
 
+**When CI tests fail, fix them.** Don't waste time analyzing whether failures are "related to your changes" — just fix all failing tests. The goal is a green CI, not attribution.
+
 Prefer fewer, comprehensive integration tests that mimic manual testing over a large number of unit tests. We have no code coverage requirements—the goal is working features, not metrics.
 - **NEVER truncate test output.** Do not pipe pytest through `tail`, `head`, `grep`, or any other filter. Always let the full output come through so failures and tracebacks are visible. This applies to both foreground and background test runs.
 - **NEVER run parol6 and web commander test suites in parallel** — no proper isolation, they share resources and have timing issues when resource-constrained. Always run sequentially.

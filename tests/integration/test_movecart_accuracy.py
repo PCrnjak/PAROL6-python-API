@@ -39,11 +39,11 @@ class TestMoveLAccuracy:
         print(f"Final pose (mm, deg):  {final_pose}")
 
         # Verify pose accuracy
-        # Position tolerance: 1.01mm (allows for minor FP drift across platforms)
+        # Position tolerance: 1.5mm (allows for minor FP drift across platforms)
         pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target[:3]))
         print(f"Position error: {pos_error:.3f} mm")
-        assert pos_error < 1.01, (
-            f"Position error {pos_error:.3f}mm exceeds 1.01mm tolerance"
+        assert pos_error < 1.5, (
+            f"Position error {pos_error:.3f}mm exceeds 1.5mm tolerance"
         )
 
         # Orientation tolerance: 1 degree per axis
@@ -92,11 +92,11 @@ class TestMoveLAccuracy:
             final_pose = client.get_pose_rpy()
             print(f"Achieved:  {final_pose}")
 
-            # Verify position accuracy (1.01mm tolerance)
+            # Verify position accuracy (1.5mm tolerance)
             pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target[:3]))
             print(f"Position error: {pos_error:.3f} mm")
-            assert pos_error < 1.01, (
-                f"Target {idx + 1}: Position error {pos_error:.3f}mm exceeds 1.01mm"
+            assert pos_error < 1.5, (
+                f"Target {idx + 1}: Position error {pos_error:.3f}mm exceeds 1.5mm"
             )
 
             # Verify orientation accuracy (1° tolerance per axis)

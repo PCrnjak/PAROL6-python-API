@@ -49,6 +49,9 @@ def ik_enablement_worker_main(
     """
     # Ignore SIGINT in worker - main process handles shutdown via shutdown_event
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    from parol6.server import set_pdeathsig
+
+    set_pdeathsig()
 
     # Attach to shared memory
     input_shm = SharedMemory(name=input_shm_name, create=False, **SHM_EXTRA_KWARGS)
