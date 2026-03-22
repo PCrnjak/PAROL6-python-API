@@ -1,13 +1,14 @@
 """Test that ServoL joint-velocity clamping doesn't cause TCP lurching.
 
-When IK requires joint velocities that exceed hardware limits (e.g. near a
-wrist singularity), ServoLCommand clamps the joint deltas.  This can cause
-the CSE's internal Cartesian state to diverge from the actual robot TCP.
+When IK requires joint velocities that exceed hardware limits, ServoLCommand
+clamps the joint deltas proportionally.  The per-tick CSE position correction
+keeps the Cartesian planner in sync with the actual robot joints, preventing
+gap accumulation and lurch on clamp exit.
 
-The fix re-syncs the CSE position when exiting a clamp period so there's no
-accumulated gap to snap across.  This test verifies that the per-tick TCP
-displacement stays within bounds throughout the entire motion — including
-the clamp → free transition.
+This test verifies that:
+1. Clamping actually occurs (the test is meaningful)
+2. No single tick produces a TCP displacement larger than limits allow
+3. The final position converges accurately despite clamping
 """
 
 import math
@@ -22,9 +23,7 @@ from parol6.server.state import ControllerState
 
 
 _q_rad_buf = np.zeros(6, dtype=np.float64)
-_T_buf = np.asfortranarray(
-    np.eye(4, dtype=np.float64)
-)  # F-order for pinokin Eigen binding
+_T_buf = np.asfortranarray(np.eye(4, dtype=np.float64))
 _rpy_buf = np.zeros(3, dtype=np.float64)
 
 
@@ -39,7 +38,7 @@ def _home_steps() -> np.ndarray:
 
 
 def _fk_mm_rpy(q_steps: np.ndarray) -> np.ndarray:
-    """FK from steps → [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
+    """FK from steps -> [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
     from pinokin import so3_rpy
 
     steps_to_rad(np.asarray(q_steps, dtype=np.int32), _q_rad_buf)
@@ -59,64 +58,55 @@ def _fk_mm_rpy(q_steps: np.ndarray) -> np.ndarray:
 
 
 class TestServoLClampResync:
-    """Verify no TCP lurch when exiting joint-velocity clamping."""
+    """Verify no TCP lurch when joint-velocity clamping is active."""
 
-    def test_no_tcp_lurch_through_wrist_rotation(self) -> None:
-        """A large wrist rotation target should not cause per-tick TCP jumps.
+    def test_no_lurch_and_accurate_convergence(self) -> None:
+        """A linear target that triggers clamping should converge accurately.
 
-        The target rotates RZ by 90° from home, which forces large J4/J6
-        deltas that trigger clamping.  We verify that:
+        A +30mm X offset from home triggers clamping because the IK solution
+        requires joint velocities exceeding hardware limits.  We verify that:
         1. Clamping actually occurs (the test is meaningful)
-        2. No single tick produces a TCP displacement larger than what the
-           CSE's max velocity allows (with generous margin for Ruckig jerk).
+        2. No single tick produces a TCP displacement larger than limits allow
+        3. The motion converges to <1mm of the target
         """
         state = ControllerState()
         home = _home_steps()
         state.Position_in[:] = home
 
-        # Target: same position, rotated 90° around Z
         home_pose = _fk_mm_rpy(home)
         target_pose = list(home_pose)
-        target_pose[5] += 90.0  # rotate RZ by 90° (crosses wrist singularity)
+        target_pose[0] += 30.0  # +30mm X triggers clamping
 
         cmd = ServoLCommand(ServoLCmd(pose=target_pose, speed=1.0, accel=1.0))
         cmd.do_setup(state)
 
-        # Max displacement per tick from CSE limits (generous 3x margin for jerk overshoot)
-        max_lin_per_tick = LIMITS.cart.jog.velocity.linear * INTERVAL_S * 3.0  # meters
-        max_ang_per_tick = LIMITS.cart.jog.velocity.angular * INTERVAL_S * 3.0  # rad
+        # Max displacement per tick (generous 3x margin for Ruckig jerk overshoot)
+        max_lin_per_tick = LIMITS.cart.jog.velocity.linear * INTERVAL_S * 3.0
+        max_ang_per_tick = LIMITS.cart.jog.velocity.angular * INTERVAL_S * 3.0
 
         prev_pose_mm_rpy: np.ndarray | None = None
         clamped_any = False
-        max_lin_jump = 0.0
-        max_ang_jump = 0.0
 
         for tick in range(2000):
             cmd.do_setup(state)
             status = cmd.execute_step(state)
 
-            # Simulate firmware tracking: Position_in follows Position_out
             state.Position_in[:] = state.Position_out
 
             current_pose = _fk_mm_rpy(state.Position_in)
 
             if prev_pose_mm_rpy is not None:
                 lin_delta = np.linalg.norm(current_pose[:3] - prev_pose_mm_rpy[:3])
-                # Angle deltas (handle wrapping)
-                ang_deltas = []
-                for i in range(3):
-                    d = abs(
+                ang_deltas = [
+                    abs(
                         (current_pose[3 + i] - prev_pose_mm_rpy[3 + i] + 180) % 360
                         - 180
                     )
-                    ang_deltas.append(d)
+                    for i in range(3)
+                ]
                 ang_delta = max(ang_deltas)
 
-                max_lin_jump = max(max_lin_jump, lin_delta)
-                max_ang_jump = max(max_ang_jump, ang_delta)
-
-                # Check: no single tick exceeds CSE velocity limits
-                assert lin_delta < max_lin_per_tick * 1000.0, (  # convert m to mm
+                assert lin_delta < max_lin_per_tick * 1000.0, (
                     f"Tick {tick}: linear TCP jump {lin_delta:.3f}mm exceeds "
                     f"limit {max_lin_per_tick * 1000:.3f}mm"
                 )
@@ -125,7 +115,6 @@ class TestServoLClampResync:
                     f"limit {math.degrees(max_ang_per_tick):.3f}°"
                 )
 
-            # Detect if clamping occurred (cmd._clamped is set in execute_step)
             if cmd._clamped:
                 clamped_any = True
 
@@ -134,8 +123,14 @@ class TestServoLClampResync:
             if status.name == "COMPLETED":
                 break
 
-        # Verify the test actually exercised the clamp path
         assert clamped_any, (
             "Test did not trigger joint-velocity clamping — "
-            "adjust target to force a wrist singularity crossing"
+            "adjust target to force clamping"
+        )
+
+        # Verify final accuracy
+        final_pose = _fk_mm_rpy(state.Position_in)
+        pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target_pose[:3]))
+        assert pos_error < 1.0, (
+            f"Position error {pos_error:.3f}mm exceeds 1.0mm tolerance"
         )

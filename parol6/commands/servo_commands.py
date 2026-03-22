@@ -293,9 +293,12 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
                     for i in range(6):
                         self._q_commanded[i] += dq[i] / ratio
                     self._clamped = True
+                    # Correct CSE position every clamped tick to prevent
+                    # gap accumulation between Cartesian planner and joints
+                    PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
+                    cse.correct_position(self._fk_buf)
                 elif self._clamped:
-                    # Exiting clamp — re-sync CSE to actual robot TCP so
-                    # there's no accumulated position gap to snap across
+                    # Exiting clamp — final re-sync
                     PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
                     cse.correct_position(self._fk_buf)
                     self._q_ik_seed[:] = self._q_commanded
@@ -318,8 +321,18 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         self.set_move_position(state, self._steps_buf)
 
         if finished and not self._ik_stopping:
-            self.finish()
-            cse.active = False
-            return ExecutionStatusCode.COMPLETED
+            if self._clamped:
+                # CSE converged in Cartesian space but joints lagged due to
+                # velocity clamping.  Re-sync CSE from actual commanded
+                # position and let it drive the remaining gap.
+                PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
+                cse.sync_pose(self._fk_buf)
+                cse.set_limits(self.p.speed, self.p.accel)
+                self._q_ik_seed[:] = self._q_commanded
+                self._clamped = False
+            else:
+                self.finish()
+                cse.active = False
+                return ExecutionStatusCode.COMPLETED
 
         return ExecutionStatusCode.EXECUTING
