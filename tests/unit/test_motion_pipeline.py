@@ -389,8 +389,10 @@ class TestSegmentPlayer:
         for i in range(5):
             assert player.tick(state) is True
             np.testing.assert_array_equal(state.Position_out, steps[i])
+            # Simulate Position_in converging to Position_out (firmware tracking)
+            state.Position_in[:] = state.Position_out
 
-        # 6th tick -- segment complete, no more buffered -> returns False
+        # 6th tick -- settling detects convergence, completes -> returns False
         assert player.tick(state) is False
         assert state.completed_command_index == 0
 

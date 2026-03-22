@@ -58,6 +58,7 @@ dev = [
     "ty",
     "pytest",
     "pytest-asyncio",
+    "pytest-timeout",
     "pre-commit",
     "trimesh",
     "fast-simplification",
@@ -70,41 +71,25 @@ dev = [
 parol6-server = "parol6.cli.server:main_entry"
 
 [tool.pytest.ini_options]
-# Limit discovery to the tests/ directory only
 testpaths = ["tests"]
-
-# Test discovery patterns
-python_files = ["test_*.py", "*_test.py"]
+python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-
-# Output configuration
 addopts = [
-    "-v",
-    "--tb=short",
     "--strict-markers",
-    "--disable-warnings",
-    "-p", "no:cacheprovider"
+    "--strict-config",
+    "-ra",
+    "--junitxml=test-results.xml",
 ]
-
-# Timeout configuration (requires pytest-timeout)
 timeout = 45
 timeout_method = "thread"
-
-# Logging configuration for tests
-log_cli = true
-log_cli_level = "INFO"
-log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
-log_cli_date_format = "%Y-%m-%d %H:%M:%S"
-
-# Pytest markers for different test types
 markers = [
     "unit: Unit tests that test individual components in isolation",
     "integration: Integration tests that test component interactions with FAKE_SERIAL",
-    "e2e: End-to-end tests that exercise complete workflows"
+    "e2e: End-to-end tests that exercise complete workflows",
 ]
-
-# Filter warnings
+log_cli = false
+log_level = "DEBUG"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",

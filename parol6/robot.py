@@ -325,9 +325,11 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         *,
         position_range: tuple[float, float] = (0.0, 1.0),
         speed_range: tuple[float, float] = (0.0, 1.0),
-        current_range: tuple[int, int] = (100, 1000),
+        current_range: tuple[int, int],
         **kwargs: Any,
     ) -> None:
+        kwargs.setdefault("action_r_labels", ("Calibrate", "Calibrate"))
+        kwargs.setdefault("action_r_icons", ("build", "build"))
         super().__init__(
             position_range=position_range,
             speed_range=speed_range,
@@ -343,6 +345,9 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
     async def calibrate(self, **kwargs: object) -> int:
         return await self._cmd("calibrate")
 
+    async def action_r(self, engaged: bool) -> None:
+        await self.calibrate()
+
     async def open(self, **kwargs: float | int) -> int:
         return await self.set_position(0.0, **kwargs)
 
@@ -350,16 +355,25 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         return await self.set_position(1.0, **kwargs)
 
     @property
-    def force_jog_step(self) -> int:
+    def adjust_step(self) -> int:
         """Default current step: ~10% of range, rounded to nearest 10 mA."""
         lo, hi = self.current_range
         return max(10, round((hi - lo) / 10 / 10) * 10)
 
     @property
+    def adjust_labels(self) -> tuple[str, str]:
+        return ("Less current", "More current")
+
+    @property
+    def adjust_icons(self) -> tuple[str, str]:
+        return ("remove", "add")
+
+    @property
     def channel_descriptors(self) -> tuple[ChannelDescriptor, ...]:
         return (
-            ChannelDescriptor(name="Force", unit="N"),
-            ChannelDescriptor(name="Current", unit="mA"),
+            ChannelDescriptor(
+                name="Current", unit="mA", max=float(self.current_range[1])
+            ),
         )
 
 

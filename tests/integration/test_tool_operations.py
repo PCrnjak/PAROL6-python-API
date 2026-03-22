@@ -150,7 +150,7 @@ class TestSSG48GripperMethods:
         # Verify parameter ranges
         assert spec.position_range == (0.0, 1.0)
         assert spec.speed_range == (0.0, 1.0)
-        assert spec.current_range == (100, 1000)
+        assert spec.current_range == (100, 1300)
 
         await client.set_tool("SSG-48")
         await client.wait_motion_complete(timeout=5.0)

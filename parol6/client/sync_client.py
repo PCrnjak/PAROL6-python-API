@@ -169,7 +169,7 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def home(self, wait: bool = False, timeout: float = 10.0) -> int:
+    def home(self, wait: bool = False, timeout: float = 60.0) -> int:
         """Home the robot to its home position.
 
         Returns the command index (≥ 0) on success, -1 on failure.
@@ -180,11 +180,19 @@ class RobotClient:
         """
         return _run(self._inner.home(wait=wait, timeout=timeout))
 
+    def teleport(
+        self,
+        angles_deg: list[float],
+        tool_positions: list[float] | None = None,
+    ) -> int:
+        """Instantly set joint angles and optional tool positions (simulator only)."""
+        return _run(self._inner.teleport(angles_deg, tool_positions=tool_positions))
+
     def resume(self) -> int:
         """Re-enable the robot controller, allowing motion commands.
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return _run(self._inner.resume())
 
@@ -192,7 +200,7 @@ class RobotClient:
         """Halt the robot — stop all motion and disable.
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return _run(self._inner.halt())
 
@@ -200,7 +208,7 @@ class RobotClient:
         """Enable simulator mode (no physical robot hardware required).
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return _run(self._inner.simulator_on())
 
@@ -208,7 +216,7 @@ class RobotClient:
         """Disable simulator mode, switching to real hardware.
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return _run(self._inner.simulator_off())
 
@@ -219,7 +227,7 @@ class RobotClient:
             port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return _run(self._inner.set_serial_port(port_str))
 
@@ -301,17 +309,18 @@ class RobotClient:
         """
         return _run(self._inner.get_tool())
 
-    def set_tool(self, tool_name: str) -> int:
+    def set_tool(self, tool_name: str, variant_key: str = "") -> int:
         """
         Set the current end-effector tool configuration.
 
         Args:
             tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
+            variant_key: Optional variant within the tool type.
 
         Returns:
-            True if successful
+            Command index (>= 0) if queued, 0 on failure.
         """
-        return _run(self._inner.set_tool(tool_name))
+        return _run(self._inner.set_tool(tool_name, variant_key=variant_key))
 
     def set_profile(self, profile: str) -> int:
         """

@@ -156,6 +156,14 @@ def _simulate_motion_jit(
         else:
             speed_in.fill(0)
 
+    elif command_out == CommandCode.TELEPORT:
+        # Instant position set — no ramping
+        for i in range(6):
+            position_in[i] = position_out[i]
+            position_f[i] = float(position_out[i])
+            speed_in[i] = 0
+        command_out = CommandCode.IDLE
+
     else:
         for i in range(6):
             speed_in[i] = 0
@@ -202,9 +210,13 @@ def _write_frame_jit(
             gripper_ramp[_RAMP_TARGET] = new_target
             gripper_ramp[_RAMP_SPEED] = new_speed
             gripper_ramp[_RAMP_ACTIVE] = _RAMP_ON
-        # Echo speed and current to feedback (not position — ramp handles that)
+        # Echo speed to feedback (not position — ramp handles that)
         state_gripper_data_in[2] = gripper_data_out[1]
-        state_gripper_data_in[3] = gripper_data_out[2]
+        # Current: only drawn while ramp is actively moving
+        if gripper_ramp[_RAMP_ACTIVE] >= _RAMP_ON:
+            state_gripper_data_in[3] = gripper_data_out[2]
+        else:
+            state_gripper_data_in[3] = 0
 
 
 @njit(cache=True)
@@ -523,7 +535,11 @@ class MockSerialTransport:
         self._state.io_out[:n] = inout_out[:n]
         return True
 
-    def tick_simulation(self, tool_name: str = "NONE") -> None:
+    def tick_simulation(
+        self,
+        tool_name: str = "NONE",
+        tool_teleport_pos: float = -1.0,
+    ) -> None:
         """
         Run one physics simulation step. Called by controller each tick.
 
@@ -537,6 +553,17 @@ class MockSerialTransport:
         now = time.perf_counter()
         dt = now - self._state.last_update
         self._state.last_update = now
+
+        # Snap gripper position if teleport requested
+        if tool_teleport_pos >= 0:
+            self._state.gripper_pos_f = tool_teleport_pos
+            self._state.gripper_data_in[1] = int(tool_teleport_pos + 0.5)
+            self._state.gripper_ramp[_RAMP_TARGET] = tool_teleport_pos
+            self._state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+            # Also snap the pneumatic/generic ramp so it doesn't overwrite
+            frac = tool_teleport_pos / 255.0
+            self._state.tool_ramp_current = frac
+            self._state.tool_ramp_target = frac
 
         if dt > 0:
             state = self._state

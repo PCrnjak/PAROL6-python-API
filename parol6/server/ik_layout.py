@@ -10,7 +10,8 @@ from multiprocessing.shared_memory import SharedMemory
 # ── Input buffer (status_cache → ik_worker) ──────────────────────
 IK_INPUT_Q_OFFSET = 0  # float64[6]  = 48 bytes
 IK_INPUT_T_OFFSET = 48  # float64[16] = 128 bytes
-IK_INPUT_SIZE = 176
+IK_INPUT_TOOL_OFFSET = 176  # float64[16] = 128 bytes (4x4 tool transform)
+IK_INPUT_SIZE = 304
 
 # ── Output buffer (ik_worker → status_cache) ─────────────────────
 IK_OUTPUT_JOINT_OFFSET = 0  # uint8[12] = 12 bytes

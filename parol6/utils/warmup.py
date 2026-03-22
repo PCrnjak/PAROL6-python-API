@@ -62,7 +62,6 @@ from parol6.server.loop_timer import (
     _quickselect_partition,
 )
 from parol6.server.status_cache import _update_arrays
-from parol6.server.transport_manager import _arrays_changed
 from parol6.server.transports.mock_serial_transport import (
     _encode_payload_jit,
     _simulate_gripper_ramp_jit,
@@ -179,24 +178,24 @@ def warmup_jit() -> float:
     # parol6/protocol/wire.py - frame packing/unpacking
     dummy_tx_frame = memoryview(bytearray(64))
     dummy_gripper_data = np.zeros(6, dtype=np.int32)
+    dummy_8u8_bitfield = np.zeros(8, dtype=np.uint8)
     pack_tx_frame_into(
         dummy_tx_frame,  # out
         dummy_6i,  # position_out
         dummy_6i,  # speed_out
         0,  # command_code
-        dummy_6i,  # affected_joint_out
-        dummy_6i,  # inout_out
+        dummy_8u8_bitfield,  # affected_joint_out (8 elements for _pack_bitfield)
+        dummy_8u8_bitfield,  # inout_out (8 elements for _pack_bitfield)
         0,  # timeout_out
         dummy_gripper_data,  # gripper_data_out
     )
     dummy_rx_frame = memoryview(bytearray(64))
-    dummy_io_5u8 = np.zeros(5, dtype=np.uint8)
     dummy_8u8_homed = np.zeros(8, dtype=np.uint8)
     dummy_8u8_io = np.zeros(8, dtype=np.uint8)
     dummy_8u8_temp = np.zeros(8, dtype=np.uint8)
     dummy_8u8_poserr = np.zeros(8, dtype=np.uint8)
-    dummy_timing_out = np.zeros(2, dtype=np.int32)
-    dummy_grip_out = np.zeros(5, dtype=np.int32)
+    dummy_timing_out = np.zeros(1, dtype=np.int32)
+    dummy_grip_out = np.zeros(6, dtype=np.int32)
     unpack_rx_frame_into(
         dummy_rx_frame,  # data
         dummy_6i,  # pos_out
@@ -207,23 +206,6 @@ def warmup_jit() -> float:
         dummy_8u8_poserr,  # poserr_out
         dummy_timing_out,  # timing_out
         dummy_grip_out,  # grip_out
-    )
-
-    # parol6/server/transport_manager.py — _arrays_changed
-    # Dtypes must match TxCoalesceState fields: pos/spd/grip=int32, aff/io=uint8
-    _wm_pos = np.zeros(6, dtype=np.int32)
-    _wm_aff = np.zeros(8, dtype=np.uint8)
-    _arrays_changed(
-        _wm_pos,
-        _wm_pos,  # pos  (int32[6])
-        _wm_pos,
-        _wm_pos,  # spd  (int32[6])
-        _wm_aff,
-        _wm_aff,  # aff  (uint8[8])
-        _wm_aff,
-        _wm_aff,  # io   (uint8[8])
-        _wm_pos,
-        _wm_pos,  # grip (int32[6])
     )
 
     # parol6/server/loop_timer.py - stats computation
@@ -279,13 +261,13 @@ def warmup_jit() -> float:
     )
     dummy_payload = memoryview(bytearray(64))
     dummy_timing = np.zeros(1, dtype=np.int32)
-    dummy_gripper_in = np.zeros(5, dtype=np.int32)
+    dummy_gripper_in = np.zeros(6, dtype=np.int32)
     _encode_payload_jit(
         dummy_payload,  # out
         dummy_6i,  # position_in
         dummy_6i,  # speed_in
         dummy_8u8,  # homed_in
-        dummy_io_5u8,  # io_in
+        dummy_8u8,  # io_in (8 elements for _pack_bitfield)
         dummy_8u8,  # temp_err_in
         dummy_8u8,  # pos_err_in
         dummy_timing,  # timing_in

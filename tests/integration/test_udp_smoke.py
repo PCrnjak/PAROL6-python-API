@@ -99,7 +99,7 @@ class TestServoMode:
         """Test that servoJ command is accepted."""
         # servoJ sends a single real-time joint target
         result = client.servoJ([0, -45, 180, 0, 0, 180], speed=0.5, accel=0.5)
-        assert result is True
+        assert result > 0
         assert client.ping() is not None
 
 

@@ -48,7 +48,7 @@ class TestServoCartesianAccuracy:
 
         Tests the servo Cartesian path (replaces old stream_on + move_cartesian).
         """
-        assert client.resume() is True
+        assert client.resume() > 0
         assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
@@ -64,7 +64,7 @@ class TestServoCartesianAccuracy:
 
         # Send servo cartesian move (fire-and-forget, no stream mode toggle needed)
         result = client.servoL(target, speed=1.0)
-        assert result is True
+        assert result > 0
 
         # Wait for motion to settle
         assert client.wait_motion_complete(timeout=10.0)
@@ -81,7 +81,7 @@ class TestServoCartesianAccuracy:
         Simulates TCP dragging behavior where multiple servoL commands
         are sent in sequence.
         """
-        assert client.resume() is True
+        assert client.resume() > 0
         assert client.home() >= 0
         assert client.wait_motion_complete(timeout=15.0)
 
@@ -108,7 +108,7 @@ class TestServoCartesianAccuracy:
             print(f"Target: {target[:3]}")
 
             result = client.servoL(target, speed=1.0)
-            assert result is True
+            assert result > 0
 
             # Wait for this move to complete before next
             assert client.wait_motion_complete(timeout=10.0, settle_window=2.0)

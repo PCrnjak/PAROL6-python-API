@@ -61,7 +61,7 @@ _urdf_path = str(
 robot: Robot = Robot(_urdf_path)
 
 
-def apply_tool(tool_name: str) -> None:
+def apply_tool(tool_name: str, variant_key: str = "") -> None:
     """
     Apply tool transform to the robot model.
 
@@ -69,15 +69,18 @@ def apply_tool(tool_name: str) -> None:
     ----------
     tool_name : str
         Name of the tool from the tool registry
+    variant_key : str
+        Optional variant key for the tool
     """
-    T_tool = get_tool_transform(tool_name)
+    T_tool = get_tool_transform(tool_name, variant_key=variant_key or None)
 
+    label = f"'{tool_name}:{variant_key}'" if variant_key else f"'{tool_name}'"
     if tool_name != "NONE" and not np.allclose(T_tool, np.eye(4)):
         robot.set_tool_transform(T_tool)
-        logger.info(f"Applied tool '{tool_name}' to robot model")
+        logger.info(f"Applied tool {label} to robot model")
     else:
         robot.clear_tool_transform()
-        logger.info(f"Applied tool '{tool_name}' (identity)")
+        logger.info(f"Applied tool {label} (identity)")
 
 
 # Initialize with no tool
@@ -98,14 +101,14 @@ _joint_ratio: NDArray[np.float64] = np.array(
     [6.4, 20.0, 20.0 * (38.0 / 42.0), 4.0, 4.0, 10.0], dtype=np.float64
 )
 
-# Joint speeds (steps/s) - hardware limits
+# Joint speeds (steps/s)
 _joint_max_speed_hw: Vec6i = np.array(
-    [9750, 27000, 30000, 30000, 33000, 33000], dtype=np.int32
+    [16000, 27000, 32000, 10000, 10000, 32000], dtype=np.int32
 )
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
 # Effective max speeds with scaling applied
-_joint_max_speed: Vec6i = _joint_max_speed_hw.astype(np.int32)
+_joint_max_speed: Vec6i = _joint_max_speed_hw.copy()
 
 # Jog speeds (steps/s) - 80% of scaled max for safety margin during jogging
 _joint_max_jog_speed: Vec6i = (_joint_max_speed * 0.8).astype(np.int32)
@@ -137,11 +140,11 @@ _joint_jerk_rad = (
 # Linear units: mm/s, mm/s^2, mm/s^3
 # Angular units: deg/s, deg/s^2, deg/s^3
 _cart_linear_velocity_max: float = 200
-_cart_angular_velocity_max: float = 280
+_cart_angular_velocity_max: float = 100
 _cart_linear_acc_max: float = 550
-_cart_angular_acc_max: float = 835
+_cart_angular_acc_max: float = 275
 _cart_linear_jerk_max: float = 5500
-_cart_angular_jerk_max: float = 8350
+_cart_angular_jerk_max: float = 2750
 
 # Min values as 1% of max
 _cart_linear_velocity_min: float = _cart_linear_velocity_max * 0.01
@@ -323,7 +326,11 @@ if __name__ == "__main__":
     def _compute_tcp_velocity_at_config(
         q: NDArray, direction: int, v_max_joint: NDArray
     ) -> float | None:
-        """Max TCP velocity in one direction while maintaining orientation."""
+        """Max TCP velocity in one Cartesian direction.
+
+        For linear directions (0-2), rejects samples that cause orientation change.
+        For angular directions (3-5), rejects samples that cause linear translation.
+        """
         try:
             J = robot.jacob0(q)
             if np.linalg.cond(J) > 1e6:
@@ -331,24 +338,43 @@ if __name__ == "__main__":
             desired = np.zeros(6)
             desired[direction] = 1.0
             q_dot = np.linalg.pinv(J) @ desired
-            if np.linalg.norm(J[3:, :] @ q_dot) > 0.01:
-                return None
+            if direction < 3:
+                if np.linalg.norm(J[3:, :] @ q_dot) > 0.01:
+                    return None
+            else:
+                if np.linalg.norm(J[:3, :] @ q_dot) > 0.01:
+                    return None
             return float(np.min(v_max_joint / (np.abs(q_dot) + 1e-10)))
         except (np.linalg.LinAlgError, ValueError):
             return None
 
-    def _sample_limit(n_samples: int, seed: int, v_max: NDArray) -> tuple[float, float]:
-        """Sample workspace and return (median_linear_m, mean_angular_rad)."""
+    _home_rad = np.deg2rad(_standby_deg)
+
+    def _sample_limit(
+        n_samples: int, seed: int, v_max: NDArray, spread_deg: float = 30.0
+    ) -> tuple[float, float]:
+        """Sample around home position and return (median_linear_m, median_angular_rad).
+
+        Samples joint configurations from a Gaussian centered on home with
+        std dev of ``spread_deg`` degrees, clamped to joint limits.
+        """
         rng = np.random.default_rng(seed)
-        results = []
+        spread_rad = np.deg2rad(spread_deg)
+        lin_results = []
+        ang_results = []
         for _ in range(n_samples):
-            q = np.array([rng.uniform(lo, hi) for lo, hi in _joint_limits_radian])
+            q = _home_rad + rng.normal(0, spread_rad, size=6)
+            q = np.clip(q, _joint_limits_radian[:, 0], _joint_limits_radian[:, 1])
             for d in range(3):
                 v = _compute_tcp_velocity_at_config(q, d, v_max)
                 if v is not None and v > 0.001:
-                    results.append(v)
-        linear = float(np.median(results)) if results else 0.1
-        angular = float(np.mean(v_max[3:6]))
+                    lin_results.append(v)
+            for d in range(3, 6):
+                v = _compute_tcp_velocity_at_config(q, d, v_max)
+                if v is not None and v > 0.001:
+                    ang_results.append(v)
+        linear = float(np.median(lin_results)) if lin_results else 0.1
+        angular = float(np.median(ang_results)) if ang_results else 0.1
         return linear, angular
 
     vel_lin, vel_ang = _sample_limit(500, 42, _joint_speed_rad)

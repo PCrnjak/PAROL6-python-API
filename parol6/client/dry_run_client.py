@@ -15,10 +15,7 @@ from typing import Any
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from ..commands.base import (
-    MotionCommand,
-    TrajectoryMoveCommandBase,
-)
+from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import (
     JogLCommand,
     _CART_ANG_JOG_MAX_RAD,
@@ -77,6 +74,7 @@ from ..protocol.wire import (
     SetProfileCmd,
     SetToolCmd,
     SimulatorCmd,
+    TeleportCmd,
     ToolActionCmd,
 )
 from ..server.command_registry import CommandRegistry
@@ -90,6 +88,7 @@ from ..server.motion_planner import (
 from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
+from parol6.tools import get_registry
 
 # Method name → (struct class, default kwargs applied before caller kwargs)
 CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
@@ -116,6 +115,7 @@ CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
     "set_serial_port": (SetPortCmd, {}),
     "simulator_on": (SimulatorCmd, {"on": True}),
     "simulator_off": (SimulatorCmd, {"on": False}),
+    "teleport": (TeleportCmd, {}),
     "tool_action": (ToolActionCmd, {}),
     "ping": (PingCmd, {}),
     "get_angles": (GetAnglesCmd, {}),
@@ -179,6 +179,7 @@ class DryRunResult:
     duration: float  # trajectory duration in seconds
     error: RobotError | None = None
     valid: np.ndarray | None = None  # (N,) per-pose bool; None = all valid
+    joint_trajectory_rad: np.ndarray | None = None  # (N, 6) full joint trajectory
 
 
 def _error_result(error: RobotError) -> DryRunResult:
@@ -188,6 +189,7 @@ def _error_result(error: RobotError) -> DryRunResult:
         end_joints_rad=np.empty(6),
         duration=0.0,
         error=error,
+        joint_trajectory_rad=None,
     )
 
 
@@ -203,6 +205,7 @@ def _build_result(radians: np.ndarray, duration: float) -> DryRunResult:
         tcp_poses=tcp_poses,
         end_joints_rad=radians[-1].copy(),
         duration=duration,
+        joint_trajectory_rad=radians.copy(),
     )
 
 
@@ -253,6 +256,7 @@ class DryRunRobotClient:
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._max_snapshot_points = max_snapshot_points
         self._active_tool_key: str = ""
+        self._active_variant_key: str = ""
         self._tool_proxy = _DryRunTool(self)
 
     @property
@@ -276,17 +280,29 @@ class DryRunRobotClient:
                 results.append(r)
         return results
 
+    def _snap_to_angles(self, angles_deg: list[float]) -> DryRunResult:
+        """Snap to angles instantly (no trajectory) — used by Home and Teleport."""
+        self._planner.flush()
+        deg = np.asarray(angles_deg, dtype=np.float64)
+        deg_to_steps(deg, self._state.Position_in)
+        self._planner.state.Position_in[:] = self._state.Position_in
+        rad = np.radians(deg).reshape(1, -1)
+        return _build_result(rad, duration=0.0)
+
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
+        if isinstance(params, HomeCmd):
+            return self._snap_to_angles(HOME_ANGLES_DEG)
+        if isinstance(params, TeleportCmd):
+            return self._snap_to_angles(params.angles)
         if isinstance(params, SetToolCmd):
             self._active_tool_key = params.tool_name.strip().upper()
-        # Detect jog commands — planner doesn't handle streaming
+            self._active_variant_key = params.variant_key
+        # Detect jog/servo commands — planner doesn't handle streaming.
+        # Other non-trajectory MotionCommands (SetTool, Home) fall through
+        # to the planner which handles them as inline segments.
         cmd_cls = self._registry.get_command_for_struct(type(params))
-        if (
-            cmd_cls is not None
-            and issubclass(cmd_cls, MotionCommand)
-            and not issubclass(cmd_cls, TrajectoryMoveCommandBase)
-        ):
+        if cmd_cls is not None and issubclass(cmd_cls, (JogJCommand, JogLCommand)):
             # Flush blend buffer, sync state, simulate jog
             self._planner.flush()
             self._state.Position_in[:] = self._planner.state.Position_in
@@ -319,7 +335,7 @@ class DryRunRobotClient:
         if isinstance(seg, ErrorSegment):
             return self._error_segment_to_result(seg)
         if isinstance(seg, InlineSegment) and isinstance(seg.params, ToolActionCmd):
-            return self._tool_action_segment_to_result()
+            return self._tool_action_segment_to_result(seg.params)
         # Other InlineSegments (SetTool, Home, etc.) — no visualization
         return None
 
@@ -342,17 +358,22 @@ class DryRunRobotClient:
         if seg.cartesian_path is not None and seg.ik_valid is not None:
             return DryRunResult(
                 tcp_poses=seg.cartesian_path,
-                end_joints_rad=np.empty((0,), dtype=np.float64),
+                end_joints_rad=np.zeros(6, dtype=np.float64),
                 duration=0.0,
                 error=seg.error,
                 valid=seg.ik_valid,
+                joint_trajectory_rad=None,
             )
         return _error_result(seg.error)
 
-    def _tool_action_segment_to_result(self) -> DryRunResult:
+    def _tool_action_segment_to_result(self, cmd: ToolActionCmd) -> DryRunResult:
         """Return a single-point DryRunResult at the current TCP pose."""
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
-        return _build_result(self._q_rad_buf[np.newaxis], 0.0)
+        duration = 0.0
+        cfg = get_registry().get(cmd.tool_key.strip().upper())
+        if cfg is not None:
+            duration = cfg.estimate_duration(cmd.action, cmd.params)
+        return _build_result(self._q_rad_buf[np.newaxis], duration)
 
     def _merge_results(self, results: list[DryRunResult]) -> DryRunResult:
         """Merge multiple DryRunResults into one (for multi-segment blends)."""
@@ -379,12 +400,28 @@ class DryRunRobotClient:
         else:
             merged_valid = None
 
+        has_any_joints = any(r.joint_trajectory_rad is not None for r in non_empty)
+        if has_any_joints:
+            joint_parts = [
+                r.joint_trajectory_rad
+                if r.joint_trajectory_rad is not None
+                else np.broadcast_to(
+                    r.end_joints_rad[np.newaxis, :],
+                    (r.tcp_poses.shape[0], r.end_joints_rad.shape[0]),
+                ).copy()
+                for r in non_empty
+            ]
+            merged_joints = np.vstack(joint_parts)
+        else:
+            merged_joints = None
+
         return DryRunResult(
             tcp_poses=tcp_all,
             end_joints_rad=last.end_joints_rad,
             duration=total_duration,
             error=first_error,
             valid=merged_valid,
+            joint_trajectory_rad=merged_joints,
         )
 
     # ---- Jog simulation (planner doesn't handle streaming) ----
@@ -523,6 +560,9 @@ class DryRunRobotClient:
 
     def delay(self, seconds: float = 0.0) -> None:
         pass
+
+    def wait_motion_complete(self, **kwargs: Any) -> None:
+        self.flush()
 
     # ---- Auto-dispatch for everything else ----
 

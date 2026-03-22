@@ -78,7 +78,6 @@ class PneumaticGripperCommand(MotionCommand[PneumaticGripperParams]):
             return ExecutionStatusCode.FAILED
 
         state.InOut_out[self._port_index] = self._state_to_set
-        logger.info("  -> Pneumatic gripper command sent.")
         self.finish()
         return ExecutionStatusCode.COMPLETED
 
@@ -171,23 +170,16 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
 
             current_position = hw.feedback_position
             if abs(current_position - self._hw_position) <= 5:
-                logger.info("  -> Gripper move complete.")
                 self.finish()
                 hw.set_command_bits(move_active=False, estop=estop)
                 return ExecutionStatusCode.COMPLETED
 
             if object_detected:
                 if (object_detection == 1) and (self._hw_position > current_position):
-                    logger.info(
-                        "  -> Gripper move holding position due to object detection when closing."
-                    )
                     self.finish()
                     return ExecutionStatusCode.COMPLETED
 
                 if (object_detection == 2) and (self._hw_position < current_position):
-                    logger.info(
-                        "  -> Gripper move holding position due to object detection when opening."
-                    )
                     self.finish()
                     return ExecutionStatusCode.COMPLETED
 

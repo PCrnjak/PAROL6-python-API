@@ -18,6 +18,7 @@ from pinokin import se3_from_trans, se3_mul, se3_rx, se3_ry, se3_rz
 from parol6.server.ik_layout import (
     IK_INPUT_Q_OFFSET,
     IK_INPUT_T_OFFSET,
+    IK_INPUT_TOOL_OFFSET,
     IK_OUTPUT_CART_TRF_OFFSET,
     IK_OUTPUT_CART_WRF_OFFSET,
     IK_OUTPUT_JOINT_OFFSET,
@@ -72,6 +73,14 @@ def ik_enablement_worker_main(
     )
     T_matrix = T_flat.reshape((4, 4))  # View, no copy
 
+    # Tool transform view for detecting tool changes
+    tool_T_flat = np.frombuffer(
+        input_shm.buf, dtype=np.float64, count=16, offset=IK_INPUT_TOOL_OFFSET
+    )
+    tool_T = tool_T_flat.reshape(4, 4)
+    last_tool_T = np.eye(4)
+    _eye4 = np.eye(4)
+
     # Zero-alloc output views: write directly to shared memory
     joint_en = np.frombuffer(
         output_shm.buf, dtype=np.uint8, count=12, offset=IK_OUTPUT_JOINT_OFFSET
@@ -113,6 +122,15 @@ def ik_enablement_worker_main(
 
             request_event.clear()
 
+            # Apply tool transform if it changed since last request
+            if not np.array_equal(tool_T, last_tool_T):
+                last_tool_T[:] = tool_T
+                if np.allclose(tool_T, _eye4):
+                    robot.clear_tool_transform()
+                else:
+                    robot.set_tool_transform(tool_T.copy())
+                logger.info("IK worker: tool transform updated")
+
             # Input data is already available via views (q_rad, T_matrix)
 
             # Compute joint enablement
@@ -150,7 +168,7 @@ def ik_enablement_worker_main(
         logger.exception("IK worker subprocess error: %s", e)
     finally:
         # Release numpy views before closing shared memory
-        del q_rad, T_flat, T_matrix
+        del q_rad, T_flat, T_matrix, tool_T_flat, tool_T
         del joint_en, cart_en_wrf, cart_en_trf, version_view
 
         # Release memoryviews

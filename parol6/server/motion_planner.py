@@ -23,7 +23,8 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
-from parol6.protocol.wire import HomeCmd, SetToolCmd
+from parol6.protocol.wire import HomeCmd, SetToolCmd, ToolActionCmd
+from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
 
@@ -47,6 +48,8 @@ class TrajectorySegment:
     command_index: int
     trajectory_steps: np.ndarray  # (M, 6) int32
     duration: float
+    command_name: str = ""
+    action_params: str = ""
     blend_consumed_indices: list[int] = field(default_factory=list)
 
 
@@ -81,7 +84,9 @@ class PlanCommand:
 
     command_index: int
     params: object  # wire struct (MoveJCmd, SetToolCmd, HomeCmd, …)
-    position_in: np.ndarray | None = None  # carries Position_in when sync needed
+    position_in: np.ndarray | None = (
+        None  # current Position_in (None = use planner internal)
+    )
 
 
 @dataclass
@@ -103,6 +108,7 @@ class SyncTool:
     """Update the planner's tool state (e.g. after E-stop cancel)."""
 
     tool_name: str
+    variant_key: str = ""
 
 
 @dataclass
@@ -130,6 +136,7 @@ class PlannerState:
     Position_in: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
     motion_profile: str = "TOPPRA"
     current_tool: str = "NONE"
+    current_tool_variant: str = ""
     stop_on_failure: bool = True
 
     # Forward kinematics cache (same layout as ControllerState — needed by
@@ -137,7 +144,8 @@ class PlannerState:
     _fkine_last_pos_in: np.ndarray = field(
         default_factory=lambda: np.zeros(6, dtype=np.int32)
     )
-    _fkine_last_tool: str = ""
+    _fkine_last_tool_name: str = ""
+    _fkine_last_tool_variant: str = ""
     _fkine_mat: np.ndarray = field(
         default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
     )
@@ -197,7 +205,8 @@ class TrajectoryPlanner:
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
             self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type]
         else:
-            if self._blend_buffer:
+            # Tool actions run concurrently with motion — don't flush blend
+            if not isinstance(params, ToolActionCmd) and self._blend_buffer:
                 self._flush_blend()
             self._handle_inline(command_index, params)
 
@@ -214,10 +223,11 @@ class TrajectoryPlanner:
         """Clear blend buffer."""
         self._blend_buffer.clear()
 
-    def sync_tool(self, tool_name: str) -> None:
+    def sync_tool(self, tool_name: str, variant_key: str = "") -> None:
         """Sync tool state (e.g. after E-stop cancel)."""
         self.state.current_tool = tool_name
-        self._robot_module.apply_tool(tool_name)
+        self.state.current_tool_variant = variant_key
+        self._robot_module.apply_tool(tool_name, variant_key=variant_key)
 
     # -- trajectory handling --
 
@@ -248,7 +258,7 @@ class TrajectoryPlanner:
         except Exception as e:
             self._emit_error(command_index, cmd, e)
             return
-        self._emit_trajectory(command_index, cmd)
+        self._emit_trajectory(command_index, cmd, params)
 
     def _flush_blend(self) -> None:
         """Flush the blend buffer — either blend or single-command setup."""
@@ -266,7 +276,7 @@ class TrajectoryPlanner:
                 buf.clear()
                 self._emit_error(head_idx, head_cmd, e)
                 return
-            self._emit_trajectory(head_idx, head_cmd)
+            self._emit_trajectory(head_idx, head_cmd, head_cmd.p)
         else:
             rest_cmds = [cmd for _, cmd in buf[1:]]
             try:
@@ -286,7 +296,7 @@ class TrajectoryPlanner:
                     except Exception as e2:
                         self._emit_error(uc_idx, uc_cmd, e2)
                         continue
-                    self._emit_trajectory(uc_idx, uc_cmd)
+                    self._emit_trajectory(uc_idx, uc_cmd, uc_cmd.p)
                 return
 
             if consumed < len(rest_cmds):
@@ -303,6 +313,8 @@ class TrajectoryPlanner:
                     command_index=head_idx,
                     trajectory_steps=head_cmd.trajectory_steps.copy(),
                     duration=head_cmd._duration,
+                    command_name=type(head_cmd).__name__,
+                    action_params=_format_cmd_params(head_cmd.p),
                     blend_consumed_indices=consumed_indices,
                 )
             )
@@ -320,12 +332,15 @@ class TrajectoryPlanner:
                         return
                     self._emit_error(uc_idx, uc_cmd, e)
                     continue
-                self._emit_trajectory(uc_idx, uc_cmd)
+                self._emit_trajectory(uc_idx, uc_cmd, uc_cmd.p)
 
         buf.clear()
 
     def _emit_trajectory(
-        self, command_index: int, cmd: TrajectoryMoveCommandBase
+        self,
+        command_index: int,
+        cmd: TrajectoryMoveCommandBase,
+        params: object | None = None,
     ) -> None:
         """Append a TrajectorySegment to output and advance position."""
         self._output.append(
@@ -333,6 +348,8 @@ class TrajectoryPlanner:
                 command_index=command_index,
                 trajectory_steps=cmd.trajectory_steps.copy(),
                 duration=cmd._duration,
+                command_name=type(cmd).__name__,
+                action_params=_format_cmd_params(params) if params is not None else "",
             )
         )
         self.state.Position_in[:] = cmd.trajectory_steps[-1]
@@ -418,7 +435,10 @@ class TrajectoryPlanner:
         # Predict state for subsequent trajectory planning
         if isinstance(params, SetToolCmd):
             self.state.current_tool = params.tool_name
-            self._robot_module.apply_tool(params.tool_name)
+            self.state.current_tool_variant = params.variant_key
+            self._robot_module.apply_tool(
+                params.tool_name, variant_key=params.variant_key
+            )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
 
@@ -462,9 +482,9 @@ class PlannerWorker:
         """Clear blend buffer on CancelAll."""
         self._planner.cancel()
 
-    def apply_tool(self, tool_name: str) -> None:
+    def apply_tool(self, tool_name: str, variant_key: str = "") -> None:
         """Sync tool state (e.g. after E-stop)."""
-        self._planner.sync_tool(tool_name)
+        self._planner.sync_tool(tool_name, variant_key=variant_key)
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +531,7 @@ def motion_planner_main(
                 continue
 
             if isinstance(msg, SyncTool):
-                worker.apply_tool(msg.tool_name)
+                worker.apply_tool(msg.tool_name, variant_key=msg.variant_key)
                 continue
 
             if isinstance(msg, PlanCommand):
@@ -610,9 +630,9 @@ class MotionPlanner:
         """Update the planner's motion profile."""
         self.submit(SyncProfile(profile=profile))
 
-    def sync_tool(self, tool_name: str) -> None:
+    def sync_tool(self, tool_name: str, variant_key: str = "") -> None:
         """Update the planner's tool state."""
-        self.submit(SyncTool(tool_name=tool_name))
+        self.submit(SyncTool(tool_name=tool_name, variant_key=variant_key))
 
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""

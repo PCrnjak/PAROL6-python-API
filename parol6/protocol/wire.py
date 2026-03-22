@@ -135,6 +135,7 @@ class CmdType(IntEnum):
     CHECKPOINT = auto()
 
     # Streaming commands — position (servo) and velocity (jog)
+    TELEPORT = auto()
     SERVOJ = auto()
     SERVOJ_POSE = auto()
     SERVOL = auto()
@@ -530,6 +531,15 @@ class ResetLoopStatsCmd(
     pass
 
 
+class TeleportCmd(
+    msgspec.Struct, tag=int(CmdType.TELEPORT), array_like=True, frozen=True, gc=False
+):
+    """TELEPORT: instantly set joint angles in degrees (simulator only)."""
+
+    angles: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
+    tool_positions: list[float] | None = None
+
+
 class SetIOCmd(
     msgspec.Struct, tag=int(CmdType.SET_IO), array_like=True, frozen=True, gc=False
 ):
@@ -570,9 +580,10 @@ class DelayCmd(
 class SetToolCmd(
     msgspec.Struct, tag=int(CmdType.SET_TOOL), array_like=True, frozen=True, gc=False
 ):
-    """SET_TOOL: [CmdType.SET_TOOL, tool_name]"""
+    """SET_TOOL: [CmdType.SET_TOOL, tool_name, variant_key]"""
 
     tool_name: Annotated[str, msgspec.Meta(min_length=1, max_length=64)]
+    variant_key: str = ""
 
     def __post_init__(self) -> None:
         name = self.tool_name.strip().upper()
@@ -1381,6 +1392,7 @@ class CommandCode(IntEnum):
     DISABLE = 102
     JOG = 123
     MOVE = 156
+    TELEPORT = 200
     IDLE = 255
 
 
@@ -1611,6 +1623,7 @@ __all__ = [
     "SetPortCmd",
     "SimulatorCmd",
     "DelayCmd",
+    "TeleportCmd",
     "SetToolCmd",
     "SetProfileCmd",
     "ToolActionCmd",

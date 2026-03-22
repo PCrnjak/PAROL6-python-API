@@ -4,7 +4,6 @@ Contains commands for Cartesian space movements: CartesianJog, MovePose, MoveCar
 """
 
 import logging
-import time
 from typing import cast
 
 import numpy as np
@@ -30,8 +29,10 @@ from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.ik import solve_ik
+from parol6.utils.ik import RateLimitedWarning, solve_ik
 from pinokin import se3_exp_ws, se3_from_rpy, se3_interp, se3_mul, se3_rpy
+
+from parol6.commands.servo_commands import _max_vel_ratio_jit
 
 from .base import (
     ExecutionStatusCode,
@@ -56,9 +57,7 @@ def _linmap_frac(frac: float, lo: float, hi: float) -> float:
     return lo + (hi - lo) * frac
 
 
-# Rate-limiting for IK failure warnings during Cartesian jog
-_IK_WARN_INTERVAL: float = 1.0
-_last_ik_warn_time: float = 0.0
+_ik_warn = RateLimitedWarning()
 
 
 @njit(cache=True)
@@ -187,6 +186,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         "_R_ws",
         "_V_ws",
         "_dot_buf",
+        "_q_clamped_buf",
     )
 
     def __init__(self, p: JogLCmd):
@@ -205,6 +205,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
         self._V_ws = np.zeros((3, 3), dtype=np.float64)
         self._dot_buf = np.zeros((), dtype=np.float64)
+        self._q_clamped_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Find dominant axis and start timer."""
@@ -261,6 +262,19 @@ class JogLCommand(MotionCommand[JogLCmd]):
                 self._V_ws,
             )
 
+    def _clamp_and_send(self, state: "ControllerState", q: np.ndarray) -> None:
+        """Velocity-clamp IK result and send to motors."""
+        ratio = _max_vel_ratio_jit(q, self._q_rad_buf)
+        if ratio > 1.0:
+            for i in range(6):
+                self._q_clamped_buf[i] = (
+                    self._q_rad_buf[i] + (q[i] - self._q_rad_buf[i]) / ratio
+                )
+            rad_to_steps(self._q_clamped_buf, self._steps_buf)
+        else:
+            rad_to_steps(q, self._steps_buf)
+        self.set_move_position(state, self._steps_buf)
+
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of Cartesian jogging."""
         cse = state.cartesian_streaming_executor
@@ -284,10 +298,10 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     PAROL6_ROBOT.robot, self._target_pose_buf, self._q_rad_buf
                 )
                 if ik_result.success and ik_result.q is not None:
-                    rad_to_steps(ik_result.q, self._steps_buf)
-                    self.set_move_position(state, self._steps_buf)
+                    self._clamp_and_send(state, ik_result.q)
                 return ExecutionStatusCode.EXECUTING
 
+            cse.active = False
             self.finish()
             self.stop_and_idle(state)
             return ExecutionStatusCode.COMPLETED
@@ -322,13 +336,11 @@ class JogLCommand(MotionCommand[JogLCmd]):
         )
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
-                now = time.monotonic()
-                global _last_ik_warn_time
-                if now - _last_ik_warn_time > _IK_WARN_INTERVAL:
-                    logger.warning(
-                        f"[CARTJOG] IK failed - initiating graceful stop: pos={self._target_pose_buf[:3, 3]}"
-                    )
-                    _last_ik_warn_time = now
+                _ik_warn(
+                    logger,
+                    "[CARTJOG] IK failed - initiating graceful stop: pos=%s",
+                    self._target_pose_buf[:3, 3],
+                )
                 cse.stop()
                 self._ik_stopping = True
             else:
@@ -338,6 +350,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     # Sync CSE to actual robot pose now that we've stopped
                     # This allows recovery by jogging in a different direction
                     cse.sync_pose(get_fkine_se3(state))
+                    cse.active = False
                     self.finish()
                     return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
@@ -356,8 +369,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
             else:
                 cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
-        rad_to_steps(ik_result.q, self._steps_buf)
-        self.set_move_position(state, self._steps_buf)
+        self._clamp_and_send(state, ik_result.q)
 
         return ExecutionStatusCode.EXECUTING
 

@@ -6,7 +6,7 @@ executor, and manages serial/simulator transport and status broadcasting.
 """
 
 import logging
-import os
+import signal
 import sys
 import threading
 import time
@@ -16,6 +16,7 @@ from typing import Any
 
 from parol6.ack_policy import AckPolicy
 from parol6.commands.base import (
+    CommandBase,
     ExecutionStatusCode,
     MotionCommand,
     QueryCommand,
@@ -28,6 +29,7 @@ from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
     CommandCode,
+    ToolActionCmd,
     pack_error,
     pack_ok,
     pack_ok_index,
@@ -54,6 +56,7 @@ from parol6.server.loop_timer import (
 )
 from parol6.server.status_cache import close_cache, get_cache
 from parol6.server.transport_manager import TransportManager
+from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
     TRACE,
@@ -115,9 +118,6 @@ class Controller:
         # E-stop state tracking (start as released to avoid false positive on first check)
         self.estop_active: bool = False
 
-        # TX keepalive timeout
-        self._tx_keepalive_s = float(os.getenv("PAROL6_TX_KEEPALIVE_S", "0.2"))
-
         # Status multicast broadcaster
         self._status_broadcaster: Any | None = None
 
@@ -151,7 +151,12 @@ class Controller:
         # segment player consumes them in the control loop
         self._planner = MotionPlanner()
         self._segment_player = SegmentPlayer(self._planner)
-        self._planner_needs_sync: bool = True  # first command always carries position
+
+        # Tool action side channel — runs concurrently with both streaming
+        # and trajectory execution (writes to gripper_hw, not Position_out)
+        self._tool_cmd: CommandBase | None = None
+        self._tool_cmd_activated: bool = False
+        self._tool_cmd_index: int = -1
 
         # Initialize components on construction
         self._initialize_components()
@@ -305,8 +310,19 @@ class Controller:
             except Exception as e:
                 logger.warning(f"Error decoding latest serial frame: {e}")
 
+        state.hardware_connected = (
+            not isinstance(self._transport_mgr.transport, MockSerialTransport)
+            and self._transport_mgr.is_connected()
+            and self._transport_mgr.first_frame_received
+        )
+
         # Serial auto-reconnect when a port is known
-        self._transport_mgr.auto_reconnect()
+        if self._transport_mgr.auto_reconnect():
+            # Flush stale commands so the robot doesn't replay old moves
+            self._segment_player.cancel(state)
+            self._planner.cancel()
+            self._executor.cancel_active_command("Serial reconnect")
+            self._executor.clear_queue("Serial reconnect")
 
     def _handle_estop(self, state: ControllerState) -> None:
         """Phase 2: Handle E-stop activation and recovery."""
@@ -321,8 +337,9 @@ class Controller:
                 logger.warning("E-STOP activated")
                 self.estop_active = True
                 self._segment_player.cancel(state)
-                self._planner_needs_sync = True
-                self._planner.sync_tool(state.current_tool)
+                self._planner.sync_tool(
+                    state.current_tool, variant_key=state.current_tool_variant
+                )
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
                 self._executor.clear_queue("E-Stop activated")
@@ -345,6 +362,9 @@ class Controller:
 
     def _execute_commands(self, state: ControllerState) -> None:
         """Phase 3: Execute active command."""
+        # Tool action side channel — ticks concurrently with everything
+        self._tick_tool_cmd(state)
+
         # Segment player handles trajectory + inline commands from planner
         if self._segment_player.tick(state):
             return
@@ -355,10 +375,42 @@ class Controller:
         else:
             state.Command_out = CommandCode.IDLE
             state.Speed_out.fill(0)
-            state.Position_out[:] = state.Position_in
+
+    def _tick_tool_cmd(self, state: ControllerState) -> None:
+        """Tick tool action side channel (concurrent with motion)."""
+        if self._tool_cmd is None:
+            return
+
+        if not self._tool_cmd_activated:
+            self._tool_cmd.setup(state)
+            self._tool_cmd_activated = True
+
+        code = self._tool_cmd.tick(state)
+
+        if code == ExecutionStatusCode.COMPLETED:
+            state.completed_command_index = max(
+                state.completed_command_index, self._tool_cmd_index
+            )
+            self._tool_cmd = None
+            self._tool_cmd_activated = False
+        elif code == ExecutionStatusCode.FAILED:
+            logger.error(
+                "Tool action failed: %s - %s",
+                type(self._tool_cmd).__name__,
+                self._tool_cmd.robot_error,
+            )
+            state.error = self._tool_cmd.robot_error or make_error(
+                ErrorCode.MOTN_TICK_FAILED, detail=type(self._tool_cmd).__name__
+            )
+            state.action_state = ActionState.ERROR
+            state.completed_command_index = max(
+                state.completed_command_index, self._tool_cmd_index
+            )
+            self._tool_cmd = None
+            self._tool_cmd_activated = False
 
     def _write_to_firmware(self, state: ControllerState) -> None:
-        """Phase 4: Write state to serial transport if changed."""
+        """Phase 4: Write state to serial transport."""
         ok = self._transport_mgr.write_frame(
             state.Position_out,
             state.Speed_out,
@@ -367,7 +419,6 @@ class Controller:
             state.InOut_out,
             state.Timeout_out,
             state.Gripper_data_out,
-            keepalive_s=self._tx_keepalive_s,
         )
         if ok:
             # Auto-reset one-shot gripper modes after successful send
@@ -461,11 +512,6 @@ class Controller:
                 with pt.phase("poll_cmd"):
                     self._poll_commands(state)
 
-                if tick_count % broadcast_interval == 0:
-                    with pt.phase("status"):
-                        if self._status_broadcaster:
-                            self._status_broadcaster.tick()
-
                 with pt.phase("estop"):
                     self._handle_estop(state)
 
@@ -473,11 +519,26 @@ class Controller:
                     with pt.phase("execute"):
                         self._execute_commands(state)
 
+                if tick_count % broadcast_interval == 0:
+                    with pt.phase("status"):
+                        if self._status_broadcaster:
+                            self._status_broadcaster.tick()
+
                 with pt.phase("write"):
                     self._write_to_firmware(state)
 
                 with pt.phase("sim"):
-                    self._transport_mgr.tick_simulation(state.current_tool)
+                    # Pass tool teleport position if set by TeleportCommand
+                    tool_tp = state.tool_teleport_pos
+                    if tool_tp >= 0:
+                        state.tool_teleport_pos = -1.0  # consume
+                        # Cancel in-flight tool action so it doesn't re-arm the ramp
+                        self._tool_cmd = None
+                        self._tool_cmd_activated = False
+                    self._transport_mgr.tick_simulation(
+                        state.current_tool,
+                        tool_teleport_pos=tool_tp,
+                    )
 
                 pt.tick()
                 self._sync_timer_metrics(state)
@@ -489,7 +550,12 @@ class Controller:
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
+                # Block SIGINT during shutdown so child processes aren't
+                # interrupted while we join them (avoids hang from numba's
+                # internal ProcessPoolExecutor workers catching SIGINT).
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
                 self.stop()
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
                 break
             except Exception as e:
                 logger.error(f"Error in main control loop: {e}", exc_info=True)
@@ -586,7 +652,6 @@ class Controller:
         # Streaming commands: cancel segment playback + existing streamable handling
         if getattr(command, "streamable", False):
             self._segment_player.cancel(state)
-            self._planner_needs_sync = True
             if self.udp_transport:
                 drained = self.udp_transport.drain_buffer()
                 if drained > 0:
@@ -607,28 +672,52 @@ class Controller:
                     self._reply_error(addr, make_error(ErrorCode.COMM_QUEUE_FULL))
             return
 
+        # Tool actions bypass planner — execute directly via side channel
+        # (writes to gripper_hw, not Position_out, so concurrent with everything)
+        if isinstance(command.p, ToolActionCmd):
+            cmd_obj, _, error_msg = create_command_from_struct(command.p)
+            if cmd_obj is None:
+                logger.error("Failed to create tool command: %s", error_msg)
+                if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                    self._reply_error(
+                        addr,
+                        make_error(ErrorCode.COMM_DECODE_ERROR, detail=error_msg or ""),
+                    )
+                return
+            # New tool action replaces any in-flight one
+            self._tool_cmd = cmd_obj
+            self._tool_cmd_activated = False
+            cmd_index = self._assign_command_index(state)
+            self._tool_cmd_index = cmd_index
+            logger.log(
+                TRACE, "Command %s → tool side channel (index=%d)", cmd_name, cmd_index
+            )
+            if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                self._reply_ok_index(addr, cmd_index)
+            return
+
         # Non-streaming commands → planner
         # Cancel active streaming command to avoid Position_in race
-        if self._executor.cancel_active_streamable():
-            self._planner_needs_sync = True
+        self._executor.cancel_active_streamable()
 
         # Clear error state from previous pipeline failure
         if state.error is not None:
             state.error = None
             state.action_state = ActionState.IDLE
-            self._planner_needs_sync = True
 
         cmd_index = self._assign_command_index(state)
-        position_in = state.Position_in.copy() if self._planner_needs_sync else None
+        # Only sync Position_in when segment player is idle — if segments are
+        # active/queued (e.g. homing), the planner's internal tracking is correct
+        # and Position_in may reflect a mid-motion position.
+        segment_idle = not self._segment_player.active
+        pos_snapshot = state.Position_in.copy() if segment_idle else None
         self._planner.submit(
             PlanCommand(
                 command_index=cmd_index,
                 params=command.p,
-                position_in=position_in,
+                position_in=pos_snapshot,
             )
         )
-        self._planner_needs_sync = False
-        logger.log(TRACE, "Command %s → planner (index=%d)", cmd_name, cmd_index)
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
             self._reply_ok_index(addr, cmd_index)
 
@@ -664,7 +753,6 @@ class Controller:
             # Reset: cancel motion pipeline so stale segments don't play
             if isinstance(command, ResetCommand):
                 self._segment_player.cancel(state)
-                self._planner_needs_sync = True
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
 
@@ -673,7 +761,6 @@ class Controller:
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
                 self._segment_player.cancel(state)
-                self._planner_needs_sync = True
                 self._executor.cancel_active_command("Simulator mode toggle")
                 self._executor.clear_queue("Simulator mode toggle")
                 success, error = self._transport_mgr.switch_simulator_mode(

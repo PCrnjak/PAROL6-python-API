@@ -8,7 +8,6 @@ ServoL: Cartesian-space target via CartesianStreamingExecutor + IK
 
 import logging
 import math
-import time
 
 import numpy as np
 from numba import njit
@@ -26,7 +25,7 @@ from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError
-from parol6.utils.ik import solve_ik
+from parol6.utils.ik import RateLimitedWarning, solve_ik
 from pinokin import se3_from_rpy
 
 from .base import ExecutionStatusCode, MotionCommand
@@ -37,9 +36,18 @@ logger = logging.getLogger(__name__)
 _JOINT_MAX_STEP_INV = 1.0 / (
     np.array(LIMITS.joint.hard.velocity, dtype=np.float64) * INTERVAL_S
 )
-# Rate-limiting for IK failure warnings
-_IK_WARN_INTERVAL: float = 1.0
-_last_servo_ik_warn: float = 0.0
+# Differential wrist coupling: motor 6 = J6*ratio[5] + J4*ratio[3] in step space
+
+_J4_STEP_FACTOR: float = (
+    float(PAROL6_ROBOT.joint.ratio[3]) / PAROL6_ROBOT.radian_per_step_constant
+)
+_J6_STEP_FACTOR: float = (
+    float(PAROL6_ROBOT.joint.ratio[5]) / PAROL6_ROBOT.radian_per_step_constant
+)
+_MOTOR6_MAX_STEP_INV: float = 1.0 / (
+    float(PAROL6_ROBOT._joint_max_speed_hw[5]) * INTERVAL_S
+)
+_ik_warn = RateLimitedWarning()
 
 
 @njit(cache=True)
@@ -47,14 +55,54 @@ def _max_vel_ratio_jit(
     target_q: np.ndarray,
     current_q: np.ndarray,
 ) -> float:
-    """Max per-tick velocity ratio across all joints. >1.0 means limit exceeded."""
+    """Max per-tick velocity ratio across all joints. >1.0 means limit exceeded.
+
+    Accounts for the differential wrist coupling: motor6 drives both J6 and
+    compensates for J4 rotation. The effective motor 6 step velocity is
+    ``dJ6 * ratio[5] + dJ4 * ratio[3]`` (in step space), which must stay
+    within motor 6's hardware speed limit.
+    """
     max_ratio = 0.0
     n = target_q.shape[0]
     for i in range(n):
         r = abs(target_q[i] - current_q[i]) * _JOINT_MAX_STEP_INV[i]
         if r > max_ratio:
             max_ratio = r
+    # Differential wrist: motor 6 effective speed includes J4 coupling
+    if n >= 6:
+        dq4_steps = abs(target_q[3] - current_q[3]) * _J4_STEP_FACTOR
+        dq6_steps = abs(target_q[5] - current_q[5]) * _J6_STEP_FACTOR
+        motor6_ratio = (dq4_steps + dq6_steps) * _MOTOR6_MAX_STEP_INV
+        if motor6_ratio > max_ratio:
+            max_ratio = motor6_ratio
     return max_ratio
+
+
+def _streaming_joint_step(
+    cmd: "ServoJCommand | ServoJPoseCommand", state: ControllerState
+) -> ExecutionStatusCode:
+    """Shared execute_step for ServoJ and ServoJPose commands."""
+    se = state.streaming_executor
+
+    if not cmd._initialized or not se.active:
+        steps_to_rad(state.Position_in, cmd._q_rad_buf)
+        se.sync_position(cmd._q_rad_buf)
+        se.set_limits(cmd.p.speed, cmd.p.accel)
+        cmd._initialized = True
+
+    se.set_position_target(cmd._target_rad)
+    pos_rad, _vel, finished = se.tick()
+
+    cmd._pos_rad_buf[:] = pos_rad
+    rad_to_steps(cmd._pos_rad_buf, cmd._steps_buf)
+    cmd.set_move_position(state, cmd._steps_buf)
+
+    if finished:
+        se.active = False
+        cmd.finish()
+        return ExecutionStatusCode.COMPLETED
+
+    return ExecutionStatusCode.EXECUTING
 
 
 @register_command(CmdType.SERVOJ)
@@ -86,27 +134,7 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
             self._target_rad[i] = math.radians(self.p.target[i])
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        se = state.streaming_executor
-
-        # Sync position on first tick or if executor not active
-        if not self._initialized or not se.active:
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(self._q_rad_buf)
-            se.set_limits(self.p.speed, self.p.accel)
-            self._initialized = True
-
-        se.set_position_target(self._target_rad)
-        pos_rad, _vel, finished = se.tick()
-
-        self._pos_rad_buf[:] = pos_rad
-        rad_to_steps(self._pos_rad_buf, self._steps_buf)
-        self.set_move_position(state, self._steps_buf)
-
-        if finished:
-            self.finish()
-            return ExecutionStatusCode.COMPLETED
-
-        return ExecutionStatusCode.EXECUTING
+        return _streaming_joint_step(self, state)
 
 
 @register_command(CmdType.SERVOJ_POSE)
@@ -162,27 +190,7 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
             self._target_rad[i] = float(ik_result.q[i])
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        se = state.streaming_executor
-
-        # Sync position on first tick or if executor not active
-        if not self._initialized or not se.active:
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(self._q_rad_buf)
-            se.set_limits(self.p.speed, self.p.accel)
-            self._initialized = True
-
-        se.set_position_target(self._target_rad)
-        pos_rad, _vel, finished = se.tick()
-
-        self._pos_rad_buf[:] = pos_rad
-        rad_to_steps(self._pos_rad_buf, self._steps_buf)
-        self.set_move_position(state, self._steps_buf)
-
-        if finished:
-            self.finish()
-            return ExecutionStatusCode.COMPLETED
-
-        return ExecutionStatusCode.EXECUTING
+        return _streaming_joint_step(self, state)
 
 
 @register_command(CmdType.SERVOL)
@@ -192,7 +200,8 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     CSE drives the Cartesian path (with its own internal Ruckig for smooth
     TCP motion).  IK converts each smoothed pose to joint space.  If any
     joint's per-tick delta exceeds its hardware velocity limit, all deltas
-    are scaled proportionally and CSE speed is reduced by the same ratio.
+    are scaled proportionally.  When the clamp clears, CSE position is
+    re-synced to the actual robot TCP to prevent accumulated divergence.
     """
 
     PARAMS_TYPE = ServoLCmd
@@ -201,22 +210,26 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     __slots__ = (
         "_initialized",
         "_ik_stopping",
+        "_clamped",
         "_target_se3",
         "_pos_rad_buf",
         "_q_commanded",
         "_q_ik_seed",
         "_dq_buf",
+        "_fk_buf",
     )
 
     def __init__(self, p: ServoLCmd):
         super().__init__(p)
         self._initialized = False
         self._ik_stopping = False
+        self._clamped = False
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
         self._q_commanded = np.zeros(6, dtype=np.float64)
         self._q_ik_seed = np.zeros(6, dtype=np.float64)
         self._dq_buf = np.zeros(6, dtype=np.float64)
+        self._fk_buf = np.zeros((4, 4), dtype=np.float64, order="F")
 
     def do_setup(self, state: ControllerState) -> None:
         pose = self.p.pose
@@ -241,6 +254,7 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             cse.set_limits(self.p.speed, self.p.accel)
             self._q_commanded[:] = self._q_rad_buf
             self._q_ik_seed[:] = self._q_rad_buf
+            self._clamped = False
             self._initialized = True
 
         # CSE drives Cartesian path
@@ -275,24 +289,27 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
                 ratio = _max_vel_ratio_jit(ik_result.q, self._q_commanded)
 
                 if ratio > 1.0:
-                    # Scale all deltas proportionally
+                    # Scale all deltas proportionally to stay within joint velocity limits
                     for i in range(6):
                         self._q_commanded[i] += dq[i] / ratio
-                    cse.set_limits(max(0.01, self.p.speed / ratio), self.p.accel)
+                    self._clamped = True
+                elif self._clamped:
+                    # Exiting clamp — re-sync CSE to actual robot TCP so
+                    # there's no accumulated position gap to snap across
+                    PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
+                    cse.correct_position(self._fk_buf)
+                    self._q_ik_seed[:] = self._q_commanded
+                    self._clamped = False
                 else:
                     self._q_commanded[:] = ik_result.q
-                    cse.set_limits(self.p.speed, self.p.accel)
         else:
             # IK failed — graceful deceleration
             if not self._ik_stopping:
-                global _last_servo_ik_warn
-                now = time.monotonic()
-                if now - _last_servo_ik_warn > _IK_WARN_INTERVAL:
-                    logger.warning(
-                        "[SERVOL] IK failed — decelerating: pos=%s",
-                        smoothed_pose[:3, 3],
-                    )
-                    _last_servo_ik_warn = now
+                _ik_warn(
+                    logger,
+                    "[SERVOL] IK failed — decelerating: pos=%s",
+                    smoothed_pose[:3, 3],
+                )
                 cse.stop()
                 self._ik_stopping = True
 

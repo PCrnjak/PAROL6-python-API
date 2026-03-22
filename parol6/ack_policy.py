@@ -39,6 +39,7 @@ FIRE_AND_FORGET: set[CmdType] = {
     CmdType.SERVOL,
     CmdType.JOGJ,
     CmdType.JOGL,
+    CmdType.TELEPORT,
     CmdType.RESET_LOOP_STATS,
 }
 

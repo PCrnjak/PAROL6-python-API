@@ -20,7 +20,7 @@ logging.addLevelName(TRACE, "TRACE")
 
 # Command queue limits
 MAX_COMMAND_QUEUE_SIZE: int = 100
-MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "3"))
+MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "100"))
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
 
 # Serial transport defaults
@@ -83,7 +83,7 @@ STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
 
 # Status update/broadcast rates
 STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
-STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
+STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.5"))
 
 # Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
 if int(CONTROL_RATE_HZ) % int(STATUS_RATE_HZ) != 0:
@@ -92,6 +92,11 @@ if int(CONTROL_RATE_HZ) % int(STATUS_RATE_HZ) != 0:
         f"CONTROL_RATE_HZ ({CONTROL_RATE_HZ})"
     )
 STATUS_BROADCAST_INTERVAL: int = int(CONTROL_RATE_HZ) // int(STATUS_RATE_HZ)
+
+# Max ticks to hold MOVE at trajectory endpoint waiting for Position_in to converge.
+# At 100Hz control rate, 20 ticks = 200ms. If the robot hasn't reached the target
+# by then, the segment completes anyway to avoid blocking the pipeline.
+SETTLE_MAX_TICKS: int = int(os.getenv("PAROL6_SETTLE_MAX_TICKS", "20"))
 
 # Loop timing tuning - busy threshold before deadline to switch from sleep to busy-wait
 BUSY_THRESHOLD_MS: float = float(os.getenv("PAROL6_BUSY_THRESHOLD_MS", "1.0"))
@@ -560,40 +565,3 @@ IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
 # -----------------------------------------------------------------------------
 # Utility Functions
 # -----------------------------------------------------------------------------
-
-# Pre-allocated Jacobian buffer for zero-alloc hot path
-_jacob0_buf = np.zeros((6, 6), dtype=np.float64, order="F")
-
-
-def compute_cart_velocity_limited_joints(
-    q_current: NDArray,
-    dq: NDArray,
-    cart_vel_limit_m_s: float,
-) -> NDArray:
-    """
-    Compute joint velocity limits respecting Cartesian velocity constraint.
-
-    Uses Jacobian path-tangent method to compute per-joint velocity limits
-    that ensure TCP velocity along the direction to target stays within
-    the Cartesian velocity limit.
-
-    Args:
-        q_current: Current joint positions in radians
-        dq: Joint displacement vector (target - current)
-        cart_vel_limit_m_s: Cartesian velocity limit in m/s
-
-    Returns:
-        Per-joint velocity limits in rad/s
-    """
-    v_max_rad = LIMITS.joint.hard.velocity
-
-    PAROL6_ROBOT.robot.jacob0_into(q_current, _jacob0_buf)
-    J_lin = _jacob0_buf[:3, :]
-    cart_vel_per_scale = np.linalg.norm(J_lin @ dq)
-
-    if cart_vel_per_scale < 1e-9:
-        return v_max_rad.copy()
-
-    max_scale = cart_vel_limit_m_s / cart_vel_per_scale
-    v_max = np.minimum(np.abs(dq) * max_scale, v_max_rad)
-    return np.maximum(v_max, 1e-6)

@@ -16,7 +16,10 @@ import logging
 from collections import deque
 from typing import TYPE_CHECKING
 
+from pinokin import arrays_equal_n
+
 from parol6.commands.base import CommandBase, ExecutionStatusCode
+from parol6.config import SETTLE_MAX_TICKS
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
@@ -52,6 +55,8 @@ class SegmentPlayer:
         "_buffer",
         "_inline_cmd",
         "_inline_activated",
+        "_settling",
+        "_settle_ticks",
     )
 
     def __init__(self, planner: MotionPlanner) -> None:
@@ -61,6 +66,13 @@ class SegmentPlayer:
         self._buffer: deque[Segment] = deque()
         self._inline_cmd: CommandBase | None = None
         self._inline_activated: bool = False
+        self._settling: bool = False
+        self._settle_ticks: int = 0
+
+    @property
+    def active(self) -> bool:
+        """True if playing a segment or has buffered segments."""
+        return self._active is not None or bool(self._buffer)
 
     def tick(self, state: ControllerState) -> bool:
         """Execute one tick. Returns True if actively playing/executing.
@@ -94,10 +106,25 @@ class SegmentPlayer:
                     state.Position_out[:] = active.trajectory_steps[self._step]
                     state.Command_out = CommandCode.MOVE
                     self._step += 1
+                    self._settling = False
                     return True
-                # Segment complete — try next immediately
-                self._complete_segment(active, state)
-                continue
+                # All waypoints sent — hold MOVE at target until Position_in converges
+                target = active.trajectory_steps[-1]
+                if not self._settling:
+                    self._settling = True
+                    self._settle_ticks = 0
+                self._settle_ticks += 1
+                if (
+                    arrays_equal_n(state.Position_in[:6], target[:6])
+                    or self._settle_ticks > SETTLE_MAX_TICKS
+                ):
+                    self._settling = False
+                    self._complete_segment(active, state)
+                    continue
+                # Keep commanding the target so firmware continues tracking
+                state.Position_out[:] = target
+                state.Command_out = CommandCode.MOVE
+                return True
 
             # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
@@ -139,6 +166,10 @@ class SegmentPlayer:
         self._inline_activated = False
         state.executing_command_index = self._active.command_index
         state.action_state = ActionState.EXECUTING
+        # Populate action info for trajectory segments (inline segments set these later)
+        if isinstance(self._active, TrajectorySegment):
+            state.action_current = self._active.command_name
+            state.action_params = self._active.action_params
 
     def _tick_inline(self, seg: InlineSegment, state: ControllerState) -> bool | None:
         """Tick an inline command. Returns True (executing), False (failed), or None (completed)."""
@@ -228,8 +259,3 @@ class SegmentPlayer:
             pass
         state.queued_segments = 0
         state.queued_duration = 0.0
-
-    @property
-    def active(self) -> bool:
-        """True if playing a segment or has buffered segments."""
-        return self._active is not None or len(self._buffer) > 0

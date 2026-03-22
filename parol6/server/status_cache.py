@@ -25,12 +25,15 @@ from parol6.server.ik_layout import (
     IK_INPUT_Q_OFFSET,
     IK_INPUT_SIZE,
     IK_INPUT_T_OFFSET,
+    IK_INPUT_TOOL_OFFSET,
     IK_OUTPUT_SIZE,
     SHM_EXTRA_KWARGS,
     unregister_shm,
 )
 from parol6.server.ik_worker import ik_enablement_worker_main
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
+from parol6.tools import get_tool_transform
+from parol6 import config as _cfg
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +143,7 @@ class StatusCache:
 
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
         self._last_tool_name: str = "NONE"  # Track tool changes
+        self._last_tool_variant: str = ""  # Track variant changes
         self._last_tool_positions: tuple[float, ...] = ()  # Track tool DOF changes
 
         # Action tracking fields
@@ -176,7 +180,6 @@ class StatusCache:
         self._prev_tcp_pos: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_initialized: bool = False
-        from parol6 import config as _cfg
 
         self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
 
@@ -229,6 +232,15 @@ class StatusCache:
             count=16,
             offset=IK_INPUT_T_OFFSET,
         )
+        # Tool transform view for syncing tool changes to IK worker
+        self._ik_input_tool_view = np.frombuffer(
+            input_buf,
+            dtype=np.float64,
+            count=16,
+            offset=IK_INPUT_TOOL_OFFSET,
+        )
+        # Initialize to identity (no tool)
+        self._ik_input_tool_view.reshape(4, 4)[:] = np.eye(4)
 
         # Zero-alloc output view for numba reader
         self._ik_output_arr = np.frombuffer(output_buf, dtype=np.uint8)
@@ -275,6 +287,7 @@ class StatusCache:
         # Release numpy views before closing shared memory
         del self._ik_input_q_view
         del self._ik_input_T_view
+        del self._ik_input_tool_view
         del self._ik_output_arr
 
         # Release memoryviews
@@ -350,7 +363,10 @@ class StatusCache:
             self.io,
             self.speeds,
         )
-        tool_changed = state.current_tool != self._last_tool_name
+        tool_changed = (
+            state.current_tool != self._last_tool_name
+            or state.current_tool_variant != self._last_tool_variant
+        )
 
         # Convert speeds from steps/s to rad/s when they change
         if spd_changed:
@@ -358,9 +374,15 @@ class StatusCache:
 
         if tool_changed:
             self._last_tool_name = state.current_tool
+            self._last_tool_variant = state.current_tool_variant
             self._tcp_pos_initialized = (
                 False  # avoid speed spike from TCP offset change
             )
+            # Sync tool transform to IK worker
+            T_tool = get_tool_transform(
+                state.current_tool, variant_key=state.current_tool_variant
+            )
+            self._ik_input_tool_view.reshape(4, 4)[:] = T_tool
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)

@@ -10,7 +10,6 @@ since they're already time-optimal (TOPPRA/RUCKIG) or validated (QUINTIC/TRAPEZO
 """
 
 import logging
-import threading
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -99,7 +98,6 @@ class RuckigExecutorBase(ABC):
     Abstract base class for Ruckig-based streaming executors.
 
     Provides common infrastructure for jerk-limited motion execution:
-    - Thread-safe Ruckig state management
     - Velocity/acceleration limit scaling
     - Common tick() error handling
     - Graceful stop implementation
@@ -112,7 +110,6 @@ class RuckigExecutorBase(ABC):
     """
 
     def __init__(self, num_dofs: int, dt: float = INTERVAL_S):
-        self._lock = threading.Lock()
         self.num_dofs = num_dofs
         self.dt = dt
         self.ruckig = Ruckig(num_dofs, dt)
@@ -123,8 +120,9 @@ class RuckigExecutorBase(ABC):
         self._acc_scale: float = 1.0
 
         # Pre-allocated output buffers (reused every tick to avoid allocations)
-        self._pos_out: list[float] = [0.0] * num_dofs
-        self._vel_out: list[float] = [0.0] * num_dofs
+        self._pos_out = np.zeros(num_dofs)
+        self._vel_out = np.zeros(num_dofs)
+        self._zeros_np = np.zeros(num_dofs)
         self._zeros: list[float] = [0.0] * num_dofs
 
         self._init_limits()
@@ -151,7 +149,7 @@ class RuckigExecutorBase(ABC):
         self._acc_scale = max(0.01, min(1.0, accel_frac))
         self._apply_limits()
 
-    def _tick_ruckig(self) -> tuple[Result, list[float], list[float]]:
+    def _tick_ruckig(self) -> tuple[Result, np.ndarray, np.ndarray]:
         """
         Common Ruckig update logic.
 
@@ -171,11 +169,10 @@ class RuckigExecutorBase(ABC):
 
     def stop(self) -> None:
         """Request graceful stop - decelerate to zero velocity."""
-        with self._lock:
-            self.inp.control_interface = ControlInterface.Velocity
-            for i in range(self.num_dofs):
-                self.inp.target_velocity[i] = 0.0
-                self.inp.target_acceleration[i] = 0.0
+        self.inp.control_interface = ControlInterface.Velocity
+        for i in range(self.num_dofs):
+            self.inp.target_velocity[i] = 0.0
+            self.inp.target_acceleration[i] = 0.0
 
 
 # =============================================================================
@@ -278,15 +275,12 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             pos: Current joint positions in radians
         """
-        with self._lock:
-            if not self.active:
-                self._sync_pos_buf[:] = pos
-                self.inp.current_position = self._sync_pos_buf
-                self.inp.current_velocity = (
-                    self._zeros
-                )  # Constant zeros buffer from base
-                self.inp.current_acceleration = self._zeros
-                self.inp.target_position = self._sync_pos_buf
+        if not self.active:
+            self._sync_pos_buf[:] = pos
+            self.inp.current_position = self._sync_pos_buf
+            self.inp.current_velocity = self._zeros
+            self.inp.current_acceleration = self._zeros
+            self.inp.target_position = self._sync_pos_buf
 
     def set_position_target(self, q_target: list[float]) -> None:
         """
@@ -299,20 +293,19 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             q_target: Target joint positions in radians
         """
-        with self._lock:
-            # Apply Cartesian velocity limiting if enabled
-            if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
-                self._apply_cart_velocity_limit(q_target)
-            else:
-                # Reset to hardware limits (reuse buffer)
-                self._max_vel_buf[:] = self._hardware_v_max
-                self.inp.max_velocity = self._max_vel_buf
+        # Apply Cartesian velocity limiting if enabled
+        if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
+            self._apply_cart_velocity_limit(q_target)
+        else:
+            # Reset to hardware limits (reuse buffer)
+            self._max_vel_buf[:] = self._hardware_v_max
+            self.inp.max_velocity = self._max_vel_buf
 
-            self.inp.control_interface = ControlInterface.Position
-            self._sync_pos_buf[:] = q_target
-            self.inp.target_position = self._sync_pos_buf
-            self.inp.target_velocity = self._zeros  # Stop at target
-            self.active = True
+        self.inp.control_interface = ControlInterface.Position
+        self._sync_pos_buf[:] = q_target
+        self.inp.target_position = self._sync_pos_buf
+        self.inp.target_velocity = self._zeros  # Stop at target
+        self.active = True
 
     def set_jog_velocity(self, joint_velocities: NDArray[np.float64]) -> None:
         """
@@ -324,19 +317,18 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             joint_velocities: Desired velocity for each joint in rad/s (signed)
         """
-        with self._lock:
-            # Use jog-specific velocity limits (~80% of hardware limits) - reuse buffers
-            for i in range(self.num_dofs):
-                self._max_vel_buf[i] = self._jog_v_max[i] * self._vel_scale
-                self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
-            self.inp.max_velocity = self._max_vel_buf
-            self.inp.max_acceleration = self._max_acc_buf
+        # Use jog-specific velocity limits (~80% of hardware limits) - reuse buffers
+        for i in range(self.num_dofs):
+            self._max_vel_buf[i] = self._jog_v_max[i] * self._vel_scale
+            self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
+        self.inp.max_velocity = self._max_vel_buf
+        self.inp.max_acceleration = self._max_acc_buf
 
-            self.inp.control_interface = ControlInterface.Velocity
-            self._target_vel_buf[:] = joint_velocities
-            self.inp.target_velocity = self._target_vel_buf
-            self.inp.target_acceleration = self._zeros
-            self.active = True
+        self.inp.control_interface = ControlInterface.Velocity
+        self._target_vel_buf[:] = joint_velocities
+        self.inp.target_velocity = self._target_vel_buf
+        self.inp.target_acceleration = self._zeros
+        self.active = True
 
     def _apply_cart_velocity_limit(self, q_target: list[float]) -> None:
         """
@@ -379,11 +371,11 @@ class StreamingExecutor(RuckigExecutorBase):
             self._max_vel_buf[:] = self._hardware_v_max
             self.inp.max_velocity = self._max_vel_buf
 
-    def tick(self) -> tuple[list[float], list[float], bool]:
+    def tick(self) -> tuple[np.ndarray, np.ndarray, bool]:
         """
         Execute one control cycle.
 
-        Warning: Returned lists are reused across calls. Copy if needed across ticks.
+        Warning: Returned arrays are reused across calls. Copy if needed across ticks.
 
         Returns:
             Tuple of (position, velocity, finished):
@@ -391,35 +383,32 @@ class StreamingExecutor(RuckigExecutorBase):
             - velocity: Current commanded velocity in rad/s
             - finished: True if target reached (position mode) or velocity reached (velocity mode)
         """
-        with self._lock:
-            if not self.active:
-                # Sync _pos_out with current position for inactive state
-                self._pos_out[:] = self.inp.current_position
-                return self._pos_out, self._zeros, True
+        if not self.active:
+            # Sync _pos_out with current position for inactive state
+            self._pos_out[:] = self.inp.current_position
+            return self._pos_out, self._zeros_np, True
 
-            result, pos, vel = self._tick_ruckig()
+        result, pos, vel = self._tick_ruckig()
 
-            if result in _RUCKIG_ERRORS:
-                return self._pos_out, self._zeros, True
+        if result in _RUCKIG_ERRORS:
+            return self._pos_out, self._zeros_np, True
 
-            # pos/vel are pre-allocated buffers from _tick_ruckig
-            return pos, vel, result == Result.Finished
+        # pos/vel are pre-allocated buffers from _tick_ruckig
+        return pos, vel, result == Result.Finished
 
     def reset_limits(self) -> None:
         """Reset velocity, acceleration, and jerk limits to hardware defaults."""
-        with self._lock:
-            self._vel_scale = 1.0
-            self._acc_scale = 1.0
-            self._apply_limits()
+        self._vel_scale = 1.0
+        self._acc_scale = 1.0
+        self._apply_limits()
 
     def reset(self) -> None:
         """Reset executor state."""
-        with self._lock:
-            self._vel_scale = 1.0
-            self._acc_scale = 1.0
-            self.active = False
-            self._cart_vel_limit = None
-            self._init_state()
+        self._vel_scale = 1.0
+        self._acc_scale = 1.0
+        self.active = False
+        self._cart_vel_limit = None
+        self._init_state()
 
     @property
     def cart_vel_limit(self) -> float | None:
@@ -488,14 +477,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
     def _init_limits(self) -> None:
         """Initialize Cartesian velocity/acceleration/jerk limits from centralized config."""
+        # Use jog limits for streaming (servo/jog share the same executor)
         # Linear limits (SI: m/s, m/s², m/s³)
-        self._v_lin_max = LIMITS.cart.hard.velocity.linear
-        self._a_lin_max = LIMITS.cart.hard.acceleration.linear
-        self._j_lin_max = LIMITS.cart.hard.jerk.linear
+        self._v_lin_max = LIMITS.cart.jog.velocity.linear
+        self._a_lin_max = LIMITS.cart.jog.acceleration.linear
+        self._j_lin_max = LIMITS.cart.jog.jerk.linear
         # Angular limits (SI: rad/s, rad/s², rad/s³)
-        self._v_ang_max = LIMITS.cart.hard.velocity.angular
-        self._a_ang_max = LIMITS.cart.hard.acceleration.angular
-        self._j_ang_max = LIMITS.cart.hard.jerk.angular
+        self._v_ang_max = LIMITS.cart.jog.velocity.angular
+        self._a_ang_max = LIMITS.cart.jog.acceleration.angular
+        self._j_ang_max = LIMITS.cart.jog.jerk.angular
 
     def _init_state(self) -> None:
         """Initialize Ruckig input parameters."""
@@ -537,16 +527,13 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         Args:
             current_pose: Current TCP pose as 4x4 SE3 matrix
         """
-        with self._lock:
-            self.reference_pose = (
-                current_pose.copy()
-            )  # Copy to avoid aliasing with cached FK
-            # Reset Ruckig state to origin (relative to reference)
-            self.inp.current_position = self._zeros
-            self.inp.current_velocity = self._zeros
-            self.inp.current_acceleration = self._zeros
-            self.inp.target_position = self._zeros
-            self.active = False
+        self.reference_pose = current_pose.copy()  # avoid aliasing with cached FK
+        # Reset Ruckig state to origin (relative to reference)
+        self.inp.current_position = self._zeros
+        self.inp.current_velocity = self._zeros
+        self.inp.current_acceleration = self._zeros
+        self.inp.target_position = self._zeros
+        self.active = False
 
     def _pose_to_tangent(self, pose: np.ndarray) -> np.ndarray:
         """
@@ -577,7 +564,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         )
         return self._tangent_buf
 
-    def _tangent_to_pose(self, tangent: list[float]) -> np.ndarray:
+    def _tangent_to_pose(self, tangent: np.ndarray) -> np.ndarray:
         """
         Convert 6D tangent vector back to SE3 pose.
 
@@ -612,15 +599,14 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         Args:
             target_pose: Target TCP pose as SE3
         """
-        with self._lock:
-            target_tangent = self._pose_to_tangent(target_pose)
+        target_tangent = self._pose_to_tangent(target_pose)
 
-            self.inp.control_interface = ControlInterface.Position
-            self.inp.target_position = target_tangent
-            self.inp.target_velocity = self._zeros  # Stop at target
+        self.inp.control_interface = ControlInterface.Position
+        self.inp.target_position = target_tangent
+        self.inp.target_velocity = self._zeros  # Stop at target
 
-            self._apply_limits()
-            self.active = True
+        self._apply_limits()
+        self.active = True
 
     def set_jog_velocity_1dof(
         self, axis: int, velocity: float, is_rotation: bool
@@ -639,21 +625,20 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             velocity: Target velocity (m/s for linear, rad/s for rotation)
             is_rotation: True for rotation axes (RX, RY, RZ)
         """
-        with self._lock:
-            # Update target velocity in-place (zero allocation)
-            self._target_velocity_arr.fill(0.0)
-            if is_rotation:
-                self._target_velocity_arr[3 + axis] = velocity
-            else:
-                self._target_velocity_arr[axis] = velocity
+        # Update target velocity in-place (zero allocation)
+        self._target_velocity_arr.fill(0.0)
+        if is_rotation:
+            self._target_velocity_arr[3 + axis] = velocity
+        else:
+            self._target_velocity_arr[axis] = velocity
 
-            self.inp.control_interface = ControlInterface.Velocity
-            self.inp.target_velocity = self._target_velocity_arr
-            self._target_acceleration_arr.fill(0.0)
-            self.inp.target_acceleration = self._target_acceleration_arr
+        self.inp.control_interface = ControlInterface.Velocity
+        self.inp.target_velocity = self._target_velocity_arr
+        self._target_acceleration_arr.fill(0.0)
+        self.inp.target_acceleration = self._target_acceleration_arr
 
-            self._apply_limits()
-            self.active = True
+        self._apply_limits()
+        self.active = True
 
     def set_jog_velocity_1dof_wrf(
         self,
@@ -672,35 +657,32 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             velocity: Target velocity (m/s for linear, rad/s for rotation)
             is_rotation: True for rotation axes (RX, RY, RZ)
         """
-        with self._lock:
-            if self.reference_pose is None:
-                logger.warning(
-                    "set_jog_velocity_1dof_wrf called without reference_pose"
-                )
-                return
+        if self.reference_pose is None:
+            logger.warning("set_jog_velocity_1dof_wrf called without reference_pose")
+            return
 
-            # Reuse pre-allocated buffer for world velocity
-            self._world_vel_buf.fill(0.0)
-            if is_rotation:
-                self._world_vel_buf[3 + axis] = velocity
-            else:
-                self._world_vel_buf[axis] = velocity
+        # Reuse pre-allocated buffer for world velocity
+        self._world_vel_buf.fill(0.0)
+        if is_rotation:
+            self._world_vel_buf[3 + axis] = velocity
+        else:
+            self._world_vel_buf[axis] = velocity
 
-            # Transform from world frame to body frame (tangent space)
-            # Body velocity = R^T @ world velocity
-            R = self.reference_pose[:3, :3]
+        # Transform from world frame to body frame (tangent space)
+        # Body velocity = R^T @ world velocity
+        R = self.reference_pose[:3, :3]
 
-            # JIT-compiled transform into target buffer (zero allocation)
-            np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
-            np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
+        # JIT-compiled transform into target buffer (zero allocation)
+        np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
+        np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
 
-            self.inp.control_interface = ControlInterface.Velocity
-            self.inp.target_velocity = self._target_velocity_arr
-            self._target_acceleration_arr.fill(0.0)
-            self.inp.target_acceleration = self._target_acceleration_arr
+        self.inp.control_interface = ControlInterface.Velocity
+        self.inp.target_velocity = self._target_velocity_arr
+        self._target_acceleration_arr.fill(0.0)
+        self.inp.target_acceleration = self._target_acceleration_arr
 
-            self._apply_limits()
-            self.active = True
+        self._apply_limits()
+        self.active = True
 
     def tick(self) -> tuple[np.ndarray, NDArray[np.float64], bool]:
         """
@@ -716,42 +698,50 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             - finished: True if target reached (position mode) or
                        target velocity reached (velocity mode)
         """
-        with self._lock:
-            if not self.active or self.reference_pose is None:
-                self._vel_np_buf.fill(0.0)
-                return (
-                    self.reference_pose
-                    if self.reference_pose is not None
-                    else _IDENTITY_SE3,
-                    self._vel_np_buf,
-                    True,
-                )
+        if not self.active or self.reference_pose is None:
+            self._vel_np_buf.fill(0.0)
+            return (
+                self.reference_pose
+                if self.reference_pose is not None
+                else _IDENTITY_SE3,
+                self._vel_np_buf,
+                True,
+            )
 
-            result, pos, vel = self._tick_ruckig()
+        result, pos, vel = self._tick_ruckig()
 
-            if result in _RUCKIG_ERRORS:
-                self._vel_np_buf.fill(0.0)
-                return (
-                    self.reference_pose
-                    if self.reference_pose is not None
-                    else _IDENTITY_SE3,
-                    self._vel_np_buf,
-                    True,
-                )
+        if result in _RUCKIG_ERRORS:
+            self._vel_np_buf.fill(0.0)
+            return (
+                self.reference_pose
+                if self.reference_pose is not None
+                else _IDENTITY_SE3,
+                self._vel_np_buf,
+                True,
+            )
 
-            # Convert tangent back to pose
-            smoothed_pose = self._tangent_to_pose(pos)
-            # Copy velocity into pre-allocated buffer
-            self._vel_np_buf[:] = vel
+        # Convert tangent back to pose
+        smoothed_pose = self._tangent_to_pose(pos)
+        # Copy velocity into pre-allocated buffer
+        self._vel_np_buf[:] = vel
 
-            # Don't auto-deactivate in velocity mode - caller controls via set_jog_velocity(0)
-            return smoothed_pose, self._vel_np_buf, result == Result.Finished
+        # Don't auto-deactivate in velocity mode - caller controls via set_jog_velocity(0)
+        return smoothed_pose, self._vel_np_buf, result == Result.Finished
+
+    def correct_position(self, actual_pose: np.ndarray) -> None:
+        """Correct CSE position to match actual TCP after joint-space clamping.
+
+        Only updates position — velocity and acceleration are left as-is
+        since the robot is still moving.  Ruckig handles the slight
+        state inconsistency and re-plans smoothly.
+        """
+        self._pose_to_tangent(actual_pose)
+        self.inp.current_position = self._tangent_buf
 
     def reset(self) -> None:
         """Reset executor state."""
-        with self._lock:
-            self._vel_scale = 1.0
-            self._acc_scale = 1.0
-            self.reference_pose = None
-            self.active = False
-            self._init_state()
+        self._vel_scale = 1.0
+        self._acc_scale = 1.0
+        self.reference_pose = None
+        self.active = False
+        self._init_state()

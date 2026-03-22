@@ -89,6 +89,13 @@ class ToolConfig:
         """Create a simulator for this tool type. Returns None if no simulation needed."""
         return None
 
+    def estimate_duration(self, action: str, params: list) -> float:
+        """Estimate how long a tool action takes, in seconds.
+
+        Override in subclasses with physical models. Returns 0.0 by default.
+        """
+        return 0.0
+
 
 # ---------------------------------------------------------------------------
 # Gripper configs
@@ -100,7 +107,7 @@ class PneumaticGripperConfig(ToolConfig):
     """Configuration for pneumatic grippers controlled via digital I/O."""
 
     io_port: int = 1
-    valid_actions: tuple[str, ...] = ("open", "close", "move")
+    valid_actions: tuple[str, ...] = ("open", "close", "move", "set_position")
 
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         port_idx = 2 if self.io_port == 1 else 3
@@ -122,12 +129,18 @@ class PneumaticGripperConfig(ToolConfig):
 
         if action not in self.valid_actions:
             raise ValueError(f"Invalid action '{action}' for pneumatic gripper")
-        if action == "move":
+        if action in ("move", "set_position"):
             position = float(params[0]) if params and len(params) > 0 else 0.0
             action = "open" if position < 0.5 else "close"
         return PneumaticGripperCommand.from_tool_action(
             action=action, port=self.io_port
         )
+
+    def estimate_duration(self, action: str, params: list) -> float:
+        for m in self.motions:
+            if isinstance(m, LinearMotion) and m.estimated_speed_m_s:
+                return m.travel_m / m.estimated_speed_m_s
+        return 0.0
 
     def create_simulator(self) -> PneumaticToolSimulator:
         return PneumaticToolSimulator()
@@ -137,10 +150,16 @@ class PneumaticGripperConfig(ToolConfig):
 class ElectricGripperConfig(ToolConfig):
     """Configuration for electric grippers controlled via the serial gripper bus."""
 
+    current_range: tuple[int, int] = (0, 0)
     position_range: tuple[float, float] = (0.0, 1.0)
     speed_range: tuple[float, float] = (0.0, 1.0)
-    current_range: tuple[int, int] = (100, 1000)
-    valid_actions: tuple[str, ...] = ("move", "calibrate")
+    valid_actions: tuple[str, ...] = (
+        "move",
+        "open",
+        "close",
+        "set_position",
+        "calibrate",
+    )
 
     # Motor controller / mechanical properties
     encoder_cpr: int = 16_384  # encoder counts per revolution
@@ -154,13 +173,7 @@ class ElectricGripperConfig(ToolConfig):
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         current_ma = float(hw.Gripper_data_in[3])
         out.positions = (float(hw.Gripper_data_in[1]) / 255.0,)
-        if self.motor_kt > 0 and self.gear_pd_mm > 0:
-            torque_nm = self.motor_kt * (current_ma / 1000.0)
-            gear_radius_m = self.gear_pd_mm / 2000.0
-            force_n = torque_nm / gear_radius_m
-        else:
-            force_n = 0.0
-        out.channels = (force_n, current_ma)
+        out.channels = (current_ma,)
         out.part_detected = bool(hw.Gripper_data_in[5])
         out.engaged = bool(hw.Gripper_data_in[2])  # speed > 0
         out.state = ToolState.IDLE
@@ -170,12 +183,59 @@ class ElectricGripperConfig(ToolConfig):
 
         if action not in self.valid_actions:
             raise ValueError(f"Invalid action '{action}' for electric gripper")
+        # Translate Python-level method names to wire-level "move" action
+        if action == "open":
+            params = [0.0] + params[1:]
+            action = "move"
+        elif action == "close":
+            params = [1.0] + params[1:]
+            action = "move"
+        elif action == "set_position":
+            action = "move"
         position = float(params[0]) if len(params) > 0 else 0.0
         speed = float(params[1]) if len(params) > 1 else 0.5
         current = int(params[2]) if len(params) > 2 else 500
         return ElectricGripperCommand.from_tool_action(
             action=action, position=position, speed=speed, current=current
         )
+
+    def estimate_duration(self, action: str, params: list) -> float:
+        # Resolve position delta from action + params (same logic as create_command)
+        if action in ("open", "close"):
+            target = 0.0 if action == "open" else 1.0
+            speed = float(params[0]) if len(params) > 0 else 0.5
+        elif action in ("move", "set_position"):
+            target = float(params[0]) if len(params) > 0 else 0.0
+            speed = float(params[1]) if len(params) > 1 else 0.5
+        else:
+            return 0.0
+
+        # Assume worst-case full travel (0→target or 1→target)
+        pos_delta = max(target, 1.0 - target)
+        if pos_delta < 1e-6:
+            return 0.0
+
+        # Mirror the simulator's speed model
+        speed_byte = max(1, int(round(speed * 255)))
+        min_tps, max_tps = self.firmware_speed_range_tps
+        velocity_tps = min_tps + (speed_byte / 255.0) * (max_tps - min_tps)
+
+        # Compute tick_range from mechanical params
+        travel_mm = 0.0
+        for m in self.motions:
+            if isinstance(m, LinearMotion):
+                travel_mm = m.travel_m * 1000.0
+                break
+        if travel_mm == 0.0:
+            return 0.0
+        tick_range = (travel_mm / (math.pi * self.gear_pd_mm)) * self.encoder_cpr
+
+        # Normalized velocity in position-byte units per second
+        norm_vel = (velocity_tps / tick_range) * 255.0
+        if norm_vel < 1e-9:
+            return 0.0
+
+        return (pos_delta * 255.0) / norm_vel
 
     def create_simulator(self) -> ElectricGripperSimulator:
         return ElectricGripperSimulator()
@@ -334,7 +394,7 @@ def get_tool_transform(
     cfg = _TOOL_REGISTRY.get(tool_name)
     if cfg is None:
         raise ValueError(f"Unknown tool '{tool_name}'. Available: {list_tools()}")
-    if variant_key is not None:
+    if variant_key:
         for v in cfg.variants:
             if v.key == variant_key and v.tcp_origin is not None:
                 return _make_tcp_transform(*v.tcp_origin)
@@ -497,7 +557,7 @@ register_tool(
         ),
         position_range=(0.0, 1.0),
         speed_range=(0.0, 1.0),
-        current_range=(100, 1000),
+        current_range=(100, 1300),
     ),
 )
 
@@ -576,7 +636,7 @@ register_tool(
         ),
         position_range=(0.0, 1.0),
         speed_range=(0.0, 1.0),
-        current_range=(100, 1000),
+        current_range=(100, 2800),
         gear_pd_mm=16.67,  # 32P 21T gear: PD = 21/32" = 16.67mm
         firmware_speed_range_tps=(500, 60_000),  # StepFOC velocity range
     ),

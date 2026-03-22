@@ -46,7 +46,6 @@ from parol6.protocol.wire import (
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_flat_mm, get_fkine_se3
 from parol6.server.status_cache import get_cache
-from parol6.server.transports import is_simulation_mode
 from parol6.tools import list_tools
 
 if TYPE_CHECKING:
@@ -184,11 +183,9 @@ class PingCommand(QueryCommand[PingCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
-        sim = is_simulation_mode()
-        if sim:
-            return pack_response(PingResultStruct(hardware_connected=0))
-        hw = 1 if get_cache().age_s() <= cfg.STATUS_STALE_S else 0
-        return pack_response(PingResultStruct(hardware_connected=hw))
+        return pack_response(
+            PingResultStruct(hardware_connected=int(state.hardware_connected))
+        )
 
 
 @register_command(CmdType.GET_TOOL)

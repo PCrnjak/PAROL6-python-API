@@ -77,6 +77,7 @@ from ..protocol.wire import (
     SetProfileCmd,
     SetToolCmd,
     SimulatorCmd,
+    TeleportCmd,
     SpeedsResultStruct,
     StatusBuffer,
     StatusResultStruct,
@@ -274,6 +275,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         # Active tool key (set by set_tool)
         self._active_tool_key: str | None = None
+        self._active_variant_key: str = ""
 
         # Bound tool specs (populated by Robot.create_async_client)
         self._bound_tools: dict[str, ToolSpec] = {}
@@ -500,7 +502,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         Returns:
             int (command index ≥ 0) for ACK'd queued commands, -1 on failure,
-            bool for system/fire-and-forget/query commands.
+            1 for system/fire-and-forget/query success, 0 on failure.
         """
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -508,15 +510,15 @@ class AsyncRobotClient(_RobotClientABC):
         # Get command type from struct's tag
         cmd_type = STRUCT_TO_CMDTYPE.get(type(cmd))
         if cmd_type is None:
-            return False
+            return 0
 
         # System commands: need stable bytes across await
         if cmd_type in SYSTEM_CMD_TYPES:
             try:
                 await self._request_ok_raw(encode_command(cmd), self.timeout)
-                return True
+                return 1
             except TimeoutError:
-                return False
+                return 0
 
         # Motion and other non-query commands
         if cmd_type not in QUERY_CMD_TYPES:
@@ -530,12 +532,12 @@ class AsyncRobotClient(_RobotClientABC):
             # Fire-and-forget: reuse pre-allocated buffer (sendto copies)
             encode_command_into(cmd, self._tx_buf)
             self._transport.sendto(self._tx_buf)
-            return True
+            return 1
 
         # Queries via _send: fire-and-forget
         encode_command_into(cmd, self._tx_buf)
         self._transport.sendto(self._tx_buf)
-        return True
+        return 1
 
     async def _request(self, cmd: msgspec.Struct) -> Response | None:
         """Send a query command and wait for a typed response.
@@ -628,7 +630,7 @@ class AsyncRobotClient(_RobotClientABC):
     # --------------- Motion / Control ---------------
 
     async def home(
-        self, wait: bool = False, timeout: float = 10.0, **wait_kwargs: Any
+        self, wait: bool = False, timeout: float = 60.0, **wait_kwargs: Any
     ) -> int:
         """Home the robot to its home position.
 
@@ -646,7 +648,9 @@ class AsyncRobotClient(_RobotClientABC):
         index = await self._send(HomeCmd())
         assert isinstance(index, int)
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            ok = await self.wait_command_complete(index, timeout=timeout)
+            if not ok:
+                raise TimeoutError(f"home() timed out after {timeout}s")
         return index
 
     async def resume(self) -> int:
@@ -658,7 +662,7 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.resume()
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return await self._send(ResumeCmd())
 
@@ -671,7 +675,7 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.halt()
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return await self._send(HaltCmd())
 
@@ -687,7 +691,7 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.simulator_on()
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return await self._send(SimulatorCmd(on=True))
 
@@ -700,9 +704,26 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.simulator_off()
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
         """
         return await self._send(SimulatorCmd(on=False))
+
+    async def teleport(
+        self,
+        angles_deg: list[float],
+        tool_positions: list[float] | None = None,
+    ) -> int:
+        """Instantly set joint angles and optional tool positions (simulator only).
+
+        Category: Control
+
+        Example:
+            rbt.teleport([0, -90, 0, 0, 0, 0])
+            rbt.teleport([0, -90, 0, 0, 0, 0], tool_positions=[1.0])
+        """
+        return await self._send(
+            TeleportCmd(angles=angles_deg, tool_positions=tool_positions)
+        )
 
     async def set_serial_port(self, port_str: str) -> int:
         """Set the serial port for robot hardware communication.
@@ -716,7 +737,7 @@ class AsyncRobotClient(_RobotClientABC):
             port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
 
         Returns:
-            True if the command was acknowledged successfully.
+            1 if acknowledged, 0 on failure.
 
         Raises:
             ValueError: If port_str is empty.
@@ -828,7 +849,7 @@ class AsyncRobotClient(_RobotClientABC):
         """
         return await self._send(ResetLoopStatsCmd())
 
-    async def set_tool(self, tool_name: str) -> int:
+    async def set_tool(self, tool_name: str, variant_key: str = "") -> int:
         """Set the current end-effector tool configuration.
 
         Category: Configuration
@@ -838,12 +859,16 @@ class AsyncRobotClient(_RobotClientABC):
 
         Args:
             tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
+            variant_key: Optional variant within the tool type.
 
         Returns:
-            True if successful
+            Command index (>= 0) if queued, 0 on failure.
         """
         self._active_tool_key = tool_name.upper()
-        return await self._send(SetToolCmd(tool_name=self._active_tool_key))
+        self._active_variant_key = variant_key
+        return await self._send(
+            SetToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
+        )
 
     async def set_profile(self, profile: str) -> int:
         """Set the motion profile for all moves.

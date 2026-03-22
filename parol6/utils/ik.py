@@ -18,18 +18,24 @@ from parol6.config import IK_SAFETY_MARGINS_RAD
 
 logger = logging.getLogger(__name__)
 
-# Rate limiting for IK warnings (avoid log spam at 250Hz)
-_ik_last_warn_time: float = 0.0
-_IK_WARN_INTERVAL: float = 1.0  # Log at most once per second
+
+class RateLimitedWarning:
+    """Rate-limited warning logger to avoid spam on hot paths."""
+
+    __slots__ = ("_interval", "_last")
+
+    def __init__(self, interval: float = 1.0):
+        self._interval = interval
+        self._last: float = 0.0
+
+    def __call__(self, log: logging.Logger, msg: str, *args: object) -> None:
+        now = time.monotonic()
+        if now - self._last > self._interval:
+            log.warning(msg, *args)
+            self._last = now
 
 
-def _rate_limited_warning(msg: str) -> None:
-    """Log a warning with rate limiting to avoid spam."""
-    global _ik_last_warn_time
-    now = time.monotonic()
-    if now - _ik_last_warn_time > _IK_WARN_INTERVAL:
-        logger.warning(msg)
-        _ik_last_warn_time = now
+_ik_warn = RateLimitedWarning()
 
 
 @dataclass
@@ -196,7 +202,7 @@ def solve_ik(
                     f"J{idx + 1} would leave safe zone (buffer violated)"
                 )
             if not quiet_logging:
-                _rate_limited_warning(result.violations)
+                _ik_warn(logger, result.violations)
 
     if result.success:
         if not check_limits(

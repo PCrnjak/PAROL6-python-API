@@ -25,15 +25,15 @@ class TestProfileCommands:
     def test_set_and_get_profile_roundtrip(self, client, server_proc):
         """Test setting a profile and getting it back."""
         for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            assert client.set_profile(profile) is True
+            assert client.set_profile(profile) > 0
             assert client.get_profile() == profile
 
     def test_set_profile_case_insensitive(self, client, server_proc):
         """Test that profile names are case-insensitive."""
-        assert client.set_profile("linear") is True
+        assert client.set_profile("linear") > 0
         assert client.get_profile() == "LINEAR"
 
-        assert client.set_profile("Quintic") is True
+        assert client.set_profile("Quintic") > 0
         assert client.get_profile() == "QUINTIC"
 
 
@@ -50,7 +50,7 @@ class TestProfileMotionBehavior:
             client.home(wait=True)
 
             # Set profile and execute move
-            assert client.set_profile(profile) is True
+            assert client.set_profile(profile) > 0
             result = client.moveJ(target_angles, duration=2.0)
             assert result >= 0
             assert client.wait_motion_complete(timeout=10.0)
@@ -91,7 +91,7 @@ class TestProfileMotionBehavior:
             client.home(wait=True)
 
             # Set profile and execute move
-            assert client.set_profile(profile) is True
+            assert client.set_profile(profile) > 0
             result = client.moveL(target_pose, duration=2.0)
             assert result >= 0
             assert client.wait_motion_complete(timeout=10.0)
@@ -126,7 +126,7 @@ class TestServoCartesian:
                 start_pose[5],
             ]
             result = client.servoL(target, speed=0.5)
-            assert result is True
+            assert result > 0
             time.sleep(0.1)
 
         assert client.wait_motion_complete(timeout=10.0)
@@ -148,7 +148,7 @@ class TestCartesianPrecision:
         LINEAR uses uniform time distribution, which may require longer durations.
         """
         client.home(wait=True)
-        assert client.set_profile(profile) is True
+        assert client.set_profile(profile) > 0
 
         # Get current pose after homing to build moves relative to it
         start_pose = client.get_pose_rpy()
@@ -259,7 +259,7 @@ class TestTCPPathAccuracy:
         lie within tolerance of the expected straight-line path.
         """
         client.home(wait=True)
-        assert client.set_profile(profile) is True
+        assert client.set_profile(profile) > 0
 
         start_pose = client.get_pose_rpy()
         assert start_pose is not None

@@ -98,10 +98,10 @@ class TestResetIntegration:
     def test_reset_command_succeeds(self, client, server_proc):
         """Test reset command executes successfully via client."""
         result = client.reset()
-        assert result is True
+        assert result > 0
 
     def test_reset_multiple_times(self, client, server_proc):
         """Test reset can be called multiple times."""
         for _ in range(3):
             result = client.reset()
-            assert result is True
+            assert result > 0

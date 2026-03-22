@@ -19,12 +19,15 @@ from parol6.protocol.wire import (
     HomeCmd,
     JogJCmd,
     SetToolCmd,
+    TeleportCmd,
 )
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
+from parol6.config import deg_to_steps
+from parol6.server.transports.transport_factory import is_simulation_mode
 
 from .base import (
     ExecutionStatusCode,
@@ -67,7 +70,7 @@ class HomeCommand(MotionCommand[HomeCmd]):
         super().__init__(p)
         self.state = HomeState.START
         self.start_cmd_counter = 10
-        self.timeout_counter = 2000
+        self.timeout_counter = 4500
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Manages the homing command and monitors for completion using a state machine."""
@@ -172,11 +175,12 @@ class JogJCommand(MotionCommand[JogJCmd]):
             rad_to_steps(self._q_rad_buf, self._steps_buf)
             self.set_move_position(state, self._steps_buf)
 
-            if finished or all(abs(v) < 0.001 for v in vel):
+            if finished or np.dot(vel, vel) < 1e-6:
                 if stop_reason.startswith("Limit"):
                     logger.warning(stop_reason)
                 else:
                     self.log_trace(stop_reason)
+                se.active = False
                 self.finish()
                 return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
@@ -214,10 +218,49 @@ class SetToolCommand(MotionCommand[SetToolCmd]):
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Set the tool in state and update robot kinematics."""
         tool_name = self.p.tool_name.strip().upper()
+        variant_key = self.p.variant_key
 
-        # Update server state - property setter handles tool application and cache invalidation
-        state.current_tool = tool_name
+        state.set_tool(tool_name, variant_key)
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
 
-        self.log_info(f"Tool set to: {tool_name}")
+
+@register_command(CmdType.TELEPORT)
+class TeleportCommand(MotionCommand[TeleportCmd]):
+    """Instantly set joint angles (simulator only, no trajectory)."""
+
+    PARAMS_TYPE = TeleportCmd
+    streamable = True
+
+    __slots__ = ("_target_steps", "_deg_buf", "_sim_mode")
+
+    def __init__(self, p: TeleportCmd):
+        super().__init__(p)
+        self._target_steps = np.empty(6, dtype=np.int32)
+        self._deg_buf = np.empty(6, dtype=np.float64)
+        self._sim_mode = False
+
+    def do_setup(self, state: ControllerState) -> None:
+        self._sim_mode = is_simulation_mode()
+        self._deg_buf[:] = self.p.angles
+        deg_to_steps(self._deg_buf, self._target_steps)
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        if not self._sim_mode:
+            logger.warning("TELEPORT rejected: only allowed in simulator mode")
+            self.finish()
+            return ExecutionStatusCode.COMPLETED
+
+        state.Position_out[:] = self._target_steps
+        state.Speed_out.fill(0)
+        state.Command_out = CommandCode.TELEPORT
+
+        if self.p.tool_positions:
+            state.tool_teleport_pos = (
+                max(0.0, min(1.0, self.p.tool_positions[0])) * 255.0
+            )
+            # Clear gripper command bits so write_frame's JIT doesn't re-arm the ramp
+            state.Gripper_data_out[3] = 0
+
         self.finish()
         return ExecutionStatusCode.COMPLETED

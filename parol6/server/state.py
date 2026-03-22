@@ -155,6 +155,7 @@ class ControllerState:
 
     # Serial/transport
     ser: Any = None
+    hardware_connected: bool = False
     last_reconnect_attempt: float = 0.0
 
     # Safety and control flags
@@ -177,6 +178,7 @@ class ControllerState:
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
+    _current_tool_variant: str = ""
 
     # Robot telemetry and command buffers - using ndarray for efficiency
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
@@ -202,6 +204,9 @@ class ControllerState:
     Gripper_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
+
+    # Tool teleport: when >= 0, snap gripper to this position (0-255) on next tick
+    tool_teleport_pos: float = -1.0
 
     # uint8 flag/bitfield buffers
     Affected_joint_out: np.ndarray = field(
@@ -273,7 +278,8 @@ class ControllerState:
     _fkine_last_pos_in: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
-    _fkine_last_tool: str = ""
+    _fkine_last_tool_name: str = ""
+    _fkine_last_tool_variant: str = ""
     _fkine_mat: np.ndarray = field(
         default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
     )
@@ -308,6 +314,7 @@ class ControllerState:
 
         # Tool back to none
         self._current_tool = "NONE"
+        self._current_tool_variant = ""
         PAROL6_ROBOT.apply_tool("NONE")
 
         # Command and telemetry buffers - zero out
@@ -352,7 +359,8 @@ class ControllerState:
 
         # Invalidate fkine cache (SE3 is pre-allocated, just reset tracking)
         self._fkine_last_pos_in.fill(0)
-        self._fkine_last_tool = ""
+        self._fkine_last_tool_name = ""
+        self._fkine_last_tool_variant = ""
 
         # Reset streaming executors (clears reference_pose and Ruckig state)
         self.streaming_executor.reset()
@@ -365,14 +373,19 @@ class ControllerState:
         """Get the current tool name."""
         return self._current_tool
 
-    @current_tool.setter
-    def current_tool(self, tool_name: str) -> None:
+    @property
+    def current_tool_variant(self) -> str:
+        """Get the current tool variant key."""
+        return self._current_tool_variant
+
+    def set_tool(self, tool_name: str, variant_key: str = "") -> None:
         """Set the current tool and apply it to the robot model."""
-        if tool_name != self._current_tool:
+        if tool_name != self._current_tool or variant_key != self._current_tool_variant:
             self._current_tool = tool_name
-            # Apply tool to robot model (updates tool transform in-place)
-            PAROL6_ROBOT.apply_tool(tool_name)
-            logger.info(f"Tool changed to {tool_name}")
+            self._current_tool_variant = variant_key
+            PAROL6_ROBOT.apply_tool(tool_name, variant_key=variant_key)
+            label = f"{tool_name}:{variant_key}" if variant_key else tool_name
+            logger.info(f"Tool changed to {label}")
 
 
 logger = logging.getLogger(__name__)
@@ -456,7 +469,8 @@ def invalidate_fkine_cache(state: ControllerState | None = None) -> None:
     """
     if state is None:
         state = get_state()
-    state._fkine_last_tool = ""
+    state._fkine_last_tool_name = ""
+    state._fkine_last_tool_variant = ""
     logger.debug("fkine cache invalidated")
 
 
@@ -471,7 +485,10 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         The controller state to update
     """
     pos_changed = not arrays_equal_6(state.Position_in, state._fkine_last_pos_in)
-    tool_changed = state.current_tool != state._fkine_last_tool
+    tool_changed = (
+        state.current_tool != state._fkine_last_tool_name
+        or state.current_tool_variant != state._fkine_last_tool_variant
+    )
 
     if pos_changed or tool_changed:
         steps_to_rad(state.Position_in, state._fkine_q_rad)
@@ -485,7 +502,8 @@ def ensure_fkine_updated(state: ControllerState) -> None:
 
         # Update cache tracking
         state._fkine_last_pos_in[:] = state.Position_in
-        state._fkine_last_tool = state.current_tool
+        state._fkine_last_tool_name = state.current_tool
+        state._fkine_last_tool_variant = state.current_tool_variant
 
 
 def get_fkine_se3(state: ControllerState | None = None) -> np.ndarray:

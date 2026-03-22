@@ -37,7 +37,7 @@ class TestJogSpeedExtremes:
             speed=0.01,  # Slowest speed
             duration=0.5,
         )
-        assert result is True, "Jog command failed to send"
+        assert result > 0, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
         client.wait_motion_complete(timeout=10, settle_window=1)
@@ -74,7 +74,7 @@ class TestJogSpeedExtremes:
             speed=1.0,  # Fastest speed
             duration=0.5,
         )
-        assert result is True, "Jog command failed to send"
+        assert result > 0, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
         client.wait_motion_complete(timeout=10)
@@ -103,7 +103,7 @@ class TestJogSpeedExtremes:
         assert initial_angles_slow is not None
 
         result = client.jogJ(joint=1, speed=0.1, duration=1.0)
-        assert result is True
+        assert result > 0
         client.wait_motion_complete(timeout=10)
 
         final_angles_slow = client.get_angles()
@@ -115,7 +115,7 @@ class TestJogSpeedExtremes:
         assert initial_angles_fast is not None
 
         result = client.jogJ(joint=1, speed=0.9, duration=1.0)
-        assert result is True
+        assert result > 0
         client.wait_motion_complete(timeout=10)
 
         final_angles_fast = client.get_angles()
@@ -154,7 +154,7 @@ class TestCartesianJogSpeedExtremes:
             speed=0.02,
             duration=1,
         )
-        assert result is True, "Cartesian jog command failed to send"
+        assert result > 0, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
         client.wait_motion_complete(timeout=10)
@@ -190,7 +190,7 @@ class TestCartesianJogSpeedExtremes:
             speed=1.0,
             duration=0.5,
         )
-        assert result is True, "Cartesian jog command failed to send"
+        assert result > 0, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
         client.wait_motion_complete(timeout=10)
