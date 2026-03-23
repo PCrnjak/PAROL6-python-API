@@ -22,6 +22,7 @@ from parol6.config import (
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.protocol.wire import (
     CmdType,
+    CommandCode,
     JogLCmd,
     MoveLCmd,
 )
@@ -273,7 +274,12 @@ class JogLCommand(MotionCommand[JogLCmd]):
             rad_to_steps(self._q_clamped_buf, self._steps_buf)
         else:
             rad_to_steps(q, self._steps_buf)
-        self.set_move_position(state, self._steps_buf)
+        # Send as JOG command — firmware uses velocity directly (no averaging)
+        for i in range(6):
+            state.Speed_out[i] = int(
+                (self._steps_buf[i] - state.Position_in[i]) / INTERVAL_S
+            )
+        state.Command_out = CommandCode.JOG
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of Cartesian jogging."""
