@@ -200,8 +200,7 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     CSE drives the Cartesian path (with its own internal Ruckig for smooth
     TCP motion).  IK converts each smoothed pose to joint space.  If any
     joint's per-tick delta exceeds its hardware velocity limit, all deltas
-    are scaled proportionally.  When the clamp clears, CSE position is
-    re-synced to the actual robot TCP to prevent accumulated divergence.
+    are scaled proportionally.
     """
 
     PARAMS_TYPE = ServoLCmd
@@ -211,13 +210,11 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         "_initialized",
         "_ik_stopping",
         "_ik_failed_target",
-        "_clamped",
         "_target_se3",
         "_pos_rad_buf",
         "_q_commanded",
         "_q_ik_seed",
         "_dq_buf",
-        "_fk_buf",
     )
 
     def __init__(self, p: ServoLCmd):
@@ -225,13 +222,11 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         self._initialized = False
         self._ik_stopping = False
         self._ik_failed_target = np.zeros((4, 4), dtype=np.float64)
-        self._clamped = False
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
         self._q_commanded = np.zeros(6, dtype=np.float64)
         self._q_ik_seed = np.zeros(6, dtype=np.float64)
         self._dq_buf = np.zeros(6, dtype=np.float64)
-        self._fk_buf = np.zeros((4, 4), dtype=np.float64, order="F")
 
     def do_setup(self, state: ControllerState) -> None:
         pose = self.p.pose
@@ -256,7 +251,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             cse.set_limits(self.p.speed, self.p.accel)
             self._q_commanded[:] = self._q_rad_buf
             self._q_ik_seed[:] = self._q_rad_buf
-            self._clamped = False
             self._initialized = True
 
         # CSE drives Cartesian path
@@ -294,22 +288,12 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
                 ratio = _max_vel_ratio_jit(ik_result.q, self._q_commanded)
 
                 if ratio > 1.0:
-                    # Scale all deltas proportionally to stay within joint velocity limits
                     for i in range(6):
                         self._q_commanded[i] += dq[i] / ratio
-                    self._clamped = True
-                    # Correct CSE position every clamped tick to prevent
-                    # gap accumulation between Cartesian planner and joints
-                    PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
-                    cse.correct_position(self._fk_buf)
-                elif self._clamped:
-                    # Exiting clamp — final re-sync
-                    PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
-                    cse.correct_position(self._fk_buf)
-                    self._q_ik_seed[:] = self._q_commanded
-                    self._clamped = False
+                    cse.set_limits(self.p.speed / ratio, self.p.accel)
                 else:
                     self._q_commanded[:] = ik_result.q
+                    cse.set_limits(self.p.speed, self.p.accel)
         else:
             # IK failed — graceful deceleration
             if not self._ik_stopping:
@@ -327,18 +311,8 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         self.set_move_position(state, self._steps_buf)
 
         if finished and not self._ik_stopping:
-            if self._clamped:
-                # CSE converged in Cartesian space but joints lagged due to
-                # velocity clamping.  Re-sync CSE from actual commanded
-                # position and let it drive the remaining gap.
-                PAROL6_ROBOT.robot.fkine_into(self._q_commanded, self._fk_buf)
-                cse.sync_pose(self._fk_buf)
-                cse.set_limits(self.p.speed, self.p.accel)
-                self._q_ik_seed[:] = self._q_commanded
-                self._clamped = False
-            else:
-                self.finish()
-                cse.active = False
-                return ExecutionStatusCode.COMPLETED
+            self.finish()
+            cse.active = False
+            return ExecutionStatusCode.COMPLETED
 
         return ExecutionStatusCode.EXECUTING

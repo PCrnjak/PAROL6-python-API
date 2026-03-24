@@ -10,10 +10,6 @@ import time
 
 import numpy as np
 
-from parol6.commands.cartesian_commands import (
-    _apply_velocity_delta_trf_jit,
-    _apply_velocity_delta_wrf_jit,
-)
 from parol6.commands.servo_commands import _max_vel_ratio_jit
 from parol6.config import (
     deg_to_steps,
@@ -138,8 +134,6 @@ def warmup_jit() -> float:
     split_to_3_bytes(0)
     fuse_3_bytes(0, 0, 0)
     fuse_2_bytes(0, 0)
-
-    dummy_3x3 = np.eye(3, dtype=np.float64)
 
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)
@@ -298,36 +292,7 @@ def warmup_jit() -> float:
         dummy_4x4, dummy_twist, delta_4x4, dummy_4x4_out, omega_ws, R_ws, V_ws
     )
 
-    # parol6/commands/cartesian_commands.py
-    vel_lin = np.zeros(3, dtype=np.float64)
-    vel_ang = np.zeros(3, dtype=np.float64)
-    world_twist = np.zeros(6, dtype=np.float64)
-    body_twist = np.zeros(6, dtype=np.float64)
-    _apply_velocity_delta_wrf_jit(
-        dummy_3x3,  # R
-        dummy_6f,  # smoothed_vel
-        0.004,  # dt
-        dummy_4x4,  # current_pose
-        vel_lin,  # vel_lin
-        vel_ang,  # vel_ang
-        world_twist,  # world_twist
-        delta_4x4,  # delta
-        dummy_4x4_out,  # out
-        omega_ws,  # omega_ws
-        R_ws,  # R_ws
-        V_ws,  # V_ws
-    )
-    _apply_velocity_delta_trf_jit(
-        dummy_6f,  # smoothed_vel
-        0.004,  # dt
-        dummy_4x4,  # current_pose
-        body_twist,  # body_twist
-        delta_4x4,  # delta
-        dummy_4x4_out,  # out
-        omega_ws,  # omega_ws
-        R_ws,  # R_ws
-        V_ws,  # V_ws
-    )
+    # parol6/commands/servo_commands.py
     _max_vel_ratio_jit(dummy_6f, dummy_6f)
 
     elapsed = time.perf_counter() - start

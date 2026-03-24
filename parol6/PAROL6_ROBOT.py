@@ -103,7 +103,7 @@ _joint_ratio: NDArray[np.float64] = np.array(
 
 # Joint speeds (steps/s)
 _joint_max_speed_hw: Vec6i = np.array(
-    [16000, 27000, 32000, 10000, 10000, 32000], dtype=np.int32
+    [15000, 25000, 32000, 10000, 10000, 27000], dtype=np.int32
 )
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 

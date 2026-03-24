@@ -224,7 +224,8 @@ class Controller:
             logger.warning("Controller already running")
             return
 
-        self._set_high_priority()
+        self._priority_elevated = self._set_high_priority()
+        self._overbudget_times: list[float] = []
         self.running = True
 
         # Start async logging to move I/O off the control loop thread
@@ -456,7 +457,20 @@ class Controller:
         should_warn, pct = m.check_degraded(now, 0.25, 3.0)
         if should_warn:
             gc_dur = self._gc_tracker.recent_duration_ms()
-            logger.warning(
+            # With elevated priority, overbudget is unexpected — always warn.
+            # Without priority, occasional overbudget is normal (OS scheduling);
+            # only escalate to warning if frequent (>3 in the last 30s).
+            if self._priority_elevated:
+                log = logger.warning
+            else:
+                self._overbudget_times.append(now)
+                cutoff = now - 60.0
+                while self._overbudget_times and self._overbudget_times[0] < cutoff:
+                    self._overbudget_times.pop(0)
+                log = (
+                    logger.warning if len(self._overbudget_times) > 3 else logger.debug
+                )
+            log(
                 "loop overbudget by +%.0f%% (%s) gc=%.2fms",
                 pct,
                 format_hz_summary(m),
@@ -797,8 +811,12 @@ class Controller:
         state.next_command_index += 1
         return idx
 
-    def _set_high_priority(self) -> None:
-        """Set highest non-privileged process priority and pin to CPU core."""
+    def _set_high_priority(self) -> bool:
+        """Set highest non-privileged process priority and pin to CPU core.
+
+        Returns True if priority was successfully elevated.
+        """
+        elevated = False
         try:
             p = psutil.Process()
 
@@ -806,10 +824,12 @@ class Controller:
             if sys.platform == "win32":
                 p.nice(psutil.HIGH_PRIORITY_CLASS)
                 logger.info("Set process priority to HIGH_PRIORITY_CLASS")
+                elevated = True
             else:
                 try:
                     p.nice(-10)
                     logger.info("Set process nice value to -10")
+                    elevated = True
                 except psutil.AccessDenied:
                     logger.debug("Cannot set negative nice value without privileges")
 
@@ -828,3 +848,4 @@ class Controller:
 
         except Exception as e:
             logger.warning(f"Failed to set process priority/affinity: {e}")
+        return elevated
