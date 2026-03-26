@@ -188,7 +188,7 @@ class TestCartesianJogSpeedExtremes:
             frame="WRF",
             axis="X",
             speed=1.0,
-            duration=0.5,
+            duration=2.0,
         )
         assert result > 0, "Cartesian jog command failed to send"
 
