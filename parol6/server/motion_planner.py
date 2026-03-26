@@ -203,7 +203,7 @@ class TrajectoryPlanner:
 
         cmd_class = self._registry.get_command_for_struct(type(params))
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
-            self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type]
+            self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type, ty:invalid-argument-type]
         else:
             # Tool actions run concurrently with motion — don't flush blend
             if not isinstance(params, ToolActionCmd) and self._blend_buffer:

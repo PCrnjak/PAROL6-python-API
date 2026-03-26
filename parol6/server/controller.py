@@ -639,11 +639,11 @@ class Controller:
         # Dispatch by category (determined at registration time, no isinstance needed)
         match category:
             case CommandCategory.QUERY:
-                self._handle_query(command, state, addr)  # type: ignore[arg-type]
+                self._handle_query(command, state, addr)  # type: ignore[arg-type, ty:invalid-argument-type]
             case CommandCategory.SYSTEM:
-                self._handle_system_command(command, state, addr)  # type: ignore[arg-type]
+                self._handle_system_command(command, state, addr)  # type: ignore[arg-type, ty:invalid-argument-type]
             case CommandCategory.MOTION:
-                self._handle_motion_command(command, state, addr)  # type: ignore[arg-type]
+                self._handle_motion_command(command, state, addr)  # type: ignore[arg-type, ty:invalid-argument-type]
 
     def _handle_motion_command(
         self, command: MotionCommand, state: ControllerState, addr: tuple[str, int]

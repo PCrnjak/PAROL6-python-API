@@ -32,8 +32,8 @@ if not hasattr(logging.Logger, "trace"):
         if self.isEnabledFor(TRACE):
             self._log(TRACE, msg, args, **kwargs)
 
-    logging.Logger.trace = _trace  # type: ignore[attr-defined]
-    logging.TRACE = TRACE  # type: ignore[attr-defined]
+    logging.Logger.trace = _trace  # type: ignore[attr-defined, ty:unresolved-attribute]
+    logging.TRACE = TRACE  # type: ignore[attr-defined, ty:unresolved-attribute]
 
 TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes", "on")
 

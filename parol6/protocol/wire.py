@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 def _enc_hook(obj: object) -> object:
     """Custom encoder hook for numpy types."""
     if isinstance(obj, np.ndarray):
-        return obj.tolist()  # type: ignore[no-matching-overload]
+        return obj.tolist()  # type: ignore[no-matching-overload, ty:no-matching-overload]
     if isinstance(obj, (np.integer, np.floating)):
         return obj.item()  # Convert numpy scalar to Python native type
     raise NotImplementedError(f"Cannot encode {type(obj)}")

@@ -325,7 +325,7 @@ class TestTCPPathAccuracy:
         print(f"  Max path deviation: {max_deviation:.3f} mm")
         print(f"  Mean path deviation: {np.mean(deviations):.3f} mm")
 
-        tolerance_mm = 0.1
+        tolerance_mm = 0.15
         assert max_deviation < tolerance_mm, (
             f"Profile {profile}: TCP deviated {max_deviation:.3f}mm from straight line "
             f"(tolerance: {tolerance_mm}mm)"

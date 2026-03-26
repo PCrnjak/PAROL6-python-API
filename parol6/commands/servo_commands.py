@@ -209,7 +209,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     __slots__ = (
         "_initialized",
         "_ik_stopping",
-        "_ik_failed_target",
         "_target_se3",
         "_pos_rad_buf",
         "_q_commanded",
@@ -221,7 +220,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         super().__init__(p)
         self._initialized = False
         self._ik_stopping = False
-        self._ik_failed_target = np.zeros((4, 4), dtype=np.float64)
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
         self._q_commanded = np.zeros(6, dtype=np.float64)
@@ -264,11 +262,7 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             self._q_ik_seed,
         )
         if ik_result.success and ik_result.q is not None:
-            # IK recovered after failure — only resume if target changed
             if self._ik_stopping:
-                if np.allclose(self._target_se3, self._ik_failed_target, atol=1e-6):
-                    # Same target that caused the failure — stay stopped
-                    return ExecutionStatusCode.EXECUTING
                 logger.info("[SERVOL] IK recovered — resuming")
                 steps_to_rad(state.Position_in, self._q_rad_buf)
                 cse.sync_pose(get_fkine_se3(state))
@@ -304,7 +298,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
                 )
                 cse.stop()
                 self._ik_stopping = True
-                self._ik_failed_target[:] = self._target_se3
 
         self._pos_rad_buf[:] = self._q_commanded
         rad_to_steps(self._pos_rad_buf, self._steps_buf)

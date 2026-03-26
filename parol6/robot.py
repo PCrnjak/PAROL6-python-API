@@ -843,7 +843,7 @@ class Robot(_RobotABC):
         bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client.tool_action  # type: ignore[attr-defined]
+            bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
             bound[spec.key] = bound_spec
         client._bound_tools = bound
         return client
@@ -862,7 +862,7 @@ class Robot(_RobotABC):
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined]
+            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
         # Wrap async-bound tools in sync adapters

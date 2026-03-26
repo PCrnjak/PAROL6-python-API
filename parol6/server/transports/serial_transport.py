@@ -156,7 +156,7 @@ class SerialTransport:
         self._r_head = 0
         self._r_tail = 0
         self._frame_buf = np.zeros(64, dtype=np.uint8)
-        self._frame_mv = memoryview(self._frame_buf)[:52]  # type: ignore[invalid-argument-type]
+        self._frame_mv = memoryview(self._frame_buf)[:52]  # type: ignore[invalid-argument-type, ty:invalid-argument-type]
         self._frame_version = 0
         self._frame_ts = 0.0
 
