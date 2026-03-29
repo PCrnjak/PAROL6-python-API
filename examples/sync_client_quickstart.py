@@ -5,7 +5,7 @@ Sync client quickstart for PAROL6.
 - Performs ping and basic queries
 
 Run from the repository root:
-    python external/PAROL6-python-API/examples/sync_client_quickstart.py
+    python examples/sync_client_quickstart.py
 """
 
 from parol6 import RobotClient

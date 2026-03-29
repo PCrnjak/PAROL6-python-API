@@ -5,7 +5,7 @@ Async client quickstart for PAROL6.
 - Shows basic queries and status streaming
 
 Run from the repository root:
-    python external/PAROL6-python-API/examples/async_client_quickstart.py
+    python examples/async_client_quickstart.py
 """
 
 import asyncio

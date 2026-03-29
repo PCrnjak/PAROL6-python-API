@@ -6,7 +6,7 @@ Manage server lifecycle demonstration for PAROL6.
 - Stops the controller on exit
 
 Run from the repository root:
-    python external/PAROL6-python-API/examples/manage_server_demo.py
+    python examples/manage_server_demo.py
 """
 
 from parol6 import Robot, RobotClient

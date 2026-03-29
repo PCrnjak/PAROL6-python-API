@@ -31,6 +31,9 @@ It supports a controller process speaking a msgpack-based UDP protocol. The clie
 ---
 
 ## Installation
+
+**Requirements:** Python >= 3.11 · Supported platforms: macOS (ARM64), Windows (AMD64), Linux (x86_64, aarch64)
+
 ```bash
 pip install .
 ```
@@ -61,8 +64,7 @@ The `Robot` class can also be used as a context manager:
 ```python
 with Robot() as robot:
     with RobotClient() as client:
-        client.home()
-        client.wait_motion_complete()
+        client.home(wait=True)
 ```
 
 ### Async client
@@ -89,6 +91,17 @@ with RobotClient(host="127.0.0.1", port=5001) as client:
     print("ping:", client.ping())
     print("pose:", client.get_pose())
 ```
+
+### Examples
+
+See the [`examples/`](examples/) directory for runnable scripts:
+- `sync_client_quickstart.py` -- basic sync client usage (ping, query)
+- `async_client_quickstart.py` -- async client with status streaming and motion
+- `manage_server_demo.py` -- starting/stopping the controller programmatically
+- `pick_and_place.py` -- pick-and-place cycle with electric gripper
+- `draw_circle.py` -- curved motion commands (moveC, moveS, moveP)
+- `zigzag_scan.py` -- raster scan pattern with blend radius for smooth corners
+- `speed_comparison.py` -- timing different speeds and motion profiles
 
 ## Architecture overview
 
@@ -185,6 +198,15 @@ flowchart TB
 
 The controller pushes status via UDP multicast to avoid client-side polling, reduce command-channel contention, and support multiple observers (GUI, logging). Falls back to unicast when multicast is unavailable (`PAROL6_STATUS_TRANSPORT=UNICAST`).
 
+### waldoctl interface
+
+This package implements the [waldoctl](https://github.com/Jepson2k/waldoctl) abstract robot interface:
+
+- `Robot` inherits from `waldoctl.Robot` — lifecycle, kinematics (FK/IK), client factories, joint/tool configuration
+- `AsyncRobotClient` inherits from `waldoctl.RobotClient` — async motion commands, status queries, streaming
+
+Any application built against the waldoctl ABCs (e.g., [PAROL Web Commander](https://github.com/PCrnjak/PAROL-Web-Commander)) can use this package as a drop-in backend.
+
 ### Simulator mode
 
 Uses `MockSerialTransport` with shared memory IPC for subprocess isolation. Toggle via `simulator_on()` / `simulator_off()`. The simulator syncs to controller state on enable for pose continuity. **Note**: Simulation cannot guarantee hardware success—motor/current limits may cause failures on the real robot.
@@ -210,14 +232,14 @@ The loop timer (`loop_timer.py`) uses a two-phase strategy for precise tick timi
 ```
 deadline = now + interval (10ms at 100Hz)
 
-if time_remaining > busy_threshold (2ms):
+if time_remaining > busy_threshold (1ms):
     time.sleep(time_remaining - busy_threshold)    # OS sleep for bulk of wait
 
 while time.perf_counter() < deadline:
-    pass                                           # Busy-loop for final 2ms
+    pass                                           # Busy-loop for final 1ms
 ```
 
-OS `time.sleep()` has ~1-4ms jitter depending on platform and load. The busy-loop absorbs this jitter to hit deadline with sub-millisecond precision. The `PAROL6_BUSY_THRESHOLD_MS` env var (default 2) controls the crossover point.
+OS `time.sleep()` has ~1-4ms jitter depending on platform and load. The busy-loop absorbs this jitter to hit deadline with sub-millisecond precision. The `PAROL6_BUSY_THRESHOLD_MS` env var (default 1.0) controls the crossover point.
 
 ### Planned vs streaming command paths
 
@@ -292,7 +314,7 @@ For Cartesian moves, joint limits stay at 100% as hard bounds—the speed fracti
 
 ## Command system
 
-Streaming mode (`client.stream_on()` / `client.stream_off()`) enables high-rate jogging — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command fast-path. Use streaming for UI-driven jog or teleoperation; use non-streaming for discrete motions and queued programs.
+Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.
 
 ### Command categories
 
@@ -335,7 +357,10 @@ Set tool at runtime from the client:
 ```python
 from parol6 import RobotClient
 with RobotClient() as c:
-    c.set_tool("PNEUMATIC")
+    c.set_tool("PNEUMATIC")                            # default variant
+    c.set_tool("PNEUMATIC", variant_key="horizontal")  # horizontal pneumatic
+    c.set_tool("SSG-48", variant_key="pinch")          # pinch grip
+    c.set_tool("MSG", variant_key="150mm")             # 150mm rail
 ```
 
 Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` directly) and calling `register_tool("KEY", config)` in `parol6/tools.py`.
@@ -346,10 +371,10 @@ Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` direct
 ## Environment variables
 - `PAROL6_CONTROL_RATE_HZ` — control loop frequency in Hz (default 100)
 - `PAROL6_STATUS_RATE_HZ` — STATUS broadcast rate in Hz (default 50; tests use 20 Hz to reduce CI load)
-- `PAROL6_STATUS_STALE_S` — skip broadcast if cache is older than this (default 0.2)
-- `PAROL6_BUSY_THRESHOLD_MS` — busy-loop threshold for loop timing in ms (default 2)
+- `PAROL6_STATUS_STALE_S` — skip broadcast if cache is older than this (default 0.5)
+- `PAROL6_BUSY_THRESHOLD_MS` — busy-loop threshold for loop timing in ms (default 1.0)
 - `PAROL6_PATH_SAMPLES` — trajectory path sampling points (default 50)
-- `PAROL6_MAX_BLEND_LOOKAHEAD` — command blending lookahead count (default 3)
+- `PAROL6_MAX_BLEND_LOOKAHEAD` — command blending lookahead count (default 100)
 - `PAROL6_MCAST_GROUP` — multicast group for status (default 239.255.0.101)
 - `PAROL6_MCAST_PORT` — multicast port for status (default 50510)
 - `PAROL6_MCAST_TTL` — multicast TTL (default 1)
@@ -359,7 +384,6 @@ Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` direct
 - `PAROL6_CONTROLLER_IP` / `PAROL6_CONTROLLER_PORT` — bind host/port for controller
 - `PAROL6_FORCE_ACK` — force ACK for motion commands regardless of policy
 - `PAROL6_FAKE_SERIAL` — enable simulator ("1"/"true"/"on"); used internally by simulator_on/off
-- `PAROL6_TX_KEEPALIVE_S` — TX keepalive period seconds for serial writes (default 0.2)
 - `PAROL6_COM_FILE` — path to persistent COM port file (default `~/.parol6/com_port.txt`)
 - `PAROL6_COM_PORT` / `PAROL6_SERIAL` — explicit serial port override (e.g., `/dev/ttyUSB0` or `COM3`)
 - `PAROL_TRACE` — `1` enables TRACE logging level unless overridden by CLI
