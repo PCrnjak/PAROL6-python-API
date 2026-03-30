@@ -1,15 +1,15 @@
 # PAROL6 Python API
 
-Lightweight Python client and controller manager for PAROL6 robot arms.
+Python client and controller for PAROL6 robot arms, implementing the [waldoctl](https://github.com/Jepson2k/waldoctl) robot interface. Any application built against the waldoctl ABCs (e.g., [PAROL Web Commander](https://github.com/PCrnjak/PAROL-Web-Commander)) can use this package as a drop-in backend.
 
 This package provides:
-- Robot (unified entry point — lifecycle, kinematics, client factories)
-- AsyncRobotClient (async UDP client)
-- RobotClient (sync wrapper around the async client)
-- DryRunRobotClient (offline trajectory simulation)
-- CLI `parol6-server` for standalone controller operation
+- **Robot** — unified entry point: lifecycle, kinematics (FK/IK), client factories (`waldoctl.Robot`)
+- **AsyncRobotClient** — async UDP client for motion commands and status streaming (`waldoctl.RobotClient`)
+- **RobotClient** — sync wrapper around the async client
+- **DryRunRobotClient** — offline trajectory simulation
+- **`parol6-server`** CLI for standalone controller operation
 
-It supports a controller process speaking a msgpack-based UDP protocol. The client can run on the same machine or remotely.
+The controller speaks a msgpack-based UDP protocol and can run on the same machine or remotely.
 
 ---
 
@@ -197,15 +197,6 @@ flowchart TB
 ### Why multicast status?
 
 The controller pushes status via UDP multicast to avoid client-side polling, reduce command-channel contention, and support multiple observers (GUI, logging). Falls back to unicast when multicast is unavailable (`PAROL6_STATUS_TRANSPORT=UNICAST`).
-
-### waldoctl interface
-
-This package implements the [waldoctl](https://github.com/Jepson2k/waldoctl) abstract robot interface:
-
-- `Robot` inherits from `waldoctl.Robot` — lifecycle, kinematics (FK/IK), client factories, joint/tool configuration
-- `AsyncRobotClient` inherits from `waldoctl.RobotClient` — async motion commands, status queries, streaming
-
-Any application built against the waldoctl ABCs (e.g., [PAROL Web Commander](https://github.com/PCrnjak/PAROL-Web-Commander)) can use this package as a drop-in backend.
 
 ### Simulator mode
 

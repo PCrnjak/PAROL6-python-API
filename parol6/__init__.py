@@ -10,8 +10,11 @@ Key components:
 - RobotClient: Sync wrapper with automatic event loop handling
 """
 
+from importlib.metadata import version as _pkg_version
+
 from . import PAROL6_ROBOT
-from ._version import __version__
+
+__version__: str = _pkg_version("parol6")
 from .client.async_client import AsyncRobotClient
 from .client.dry_run_client import DryRunRobotClient
 from .client.sync_client import RobotClient
