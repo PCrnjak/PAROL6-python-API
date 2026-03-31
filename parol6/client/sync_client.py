@@ -14,11 +14,10 @@ from typing import Any, TypeVar, overload
 from waldoctl.tools import ToolSpec
 
 from waldoctl import PingResult, ToolStatus
-from waldoctl.status import ToolResult
+from waldoctl.status import ActivityResult, ToolResult
 
 from waldoctl.types import Axis, Frame
 from ..protocol.wire import (
-    CurrentActionResultStruct,
     EnablementResultStruct,
     LoopStatsResultStruct,
     StatusBuffer,
@@ -140,7 +139,7 @@ class RobotClient:
         """Active bound tool. Raises if no tool has been set."""
         key = (self._inner._active_tool_key or "").upper()
         if not key:
-            raise RuntimeError("No tool set. Call set_tool() first.")
+            raise RuntimeError("No tool set. Call select_tool() first.")
         return self._bound_tools[key]
 
     def close(self) -> None:
@@ -204,24 +203,16 @@ class RobotClient:
         """
         return _run(self._inner.halt())
 
-    def simulator_on(self) -> int:
-        """Enable simulator mode (no physical robot hardware required).
+    def simulator(self, enabled: bool) -> int:
+        """Enable or disable simulator mode."""
+        return _run(self._inner.simulator(enabled))
 
-        Returns:
-            1 if acknowledged, 0 on failure.
-        """
-        return _run(self._inner.simulator_on())
+    def is_simulator(self) -> bool:
+        """Query whether simulator mode is active."""
+        return _run(self._inner.is_simulator())
 
-    def simulator_off(self) -> int:
-        """Disable simulator mode, switching to real hardware.
-
-        Returns:
-            1 if acknowledged, 0 on failure.
-        """
-        return _run(self._inner.simulator_off())
-
-    def set_serial_port(self, port_str: str) -> int:
-        """Set the serial port for robot hardware communication.
+    def connect_hardware(self, port_str: str) -> int:
+        """Connect to robot hardware via serial port.
 
         Args:
             port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
@@ -229,7 +220,7 @@ class RobotClient:
         Returns:
             1 if acknowledged, 0 on failure.
         """
-        return _run(self._inner.set_serial_port(port_str))
+        return _run(self._inner.connect_hardware(port_str))
 
     def reset(self) -> int:
         """Reset controller state to initial values."""
@@ -244,74 +235,71 @@ class RobotClient:
         """
         return _run(self._inner.ping())
 
-    def get_angles(self) -> list[float] | None:
-        """Get current joint angles in degrees.
+    def angles(self) -> list[float] | None:
+        """Current joint angles in degrees.
 
         Returns:
             List of 6 joint angles [J1-J6] in degrees, or None on timeout.
         """
-        return _run(self._inner.get_angles())
+        return _run(self._inner.angles())
 
-    def get_io(self) -> list[int] | None:
-        """Get digital I/O status.
+    def io(self) -> list[int] | None:
+        """Digital I/O status.
 
         Returns:
             List of 5 integers [in1, in2, out1, out2, estop], or None on timeout.
         """
-        return _run(self._inner.get_io())
+        return _run(self._inner.io())
 
-    def get_speeds(self) -> list[float] | None:
-        """Get current joint speeds in steps per second.
+    def joint_speeds(self) -> list[float] | None:
+        """Current joint speeds in steps per second.
 
         Returns:
             List of 6 joint speeds [J1-J6] in steps/sec, or None on timeout.
         """
-        return _run(self._inner.get_speeds())
+        return _run(self._inner.joint_speeds())
 
-    def get_pose(self, frame: str = "WRF") -> list[float] | None:
-        """Get current robot pose as a 4x4 transformation matrix.
+    def pose(self, frame: str = "WRF") -> list[float] | None:
+        """Current TCP pose as [x, y, z, rx, ry, rz] in mm and degrees.
 
         Args:
             frame: Reference frame - "WRF" (world) or "TRF" (tool).
 
         Returns:
-            16-element flattened transformation matrix (row-major) with
-            translation in mm, or None on timeout.
+            [x, y, z, rx, ry, rz] in mm and degrees, or None on timeout.
         """
-        return _run(self._inner.get_pose(frame=frame))
+        return _run(self._inner.pose(frame=frame))
 
-    def get_status(self) -> StatusResultStruct | None:
-        """Get aggregate robot status.
+    def status(self) -> StatusResultStruct | None:
+        """Aggregate status snapshot.
 
         Returns:
             StatusResultStruct with pose, angles, speeds, io, tool_status, or None on timeout.
         """
-        return _run(self._inner.get_status())
+        return _run(self._inner.status())
 
-    def get_loop_stats(self) -> LoopStatsResultStruct | None:
-        """Get control loop runtime statistics.
+    def loop_stats(self) -> LoopStatsResultStruct | None:
+        """Control loop runtime statistics.
 
         Returns:
             LoopStatsResultStruct with loop timing metrics, or None on timeout.
         """
-        return _run(self._inner.get_loop_stats())
+        return _run(self._inner.loop_stats())
 
     def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count."""
         return _run(self._inner.reset_loop_stats())
 
-    def get_tool(self) -> ToolResult | None:
-        """
-        Get the current tool configuration and available tools.
+    def tools(self) -> ToolResult | None:
+        """Current tool and available tools.
 
         Returns:
             ToolResult with tool (current) and available (list), or None.
         """
-        return _run(self._inner.get_tool())
+        return _run(self._inner.tools())
 
-    def set_tool(self, tool_name: str, variant_key: str = "") -> int:
-        """
-        Set the current end-effector tool configuration.
+    def select_tool(self, tool_name: str, variant_key: str = "") -> int:
+        """Set the active end-effector tool on the controller.
 
         Args:
             tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
@@ -320,11 +308,10 @@ class RobotClient:
         Returns:
             Command index (>= 0) if queued, 0 on failure.
         """
-        return _run(self._inner.set_tool(tool_name, variant_key=variant_key))
+        return _run(self._inner.select_tool(tool_name, variant_key=variant_key))
 
-    def set_profile(self, profile: str) -> int:
-        """
-        Set the motion profile for all moves.
+    def select_profile(self, profile: str) -> int:
+        """Set the motion profile (e.g. ``"TOPPRA"``).
 
         Args:
             profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
@@ -333,84 +320,61 @@ class RobotClient:
         Returns:
             True if successful
         """
-        return _run(self._inner.set_profile(profile))
+        return _run(self._inner.select_profile(profile))
 
-    def get_profile(self) -> str | None:
-        """
-        Get the current motion profile.
+    def profile(self) -> str | None:
+        """Current motion profile name.
 
         Returns:
             Current motion profile, or None on timeout.
         """
-        return _run(self._inner.get_profile())
+        return _run(self._inner.profile())
 
-    def get_current_action(self) -> CurrentActionResultStruct | None:
-        """
-        Get the current executing action/command and its state.
+    def activity(self) -> ActivityResult | None:
+        """What the robot is currently doing.
 
         Returns:
-            Struct with current action name, state, next action, and params.
+            ActivityResult with state, command, params, and error.
         """
-        return _run(self._inner.get_current_action())
+        return _run(self._inner.activity())
 
-    def get_queue(self) -> list[str] | None:
-        """
-        Get queue status with progress tracking.
+    def queue(self) -> list[str] | None:
+        """Queued command list.
 
         Returns:
             List of queued command names, or None on timeout.
         """
-        return _run(self._inner.get_queue())
+        return _run(self._inner.queue())
 
-    def get_tool_status(self) -> ToolStatus | None:
-        """Get current tool status.
+    def _tool_status(self) -> ToolStatus | None:
+        """Query tool status (internal — use ``rbt.tool.status()``)."""
+        return _run(self._inner._tool_status())
 
-        Returns:
-            ToolStatus with key, state, engaged, positions, channels, etc.
-        """
-        return _run(self._inner.get_tool_status())
-
-    def get_enablement(self) -> EnablementResultStruct | None:
-        """Get joint and Cartesian enablement flags.
+    def reachable(self) -> EnablementResultStruct | None:
+        """Remaining freedom of movement per joint/axis before hitting limits.
 
         Returns:
             EnablementResultStruct with joint_en, cart_en_wrf, cart_en_trf.
         """
-        return _run(self._inner.get_enablement())
+        return _run(self._inner.reachable())
 
-    def get_error(self) -> RobotError | None:
-        """Get the current error state.
+    def error(self) -> RobotError | None:
+        """Current error state, or None if no error.
 
         Returns:
             RobotError if an error is active, None otherwise.
         """
-        return _run(self._inner.get_error())
+        return _run(self._inner.error())
 
-    def get_tcp_speed(self) -> float | None:
-        """Get current TCP linear speed in mm/s.
+    def tcp_speed(self) -> float | None:
+        """TCP linear velocity in mm/s.
 
         Returns:
             TCP speed as float, or None on timeout.
         """
-        return _run(self._inner.get_tcp_speed())
+        return _run(self._inner.tcp_speed())
 
     # ---------- helper methods ----------
-
-    def get_pose_rpy(self) -> list[float] | None:
-        """Get robot pose as [x, y, z, rx, ry, rz] in mm and degrees.
-
-        Returns:
-            List of 6 floats [x, y, z, rx, ry, rz], or None on error.
-        """
-        return _run(self._inner.get_pose_rpy())
-
-    def get_pose_xyz(self) -> list[float] | None:
-        """Get robot position as [x, y, z] in mm.
-
-        Returns:
-            List of 3 floats [x, y, z], or None on error.
-        """
-        return _run(self._inner.get_pose_xyz())
 
     def is_estop_pressed(self) -> bool:
         """Check if E-stop is pressed.
@@ -423,7 +387,7 @@ class RobotClient:
     def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
         """Check if robot has stopped moving.
 
-        Prefer ``wait_command_complete()`` for waiting on specific commands.
+        Prefer ``wait_command()`` for waiting on specific commands.
         This method polls raw joint speeds and is mainly useful for
         diagnostics or manual stopping logic.
 
@@ -435,7 +399,7 @@ class RobotClient:
         """
         return _run(self._inner.is_robot_stopped(threshold_speed))
 
-    def wait_motion_complete(
+    def wait_motion(
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
@@ -456,7 +420,7 @@ class RobotClient:
             True if robot stopped, False if timeout.
         """
         return _run(
-            self._inner.wait_motion_complete(
+            self._inner.wait_motion(
                 timeout=timeout,
                 settle_window=settle_window,
                 speed_threshold=speed_threshold,
@@ -471,16 +435,16 @@ class RobotClient:
         """Poll ping() until server responds or timeout."""
         return _run(self._inner.wait_ready(timeout=timeout, interval=interval))
 
-    def wait_for_status(
+    def wait_status(
         self, predicate: Callable[[StatusBuffer], bool], timeout: float = 5.0
     ) -> bool:
-        """
-        Wait until a multicast status satisfies predicate(status) within timeout.
+        """Wait until a multicast status satisfies predicate(status) within timeout.
+
         Note: predicate is executed in the client's event loop thread.
         """
-        return _run(self._inner.wait_for_status(predicate, timeout=timeout))
+        return _run(self._inner.wait_status(predicate, timeout=timeout))
 
-    def wait_command_complete(self, command_index: int, timeout: float = 10.0) -> bool:
+    def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
         Args:
@@ -493,14 +457,14 @@ class RobotClient:
         Raises:
             MotionError: If the pipeline errored at or before command_index.
         """
-        return _run(self._inner.wait_command_complete(command_index, timeout=timeout))
+        return _run(self._inner.wait_command(command_index, timeout=timeout))
 
     # ---------- motion ----------
 
     @overload
-    def moveJ(
+    def move_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         duration: float = ...,
         speed: float = ...,
@@ -512,9 +476,9 @@ class RobotClient:
     ) -> int: ...
 
     @overload
-    def moveJ(
+    def move_j(
         self,
-        target: list[float] | None = ...,
+        angles: list[float] | None = ...,
         *,
         pose: list[float],
         duration: float = ...,
@@ -525,9 +489,9 @@ class RobotClient:
         timeout: float = ...,
     ) -> int: ...
 
-    def moveJ(
+    def move_j(
         self,
-        target: list[float] | None = None,
+        angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
         duration: float = 0.0,
@@ -540,8 +504,8 @@ class RobotClient:
     ) -> int:
         if pose is not None:
             return _run(
-                self._inner.moveJ(
-                    target or [],
+                self._inner.move_j(
+                    angles or [],
                     pose=pose,
                     duration=duration,
                     speed=speed,
@@ -551,11 +515,11 @@ class RobotClient:
                     timeout=timeout,
                 )
             )
-        if target is None:
-            raise ValueError("moveJ requires target or pose")
+        if angles is None:
+            raise ValueError("move_j requires angles or pose")
         return _run(
-            self._inner.moveJ(
-                target,
+            self._inner.move_j(
+                angles,
                 duration=duration,
                 speed=speed,
                 accel=accel,
@@ -566,7 +530,7 @@ class RobotClient:
             )
         )
 
-    def moveL(
+    def move_l(
         self,
         pose: list[float],
         *,
@@ -580,7 +544,7 @@ class RobotClient:
         timeout: float = 10.0,
     ) -> int:
         return _run(
-            self._inner.moveL(
+            self._inner.move_l(
                 pose,
                 frame=frame,
                 duration=duration,
@@ -593,7 +557,7 @@ class RobotClient:
             )
         )
 
-    def moveC(
+    def move_c(
         self,
         via: list[float],
         end: list[float],
@@ -607,7 +571,7 @@ class RobotClient:
         timeout: float = 10.0,
     ) -> int:
         return _run(
-            self._inner.moveC(
+            self._inner.move_c(
                 via,
                 end,
                 frame=frame,
@@ -620,7 +584,7 @@ class RobotClient:
             )
         )
 
-    def moveS(
+    def move_s(
         self,
         waypoints: list[list[float]],
         *,
@@ -632,7 +596,7 @@ class RobotClient:
         timeout: float = 10.0,
     ) -> int:
         return _run(
-            self._inner.moveS(
+            self._inner.move_s(
                 waypoints,
                 frame=frame,
                 duration=duration,
@@ -643,7 +607,7 @@ class RobotClient:
             )
         )
 
-    def moveP(
+    def move_p(
         self,
         waypoints: list[list[float]],
         *,
@@ -655,7 +619,7 @@ class RobotClient:
         timeout: float = 10.0,
     ) -> int:
         return _run(
-            self._inner.moveP(
+            self._inner.move_p(
                 waypoints,
                 frame=frame,
                 duration=duration,
@@ -667,27 +631,27 @@ class RobotClient:
         )
 
     @overload
-    def servoJ(
+    def servo_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         speed: float = ...,
         accel: float = ...,
     ) -> int: ...
 
     @overload
-    def servoJ(
+    def servo_j(
         self,
-        target: list[float] | None = ...,
+        angles: list[float] | None = ...,
         *,
         pose: list[float],
         speed: float = ...,
         accel: float = ...,
     ) -> int: ...
 
-    def servoJ(
+    def servo_j(
         self,
-        target: list[float] | None = None,
+        angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
         speed: float = 1.0,
@@ -695,23 +659,23 @@ class RobotClient:
     ) -> int:
         if pose is not None:
             return _run(
-                self._inner.servoJ(target or [], pose=pose, speed=speed, accel=accel)
+                self._inner.servo_j(angles or [], pose=pose, speed=speed, accel=accel)
             )
-        if target is None:
-            raise ValueError("servoJ requires target or pose")
-        return _run(self._inner.servoJ(target, speed=speed, accel=accel))
+        if angles is None:
+            raise ValueError("servo_j requires angles or pose")
+        return _run(self._inner.servo_j(angles, speed=speed, accel=accel))
 
-    def servoL(
+    def servo_l(
         self,
         pose: list[float],
         *,
         speed: float = 1.0,
         accel: float = 1.0,
     ) -> int:
-        return _run(self._inner.servoL(pose, speed=speed, accel=accel))
+        return _run(self._inner.servo_l(pose, speed=speed, accel=accel))
 
     @overload
-    def jogJ(
+    def jog_j(
         self,
         joint: int,
         speed: float,
@@ -721,7 +685,7 @@ class RobotClient:
     ) -> int: ...
 
     @overload
-    def jogJ(
+    def jog_j(
         self,
         *,
         joints: list[int],
@@ -730,7 +694,7 @@ class RobotClient:
         accel: float = ...,
     ) -> int: ...
 
-    def jogJ(
+    def jog_j(
         self,
         joint: int | None = None,
         speed: float = 0.0,
@@ -742,16 +706,16 @@ class RobotClient:
     ) -> int:
         if joints is not None and speeds is not None:
             return _run(
-                self._inner.jogJ(
+                self._inner.jog_j(
                     joints=joints, speeds=speeds, duration=duration, accel=accel
                 )
             )
         if joint is not None:
-            return _run(self._inner.jogJ(joint, speed, duration, accel=accel))
-        raise ValueError("jogJ requires either joint or joints/speeds")
+            return _run(self._inner.jog_j(joint, speed, duration, accel=accel))
+        raise ValueError("jog_j requires either joint or joints/speeds")
 
     @overload
-    def jogL(
+    def jog_l(
         self,
         frame: Frame,
         axis: Axis,
@@ -762,7 +726,7 @@ class RobotClient:
     ) -> int: ...
 
     @overload
-    def jogL(
+    def jog_l(
         self,
         frame: Frame,
         *,
@@ -772,7 +736,7 @@ class RobotClient:
         accel: float = ...,
     ) -> int: ...
 
-    def jogL(
+    def jog_l(
         self,
         frame: Frame,
         axis: Axis | None = None,
@@ -785,7 +749,7 @@ class RobotClient:
     ) -> int:
         if axes is not None and speeds_list is not None:
             return _run(
-                self._inner.jogL(
+                self._inner.jog_l(
                     frame,
                     axes=axes,
                     speeds_list=speeds_list,
@@ -794,21 +758,18 @@ class RobotClient:
                 )
             )
         if axis is not None:
-            return _run(self._inner.jogL(frame, axis, speed, duration, accel=accel))
-        raise ValueError("jogL requires either axis or axes/speeds_list")
+            return _run(self._inner.jog_l(frame, axis, speed, duration, accel=accel))
+        raise ValueError("jog_l requires either axis or axes/speeds_list")
 
     def checkpoint(self, label: str) -> int:
         return _run(self._inner.checkpoint(label))
 
-    def wait_for_command(self, index: int, timeout: float = 30.0) -> bool:
-        return _run(self._inner.wait_for_command(index, timeout=timeout))
+    def wait_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
+        return _run(self._inner.wait_checkpoint(label, timeout=timeout))
 
-    def wait_for_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
-        return _run(self._inner.wait_for_checkpoint(label, timeout=timeout))
-
-    def set_io(self, index: int, value: int) -> int:
+    def write_io(self, index: int, value: int) -> int:
         """Set digital output by logical index (0 = first output pin)."""
-        return _run(self._inner.set_io(index, value))
+        return _run(self._inner.write_io(index, value))
 
     def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue."""

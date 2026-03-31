@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -88,6 +88,7 @@ class QueryType(IntEnum):
     ENABLEMENT = auto()
     ERROR = auto()
     TCP_SPEED = auto()
+    SIMULATOR_STATE = auto()
 
 
 class CmdType(IntEnum):
@@ -98,27 +99,27 @@ class CmdType(IntEnum):
 
     # Query commands (immediate, read-only)
     PING = auto()
-    GET_STATUS = auto()
-    GET_ANGLES = auto()
-    GET_POSE = auto()
-    GET_IO = auto()
-    GET_SPEEDS = auto()
-    GET_TOOL = auto()
-    GET_QUEUE = auto()
-    GET_CURRENT_ACTION = auto()
-    GET_LOOP_STATS = auto()
-    GET_PROFILE = auto()
-    GET_ENABLEMENT = auto()
-    GET_ERROR = auto()
-    GET_TCP_SPEED = auto()
+    STATUS = auto()
+    ANGLES = auto()
+    POSE = auto()
+    IO = auto()
+    JOINT_SPEEDS = auto()
+    TOOLS = auto()
+    QUEUE = auto()
+    ACTIVITY = auto()
+    LOOP_STATS = auto()
+    PROFILE = auto()
+    REACHABLE = auto()
+    ERROR = auto()
+    TCP_SPEED = auto()
 
     # System commands (execute regardless of enable state)
     RESUME = auto()
     HALT = auto()
-    SET_IO = auto()
-    SET_PORT = auto()
+    WRITE_IO = auto()
+    CONNECT_HARDWARE = auto()
     SIMULATOR = auto()
-    SET_PROFILE = auto()
+    SELECT_PROFILE = auto()
     RESET = auto()
     RESET_LOOP_STATS = auto()
 
@@ -130,7 +131,7 @@ class CmdType(IntEnum):
     MOVEC = auto()
     MOVES = auto()
     MOVEP = auto()
-    SET_TOOL = auto()
+    SELECT_TOOL = auto()
     DELAY = auto()
     CHECKPOINT = auto()
 
@@ -144,7 +145,10 @@ class CmdType(IntEnum):
 
     # Tool commands
     TOOL_ACTION = auto()
-    GET_TOOL_STATUS = auto()
+    TOOL_STATUS = auto()
+
+    # Simulator state query
+    SIMULATOR_STATE = auto()
 
 
 # =============================================================================
@@ -405,7 +409,7 @@ class ServoJCmd(
 ):
     """SERVOJ: streaming joint position target (degrees)."""
 
-    target: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
+    angles: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
@@ -540,10 +544,10 @@ class TeleportCmd(
     tool_positions: list[float] | None = None
 
 
-class SetIOCmd(
-    msgspec.Struct, tag=int(CmdType.SET_IO), array_like=True, frozen=True, gc=False
+class WriteIOCmd(
+    msgspec.Struct, tag=int(CmdType.WRITE_IO), array_like=True, frozen=True, gc=False
 ):
-    """SET_IO: [CmdType.SET_IO, port_index, value]
+    """WRITE_IO: [CmdType.WRITE_IO, port_index, value]
 
     port_index: 0-7 (8-bit I/O port)
     value: 0 or 1
@@ -553,10 +557,14 @@ class SetIOCmd(
     value: Annotated[int, msgspec.Meta(ge=0, le=1)]
 
 
-class SetPortCmd(
-    msgspec.Struct, tag=int(CmdType.SET_PORT), array_like=True, frozen=True, gc=False
+class ConnectHardwareCmd(
+    msgspec.Struct,
+    tag=int(CmdType.CONNECT_HARDWARE),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
-    """SET_PORT: [CmdType.SET_PORT, port_str]"""
+    """CONNECT_HARDWARE: [CmdType.CONNECT_HARDWARE, port_str]"""
 
     port_str: Annotated[str, msgspec.Meta(min_length=1, max_length=256)]
 
@@ -577,10 +585,10 @@ class DelayCmd(
     seconds: Annotated[float, msgspec.Meta(gt=0.0)]
 
 
-class SetToolCmd(
-    msgspec.Struct, tag=int(CmdType.SET_TOOL), array_like=True, frozen=True, gc=False
+class SelectToolCmd(
+    msgspec.Struct, tag=int(CmdType.SELECT_TOOL), array_like=True, frozen=True, gc=False
 ):
-    """SET_TOOL: [CmdType.SET_TOOL, tool_name, variant_key]"""
+    """SELECT_TOOL: [CmdType.SELECT_TOOL, tool_name, variant_key]"""
 
     tool_name: Annotated[str, msgspec.Meta(min_length=1, max_length=64)]
     variant_key: str = ""
@@ -591,10 +599,14 @@ class SetToolCmd(
             raise ValueError(f"Unknown tool '{name}'. Available: {list_tools()}")
 
 
-class SetProfileCmd(
-    msgspec.Struct, tag=int(CmdType.SET_PROFILE), array_like=True, frozen=True, gc=False
+class SelectProfileCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SELECT_PROFILE),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
-    """SET_PROFILE: [CmdType.SET_PROFILE, profile]"""
+    """SELECT_PROFILE: [CmdType.SELECT_PROFILE, profile]"""
 
     profile: Annotated[str, msgspec.Meta(min_length=1, max_length=32)]
 
@@ -623,50 +635,62 @@ class ToolActionCmd(
             raise ValueError(f"Unknown tool '{key}'. Available: {list(registry)}")
 
 
-class GetToolStatusCmd(
+class ToolStatusCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_TOOL_STATUS),
+    tag=int(CmdType.TOOL_STATUS),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_TOOL_STATUS: [CmdType.GET_TOOL_STATUS]"""
+    """TOOL_STATUS: [CmdType.TOOL_STATUS]"""
 
     pass
 
 
-class GetEnablementCmd(
+class SimulatorStateCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_ENABLEMENT),
+    tag=int(CmdType.SIMULATOR_STATE),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_ENABLEMENT: [CmdType.GET_ENABLEMENT]"""
+    """SIMULATOR_STATE: [CmdType.SIMULATOR_STATE]"""
 
     pass
 
 
-class GetErrorCmd(
+class ReachableCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_ERROR),
+    tag=int(CmdType.REACHABLE),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_ERROR: [CmdType.GET_ERROR]"""
+    """REACHABLE: [CmdType.REACHABLE]"""
 
     pass
 
 
-class GetTcpSpeedCmd(
+class ErrorCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_TCP_SPEED),
+    tag=int(CmdType.ERROR),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_TCP_SPEED: [CmdType.GET_TCP_SPEED]"""
+    """ERROR: [CmdType.ERROR]"""
+
+    pass
+
+
+class TcpSpeedCmd(
+    msgspec.Struct,
+    tag=int(CmdType.TCP_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """TCP_SPEED: [CmdType.TCP_SPEED]"""
 
     pass
 
@@ -680,90 +704,94 @@ class PingCmd(
     pass
 
 
-class GetStatusCmd(
-    msgspec.Struct, tag=int(CmdType.GET_STATUS), array_like=True, frozen=True, gc=False
+class StatusCmd(
+    msgspec.Struct, tag=int(CmdType.STATUS), array_like=True, frozen=True, gc=False
 ):
-    """GET_STATUS: [CmdType.GET_STATUS]"""
+    """STATUS: [CmdType.STATUS]"""
 
     pass
 
 
-class GetAnglesCmd(
-    msgspec.Struct, tag=int(CmdType.GET_ANGLES), array_like=True, frozen=True, gc=False
+class AnglesCmd(
+    msgspec.Struct, tag=int(CmdType.ANGLES), array_like=True, frozen=True, gc=False
 ):
-    """GET_ANGLES: [CmdType.GET_ANGLES]"""
+    """ANGLES: [CmdType.ANGLES]"""
 
     pass
 
 
-class GetPoseCmd(
-    msgspec.Struct, tag=int(CmdType.GET_POSE), array_like=True, frozen=True, gc=False
+class PoseCmd(
+    msgspec.Struct, tag=int(CmdType.POSE), array_like=True, frozen=True, gc=False
 ):
-    """GET_POSE: [CmdType.GET_POSE, frame]"""
+    """POSE: [CmdType.POSE, frame]"""
 
     frame: Annotated[str, msgspec.Meta(pattern=r"^(WRF|TRF)$")] | None = None
 
 
-class GetIOCmd(
-    msgspec.Struct, tag=int(CmdType.GET_IO), array_like=True, frozen=True, gc=False
+class IOCmd(
+    msgspec.Struct, tag=int(CmdType.IO), array_like=True, frozen=True, gc=False
 ):
-    """GET_IO: [CmdType.GET_IO]"""
+    """IO: [CmdType.IO]"""
 
     pass
 
 
-class GetSpeedsCmd(
-    msgspec.Struct, tag=int(CmdType.GET_SPEEDS), array_like=True, frozen=True, gc=False
-):
-    """GET_SPEEDS: [CmdType.GET_SPEEDS]"""
-
-    pass
-
-
-class GetToolCmd(
-    msgspec.Struct, tag=int(CmdType.GET_TOOL), array_like=True, frozen=True, gc=False
-):
-    """GET_TOOL: [CmdType.GET_TOOL]"""
-
-    pass
-
-
-class GetQueueCmd(
-    msgspec.Struct, tag=int(CmdType.GET_QUEUE), array_like=True, frozen=True, gc=False
-):
-    """GET_QUEUE: [CmdType.GET_QUEUE]"""
-
-    pass
-
-
-class GetCurrentActionCmd(
+class JointSpeedsCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_CURRENT_ACTION),
+    tag=int(CmdType.JOINT_SPEEDS),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_CURRENT_ACTION: [CmdType.GET_CURRENT_ACTION]"""
+    """JOINT_SPEEDS: [CmdType.JOINT_SPEEDS]"""
 
     pass
 
 
-class GetLoopStatsCmd(
+class ToolsCmd(
+    msgspec.Struct, tag=int(CmdType.TOOLS), array_like=True, frozen=True, gc=False
+):
+    """TOOLS: [CmdType.TOOLS]"""
+
+    pass
+
+
+class QueueCmd(
+    msgspec.Struct, tag=int(CmdType.QUEUE), array_like=True, frozen=True, gc=False
+):
+    """QUEUE: [CmdType.QUEUE]"""
+
+    pass
+
+
+class ActivityCmd(
     msgspec.Struct,
-    tag=int(CmdType.GET_LOOP_STATS),
+    tag=int(CmdType.ACTIVITY),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """GET_LOOP_STATS: [CmdType.GET_LOOP_STATS]"""
+    """ACTIVITY: [CmdType.ACTIVITY]"""
 
     pass
 
 
-class GetProfileCmd(
-    msgspec.Struct, tag=int(CmdType.GET_PROFILE), array_like=True, frozen=True, gc=False
+class LoopStatsCmd(
+    msgspec.Struct,
+    tag=int(CmdType.LOOP_STATS),
+    array_like=True,
+    frozen=True,
+    gc=False,
 ):
-    """GET_PROFILE: [CmdType.GET_PROFILE]"""
+    """LOOP_STATS: [CmdType.LOOP_STATS]"""
+
+    pass
+
+
+class ProfileCmd(
+    msgspec.Struct, tag=int(CmdType.PROFILE), array_like=True, frozen=True, gc=False
+):
+    """PROFILE: [CmdType.PROFILE]"""
 
     pass
 
@@ -1046,6 +1074,18 @@ class TcpSpeedResultStruct(
     speed: float
 
 
+class SimulatorStateResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.SIMULATOR_STATE),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Simulator mode state."""
+
+    active: bool
+
+
 # Tagged Union for responses
 Response = (
     StatusResultStruct
@@ -1063,6 +1103,7 @@ Response = (
     | EnablementResultStruct
     | ErrorResultStruct
     | TcpSpeedResultStruct
+    | SimulatorStateResultStruct
 )
 
 
@@ -1193,6 +1234,7 @@ def pack_status(
     action_params: str = "",
     tool_status: ToolStatus | None = None,
     tcp_speed: float = 0.0,
+    simulator_active: bool = False,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1231,6 +1273,7 @@ def pack_status(
             if ts is not None
             else None,
             tcp_speed,
+            simulator_active,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1267,6 +1310,7 @@ class StatusBuffer:
     queued_segments: int = 0
     queued_duration: float = 0.0
     tcp_speed: float = 0.0
+    simulator_active: bool = False
 
     def __post_init__(self) -> None:
         self._cart_en_dict: dict[str, np.ndarray] = {
@@ -1309,6 +1353,7 @@ class StatusBuffer:
             queued_segments=self.queued_segments,
             queued_duration=self.queued_duration,
             tcp_speed=self.tcp_speed,
+            simulator_active=self.simulator_active,
         )
 
 
@@ -1319,7 +1364,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
                      executing_index, completed_index, last_checkpoint,
                      error, queued_segments, queued_duration, action_params,
-                     tool_status_tuple, tcp_speed]
+                     tool_status_tuple, tcp_speed, simulator_active]
 
     Args:
         data: Raw msgpack bytes
@@ -1372,6 +1417,9 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
         if len(msg) > 18:
             buf.tcp_speed = float(msg[18])
+
+        if len(msg) > 19:
+            buf.simulator_active = bool(msg[19])
 
         return True
     except Exception as e:
@@ -1614,34 +1662,36 @@ __all__ = [
     "ServoLCmd",
     "JogJCmd",
     "JogLCmd",
-    # Command structs — system/query/other
+    # Command structs — system/control
     "ResumeCmd",
     "HaltCmd",
     "ResetCmd",
     "ResetLoopStatsCmd",
-    "SetIOCmd",
-    "SetPortCmd",
+    "WriteIOCmd",
+    "ConnectHardwareCmd",
     "SimulatorCmd",
     "DelayCmd",
     "TeleportCmd",
-    "SetToolCmd",
-    "SetProfileCmd",
+    "SelectToolCmd",
+    "SelectProfileCmd",
     "ToolActionCmd",
-    "GetToolStatusCmd",
-    "GetEnablementCmd",
-    "GetErrorCmd",
-    "GetTcpSpeedCmd",
+    # Command structs — query
+    "ToolStatusCmd",
+    "SimulatorStateCmd",
+    "ReachableCmd",
+    "ErrorCmd",
+    "TcpSpeedCmd",
     "PingCmd",
-    "GetStatusCmd",
-    "GetAnglesCmd",
-    "GetPoseCmd",
-    "GetIOCmd",
-    "GetSpeedsCmd",
-    "GetToolCmd",
-    "GetQueueCmd",
-    "GetCurrentActionCmd",
-    "GetLoopStatsCmd",
-    "GetProfileCmd",
+    "StatusCmd",
+    "AnglesCmd",
+    "PoseCmd",
+    "IOCmd",
+    "JointSpeedsCmd",
+    "ToolsCmd",
+    "QueueCmd",
+    "ActivityCmd",
+    "LoopStatsCmd",
+    "ProfileCmd",
     "Command",
     # Mixin
     "MotionParamsMixin",
@@ -1661,6 +1711,7 @@ __all__ = [
     "EnablementResultStruct",
     "ErrorResultStruct",
     "TcpSpeedResultStruct",
+    "SimulatorStateResultStruct",
     "Response",
     # Message types
     "OkMsg",

@@ -17,7 +17,7 @@ async def test_multicast_status_reception(server_proc, ports):
 
         async def receive_status():
             nonlocal received_count
-            async for _ in client.status_stream_shared():
+            async for _ in client.stream_status_shared():
                 received_count += 1
                 if received_count >= 3:
                     return

@@ -19,8 +19,8 @@ def main() -> None:
         ready = client.wait_ready(timeout=3.0)
         print(f"server ready: {ready}")
         print("ping:", client.ping())
-        print("pose xyz:", client.get_pose_xyz())
-        print("angles:", client.get_angles())
+        print("pose xyz:", client.pose()[:3])
+        print("angles:", client.angles())
         code = 0 if ready else 1
     raise SystemExit(code)
 

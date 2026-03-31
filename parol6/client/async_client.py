@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 import msgspec
 import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, ToolStatus
-from waldoctl.status import ToolResult
+from waldoctl.status import ActionState, ActivityResult, ToolResult
 from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
@@ -24,29 +24,22 @@ from ..utils.error_catalog import RobotError
 from ..utils.errors import MotionError
 from ..protocol.wire import (
     STRUCT_TO_CMDTYPE,
+    ActivityCmd,
+    AnglesCmd,
     AnglesResultStruct,
     decode_status_bin_into,
     CheckpointCmd,
+    ConnectHardwareCmd,
     CurrentActionResultStruct,
     DelayCmd,
     EnablementResultStruct,
+    ErrorCmd,
     ErrorResultStruct,
     ErrorMsg,
+    IOCmd,
     IOResultStruct,
-    GetAnglesCmd,
-    GetCurrentActionCmd,
-    GetEnablementCmd,
-    GetErrorCmd,
-    GetIOCmd,
-    GetLoopStatsCmd,
-    GetPoseCmd,
-    GetProfileCmd,
-    GetQueueCmd,
-    GetSpeedsCmd,
-    GetStatusCmd,
-    GetTcpSpeedCmd,
-    GetToolCmd,
-    GetToolStatusCmd,
+    JointSpeedsCmd,
+    LoopStatsCmd,
     HaltCmd,
     HomeCmd,
     JogJCmd,
@@ -61,22 +54,28 @@ from ..protocol.wire import (
     OkMsg,
     PingCmd,
     PingResultStruct,
+    PoseCmd,
     PoseResultStruct,
+    ProfileCmd,
     ProfileResultStruct,
+    QueueCmd,
     QueueResultStruct,
+    ReachableCmd,
     ResetCmd,
     ResetLoopStatsCmd,
     ResumeCmd,
     Response,
     ResponseMsg,
+    SelectProfileCmd,
+    SelectToolCmd,
     ServoJCmd,
     ServoJPoseCmd,
     ServoLCmd,
-    SetIOCmd,
-    SetPortCmd,
-    SetProfileCmd,
-    SetToolCmd,
     SimulatorCmd,
+    SimulatorStateCmd,
+    SimulatorStateResultStruct,
+    StatusCmd,
+    TcpSpeedCmd,
     TeleportCmd,
     SpeedsResultStruct,
     StatusBuffer,
@@ -84,7 +83,10 @@ from ..protocol.wire import (
     TcpSpeedResultStruct,
     ToolActionCmd,
     ToolResultStruct,
+    ToolStatusCmd,
     ToolStatusResultStruct,
+    ToolsCmd,
+    WriteIOCmd,
     decode_message,
     encode_command,
     encode_command_into,
@@ -96,6 +98,11 @@ from pinokin import so3_rpy
 logger = logging.getLogger(__name__)
 
 _AXIS_MAP: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
+_ACTION_STATE_MAP: dict[str, ActionState] = {
+    "idle": ActionState.IDLE,
+    "executing": ActionState.EXECUTING,
+    "error": ActionState.ERROR,
+}
 
 
 class _UDPClientProtocol(asyncio.DatagramProtocol):
@@ -242,7 +249,7 @@ class AsyncRobotClient(_RobotClientABC):
         self.timeout = timeout
         self.retries = retries
 
-        # Pre-allocated buffers for get_pose_rpy
+        # Pre-allocated buffers for pose() RPY conversion
         self._R_buf = np.zeros((3, 3), dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
 
@@ -273,7 +280,7 @@ class AsyncRobotClient(_RobotClientABC):
         # Last command index returned by server for queued commands
         self._last_command_index: int | None = None
 
-        # Active tool key (set by set_tool)
+        # Active tool key (set by select_tool)
         self._active_tool_key: str | None = None
         self._active_variant_key: str = ""
 
@@ -290,7 +297,7 @@ class AsyncRobotClient(_RobotClientABC):
         """Active bound tool. Raises if no tool has been set."""
         key = (self._active_tool_key or "").upper()
         if not key:
-            raise RuntimeError("No tool set. Call set_tool() first.")
+            raise RuntimeError("No tool set. Call select_tool() first.")
         return self._bound_tools[key]
 
     # --------------- Endpoint configuration properties ---------------
@@ -402,7 +409,7 @@ class AsyncRobotClient(_RobotClientABC):
         logging.debug("Closing Client...")
         self._closed = True
 
-        # Wake all status_stream consumers
+        # Wake all stream_status consumers
         self._status_event.set()
 
         # Close status transport - yield first to let pending I/O complete
@@ -437,11 +444,11 @@ class AsyncRobotClient(_RobotClientABC):
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def status_stream(self) -> AsyncIterator[StatusBuffer]:
+    async def stream_status(self) -> AsyncIterator[StatusBuffer]:
         """Async generator that yields status updates from multicast broadcasts.
 
         Usage:
-            async for status in client.status_stream():
+            async for status in client.stream_status():
                 print(f"Angles: {status.angles}")
 
         This generator terminates automatically when :meth:`close` is
@@ -449,25 +456,25 @@ class AsyncRobotClient(_RobotClientABC):
         their consumer tasks.
 
         Each yielded StatusBuffer is a copy - safe to store or process async.
-        For zero-copy hot paths, use :meth:`status_stream_shared` instead.
+        For zero-copy hot paths, use :meth:`stream_status_shared` instead.
 
         Slow consumers automatically skip to the latest state (desired for real-time).
         """
-        async for status in self.status_stream_shared():
+        async for status in self.stream_status_shared():
             yield status.copy()
 
-    async def status_stream_shared(self) -> AsyncIterator[StatusBuffer]:
+    async def stream_status_shared(self) -> AsyncIterator[StatusBuffer]:
         """Zero-copy async generator that yields the shared status buffer.
 
         Usage:
-            async for status in client.status_stream_shared():
+            async for status in client.stream_status_shared():
                 # Process immediately - don't store references
                 print(f"Angles: {status.angles}")
 
         WARNING: The same buffer instance is yielded on every iteration.
         Do not store references to the yielded object - data will be
         overwritten on the next iteration. For safe storage, use
-        :meth:`status_stream` or call status.copy().
+        :meth:`stream_status` or call status.copy().
 
         This generator terminates automatically when :meth:`close` is
         called on the client.
@@ -648,7 +655,7 @@ class AsyncRobotClient(_RobotClientABC):
         index = await self._send(HomeCmd())
         assert isinstance(index, int)
         if wait and index >= 0:
-            ok = await self.wait_command_complete(index, timeout=timeout)
+            ok = await self.wait_command(index, timeout=timeout)
             if not ok:
                 raise TimeoutError(f"home() timed out after {timeout}s")
         return index
@@ -679,34 +686,26 @@ class AsyncRobotClient(_RobotClientABC):
         """
         return await self._send(HaltCmd())
 
-    async def simulator_on(self) -> int:
-        """Enable simulator mode (no physical robot hardware required).
-
-        The controller will use simulated robot dynamics instead of
-        communicating with real hardware over serial.
+    async def simulator(self, enabled: bool) -> int:
+        """Enable or disable simulator mode.
 
         Category: Control
 
         Example:
-            rbt.simulator_on()
-
-        Returns:
-            1 if acknowledged, 0 on failure.
+            rbt.simulator(True)
         """
-        return await self._send(SimulatorCmd(on=True))
+        return await self._send(SimulatorCmd(on=enabled))
 
-    async def simulator_off(self) -> int:
-        """Disable simulator mode, switching to real hardware communication.
+    async def is_simulator(self) -> bool:
+        """Query whether simulator mode is active.
 
-        Category: Control
+        Category: Query
 
         Example:
-            rbt.simulator_off()
-
-        Returns:
-            1 if acknowledged, 0 on failure.
+            active = rbt.is_simulator()
         """
-        return await self._send(SimulatorCmd(on=False))
+        resp = await self._request(SimulatorStateCmd())
+        return resp.active if isinstance(resp, SimulatorStateResultStruct) else False
 
     async def teleport(
         self,
@@ -725,13 +724,13 @@ class AsyncRobotClient(_RobotClientABC):
             TeleportCmd(angles=angles_deg, tool_positions=tool_positions)
         )
 
-    async def set_serial_port(self, port_str: str) -> int:
-        """Set the serial port for robot hardware communication.
+    async def connect_hardware(self, port_str: str) -> int:
+        """Connect to robot hardware via serial port.
 
         Category: Configuration
 
         Example:
-            rbt.set_serial_port("/dev/ttyUSB0")
+            rbt.connect_hardware("/dev/ttyUSB0")
 
         Args:
             port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
@@ -744,7 +743,7 @@ class AsyncRobotClient(_RobotClientABC):
         """
         if not port_str:
             raise ValueError("No port provided")
-        return await self._send(SetPortCmd(port_str=port_str))
+        return await self._send(ConnectHardwareCmd(port_str=port_str))
 
     async def reset(self) -> int:
         """Reset controller state to initial values.
@@ -773,236 +772,55 @@ class AsyncRobotClient(_RobotClientABC):
             return None
         return PingResult(hardware_connected=bool(resp.hardware_connected))
 
-    async def get_angles(self) -> list[float] | None:
-        """Get current joint angles in degrees [J1, J2, J3, J4, J5, J6].
+    async def angles(self) -> list[float] | None:
+        """Current joint angles in degrees [J1, J2, J3, J4, J5, J6].
 
         Category: Query
 
         Example:
-            angles = rbt.get_angles()
+            angles = rbt.angles()
         """
-        resp = await self._request(GetAnglesCmd())
+        resp = await self._request(AnglesCmd())
         return resp.angles if isinstance(resp, AnglesResultStruct) else None
 
-    async def get_io(self) -> list[int] | None:
-        """Get digital I/O status [in1, in2, out1, out2, estop].
+    async def io(self) -> list[int] | None:
+        """Digital I/O status [in1, in2, out1, out2, estop].
 
         Category: Query
 
         Example:
-            io = rbt.get_io()
+            io = rbt.io()
         """
-        resp = await self._request(GetIOCmd())
+        resp = await self._request(IOCmd())
         return resp.io if isinstance(resp, IOResultStruct) else None
 
-    async def get_speeds(self) -> list[float] | None:
-        """Get current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
+    async def joint_speeds(self) -> list[float] | None:
+        """Current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
 
         Category: Query
 
         Example:
-            speeds = rbt.get_speeds()
+            speeds = rbt.joint_speeds()
         """
-        resp = await self._request(GetSpeedsCmd())
+        resp = await self._request(JointSpeedsCmd())
         return resp.speeds if isinstance(resp, SpeedsResultStruct) else None
 
-    async def get_pose(self, frame: Frame = "WRF") -> list[float] | None:
-        """Get 16-element transformation matrix (flattened) with translation in mm.
-
-        Category: Query
-
-        Example:
-            pose = rbt.get_pose()
-        """
-        resp = await self._request(GetPoseCmd(frame=frame))
+    async def _pose_matrix(self, frame: Frame = "WRF") -> list[float] | None:
+        """Raw 16-element transformation matrix (flattened) with translation in mm."""
+        resp = await self._request(PoseCmd(frame=frame))
         return resp.pose if isinstance(resp, PoseResultStruct) else None
 
-    async def get_status(self) -> StatusResultStruct | None:
-        """Get aggregate status (pose, angles, speeds, io, tool_status).
+    async def pose(self, frame: Frame = "WRF") -> list[float] | None:
+        """Current TCP pose as [x, y, z, rx, ry, rz] in mm and degrees.
 
         Category: Query
 
         Example:
-            status = rbt.get_status()
+            pose = rbt.pose()
         """
-        resp = await self._request(GetStatusCmd())
-        return resp if isinstance(resp, StatusResultStruct) else None
-
-    async def get_loop_stats(self) -> LoopStatsResultStruct | None:
-        """Fetch control-loop runtime metrics.
-
-        Category: Query
-
-        Example:
-            stats = rbt.get_loop_stats()
-        """
-        resp = await self._request(GetLoopStatsCmd())
-        return resp if isinstance(resp, LoopStatsResultStruct) else None
-
-    async def reset_loop_stats(self) -> int:
-        """Reset control-loop min/max metrics and overrun count.
-
-        Category: Query
-
-        Example:
-            rbt.reset_loop_stats()
-        """
-        return await self._send(ResetLoopStatsCmd())
-
-    async def set_tool(self, tool_name: str, variant_key: str = "") -> int:
-        """Set the current end-effector tool configuration.
-
-        Category: Configuration
-
-        Example:
-            rbt.set_tool("NONE")
-
-        Args:
-            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
-            variant_key: Optional variant within the tool type.
-
-        Returns:
-            Command index (>= 0) if queued, 0 on failure.
-        """
-        self._active_tool_key = tool_name.upper()
-        self._active_variant_key = variant_key
-        return await self._send(
-            SetToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
-        )
-
-    async def set_profile(self, profile: str) -> int:
-        """Set the motion profile for all moves.
-
-        Category: Configuration
-
-        Example:
-            rbt.set_profile("TOPPRA")
-
-        Args:
-            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
-                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
-
-        Returns:
-            True if successful
-        """
-        return await self._send(SetProfileCmd(profile=profile.upper()))
-
-    async def get_profile(self) -> str | None:
-        """Get the current motion profile.
-
-        Category: Query
-
-        Example:
-            profile = rbt.get_profile()
-        """
-        resp = await self._request(GetProfileCmd())
-        return resp.profile.upper() if isinstance(resp, ProfileResultStruct) else None
-
-    async def get_tool(self) -> ToolResult | None:
-        """Get the current tool and available tools.
-
-        Category: Query
-
-        Example:
-            tool = rbt.get_tool()
-        """
-        resp = await self._request(GetToolCmd())
-        if not isinstance(resp, ToolResultStruct):
-            return None
-        return ToolResult(tool=resp.tool, available=resp.available)
-
-    async def get_current_action(self) -> CurrentActionResultStruct | None:
-        """Get the current executing action (current, state, next, params).
-
-        Category: Query
-
-        Example:
-            action = rbt.get_current_action()
-        """
-        resp = await self._request(GetCurrentActionCmd())
-        return resp if isinstance(resp, CurrentActionResultStruct) else None
-
-    async def get_queue(self) -> list[str] | None:
-        """Get queue status with progress tracking.
-
-        Category: Query
-
-        Example:
-            queue = rbt.get_queue()
-        """
-        resp = await self._request(GetQueueCmd())
-        return resp.queue if isinstance(resp, QueueResultStruct) else None
-
-    async def get_tool_status(self) -> ToolStatus | None:
-        """Get current tool status (key, state, engaged, positions, channels, etc.).
-
-        Category: Query
-
-        Example:
-            ts = rbt.get_tool_status()
-        """
-        resp = await self._request(GetToolStatusCmd())
-        if not isinstance(resp, ToolStatusResultStruct):
-            return None
-        return ToolStatus(
-            key=resp.tool_key,
-            state=resp.state,
-            engaged=resp.engaged,
-            part_detected=resp.part_detected,
-            fault_code=resp.fault_code,
-            positions=tuple(resp.positions),
-            channels=tuple(resp.channels),
-        )
-
-    async def get_enablement(self) -> EnablementResultStruct | None:
-        """Get joint and Cartesian enablement flags.
-
-        Category: Query
-
-        Example:
-            en = rbt.get_enablement()
-        """
-        resp = await self._request(GetEnablementCmd())
-        return resp if isinstance(resp, EnablementResultStruct) else None
-
-    async def get_error(self) -> RobotError | None:
-        """Get the current error state, or None if no error.
-
-        Category: Query
-
-        Example:
-            err = rbt.get_error()
-        """
-        resp = await self._request(GetErrorCmd())
-        if not isinstance(resp, ErrorResultStruct) or resp.error is None:
-            return None
-        return RobotError.from_wire(resp.error)
-
-    async def get_tcp_speed(self) -> float | None:
-        """Get current TCP linear speed in mm/s.
-
-        Category: Query
-
-        Example:
-            speed = rbt.get_tcp_speed()
-        """
-        resp = await self._request(GetTcpSpeedCmd())
-        return resp.speed if isinstance(resp, TcpSpeedResultStruct) else None
-
-    # --------------- Helper methods ---------------
-
-    async def get_pose_rpy(self) -> list[float] | None:
-        """Get robot pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] using RPY order='xyz'.
-
-        Category: Query
-
-        Example:
-            rpy = rbt.get_pose_rpy()
-        """
-        pose_matrix = await self.get_pose()
+        pose_matrix = await self._pose_matrix(frame=frame)
         if not pose_matrix or len(pose_matrix) != 16:
             return None
-
         try:
             x, y, z = pose_matrix[3], pose_matrix[7], pose_matrix[11]
             R = self._R_buf
@@ -1021,16 +839,184 @@ class AsyncRobotClient(_RobotClientABC):
         except (ValueError, IndexError):
             return None
 
-    async def get_pose_xyz(self) -> list[float] | None:
-        """Get robot position as [x, y, z] in mm.
+    async def status(self) -> StatusResultStruct | None:
+        """Aggregate status snapshot (pose, angles, speeds, io, tool_status).
 
         Category: Query
 
         Example:
-            xyz = rbt.get_pose_xyz()
+            status = rbt.status()
         """
-        pose_rpy = await self.get_pose_rpy()
-        return pose_rpy[:3] if pose_rpy else None
+        resp = await self._request(StatusCmd())
+        return resp if isinstance(resp, StatusResultStruct) else None
+
+    async def loop_stats(self) -> LoopStatsResultStruct | None:
+        """Fetch control-loop runtime metrics.
+
+        Category: Query
+
+        Example:
+            stats = rbt.loop_stats()
+        """
+        resp = await self._request(LoopStatsCmd())
+        return resp if isinstance(resp, LoopStatsResultStruct) else None
+
+    async def reset_loop_stats(self) -> int:
+        """Reset control-loop min/max metrics and overrun count.
+
+        Category: Query
+
+        Example:
+            rbt.reset_loop_stats()
+        """
+        return await self._send(ResetLoopStatsCmd())
+
+    async def select_tool(self, tool_name: str, variant_key: str = "") -> int:
+        """Set the active end-effector tool on the controller.
+
+        Category: Configuration
+
+        Example:
+            rbt.select_tool("PNEUMATIC")
+
+        Args:
+            tool_name: Name of the tool ('NONE', 'PNEUMATIC', 'SSG-48', 'MSG', 'VACUUM')
+            variant_key: Optional variant within the tool type.
+
+        Returns:
+            Command index (>= 0) if queued, 0 on failure.
+        """
+        self._active_tool_key = tool_name.upper()
+        self._active_variant_key = variant_key
+        return await self._send(
+            SelectToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
+        )
+
+    async def select_profile(self, profile: str) -> int:
+        """Set the motion profile (e.g. ``"TOPPRA"``).
+
+        Category: Configuration
+
+        Example:
+            rbt.select_profile("TOPPRA")
+
+        Args:
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
+                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
+
+        Returns:
+            True if successful
+        """
+        return await self._send(SelectProfileCmd(profile=profile.upper()))
+
+    async def profile(self) -> str | None:
+        """Current motion profile name.
+
+        Category: Query
+
+        Example:
+            profile = rbt.profile()
+        """
+        resp = await self._request(ProfileCmd())
+        return resp.profile.upper() if isinstance(resp, ProfileResultStruct) else None
+
+    async def tools(self) -> ToolResult | None:
+        """Current tool and available tools.
+
+        Category: Query
+
+        Example:
+            tools = rbt.tools()
+        """
+        resp = await self._request(ToolsCmd())
+        if not isinstance(resp, ToolResultStruct):
+            return None
+        return ToolResult(tool=resp.tool, available=resp.available)
+
+    async def activity(self) -> ActivityResult | None:
+        """What the robot is currently doing.
+
+        Returns state (idle/executing/error), current command name,
+        parameters, and error description if applicable.
+
+        Category: Query
+
+        Example:
+            act = rbt.activity()
+        """
+        resp = await self._request(ActivityCmd())
+        if not isinstance(resp, CurrentActionResultStruct):
+            return None
+        state = _ACTION_STATE_MAP.get(resp.state.lower(), ActionState.IDLE)
+        return ActivityResult(
+            state=state,
+            command=resp.current,
+            params=resp.params,
+            error="" if state != ActionState.ERROR else resp.current,
+        )
+
+    async def queue(self) -> list[str] | None:
+        """Queued command list.
+
+        Category: Query
+
+        Example:
+            queue = rbt.queue()
+        """
+        resp = await self._request(QueueCmd())
+        return resp.queue if isinstance(resp, QueueResultStruct) else None
+
+    async def _tool_status(self) -> ToolStatus | None:
+        """Query tool status from the controller (internal — use ``rbt.tool.status()``)."""
+        resp = await self._request(ToolStatusCmd())
+        if not isinstance(resp, ToolStatusResultStruct):
+            return None
+        return ToolStatus(
+            key=resp.tool_key,
+            state=resp.state,
+            engaged=resp.engaged,
+            part_detected=resp.part_detected,
+            fault_code=resp.fault_code,
+            positions=tuple(resp.positions),
+            channels=tuple(resp.channels),
+        )
+
+    async def reachable(self) -> EnablementResultStruct | None:
+        """Remaining freedom of movement per joint/axis before hitting limits.
+
+        Category: Query
+
+        Example:
+            en = rbt.reachable()
+        """
+        resp = await self._request(ReachableCmd())
+        return resp if isinstance(resp, EnablementResultStruct) else None
+
+    async def error(self) -> RobotError | None:
+        """Current error state, or None if no error.
+
+        Category: Query
+
+        Example:
+            err = rbt.error()
+        """
+        resp = await self._request(ErrorCmd())
+        if not isinstance(resp, ErrorResultStruct) or resp.error is None:
+            return None
+        return RobotError.from_wire(resp.error)
+
+    async def tcp_speed(self) -> float | None:
+        """TCP linear velocity in mm/s.
+
+        Category: Query
+
+        Example:
+            speed = rbt.tcp_speed()
+        """
+        resp = await self._request(TcpSpeedCmd())
+        return resp.speed if isinstance(resp, TcpSpeedResultStruct) else None
+
+    # --------------- Helper methods ---------------
 
     async def is_estop_pressed(self) -> bool:
         """Check if E-stop is pressed. Returns True if pressed.
@@ -1040,7 +1026,7 @@ class AsyncRobotClient(_RobotClientABC):
         Example:
             pressed = rbt.is_estop_pressed()
         """
-        io_status = await self.get_io()
+        io_status = await self.io()
         if io_status and len(io_status) >= 5:
             return io_status[4] == 0  # E-stop at index 4, 0 means pressed
         return False
@@ -1050,7 +1036,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         Category: Query
 
-        Prefer ``wait_command_complete()`` for waiting on specific commands.
+        Prefer ``wait_command()`` for waiting on specific commands.
         This method polls raw joint speeds and is mainly useful for
         diagnostics or manual stopping logic.
 
@@ -1063,12 +1049,12 @@ class AsyncRobotClient(_RobotClientABC):
         Returns:
             True if all joints below threshold
         """
-        speeds = await self.get_speeds()
+        speeds = await self.joint_speeds()
         if not speeds:
             return False
         return max(abs(s) for s in speeds) < threshold_speed
 
-    async def wait_motion_complete(
+    async def wait_motion(
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
@@ -1087,7 +1073,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Synchronization
 
         Example:
-            rbt.wait_motion_complete()
+            rbt.wait_motion()
 
         Args:
             timeout: Maximum time to wait in seconds
@@ -1108,7 +1094,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         try:
             async with asyncio.timeout(timeout):
-                async for status in self.status_stream_shared():
+                async for status in self.stream_status_shared():
                     speeds = status.speeds
                     angles = status.angles
 
@@ -1171,7 +1157,7 @@ class AsyncRobotClient(_RobotClientABC):
             await asyncio.sleep(interval)
         return False
 
-    async def wait_for_status(
+    async def wait_status(
         self, predicate: Callable[[StatusBuffer], bool], timeout: float = 5.0
     ) -> bool:
         """Wait until a multicast status satisfies predicate(status) within timeout."""
@@ -1215,9 +1201,7 @@ class AsyncRobotClient(_RobotClientABC):
                     logger.debug("Status predicate raised", exc_info=True)
         return False
 
-    async def wait_command_complete(
-        self, command_index: int, timeout: float = 10.0
-    ) -> bool:
+    async def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
         Uses status broadcasts to monitor the server's completed_command_index.
@@ -1242,7 +1226,7 @@ class AsyncRobotClient(_RobotClientABC):
                 return True
             return False
 
-        ok = await self.wait_for_status(_done, timeout=timeout)
+        ok = await self.wait_status(_done, timeout=timeout)
         if ok:
             s = self._shared_status
             if s.error is not None and s.error.command_index <= command_index:
@@ -1252,9 +1236,9 @@ class AsyncRobotClient(_RobotClientABC):
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 
     @overload
-    async def moveJ(
+    async def move_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         duration: float = ...,
         speed: float = ...,
@@ -1269,9 +1253,9 @@ class AsyncRobotClient(_RobotClientABC):
         ...
 
     @overload
-    async def moveJ(
+    async def move_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         pose: list[float],
         duration: float = ...,
@@ -1285,9 +1269,9 @@ class AsyncRobotClient(_RobotClientABC):
         """Joint-space move to Cartesian target via IK."""
         ...
 
-    async def moveJ(
+    async def move_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         pose: list[float] | None = None,
         duration: float = 0.0,
@@ -1306,16 +1290,16 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Motion
 
         Example:
-            rbt.moveJ([90, -90, 180, 0, 0, 180], speed=0.5)
+            rbt.move_j([90, -90, 180, 0, 0, 180], speed=0.5)
 
         Args:
-            target: 6 joint angles in degrees (ignored if pose= is set)
+            angles: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target [x,y,z,rx,ry,rz] — dispatches to MOVEJ_POSE
             duration: Motion duration in seconds (mutually exclusive with speed)
             speed: Speed fraction 0-1 (mutually exclusive with duration)
             accel: Acceleration fraction 0-1
             r: Blend radius in mm (0 = stop at target)
-            rel: If True, target is relative to current position
+            rel: If True, angles are relative to current position
             wait: If True, block until motion completes
         """
         if pose is not None:
@@ -1327,7 +1311,7 @@ class AsyncRobotClient(_RobotClientABC):
         else:
             index = await self._send(
                 MoveJCmd(
-                    angles=target,
+                    angles=angles,
                     duration=duration,
                     speed=speed,
                     accel=accel,
@@ -1336,10 +1320,10 @@ class AsyncRobotClient(_RobotClientABC):
                 )
             )
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            await self.wait_command(index, timeout=timeout)
         return index
 
-    async def moveL(
+    async def move_l(
         self,
         pose: list[float],
         *,
@@ -1360,7 +1344,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Motion
 
         Example:
-            rbt.moveL([0, 263, 242, 90, 0, 90], speed=0.5)
+            rbt.move_l([0, 263, 242, 90, 0, 90], speed=0.5)
 
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
@@ -1383,10 +1367,10 @@ class AsyncRobotClient(_RobotClientABC):
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            await self.wait_command(index, timeout=timeout)
         return index
 
-    async def moveC(
+    async def move_c(
         self,
         via: list[float],
         end: list[float],
@@ -1407,7 +1391,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Motion
 
         Example:
-            rbt.moveC(via=[0, 250, 250, 90, 0, 90], end=[0, 263, 242, 90, 0, 90], speed=0.5)
+            rbt.move_c(via=[0, 250, 250, 90, 0, 90], end=[0, 263, 242, 90, 0, 90], speed=0.5)
 
         Args:
             via: Via-point pose [x,y,z,rx,ry,rz]
@@ -1430,10 +1414,10 @@ class AsyncRobotClient(_RobotClientABC):
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            await self.wait_command(index, timeout=timeout)
         return index
 
-    async def moveS(
+    async def move_s(
         self,
         waypoints: list[list[float]],
         *,
@@ -1452,7 +1436,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Smooth Motion
 
         Example:
-            rbt.moveS([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
+            rbt.move_s([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
 
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
@@ -1471,10 +1455,10 @@ class AsyncRobotClient(_RobotClientABC):
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            await self.wait_command(index, timeout=timeout)
         return index
 
-    async def moveP(
+    async def move_p(
         self,
         waypoints: list[list[float]],
         *,
@@ -1493,7 +1477,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Smooth Motion
 
         Example:
-            rbt.moveP([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
+            rbt.move_p([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
 
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
@@ -1512,7 +1496,7 @@ class AsyncRobotClient(_RobotClientABC):
         )
         index = await self._send(cmd)
         if wait and index >= 0:
-            await self.wait_command_complete(index, timeout=timeout)
+            await self.wait_command(index, timeout=timeout)
         return index
 
     async def checkpoint(self, label: str) -> int:
@@ -1531,45 +1515,28 @@ class AsyncRobotClient(_RobotClientABC):
         index = await self._send(CheckpointCmd(label=label))
         return index
 
-    async def wait_for_command(self, index: int, timeout: float = 30.0) -> bool:
-        """Wait until a queued command (by index) has completed.
-
-        Category: Synchronization
-
-        Example:
-            rbt.wait_for_command(index)
-
-        Args:
-            index: Command index returned by a move command
-            timeout: Maximum wait time in seconds
-        """
-        return await self.wait_for_status(
-            lambda s: s.completed_index >= index,
-            timeout=timeout,
-        )
-
-    async def wait_for_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
+    async def wait_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
         """Wait until a checkpoint with the given label has been reached.
 
         Category: Synchronization
 
         Example:
-            rbt.wait_for_checkpoint("pick_done")
+            rbt.wait_checkpoint("pick_done")
 
         Args:
             label: Checkpoint label to wait for
             timeout: Maximum wait time in seconds
         """
-        return await self.wait_for_status(
+        return await self.wait_status(
             lambda s: s.last_checkpoint == label,
             timeout=timeout,
         )
 
     # --------------- Servo commands (streaming position) ---------------
 
-    async def servoJ(
+    async def servo_j(
         self,
-        target: list[float],
+        angles: list[float],
         *,
         pose: list[float] | None = None,
         speed: float = 1.0,
@@ -1580,19 +1547,19 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Streaming
 
         Example:
-            rbt.servoJ([90, -90, 180, 0, 0, 180])
+            rbt.servo_j([90, -90, 180, 0, 0, 180])
 
         Args:
-            target: 6 joint angles in degrees (ignored if pose= is set)
+            angles: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target — dispatches to SERVOJ_POSE
             speed: Speed fraction 0-1
             accel: Acceleration fraction 0-1
         """
         if pose is not None:
             return await self._send(ServoJPoseCmd(pose=pose, speed=speed, accel=accel))
-        return await self._send(ServoJCmd(target=target, speed=speed, accel=accel))
+        return await self._send(ServoJCmd(angles=angles, speed=speed, accel=accel))
 
-    async def servoL(
+    async def servo_l(
         self,
         pose: list[float],
         *,
@@ -1604,7 +1571,7 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Streaming
 
         Example:
-            rbt.servoL([0, 263, 242, 90, 0, 90])
+            rbt.servo_l([0, 263, 242, 90, 0, 90])
 
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
@@ -1615,7 +1582,7 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- Jog commands (streaming velocity) ---------------
 
-    async def jogJ(
+    async def jog_j(
         self,
         joint: int = -1,
         speed: float = 0.0,
@@ -1627,13 +1594,13 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Joint velocity jog. Single-joint or multi-joint.
 
-        Single joint:   jogJ(0, 0.5, 1.0)
-        Multi joint:    jogJ(joints=[0,1], speeds=[0.5, -0.3], duration=1.0)
+        Single joint:   jog_j(0, 0.5, 1.0)
+        Multi joint:    jog_j(joints=[0,1], speeds=[0.5, -0.3], duration=1.0)
 
         Category: Jog
 
         Example:
-            rbt.jogJ(0, speed=0.5, duration=1.0)
+            rbt.jog_j(0, speed=0.5, duration=1.0)
 
         Args:
             joint: Joint index (0-5) for single-joint jog
@@ -1650,12 +1617,12 @@ class AsyncRobotClient(_RobotClientABC):
         elif joint >= 0:
             speed_arr[joint] = speed
         else:
-            raise ValueError("jogJ requires either joint= or joints=/speeds=")
+            raise ValueError("jog_j requires either joint= or joints=/speeds=")
         return await self._send(
             JogJCmd(speeds=speed_arr, duration=duration, accel=accel)
         )
 
-    async def jogL(
+    async def jog_l(
         self,
         frame: Frame,
         axis: Axis | None = None,
@@ -1668,13 +1635,13 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Cartesian velocity jog. Single-axis or multi-axis.
 
-        Single axis:  jogL("WRF", "X", 0.5, 1.0)
-        Multi axis:   jogL("WRF", axes=["X","Y"], speeds_list=[0.5, -0.3], duration=1.0)
+        Single axis:  jog_l("WRF", "X", 0.5, 1.0)
+        Multi axis:   jog_l("WRF", axes=["X","Y"], speeds_list=[0.5, -0.3], duration=1.0)
 
         Category: Jog
 
         Example:
-            rbt.jogL("WRF", "X", speed=0.5, duration=1.0)
+            rbt.jog_l("WRF", "X", speed=0.5, duration=1.0)
 
         Args:
             frame: Reference frame ("WRF" or "TRF")
@@ -1692,14 +1659,14 @@ class AsyncRobotClient(_RobotClientABC):
         elif axis is not None:
             vel[_AXIS_MAP[axis]] = speed
         else:
-            raise ValueError("jogL requires either axis= or axes=/speeds_list=")
+            raise ValueError("jog_l requires either axis= or axes=/speeds_list=")
         return await self._send(
             JogLCmd(frame=frame, velocities=vel, duration=duration, accel=accel)
         )
 
     # --------------- IO / Gripper / Utility ---------------
 
-    async def set_io(self, index: int, value: int) -> int:
+    async def write_io(self, index: int, value: int) -> int:
         """Set digital output by logical index (0 = first output pin).
 
         The firmware I/O byte layout is ``[in0, in1, out0, out1, estop, ...]``
@@ -1707,10 +1674,10 @@ class AsyncRobotClient(_RobotClientABC):
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
-        Category: IO
+        Category: I/O
 
         Example:
-            rbt.set_io(0, 1)   # Set first output HIGH
+            rbt.write_io(0, 1)   # Set first output HIGH
         """
         if index < 0 or index > 1:
             raise ValueError("Output index must be 0 or 1")
@@ -1718,7 +1685,7 @@ class AsyncRobotClient(_RobotClientABC):
             raise ValueError("I/O value must be 0 or 1")
         # Firmware bit layout: [in0, in1, out0, out1, estop, ...]
         firmware_index = index + 2
-        result = await self._send(SetIOCmd(port_index=firmware_index, value=value))
+        result = await self._send(WriteIOCmd(port_index=firmware_index, value=value))
         return result
 
     async def delay(self, seconds: float) -> int:
@@ -1768,5 +1735,5 @@ class AsyncRobotClient(_RobotClientABC):
         )
         result = await self._send(cmd)
         if wait and result >= 0:
-            await self.wait_command_complete(result, timeout=timeout)
+            await self.wait_command(result, timeout=timeout)
         return result

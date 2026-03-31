@@ -1,6 +1,6 @@
 """
 Integration test for MoveL pose accuracy.
-Verifies that moveL commands reach the correct final pose.
+Verifies that move_l commands reach the correct final pose.
 """
 
 import numpy as np
@@ -11,30 +11,30 @@ import pytest
 class TestMoveLAccuracy:
     """Test that MoveL commands reach correct final poses."""
 
-    def test_moveL_from_home(self, client, server_proc):
-        """Test MoveL accuracy starting from home position."""
+    def test_move_l_from_home(self, client, server_proc):
+        """Test move_l accuracy starting from home position."""
         # Ensure controller is enabled before motion
         assert client.resume() > 0
         # Home the robot first
         assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
         # Get home pose for reference
-        home_pose = client.get_pose_rpy()
+        home_pose = client.pose()
         print(f"\nHome pose (mm, deg): {home_pose}")
 
         # This is in mm for position, degrees for orientation
         target = [0.000, 263, 242, 90, 0, 90]
 
         # Execute movecart
-        result = client.moveL(target, speed=0.5)
+        result = client.move_l(target, speed=0.5)
         assert result >= 0
 
         # Wait for completion
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         print(f"Target pose (mm, deg): {target}")
         print(f"Final pose (mm, deg):  {final_pose}")
 
@@ -62,13 +62,13 @@ class TestMoveLAccuracy:
 
         print("✓ MoveCart pose accuracy test passed!")
 
-    def test_moveL_multiple_targets(self, client, server_proc):
-        """Test MoveL accuracy with multiple sequential targets."""
+    def test_move_l_multiple_targets(self, client, server_proc):
+        """Test move_l accuracy with multiple sequential targets."""
         # Ensure controller is enabled before motion
         assert client.resume() > 0
         # Home first
         assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
         # Define multiple targets to test
         targets = [
@@ -82,14 +82,14 @@ class TestMoveLAccuracy:
             print(f"Moving to: {target}")
 
             # Execute movecart
-            result = client.moveL(target, speed=0.3)
+            result = client.move_l(target, speed=0.3)
             assert result >= 0
 
             # Wait for completion
-            assert client.wait_motion_complete(timeout=15.0)
+            assert client.wait_motion(timeout=15.0)
 
             # Get final pose
-            final_pose = client.get_pose_rpy()
+            final_pose = client.pose()
             print(f"Achieved:  {final_pose}")
 
             # Verify position accuracy (1.5mm tolerance)

@@ -272,7 +272,7 @@ class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
         return trajectory
 
 
-# Number of SE3 samples per linear segment for moveP
+# Number of SE3 samples per linear segment for move_p
 _MOVEP_SAMPLES_PER_SEGMENT: int = 20
 
 

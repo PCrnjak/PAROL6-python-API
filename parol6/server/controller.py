@@ -22,7 +22,7 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
-from parol6.commands.system_commands import SetProfileCommand
+from parol6.commands.system_commands import SelectProfileCommand
 from parol6.commands.utility_commands import ResetCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.motion_planner import MotionPlanner, PlanCommand
@@ -787,8 +787,8 @@ class Controller:
             if command._sync_mock:
                 self._transport_mgr.sync_mock_from_state(state)
 
-            # Sync motion profile to planner (SetProfile is a SystemCommand)
-            if isinstance(command, SetProfileCommand):
+            # Sync motion profile to planner (SelectProfile is a SystemCommand)
+            if isinstance(command, SelectProfileCommand):
                 self._planner.sync_profile(state.motion_profile)
 
             if code == ExecutionStatusCode.COMPLETED:

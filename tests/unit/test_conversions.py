@@ -12,9 +12,9 @@ def _pose_result(matrix: list) -> PoseResultStruct:
     return PoseResultStruct(pose=flat)
 
 
-def test_get_pose_rpy_identity_translation(monkeypatch):
+def test_pose_identity_translation(monkeypatch):
     """
-    Validate get_pose_rpy converts 4x4 pose matrix to [x,y,z,rx,ry,rz] (mm,deg).
+    Validate pose() converts 4x4 pose matrix to [x,y,z,rx,ry,rz] (mm,deg).
     Use identity rotation with translation (10,20,30) mm.
     """
     client = RobotClient()
@@ -31,7 +31,7 @@ def test_get_pose_rpy_identity_translation(monkeypatch):
     mock_request = AsyncMock(return_value=result)
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
-    pose_rpy = client.get_pose_rpy()
+    pose_rpy = client.pose()
     assert pose_rpy is not None
     # Translations
     assert pose_rpy[0:3] == [10, 20, 30]
@@ -42,7 +42,7 @@ def test_get_pose_rpy_identity_translation(monkeypatch):
     assert abs(rz) < 1e-6
 
 
-def test_get_pose_rpy_malformed_payload(monkeypatch):
+def test_pose_malformed_payload(monkeypatch):
     """
     Malformed POSE payload (wrong length) should return None.
     """
@@ -51,5 +51,5 @@ def test_get_pose_rpy_malformed_payload(monkeypatch):
     mock_request = AsyncMock(return_value=PoseResultStruct(pose=[1, 2, 3]))
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
-    pose_rpy = client.get_pose_rpy()
+    pose_rpy = client.pose()
     assert pose_rpy is None

@@ -4,7 +4,7 @@ The MotionPlanner offloads trajectory computation (TOPPRA, IK chains) from
 the 100Hz control loop to a separate process.  Commands flow in via
 ``command_queue`` and computed segments flow back via ``segment_queue``.
 
-Non-trajectory motion commands (Home, SetTool, Gripper, Checkpoint, Delay)
+Non-trajectory motion commands (Home, SelectTool, Gripper, Checkpoint, Delay)
 are forwarded as ``InlineSegment`` tokens so that the SegmentPlayer can
 execute them in the control loop while preserving command ordering.
 
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
-from parol6.protocol.wire import HomeCmd, SetToolCmd, ToolActionCmd
+from parol6.protocol.wire import HomeCmd, SelectToolCmd, ToolActionCmd
 from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
@@ -83,7 +83,7 @@ class PlanCommand:
     """Submit a motion command for planning or forwarding."""
 
     command_index: int
-    params: object  # wire struct (MoveJCmd, SetToolCmd, HomeCmd, …)
+    params: object  # wire struct (MoveJCmd, SelectToolCmd, HomeCmd, …)
     position_in: np.ndarray | None = (
         None  # current Position_in (None = use planner internal)
     )
@@ -433,7 +433,7 @@ class TrajectoryPlanner:
         )
 
         # Predict state for subsequent trajectory planning
-        if isinstance(params, SetToolCmd):
+        if isinstance(params, SelectToolCmd):
             self.state.current_tool = params.tool_name
             self.state.current_tool_variant = params.variant_key
             self._robot_module.apply_tool(

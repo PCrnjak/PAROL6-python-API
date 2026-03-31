@@ -11,8 +11,8 @@ import pytest
 class TestJointBlendLookahead:
     """Joint-space blending with N-command lookahead."""
 
-    def test_three_moveJ_blended_reaches_final_target(self, client, server_proc):
-        """Three moveJ with blend zones should reach the last target."""
+    def test_three_move_j_blended_reaches_final_target(self, client, server_proc):
+        """Three move_j with blend zones should reach the last target."""
         targets = [
             [80, -80, 170, 5, 5, 170],
             [70, -70, 160, 10, 10, 160],
@@ -21,20 +21,20 @@ class TestJointBlendLookahead:
 
         # r>0 on intermediate commands creates blend zones; r=0 on the last
         # command terminates the chain and triggers immediate planner flush.
-        assert client.moveJ(targets[0], speed=0.5, r=30.0, wait=False) >= 0
-        assert client.moveJ(targets[1], speed=0.5, r=30.0, wait=False) >= 0
-        assert client.moveJ(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
+        assert client.move_j(targets[0], speed=0.5, r=30.0, wait=False) >= 0
+        assert client.move_j(targets[1], speed=0.5, r=30.0, wait=False) >= 0
+        assert client.move_j(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
 
         # Verify final position matches last target
-        angles = client.get_angles()
+        angles = client.angles()
         assert angles is not None
         for i, (actual, expected) in enumerate(zip(angles, targets[-1])):
             assert abs(actual - expected) < 1.0, (
                 f"J{i}: expected {expected}, got {actual}"
             )
 
-    def test_moveJ_r0_stops_blend_chain(self, client, server_proc):
-        """A moveJ with r=0 in the middle should stop the blend chain."""
+    def test_move_j_r0_stops_blend_chain(self, client, server_proc):
+        """A move_j with r=0 in the middle should stop the blend chain."""
         targets = [
             ([80, -80, 170, 5, 5, 170], 30.0),  # blendable
             ([70, -70, 160, 10, 10, 160], 0.0),  # r=0 → hard stop
@@ -42,28 +42,28 @@ class TestJointBlendLookahead:
         ]
 
         for t, r in targets:
-            assert client.moveJ(t, speed=0.5, r=r, wait=False) >= 0
+            assert client.move_j(t, speed=0.5, r=r, wait=False) >= 0
 
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
-        angles = client.get_angles()
+        angles = client.angles()
         assert angles is not None
         for i, (actual, expected) in enumerate(zip(angles, targets[-1][0])):
             assert abs(actual - expected) < 1.0, (
                 f"J{i}: expected {expected}, got {actual}"
             )
 
-    def test_two_moveJ_blended(self, client, server_proc):
-        """Two moveJ with r>0 should blend (minimum blend chain)."""
+    def test_two_move_j_blended(self, client, server_proc):
+        """Two move_j with r>0 should blend (minimum blend chain)."""
         t1 = [80, -80, 170, 5, 5, 170]
         t2 = [70, -70, 160, 10, 10, 160]
 
-        assert client.moveJ(t1, speed=0.5, r=20.0, wait=False) >= 0
-        assert client.moveJ(t2, speed=0.5, r=0.0, wait=False) >= 0
+        assert client.move_j(t1, speed=0.5, r=20.0, wait=False) >= 0
+        assert client.move_j(t2, speed=0.5, r=0.0, wait=False) >= 0
 
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
-        angles = client.get_angles()
+        angles = client.angles()
         assert angles is not None
         for i, (actual, expected) in enumerate(zip(angles, t2)):
             assert abs(actual - expected) < 1.0, (
@@ -73,11 +73,11 @@ class TestJointBlendLookahead:
 
 @pytest.mark.integration
 class TestCartesianBlendLookahead:
-    """Cartesian (moveL) blending with N-command lookahead."""
+    """Cartesian (move_l) blending with N-command lookahead."""
 
-    def test_three_moveL_blended_reaches_final_target(self, client, server_proc):
-        """Three moveL with blend zones should reach the last target."""
-        start = client.get_pose_rpy()
+    def test_three_move_l_blended_reaches_final_target(self, client, server_proc):
+        """Three move_l with blend zones should reach the last target."""
+        start = client.pose()
         assert start is not None
 
         # Small offsets from current pose (guaranteed reachable)
@@ -89,11 +89,11 @@ class TestCartesianBlendLookahead:
 
         # r>0 on intermediate commands creates blend zones; r=0 on the last
         # command terminates the blend chain and triggers immediate flush.
-        assert client.moveL(targets[0], speed=0.5, r=20.0, wait=False) >= 0
-        assert client.moveL(targets[1], speed=0.5, r=20.0, wait=False) >= 0
-        assert client.moveL(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
+        assert client.move_l(targets[0], speed=0.5, r=20.0, wait=False) >= 0
+        assert client.move_l(targets[1], speed=0.5, r=20.0, wait=False) >= 0
+        assert client.move_l(targets[2], speed=0.5, r=0.0, wait=True, timeout=15.0) >= 0
 
-        final = client.get_pose_rpy()
+        final = client.pose()
         assert final is not None
         for i in range(3):
             assert abs(final[i] - targets[-1][i]) < 2.0, (
@@ -107,7 +107,7 @@ class TestCartesianBlendLookahead:
         Verifies position accuracy and orientation preservation through
         4 blended 90-degree direction changes.
         """
-        start = client.get_pose_rpy()
+        start = client.pose()
         assert start is not None
 
         side = 20.0
@@ -130,16 +130,16 @@ class TestCartesianBlendLookahead:
         back_home = offset(0, 0)
         back_right = offset(side, 0)  # same as right — closes the loop
 
-        # 5 moveL commands: 4 corners blended (r=5), last terminates chain (r=0)
-        assert client.moveL(right, speed=0.3, r=r, wait=False) >= 0
-        assert client.moveL(down_right, speed=0.3, r=r, wait=False) >= 0
-        assert client.moveL(down_left, speed=0.3, r=r, wait=False) >= 0
-        assert client.moveL(back_home, speed=0.3, r=r, wait=False) >= 0
-        assert client.moveL(back_right, speed=0.3, r=0.0, wait=False) >= 0
+        # 5 move_l commands: 4 corners blended (r=5), last terminates chain (r=0)
+        assert client.move_l(right, speed=0.3, r=r, wait=False) >= 0
+        assert client.move_l(down_right, speed=0.3, r=r, wait=False) >= 0
+        assert client.move_l(down_left, speed=0.3, r=r, wait=False) >= 0
+        assert client.move_l(back_home, speed=0.3, r=r, wait=False) >= 0
+        assert client.move_l(back_right, speed=0.3, r=0.0, wait=False) >= 0
 
-        assert client.wait_motion_complete(timeout=20.0)
+        assert client.wait_motion(timeout=20.0)
 
-        final = client.get_pose_rpy()
+        final = client.pose()
         assert final is not None
 
         # Position: should match back_right within 2mm
@@ -155,9 +155,9 @@ class TestCartesianBlendLookahead:
                 f"Orientation axis {i - 3}: drifted {diff:.2f}° (start={start[i]:.1f}, end={final[i]:.1f})"
             )
 
-    def test_moveL_r0_stops_blend_chain(self, client, server_proc):
-        """A moveL with r=0 in the middle should stop the blend chain."""
-        start = client.get_pose_rpy()
+    def test_move_l_r0_stops_blend_chain(self, client, server_proc):
+        """A move_l with r=0 in the middle should stop the blend chain."""
+        start = client.pose()
         assert start is not None
 
         targets = [
@@ -167,11 +167,11 @@ class TestCartesianBlendLookahead:
         ]
 
         for t, r in targets:
-            assert client.moveL(t, speed=0.5, r=r, wait=False) >= 0
+            assert client.move_l(t, speed=0.5, r=r, wait=False) >= 0
 
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
-        final = client.get_pose_rpy()
+        final = client.pose()
         assert final is not None
         for i in range(3):
             assert abs(final[i] - targets[-1][0][i]) < 2.0
@@ -181,11 +181,11 @@ class TestCartesianBlendLookahead:
 class TestMixedTypeBlendTermination:
     """Blend chain should stop at type boundaries."""
 
-    def test_moveJ_then_moveL_executes_separately(self, client, server_proc):
-        """moveJ(r>0) followed by moveL should not blend across types."""
+    def test_move_j_then_move_l_executes_separately(self, client, server_proc):
+        """move_j(r>0) followed by move_l should not blend across types."""
         # Small joint move with blend radius
         assert (
-            client.moveJ(
+            client.move_j(
                 [85, -85, 175, 2, 2, 175],
                 speed=0.5,
                 r=20.0,
@@ -195,16 +195,16 @@ class TestMixedTypeBlendTermination:
         )
 
         # Wait for joint move, then get the pose for a reachable Cartesian target
-        assert client.wait_motion_complete(timeout=10.0)
-        mid_pose = client.get_pose_rpy()
+        assert client.wait_motion(timeout=10.0)
+        mid_pose = client.pose()
         assert mid_pose is not None
 
         # Small Cartesian offset from current position
         final_target = list(mid_pose)
         final_target[1] += 5  # 5mm Y offset — very small, always reachable
-        assert client.moveL(final_target, speed=0.5, r=0.0) >= 0
+        assert client.move_l(final_target, speed=0.5, r=0.0) >= 0
 
-        final = client.get_pose_rpy()
+        final = client.pose()
         assert final is not None
         for i in range(3):
             assert abs(final[i] - final_target[i]) < 2.0, (

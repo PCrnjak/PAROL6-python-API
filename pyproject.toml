@@ -70,6 +70,9 @@ dev = [
 [project.scripts]
 parol6-server = "parol6.cli.server:main_entry"
 
+[project.entry-points."waldoctl.robots"]
+parol6 = "parol6.robot:Robot"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

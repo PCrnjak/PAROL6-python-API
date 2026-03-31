@@ -28,17 +28,17 @@ def main() -> None:
             print("ping:", client.ping())
 
             # Enable simulator for a safe motion
-            sim_on = client.simulator_on()
-            print("simulator_on:", sim_on)
+            sim_on = client.simulator(True)
+            print("simulator(True):", sim_on)
 
             if sim_on:
                 # Small relative move: +3mm in Z over 0.8s
-                moved = client.moveL([0, 0, 3, 0, 0, 0], rel=True, duration=0.8)
-                print("moveL ->", moved)
+                moved = client.move_l([0, 0, 3, 0, 0, 0], rel=True, duration=0.8)
+                print("move_l ->", moved)
 
             # Demonstrate toggling simulator off again (no motion follows)
-            sim_off = client.simulator_off()
-            print("simulator_off:", sim_off)
+            sim_off = client.simulator(False)
+            print("simulator(False):", sim_off)
 
             raise SystemExit(0)
     finally:

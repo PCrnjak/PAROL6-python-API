@@ -9,38 +9,40 @@ import numpy as np
 from parol6 import config as cfg
 from parol6.commands.base import QueryCommand
 from parol6.protocol.wire import (
+    ActivityCmd,
+    AnglesCmd,
     AnglesResultStruct,
     CmdType,
     CurrentActionResultStruct,
     EnablementResultStruct,
+    ErrorCmd,
     ErrorResultStruct,
-    GetAnglesCmd,
-    GetCurrentActionCmd,
-    GetEnablementCmd,
-    GetErrorCmd,
-    GetIOCmd,
-    GetLoopStatsCmd,
-    GetPoseCmd,
-    GetProfileCmd,
-    GetQueueCmd,
-    GetSpeedsCmd,
-    GetStatusCmd,
-    GetTcpSpeedCmd,
-    GetToolCmd,
-    GetToolStatusCmd,
+    IOCmd,
     IOResultStruct,
+    JointSpeedsCmd,
+    LoopStatsCmd,
     LoopStatsResultStruct,
     PingCmd,
     PingResultStruct,
+    PoseCmd,
     PoseResultStruct,
+    ProfileCmd,
     ProfileResultStruct,
     QueryType,
+    QueueCmd,
     QueueResultStruct,
+    ReachableCmd,
+    SimulatorStateCmd,
+    SimulatorStateResultStruct,
     SpeedsResultStruct,
+    StatusCmd,
     StatusResultStruct,
+    TcpSpeedCmd,
     TcpSpeedResultStruct,
+    ToolStatusCmd,
     ToolResultStruct,
     ToolStatusResultStruct,
+    ToolsCmd,
     pack_response,
 )
 from parol6.server.command_registry import register_command
@@ -52,11 +54,11 @@ if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 
-@register_command(CmdType.GET_POSE)
-class GetPoseCommand(QueryCommand[GetPoseCmd]):
+@register_command(CmdType.POSE)
+class PoseCommand(QueryCommand[PoseCmd]):
     """Get current robot pose matrix in specified frame (WRF or TRF)."""
 
-    PARAMS_TYPE = GetPoseCmd
+    PARAMS_TYPE = PoseCmd
     QUERY_TYPE = QueryType.POSE
 
     __slots__ = ()
@@ -71,11 +73,11 @@ class GetPoseCommand(QueryCommand[GetPoseCmd]):
         return pack_response(PoseResultStruct(pose=get_fkine_flat_mm(state).tolist()))
 
 
-@register_command(CmdType.GET_ANGLES)
-class GetAnglesCommand(QueryCommand[GetAnglesCmd]):
+@register_command(CmdType.ANGLES)
+class AnglesCommand(QueryCommand[AnglesCmd]):
     """Get current joint angles in degrees."""
 
-    PARAMS_TYPE = GetAnglesCmd
+    PARAMS_TYPE = AnglesCmd
     QUERY_TYPE = QueryType.ANGLES
 
     __slots__ = ()
@@ -87,11 +89,11 @@ class GetAnglesCommand(QueryCommand[GetAnglesCmd]):
         )
 
 
-@register_command(CmdType.GET_IO)
-class GetIOCommand(QueryCommand[GetIOCmd]):
+@register_command(CmdType.IO)
+class IOCommand(QueryCommand[IOCmd]):
     """Get current I/O status."""
 
-    PARAMS_TYPE = GetIOCmd
+    PARAMS_TYPE = IOCmd
     QUERY_TYPE = QueryType.IO
 
     __slots__ = ()
@@ -100,11 +102,11 @@ class GetIOCommand(QueryCommand[GetIOCmd]):
         return pack_response(IOResultStruct(io=state.InOut_in[:5].tolist()))
 
 
-@register_command(CmdType.GET_SPEEDS)
-class GetSpeedsCommand(QueryCommand[GetSpeedsCmd]):
+@register_command(CmdType.JOINT_SPEEDS)
+class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
     """Get current joint speeds."""
 
-    PARAMS_TYPE = GetSpeedsCmd
+    PARAMS_TYPE = JointSpeedsCmd
     QUERY_TYPE = QueryType.SPEEDS
 
     __slots__ = ()
@@ -113,11 +115,11 @@ class GetSpeedsCommand(QueryCommand[GetSpeedsCmd]):
         return pack_response(SpeedsResultStruct(speeds=state.Speed_in.tolist()))
 
 
-@register_command(CmdType.GET_STATUS)
-class GetStatusCommand(QueryCommand[GetStatusCmd]):
+@register_command(CmdType.STATUS)
+class StatusCommand(QueryCommand[StatusCmd]):
     """Get aggregated robot status (pose, angles, I/O, tool_status) from cache."""
 
-    PARAMS_TYPE = GetStatusCmd
+    PARAMS_TYPE = StatusCmd
     QUERY_TYPE = QueryType.STATUS
 
     __slots__ = ()
@@ -145,11 +147,11 @@ class GetStatusCommand(QueryCommand[GetStatusCmd]):
         )
 
 
-@register_command(CmdType.GET_LOOP_STATS)
-class GetLoopStatsCommand(QueryCommand[GetLoopStatsCmd]):
+@register_command(CmdType.LOOP_STATS)
+class LoopStatsCommand(QueryCommand[LoopStatsCmd]):
     """Return control-loop metrics."""
 
-    PARAMS_TYPE = GetLoopStatsCmd
+    PARAMS_TYPE = LoopStatsCmd
     QUERY_TYPE = QueryType.LOOP_STATS
 
     __slots__ = ()
@@ -188,11 +190,11 @@ class PingCommand(QueryCommand[PingCmd]):
         )
 
 
-@register_command(CmdType.GET_TOOL)
-class GetToolCommand(QueryCommand[GetToolCmd]):
+@register_command(CmdType.TOOLS)
+class ToolsCommand(QueryCommand[ToolsCmd]):
     """Get current tool configuration and available tools."""
 
-    PARAMS_TYPE = GetToolCmd
+    PARAMS_TYPE = ToolsCmd
     QUERY_TYPE = QueryType.TOOL
 
     __slots__ = ()
@@ -203,11 +205,11 @@ class GetToolCommand(QueryCommand[GetToolCmd]):
         )
 
 
-@register_command(CmdType.GET_TOOL_STATUS)
-class GetToolStatusCommand(QueryCommand[GetToolStatusCmd]):
+@register_command(CmdType.TOOL_STATUS)
+class ToolStatusCommand(QueryCommand[ToolStatusCmd]):
     """Get current tool status (key + DOF positions)."""
 
-    PARAMS_TYPE = GetToolStatusCmd
+    PARAMS_TYPE = ToolStatusCmd
     QUERY_TYPE = QueryType.TOOL_STATUS
 
     __slots__ = ()
@@ -229,11 +231,11 @@ class GetToolStatusCommand(QueryCommand[GetToolStatusCmd]):
         )
 
 
-@register_command(CmdType.GET_CURRENT_ACTION)
-class GetCurrentActionCommand(QueryCommand[GetCurrentActionCmd]):
+@register_command(CmdType.ACTIVITY)
+class ActivityCommand(QueryCommand[ActivityCmd]):
     """Get the current executing action/command and its state."""
 
-    PARAMS_TYPE = GetCurrentActionCmd
+    PARAMS_TYPE = ActivityCmd
     QUERY_TYPE = QueryType.CURRENT_ACTION
 
     __slots__ = ()
@@ -249,11 +251,11 @@ class GetCurrentActionCommand(QueryCommand[GetCurrentActionCmd]):
         )
 
 
-@register_command(CmdType.GET_QUEUE)
-class GetQueueCommand(QueryCommand[GetQueueCmd]):
+@register_command(CmdType.QUEUE)
+class QueueCommand(QueryCommand[QueueCmd]):
     """Get the list of queued non-streamable commands."""
 
-    PARAMS_TYPE = GetQueueCmd
+    PARAMS_TYPE = QueueCmd
     QUERY_TYPE = QueryType.QUEUE
 
     __slots__ = ()
@@ -270,11 +272,11 @@ class GetQueueCommand(QueryCommand[GetQueueCmd]):
         )
 
 
-@register_command(CmdType.GET_PROFILE)
-class GetProfileCommand(QueryCommand[GetProfileCmd]):
+@register_command(CmdType.PROFILE)
+class ProfileCommand(QueryCommand[ProfileCmd]):
     """Query the current motion profile."""
 
-    PARAMS_TYPE = GetProfileCmd
+    PARAMS_TYPE = ProfileCmd
     QUERY_TYPE = QueryType.PROFILE
 
     __slots__ = ()
@@ -283,11 +285,11 @@ class GetProfileCommand(QueryCommand[GetProfileCmd]):
         return pack_response(ProfileResultStruct(profile=state.motion_profile))
 
 
-@register_command(CmdType.GET_ENABLEMENT)
-class GetEnablementCommand(QueryCommand[GetEnablementCmd]):
+@register_command(CmdType.REACHABLE)
+class ReachableCommand(QueryCommand[ReachableCmd]):
     """Get joint and Cartesian enablement flags."""
 
-    PARAMS_TYPE = GetEnablementCmd
+    PARAMS_TYPE = ReachableCmd
     QUERY_TYPE = QueryType.ENABLEMENT
 
     __slots__ = ()
@@ -304,11 +306,11 @@ class GetEnablementCommand(QueryCommand[GetEnablementCmd]):
         )
 
 
-@register_command(CmdType.GET_ERROR)
-class GetErrorCommand(QueryCommand[GetErrorCmd]):
+@register_command(CmdType.ERROR)
+class ErrorCommand(QueryCommand[ErrorCmd]):
     """Get the current error state."""
 
-    PARAMS_TYPE = GetErrorCmd
+    PARAMS_TYPE = ErrorCmd
     QUERY_TYPE = QueryType.ERROR
 
     __slots__ = ()
@@ -322,11 +324,11 @@ class GetErrorCommand(QueryCommand[GetErrorCmd]):
         )
 
 
-@register_command(CmdType.GET_TCP_SPEED)
-class GetTcpSpeedCommand(QueryCommand[GetTcpSpeedCmd]):
+@register_command(CmdType.TCP_SPEED)
+class TcpSpeedCommand(QueryCommand[TcpSpeedCmd]):
     """Get current TCP linear speed in mm/s."""
 
-    PARAMS_TYPE = GetTcpSpeedCmd
+    PARAMS_TYPE = TcpSpeedCmd
     QUERY_TYPE = QueryType.TCP_SPEED
 
     __slots__ = ()
@@ -335,3 +337,18 @@ class GetTcpSpeedCommand(QueryCommand[GetTcpSpeedCmd]):
         cache = get_cache()
         cache.update_from_state(state)
         return pack_response(TcpSpeedResultStruct(speed=cache.tcp_speed))
+
+
+@register_command(CmdType.SIMULATOR_STATE)
+class SimulatorStateCommand(QueryCommand[SimulatorStateCmd]):
+    """Query current simulator mode state."""
+
+    PARAMS_TYPE = SimulatorStateCmd
+    QUERY_TYPE = QueryType.SIMULATOR_STATE
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        from parol6.server.transports.transport_factory import is_simulation_mode
+
+        return pack_response(SimulatorStateResultStruct(active=is_simulation_mode()))

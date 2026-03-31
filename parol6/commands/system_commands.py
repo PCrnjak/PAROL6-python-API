@@ -15,12 +15,12 @@ from parol6.commands.base import ExecutionStatusCode, SystemCommand
 from parol6.config import save_com_port
 from parol6.protocol.wire import (
     CmdType,
+    ConnectHardwareCmd,
     HaltCmd,
     ResumeCmd,
-    SetIOCmd,
-    SetPortCmd,
-    SetProfileCmd,
+    SelectProfileCmd,
     SimulatorCmd,
+    WriteIOCmd,
 )
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
@@ -72,17 +72,17 @@ class HaltCommand(SystemCommand[HaltCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-@register_command(CmdType.SET_IO)
-class SetIOCommand(SystemCommand[SetIOCmd]):
+@register_command(CmdType.WRITE_IO)
+class WriteIOCommand(SystemCommand[WriteIOCmd]):
     """Set a digital I/O port state."""
 
-    PARAMS_TYPE = SetIOCmd
+    PARAMS_TYPE = WriteIOCmd
 
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         """Execute set port - update I/O port state."""
-        logger.info(f"SET_IO: Setting port {self.p.port_index} to {self.p.value}")
+        logger.info(f"WRITE_IO: Setting port {self.p.port_index} to {self.p.value}")
 
         state.InOut_out[self.p.port_index] = self.p.value
 
@@ -90,11 +90,11 @@ class SetIOCommand(SystemCommand[SetIOCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-@register_command(CmdType.SET_PORT)
-class SetSerialPortCommand(SystemCommand[SetPortCmd]):
+@register_command(CmdType.CONNECT_HARDWARE)
+class ConnectHardwareCommand(SystemCommand[ConnectHardwareCmd]):
     """Set the serial COM port used by the controller."""
 
-    PARAMS_TYPE = SetPortCmd
+    PARAMS_TYPE = ConnectHardwareCmd
 
     __slots__ = ()
 
@@ -132,12 +132,12 @@ class SimulatorCommand(SystemCommand[SimulatorCmd]):
 VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
 
 
-@register_command(CmdType.SET_PROFILE)
-class SetProfileCommand(SystemCommand[SetProfileCmd]):
+@register_command(CmdType.SELECT_PROFILE)
+class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
     """
     Set the motion profile for all moves.
 
-    Format: [CmdType.SET_PROFILE, profile_type]
+    Format: [CmdType.SELECT_PROFILE, profile_type]
 
     Profile Types:
         TOPPRA    - Time-optimal path parameterization (default)
@@ -150,7 +150,7 @@ class SetProfileCommand(SystemCommand[SetProfileCmd]):
     Cartesian moves will use TOPPRA when RUCKIG is set.
     """
 
-    PARAMS_TYPE = SetProfileCmd
+    PARAMS_TYPE = SelectProfileCmd
 
     __slots__ = ()
 
@@ -171,7 +171,7 @@ class SetProfileCommand(SystemCommand[SetProfileCmd]):
         old_profile = state.motion_profile
         state.motion_profile = profile
         logger.info(
-            f"SETPROFILE: Changed motion profile from {old_profile} to {profile}"
+            f"SELECT_PROFILE: Changed motion profile from {old_profile} to {profile}"
         )
 
         self.finish()

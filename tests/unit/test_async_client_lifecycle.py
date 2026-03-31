@@ -43,11 +43,11 @@ async def test_status_listener_shuts_down_on_close(ports, server_proc):
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_status_stream_terminates_on_close(ports, server_proc):
-    """status_stream consumers should terminate when AsyncRobotClient.close() is called.
+async def test_stream_status_terminates_on_close(ports, server_proc):
+    """stream_status consumers should terminate when AsyncRobotClient.close() is called.
 
     This test exercises the real server process and the real status listener
-    to ensure that any background tasks consuming status_stream() are
+    to ensure that any background tasks consuming stream_status() are
     unblocked and finished by the time close() completes.
     """
 
@@ -58,7 +58,7 @@ async def test_status_stream_terminates_on_close(ports, server_proc):
     async def consumer() -> None:
         # Consume a few status messages until the client is closed.
         # The loop should terminate automatically when close() is invoked.
-        async for _ in client.status_stream():
+        async for _ in client.stream_status():
             # Yield control so we don't spin too fast in tests
             await asyncio.sleep(0)
 
@@ -79,7 +79,7 @@ async def test_status_stream_terminates_on_close(ports, server_proc):
         await asyncio.wait_for(consumer_task, timeout=5.0)
 
         assert consumer_task.done(), (
-            "status_stream consumer should be finished after close()"
+            "stream_status consumer should be finished after close()"
         )
     finally:
         # Ensure cleanup even if assertions fail earlier

@@ -1,6 +1,6 @@
 """
 Basic Robot Commands
-Contains fundamental movement commands: Home, Jog, and SetTool.
+Contains fundamental movement commands: Home, Jog, and SelectTool.
 """
 
 import logging
@@ -18,7 +18,7 @@ from parol6.protocol.wire import (
     CmdType,
     HomeCmd,
     JogJCmd,
-    SetToolCmd,
+    SelectToolCmd,
     TeleportCmd,
 )
 from parol6.protocol.wire import CommandCode
@@ -205,13 +205,13 @@ class JogJCommand(MotionCommand[JogJCmd]):
         return None
 
 
-@register_command(CmdType.SET_TOOL)
-class SetToolCommand(MotionCommand[SetToolCmd]):
+@register_command(CmdType.SELECT_TOOL)
+class SelectToolCommand(MotionCommand[SelectToolCmd]):
     """
     Set the current end-effector tool configuration.
     """
 
-    PARAMS_TYPE = SetToolCmd
+    PARAMS_TYPE = SelectToolCmd
 
     __slots__ = ()
 

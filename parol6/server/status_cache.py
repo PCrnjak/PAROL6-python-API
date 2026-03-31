@@ -477,6 +477,8 @@ class StatusCache:
     def to_binary(self) -> bytes:
         """Return the msgpack-encoded STATUS payload."""
         if self._binary_dirty:
+            from parol6.server.transports.transport_factory import is_simulation_mode
+
             self._binary_cache = pack_status(
                 self.pose,
                 self.angles_deg,
@@ -496,6 +498,7 @@ class StatusCache:
                 self._action_params,
                 self.tool_status,
                 self.tcp_speed,
+                simulator_active=is_simulation_mode(),
             )
             self._binary_dirty = False
         return self._binary_cache

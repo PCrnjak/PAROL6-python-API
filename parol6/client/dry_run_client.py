@@ -36,26 +36,19 @@ from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
 from pinokin import se3_from_rpy, se3_rpy
 from ..protocol.wire import (
+    ActivityCmd,
+    AnglesCmd,
     CheckpointCmd,
+    ConnectHardwareCmd,
     DelayCmd,
-    GetAnglesCmd,
-    GetCurrentActionCmd,
-    GetEnablementCmd,
-    GetErrorCmd,
-    GetIOCmd,
-    GetLoopStatsCmd,
-    GetPoseCmd,
-    GetProfileCmd,
-    GetQueueCmd,
-    GetSpeedsCmd,
-    GetStatusCmd,
-    GetTcpSpeedCmd,
-    GetToolCmd,
-    GetToolStatusCmd,
+    ErrorCmd,
     HaltCmd,
     HomeCmd,
+    IOCmd,
     JogJCmd,
     JogLCmd,
+    JointSpeedsCmd,
+    LoopStatsCmd,
     MoveCCmd,
     MoveJCmd,
     MoveJPoseCmd,
@@ -63,19 +56,27 @@ from ..protocol.wire import (
     MovePCmd,
     MoveSCmd,
     PingCmd,
+    PoseCmd,
+    ProfileCmd,
+    QueueCmd,
+    ReachableCmd,
     ResetCmd,
     ResetLoopStatsCmd,
     ResumeCmd,
+    SelectProfileCmd,
+    SelectToolCmd,
     ServoJCmd,
     ServoJPoseCmd,
     ServoLCmd,
-    SetIOCmd,
-    SetPortCmd,
-    SetProfileCmd,
-    SetToolCmd,
     SimulatorCmd,
+    SimulatorStateCmd,
+    StatusCmd,
+    TcpSpeedCmd,
     TeleportCmd,
     ToolActionCmd,
+    ToolStatusCmd,
+    ToolsCmd,
+    WriteIOCmd,
 )
 from ..server.command_registry import CommandRegistry
 from ..server.motion_planner import (
@@ -93,61 +94,53 @@ from parol6.tools import get_registry
 # Method name → (struct class, default kwargs applied before caller kwargs)
 CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
     "home": (HomeCmd, {}),
-    "moveJ": (MoveJCmd, {}),
-    "moveJ_pose": (MoveJPoseCmd, {}),
-    "moveL": (MoveLCmd, {}),
-    "moveC": (MoveCCmd, {"frame": "WRF"}),
-    "moveS": (MoveSCmd, {"frame": "WRF"}),
-    "moveP": (MovePCmd, {"frame": "WRF"}),
-    "jogJ": (JogJCmd, {}),
-    "jogL": (JogLCmd, {"frame": "WRF"}),
-    "servoJ": (ServoJCmd, {}),
-    "servoJ_pose": (ServoJPoseCmd, {}),
-    "servoL": (ServoLCmd, {}),
+    "move_j": (MoveJCmd, {}),
+    "move_j_pose": (MoveJPoseCmd, {}),
+    "move_l": (MoveLCmd, {}),
+    "move_c": (MoveCCmd, {"frame": "WRF"}),
+    "move_s": (MoveSCmd, {"frame": "WRF"}),
+    "move_p": (MovePCmd, {"frame": "WRF"}),
+    "jog_j": (JogJCmd, {}),
+    "jog_l": (JogLCmd, {"frame": "WRF"}),
+    "servo_j": (ServoJCmd, {}),
+    "servo_j_pose": (ServoJPoseCmd, {}),
+    "servo_l": (ServoLCmd, {}),
     "checkpoint": (CheckpointCmd, {}),
     "delay": (DelayCmd, {}),
     "resume": (ResumeCmd, {}),
     "halt": (HaltCmd, {}),
     "reset": (ResetCmd, {}),
-    "set_tool": (SetToolCmd, {}),
-    "set_profile": (SetProfileCmd, {}),
-    "set_io": (SetIOCmd, {}),
-    "set_serial_port": (SetPortCmd, {}),
-    "simulator_on": (SimulatorCmd, {"on": True}),
-    "simulator_off": (SimulatorCmd, {"on": False}),
+    "select_tool": (SelectToolCmd, {}),
+    "select_profile": (SelectProfileCmd, {}),
+    "write_io": (WriteIOCmd, {}),
+    "connect_hardware": (ConnectHardwareCmd, {}),
+    "simulator": (SimulatorCmd, {}),
     "teleport": (TeleportCmd, {}),
     "tool_action": (ToolActionCmd, {}),
     "ping": (PingCmd, {}),
-    "get_angles": (GetAnglesCmd, {}),
-    "get_io": (GetIOCmd, {}),
-    "get_speeds": (GetSpeedsCmd, {}),
-    "get_pose": (GetPoseCmd, {}),
-    "get_status": (GetStatusCmd, {}),
-    "get_loop_stats": (GetLoopStatsCmd, {}),
+    "angles": (AnglesCmd, {}),
+    "io": (IOCmd, {}),
+    "joint_speeds": (JointSpeedsCmd, {}),
+    "pose": (PoseCmd, {}),
+    "status": (StatusCmd, {}),
+    "loop_stats": (LoopStatsCmd, {}),
     "reset_loop_stats": (ResetLoopStatsCmd, {}),
-    "get_profile": (GetProfileCmd, {}),
-    "get_tool": (GetToolCmd, {}),
-    "get_current_action": (GetCurrentActionCmd, {}),
-    "get_queue": (GetQueueCmd, {}),
-    "get_tool_status": (GetToolStatusCmd, {}),
-    "get_enablement": (GetEnablementCmd, {}),
-    "get_error": (GetErrorCmd, {}),
-    "get_tcp_speed": (GetTcpSpeedCmd, {}),
-}
-
-# Client param names → struct field names.
-_FIELD_RENAMES: dict[str, str] = {
-    "joint_angles": "angles",
-    "joint_index": "joint",
-    "index": "port_index",
-    "program_lines": "lines",
+    "profile": (ProfileCmd, {}),
+    "tools": (ToolsCmd, {}),
+    "activity": (ActivityCmd, {}),
+    "queue": (QueueCmd, {}),
+    "_tool_status": (ToolStatusCmd, {}),
+    "reachable": (ReachableCmd, {}),
+    "error": (ErrorCmd, {}),
+    "tcp_speed": (TcpSpeedCmd, {}),
+    "is_simulator": (SimulatorStateCmd, {}),
 }
 
 _UPPER_FIELDS: frozenset[str] = frozenset({"tool_name", "tool_key", "profile"})
 
 
 def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
-    """Build a command struct by method name with automatic param renaming."""
+    """Build a command struct by method name."""
     entry = CMD_MAP.get(name)
     if entry is None:
         raise ValueError(f"Unknown command: {name}")
@@ -157,13 +150,11 @@ def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
     for k, v in kwargs.items():
         if v is None:
             continue
-        renamed = _FIELD_RENAMES.get(k)
-        field = renamed if renamed and renamed in struct_fields else k
-        if field not in struct_fields:
+        if k not in struct_fields:
             continue
         if k in _UPPER_FIELDS and isinstance(v, str):
             v = v.upper()
-        merged[field] = v
+        merged[k] = v
     return struct_cls(*args, **merged)
 
 
@@ -232,7 +223,7 @@ class DryRunRobotClient:
     simulated separately since the planner doesn't handle streaming.
 
     Most methods are auto-dispatched via __getattr__ using CMD_MAP.
-    Explicit methods exist only for get_angles/get_pose (read from state)
+    Explicit methods exist only for angles/pose (read from state)
     and delay (no-op).
     """
 
@@ -295,11 +286,11 @@ class DryRunRobotClient:
             return self._snap_to_angles(HOME_ANGLES_DEG)
         if isinstance(params, TeleportCmd):
             return self._snap_to_angles(params.angles)
-        if isinstance(params, SetToolCmd):
+        if isinstance(params, SelectToolCmd):
             self._active_tool_key = params.tool_name.strip().upper()
             self._active_variant_key = params.variant_key
         # Detect jog/servo commands — planner doesn't handle streaming.
-        # Other non-trajectory MotionCommands (SetTool, Home) fall through
+        # Other non-trajectory MotionCommands (SelectTool, Home) fall through
         # to the planner which handles them as inline segments.
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if cmd_cls is not None and issubclass(cmd_cls, (JogJCommand, JogLCommand)):
@@ -336,7 +327,7 @@ class DryRunRobotClient:
             return self._error_segment_to_result(seg)
         if isinstance(seg, InlineSegment) and isinstance(seg.params, ToolActionCmd):
             return self._tool_action_segment_to_result(seg.params)
-        # Other InlineSegments (SetTool, Home, etc.) — no visualization
+        # Other InlineSegments (SelectTool, Home, etc.) — no visualization
         return None
 
     def _trajectory_segment_to_result(self, seg: TrajectorySegment) -> DryRunResult:
@@ -541,11 +532,11 @@ class DryRunRobotClient:
 
     # ---- Explicit methods for state reads ----
 
-    def get_angles(self) -> list[float]:
+    def angles(self) -> list[float]:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
         return np.degrees(self._q_rad_buf).tolist()
 
-    def get_pose(self) -> list[float]:
+    def pose(self) -> list[float]:
         """Return [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
         se3 = get_fkine_se3(self._state)
         se3_rpy(se3, self._rpy_buf)
@@ -561,7 +552,7 @@ class DryRunRobotClient:
     def delay(self, seconds: float = 0.0) -> None:
         pass
 
-    def wait_motion_complete(self, **kwargs: Any) -> None:
+    def wait_motion(self, **kwargs: Any) -> None:
         self.flush()
 
     # ---- Auto-dispatch for everything else ----

@@ -23,23 +23,23 @@ async def run_client() -> int:
             return 1
 
         # Safety: enable simulator for this demo
-        ok = await client.simulator_on()
-        print(f"simulator_on: {ok}")
+        ok = await client.simulator(True)
+        print(f"simulator(True): {ok}")
 
         print("ping:", await client.ping())
-        pose_xyz = await client.get_pose_xyz()
+        pose_xyz = (await client.pose())[:3]
         print("pose xyz:", pose_xyz)
 
         # Consume one status broadcast
         print("one status frame speeds:")
-        async for status in client.status_stream():
+        async for status in client.stream_status():
             print(status.speeds)
             break
 
         # Small relative move (safe in simulator)
         # Move +5mm in Z over 1.0s
-        moved = await client.moveL([0, 0, 5, 0, 0, 0], rel=True, duration=1.0)
-        print("moveL ->", moved)
+        moved = await client.move_l([0, 0, 5, 0, 0, 0], rel=True, duration=1.0)
+        print("move_l ->", moved)
 
         return 0
 
