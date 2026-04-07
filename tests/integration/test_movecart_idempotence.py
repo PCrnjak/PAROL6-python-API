@@ -11,27 +11,27 @@ import pytest
 class TestMoveLIdempotence:
     """Test that MoveL to current pose results in zero movement."""
 
-    def test_moveL_to_current_pose_no_rotation(self, client, server_proc):
+    def test_move_l_to_current_pose_no_rotation(self, client, server_proc):
         """Test that moving to the current pose results in no rotation."""
         # Home the robot first
         idx = client.home()
         assert idx >= 0
-        assert client.wait_command_complete(idx, timeout=15.0)
+        assert client.wait_command(idx, timeout=15.0)
 
         # Get current pose (should be home position)
-        current_pose = client.get_pose_rpy()
+        current_pose = client.pose()
         print(f"\nCurrent pose at home (mm, deg): {current_pose}")
 
         # Move to the exact same pose - should result in zero angular distance
         # and effectively be a no-op
-        result = client.moveL(current_pose, speed=0.5)
+        result = client.move_l(current_pose, speed=0.5)
         assert result >= 0
 
         # Wait for completion (should be instant if duration is ~0)
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         print(f"Final pose after 'move to same' (mm, deg): {final_pose}")
 
         # Verify pose hasn't changed significantly

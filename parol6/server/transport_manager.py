@@ -79,7 +79,7 @@ class TransportManager:
                 return True
         else:
             logger.warning(
-                "No serial port configured. Waiting for SET_PORT via UDP or set --serial/PAROL6_COM_PORT/com_port.txt before connecting."
+                "No serial port configured. Waiting for CONNECT_HARDWARE via UDP or set --serial/PAROL6_COM_PORT/com_port.txt before connecting."
             )
 
         return False
@@ -111,7 +111,7 @@ class TransportManager:
         return False
 
     def switch_to_port(self, port: str) -> bool:
-        """Switch to a new serial port (handles SET_PORT command).
+        """Switch to a new serial port (handles CONNECT_HARDWARE command).
 
         Args:
             port: New serial port path.
@@ -138,7 +138,7 @@ class TransportManager:
                 logger.info("Serial switched to port %s", port)
                 return True
         except Exception as e:
-            logger.warning("Failed to (re)connect serial on SET_PORT: %s", e)
+            logger.warning("Failed to (re)connect serial on CONNECT_HARDWARE: %s", e)
 
         return False
 

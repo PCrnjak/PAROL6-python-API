@@ -42,11 +42,11 @@ class TestSystemCommandSideEffects:
         assert cmd._switch_simulator is False
 
     def test_set_port_command_sets_switch_port(self):
-        """Verify SET_PORT command sets _switch_port attribute."""
-        from parol6.commands.system_commands import SetSerialPortCommand
-        from parol6.protocol.wire import SetPortCmd
+        """Verify CONNECT_HARDWARE command sets _switch_port attribute."""
+        from parol6.commands.system_commands import ConnectHardwareCommand
+        from parol6.protocol.wire import ConnectHardwareCmd
 
-        cmd = SetSerialPortCommand(SetPortCmd(port_str="/dev/ttyUSB0"))
+        cmd = ConnectHardwareCommand(ConnectHardwareCmd(port_str="/dev/ttyUSB0"))
         state = ControllerState()
 
         with patch("parol6.commands.system_commands.save_com_port", return_value=True):
@@ -56,11 +56,11 @@ class TestSystemCommandSideEffects:
         assert cmd._switch_port == "/dev/ttyUSB0"
 
     def test_set_port_command_fail_leaves_no_side_effect(self):
-        """Verify SET_PORT does not set _switch_port on save failure."""
-        from parol6.commands.system_commands import SetSerialPortCommand
-        from parol6.protocol.wire import SetPortCmd
+        """Verify CONNECT_HARDWARE does not set _switch_port on save failure."""
+        from parol6.commands.system_commands import ConnectHardwareCommand
+        from parol6.protocol.wire import ConnectHardwareCmd
 
-        cmd = SetSerialPortCommand(SetPortCmd(port_str="/dev/ttyUSB0"))
+        cmd = ConnectHardwareCommand(ConnectHardwareCmd(port_str="/dev/ttyUSB0"))
         state = ControllerState()
 
         with patch("parol6.commands.system_commands.save_com_port", return_value=False):

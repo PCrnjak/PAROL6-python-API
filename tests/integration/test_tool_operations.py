@@ -42,9 +42,9 @@ class TestToolSwitching:
     """Test tool switching via the client API."""
 
     def test_set_get_tool_cycle(self, client, server_proc):
-        """Cycle through all registered tools and verify get_tool reflects each switch."""
+        """Cycle through all registered tools and verify tools() reflects each switch."""
         # Default after reset should be NONE
-        result = client.get_tool()
+        result = client.tools()
         assert result is not None
         assert result.tool == "NONE"
 
@@ -56,22 +56,22 @@ class TestToolSwitching:
 
         # Switch to each tool and verify
         for tool_name in ("PNEUMATIC", "SSG-48", "MSG", "NONE"):
-            assert client.set_tool(tool_name) >= 0
-            assert client.wait_motion_complete(timeout=5.0)
-            result = client.get_tool()
+            assert client.select_tool(tool_name) >= 0
+            assert client.wait_motion(timeout=5.0)
+            result = client.tools()
             assert result is not None
             assert result.tool == tool_name
 
     def test_tool_persists_across_motion(self, client, server_proc):
         """Tool setting should survive a joint move."""
-        assert client.set_tool("PNEUMATIC") >= 0
-        assert client.wait_motion_complete(timeout=5.0)
+        assert client.select_tool("PNEUMATIC") >= 0
+        assert client.wait_motion(timeout=5.0)
 
-        idx = client.moveJ([0, -45, 180, 0, 0, 180], speed=0.5)
+        idx = client.move_j([0, -45, 180, 0, 0, 180], speed=0.5)
         assert idx >= 0
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
-        result = client.get_tool()
+        result = client.tools()
         assert result is not None
         assert result.tool == "PNEUMATIC"
 
@@ -94,40 +94,40 @@ class TestPneumaticGripperMethods:
         assert spec.gripper_type == GripperType.PNEUMATIC
         assert spec.io_port == 1
 
-        await client.set_tool("PNEUMATIC")
-        await client.wait_motion_complete(timeout=5.0)
+        await client.select_tool("PNEUMATIC")
+        await client.wait_motion(timeout=5.0)
 
         tool = client.tool
 
         # Open — command accepted and completes
         idx = await tool.open()
         assert idx >= 0
-        assert await client.wait_motion_complete(timeout=5.0)
+        assert await client.wait_motion(timeout=5.0)
 
         # Close — command accepted and completes
         idx = await tool.close()
         assert idx >= 0
-        assert await client.wait_motion_complete(timeout=5.0)
+        assert await client.wait_motion(timeout=5.0)
 
     @pytest.mark.asyncio
     async def test_pneumatic_set_position_threshold(self, async_client):
         """set_position uses binary threshold: < 0.5 opens, >= 0.5 closes."""
         robot, client = async_client
 
-        await client.set_tool("PNEUMATIC")
-        await client.wait_motion_complete(timeout=5.0)
+        await client.select_tool("PNEUMATIC")
+        await client.wait_motion(timeout=5.0)
 
         tool = client.tool
 
         # Position 0.8 → dispatches to close()
         idx = await tool.set_position(0.8)
         assert idx >= 0
-        assert await client.wait_motion_complete(timeout=5.0)
+        assert await client.wait_motion(timeout=5.0)
 
         # Position 0.2 → dispatches to open()
         idx = await tool.set_position(0.2)
         assert idx >= 0
-        assert await client.wait_motion_complete(timeout=5.0)
+        assert await client.wait_motion(timeout=5.0)
 
 
 # ===========================================================================
@@ -152,20 +152,20 @@ class TestSSG48GripperMethods:
         assert spec.speed_range == (0.0, 1.0)
         assert spec.current_range == (100, 1300)
 
-        await client.set_tool("SSG-48")
-        await client.wait_motion_complete(timeout=5.0)
+        await client.select_tool("SSG-48")
+        await client.wait_motion(timeout=5.0)
 
         tool = client.tool
 
         # Calibrate
         idx = await tool.calibrate()
         assert idx >= 0
-        await client.wait_motion_complete(timeout=10.0)
+        await client.wait_motion(timeout=10.0)
 
         # Move to half position
         idx = await tool.set_position(0.5, speed=0.7, current=600)
         assert idx >= 0
-        await client.wait_motion_complete(timeout=10.0)
+        await client.wait_motion(timeout=10.0)
 
 
 # ===========================================================================
@@ -185,20 +185,20 @@ class TestMSGGripperMethods:
         assert isinstance(spec, ElectricGripperTool)
         assert spec.gripper_type == GripperType.ELECTRIC
 
-        await client.set_tool("MSG")
-        await client.wait_motion_complete(timeout=5.0)
+        await client.select_tool("MSG")
+        await client.wait_motion(timeout=5.0)
 
         tool = client.tool
 
         # Calibrate
         idx = await tool.calibrate()
         assert idx >= 0
-        await client.wait_motion_complete(timeout=10.0)
+        await client.wait_motion(timeout=10.0)
 
         # Move to position
         idx = await tool.set_position(0.3, speed=0.5, current=500)
         assert idx >= 0
-        await client.wait_motion_complete(timeout=10.0)
+        await client.wait_motion(timeout=10.0)
 
 
 # ===========================================================================

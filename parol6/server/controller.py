@@ -22,7 +22,7 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
-from parol6.commands.system_commands import SetProfileCommand
+from parol6.commands.system_commands import SelectProfileCommand
 from parol6.commands.utility_commands import ResetCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.motion_planner import MotionPlanner, PlanCommand
@@ -339,7 +339,9 @@ class Controller:
                 self.estop_active = True
                 self._segment_player.cancel(state)
                 self._planner.sync_tool(
-                    state.current_tool, variant_key=state.current_tool_variant
+                    state.current_tool,
+                    variant_key=state.current_tool_variant,
+                    tcp_offset_m=state.tcp_offset_m,
                 )
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
@@ -764,11 +766,18 @@ class Controller:
             command.setup(state)
             code = command.tick(state)
 
-            # Reset: cancel motion pipeline so stale segments don't play
+            # Reset: cancel motion pipeline so stale segments don't play.
+            # Also sync the (now-cleared) tool state to the planner subprocess
+            # so its PAROL6_ROBOT singleton matches the controller's.
             if isinstance(command, ResetCommand):
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
+                self._planner.sync_tool(
+                    state.current_tool,
+                    variant_key=state.current_tool_variant,
+                    tcp_offset_m=state.tcp_offset_m,
+                )
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
@@ -787,8 +796,8 @@ class Controller:
             if command._sync_mock:
                 self._transport_mgr.sync_mock_from_state(state)
 
-            # Sync motion profile to planner (SetProfile is a SystemCommand)
-            if isinstance(command, SetProfileCommand):
+            # Sync motion profile to planner (SelectProfile is a SystemCommand)
+            if isinstance(command, SelectProfileCommand):
                 self._planner.sync_profile(state.motion_profile)
 
             if code == ExecutionStatusCode.COMPLETED:

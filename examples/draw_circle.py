@@ -1,8 +1,11 @@
-"""Curved motion commands: moveC, moveS, and moveP.
+"""Curved motion commands: move_c, move_p, and move_s.
 
-Draws circles and shapes using the robot's built-in curved motion
-commands, progressing from simplest (one moveC) to most flexible
-(computed waypoints with moveS/moveP). Runs in simulator mode.
+Draws three circles using progressively more flexible curve commands,
+then connects their centers with a sine-wave spline:
+  1. Full circle via single move_c (start = end)
+  2. Two half-circle move_c arcs
+  3. Computed 12-point waypoints via move_p
+  4. Sine-wave spline (move_s) through all three centers
 
 Run:
     python examples/draw_circle.py
@@ -15,68 +18,64 @@ from parol6 import Robot, RobotClient
 HOST = "127.0.0.1"
 PORT = 5001
 
-# Circle: vertical (XZ plane), in front of robot
-CX, CY, CZ = 0, 280, 200  # center (mm)
-RADIUS = 60  # mm
-ORIENTATION = [90, 0, 90]
+RADIUS = 30
 SPEED = 0.4
+CIRCLE_Y = 340
+ORIENTATION = [90, 0, 90]
+CENTERS = [(0, CIRCLE_Y, 280), (0, CIRCLE_Y, 210), (0, CIRCLE_Y, 140)]
 
 
-def circle_point(angle_deg: float) -> list[float]:
-    """Point on the circle at a given angle (0=right, 90=top)."""
+def circle_pt(cx, cz, angle_deg):
+    """Circle in the XZ plane (vertical) at fixed Y."""
     a = math.radians(angle_deg)
-    return [CX + RADIUS * math.cos(a), CY, CZ + RADIUS * math.sin(a)] + ORIENTATION
+    return [
+        cx + RADIUS * math.cos(a),
+        CIRCLE_Y,
+        cz + RADIUS * math.sin(a),
+    ] + ORIENTATION
 
 
-def main() -> None:
-    with Robot(host=HOST, port=PORT, normalize_logs=True):
-        with RobotClient(host=HOST, port=PORT, timeout=2.0) as rbt:
-            rbt.wait_ready(timeout=5.0)
-            rbt.simulator_on()
+with Robot(host=HOST, port=PORT, normalize_logs=True):
+    rbt = RobotClient(host=HOST, port=PORT, timeout=2.0)
+    rbt.wait_ready(timeout=5.0)
+    rbt.simulator(True)
 
-            print("Homing...")
-            rbt.home(wait=True)
+    rbt.home(wait=True)
 
-            # -- Part 1: Full circle with a single moveC --
-            print("\n--- Full circle (single moveC) ---")
-            print(f"Center: ({CX}, {CY}, {CZ})  Radius: {RADIUS}mm")
+    # Circle 1: full circle with a single move_c (start = end)
+    cx, _, cz = CENTERS[0]
+    rbt.move_j(pose=circle_pt(cx, cz, 0), speed=0.5, wait=True)
+    rbt.move_c(
+        via=circle_pt(cx, cz, 180), end=circle_pt(cx, cz, 0), speed=SPEED, wait=True
+    )
 
-            rbt.moveL(circle_point(0), speed=SPEED, wait=True)
-            rbt.moveC(
-                via=circle_point(180), end=circle_point(0), speed=SPEED, wait=True
-            )
+    # Circle 2: two half-circle move_c arcs
+    cx, _, cz = CENTERS[1]
+    rbt.move_l(circle_pt(cx, cz, 0), speed=SPEED, wait=True)
+    rbt.move_c(
+        via=circle_pt(cx, cz, 90), end=circle_pt(cx, cz, 180), speed=SPEED, wait=True
+    )
+    rbt.move_c(
+        via=circle_pt(cx, cz, 270), end=circle_pt(cx, cz, 0), speed=SPEED, wait=True
+    )
 
-            # -- Part 2: Two half-circle arcs --
-            print("\n--- Two half-circle arcs ---")
+    # Circle 3: computed 12-point waypoints with move_p
+    cx, _, cz = CENTERS[2]
+    waypoints = [circle_pt(cx, cz, i * 30) for i in range(12)]
+    waypoints.append(waypoints[0])
+    rbt.move_l(waypoints[0], speed=SPEED, wait=True)
+    rbt.move_p(waypoints, speed=SPEED, wait=True)
 
-            rbt.moveL(circle_point(90), speed=SPEED, wait=True)
-            rbt.moveC(
-                via=circle_point(0), end=circle_point(270), speed=SPEED, wait=True
-            )
-            rbt.moveC(
-                via=circle_point(180), end=circle_point(90), speed=SPEED, wait=True
-            )
+    # Sine-wave spline through all three circle centers (bottom to top)
+    SINE_POINTS = 36
+    z_min, z_max = CENTERS[2][2], CENTERS[0][2]
+    spline = []
+    for i in range(SINE_POINTS + 1):
+        t = i / SINE_POINTS
+        z = z_min + t * (z_max - z_min)
+        x = RADIUS * math.cos(t * 3 * 2 * math.pi)
+        spline.append([x, CIRCLE_Y, z] + ORIENTATION)
+    rbt.move_s(spline, speed=SPEED, wait=True)
 
-            # -- Part 3: Circle via moveS (spline through 8 waypoints) --
-            print("\n--- Circle via moveS (8-point spline) ---")
-
-            waypoints = [circle_point(i * 45) for i in range(8)]
-            waypoints.append(waypoints[0])  # close the loop
-
-            rbt.moveL(waypoints[0], speed=SPEED, wait=True)
-            rbt.moveS(waypoints, speed=SPEED, wait=True)
-
-            # -- Part 4: Hexagon via moveP (constant TCP speed) --
-            print("\n--- Hexagon via moveP (constant TCP speed) ---")
-
-            hex_points = [circle_point(i * 60) for i in range(6)]
-            hex_points.append(hex_points[0])  # close the shape
-
-            rbt.moveL(hex_points[0], speed=SPEED, wait=True)
-            rbt.moveP(hex_points, speed=SPEED, wait=True)
-
-            print("Done!")
-
-
-if __name__ == "__main__":
-    main()
+    rbt.home(wait=True)
+    print("Done!")

@@ -1,7 +1,7 @@
 """
 Unit tests for action-related query commands.
 
-Tests GET_CURRENT_ACTION and GET_QUEUE query commands without requiring a running server.
+Tests ACTIVITY and QUEUE query commands without requiring a running server.
 Uses minimal state objects to test command logic in isolation.
 """
 
@@ -9,11 +9,11 @@ from types import SimpleNamespace
 
 from waldoctl import ActionState
 
-from parol6.commands.query_commands import GetCurrentActionCommand, GetQueueCommand
+from parol6.commands.query_commands import ActivityCommand, QueueCommand
 from parol6.protocol.wire import (
     CurrentActionResultStruct,
-    GetCurrentActionCmd,
-    GetQueueCmd,
+    ActivityCmd,
+    QueueCmd,
     QueryType,
     QueueResultStruct,
     ResponseMsg,
@@ -28,17 +28,17 @@ def _unpack_response(data: bytes):
     return msg.result
 
 
-def test_get_current_action_command_init():
-    """Test that GET_CURRENT_ACTION command initializes correctly."""
-    cmd = GetCurrentActionCommand(GetCurrentActionCmd())
+def test_activity_command_init():
+    """Test that ACTIVITY command initializes correctly."""
+    cmd = ActivityCommand(ActivityCmd())
 
     assert not cmd.is_finished
     assert cmd.PARAMS_TYPE is not None
     assert cmd.QUERY_TYPE == QueryType.CURRENT_ACTION
 
 
-def test_get_current_action_returns_details():
-    """Test that GET_CURRENT_ACTION compute() returns correct data."""
+def test_activity_returns_details():
+    """Test that ACTIVITY compute() returns correct data."""
     state = SimpleNamespace(
         action_current="MoveJPoseCommand",
         action_state=ActionState.EXECUTING,
@@ -46,7 +46,7 @@ def test_get_current_action_returns_details():
         action_params="angles=[10,20,30,40,50,60]",
     )
 
-    cmd = GetCurrentActionCommand(GetCurrentActionCmd())
+    cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
     result = _unpack_response(cmd.compute(state))
 
@@ -57,8 +57,8 @@ def test_get_current_action_returns_details():
     assert result.params == "angles=[10,20,30,40,50,60]"
 
 
-def test_get_current_action_with_idle_state():
-    """Test GET_CURRENT_ACTION when robot is idle."""
+def test_activity_with_idle_state():
+    """Test ACTIVITY when robot is idle."""
     state = SimpleNamespace(
         action_current="",
         action_state=ActionState.IDLE,
@@ -66,7 +66,7 @@ def test_get_current_action_with_idle_state():
         action_params="",
     )
 
-    cmd = GetCurrentActionCommand(GetCurrentActionCmd())
+    cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
     result = _unpack_response(cmd.compute(state))
 
@@ -77,17 +77,17 @@ def test_get_current_action_with_idle_state():
     assert result.params == ""
 
 
-def test_get_queue_command_init():
-    """Test that GET_QUEUE command initializes correctly."""
-    cmd = GetQueueCommand(GetQueueCmd())
+def test_queue_command_init():
+    """Test that QUEUE command initializes correctly."""
+    cmd = QueueCommand(QueueCmd())
 
     assert not cmd.is_finished
     assert cmd.PARAMS_TYPE is not None
     assert cmd.QUERY_TYPE == QueryType.QUEUE
 
 
-def test_get_queue_returns_details():
-    """Test that GET_QUEUE compute() returns correct data."""
+def test_queue_returns_details():
+    """Test that QUEUE compute() returns correct data."""
     state = SimpleNamespace(
         queue_nonstreamable=["MoveJPoseCommand", "HomeCommand", "MoveJCommand"],
         executing_command_index=1,
@@ -96,7 +96,7 @@ def test_get_queue_returns_details():
         queued_duration=3.5,
     )
 
-    cmd = GetQueueCommand(GetQueueCmd())
+    cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
     result = _unpack_response(cmd.compute(state))
 
@@ -108,8 +108,8 @@ def test_get_queue_returns_details():
     assert result.queued_duration == 3.5
 
 
-def test_get_queue_with_empty_queue():
-    """Test GET_QUEUE when queue is empty."""
+def test_queue_with_empty_queue():
+    """Test QUEUE when queue is empty."""
     state = SimpleNamespace(
         queue_nonstreamable=[],
         executing_command_index=-1,
@@ -118,7 +118,7 @@ def test_get_queue_with_empty_queue():
         queued_duration=0.0,
     )
 
-    cmd = GetQueueCommand(GetQueueCmd())
+    cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
     result = _unpack_response(cmd.compute(state))
 
@@ -128,7 +128,7 @@ def test_get_queue_with_empty_queue():
     assert result.completed_index == -1
 
 
-def test_get_queue_excludes_streamable():
+def test_queue_excludes_streamable():
     """Test that queue only contains non-streamable commands (by design)."""
     state = SimpleNamespace(
         queue_nonstreamable=["MoveJPoseCommand", "HomeCommand"],
@@ -138,7 +138,7 @@ def test_get_queue_excludes_streamable():
         queued_duration=1.0,
     )
 
-    cmd = GetQueueCommand(GetQueueCmd())
+    cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
     result = _unpack_response(cmd.compute(state))
 

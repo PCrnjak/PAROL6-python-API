@@ -16,7 +16,7 @@ from parol6.protocol.wire import (
     DelayCmd,
     HomeCmd,
     MoveJCmd,
-    SetToolCmd,
+    SelectToolCmd,
 )
 from parol6.server.motion_planner import (
     InlineSegment,
@@ -93,8 +93,8 @@ class TestPlannerDirect:
         assert seg.blend_consumed_indices == []
 
     def test_settool_produces_inline_segment(self, worker, segment_queue):
-        """SetTool should produce an InlineSegment."""
-        params = SetToolCmd(tool_name="PNEUMATIC")
+        """SelectTool should produce an InlineSegment."""
+        params = SelectToolCmd(tool_name="PNEUMATIC")
         msg = PlanCommand(command_index=0, params=params)
 
         worker.process_command(msg)
@@ -102,7 +102,7 @@ class TestPlannerDirect:
         seg = segment_queue.get(timeout=1.0)
         assert isinstance(seg, InlineSegment)
         assert seg.command_index == 0
-        assert isinstance(seg.params, SetToolCmd)
+        assert isinstance(seg.params, SelectToolCmd)
 
     def test_home_produces_inline_and_updates_position(self, worker, segment_queue):
         """Home command should produce InlineSegment and update planner position."""
@@ -143,13 +143,13 @@ class TestPlannerDirect:
         assert seg.command_index == 3
 
     def test_ordering_preserved_movej_settool_movej(self, worker, segment_queue):
-        """MoveJ -> SetTool -> MoveJ should produce segments in order."""
+        """MoveJ -> SelectTool -> MoveJ should produce segments in order."""
         # 1. MoveJ to W1
         worker.process_command(PlanCommand(command_index=0, params=_make_movej_cmd(W1)))
 
-        # 2. SetTool (inline)
+        # 2. SelectTool (inline)
         worker.process_command(
-            PlanCommand(command_index=1, params=SetToolCmd(tool_name="PNEUMATIC"))
+            PlanCommand(command_index=1, params=SelectToolCmd(tool_name="PNEUMATIC"))
         )
 
         # 3. MoveJ to W2
@@ -206,7 +206,7 @@ class TestPlannerDirect:
 
         # Inline command -> flush blend buffer first
         worker.process_command(
-            PlanCommand(command_index=1, params=SetToolCmd(tool_name="PNEUMATIC"))
+            PlanCommand(command_index=1, params=SelectToolCmd(tool_name="PNEUMATIC"))
         )
 
         # Should get: trajectory segment (flushed from buffer), then inline segment
@@ -326,14 +326,14 @@ class TestPlannerSubprocess:
             planner.stop()
 
     def test_planner_inline_command(self):
-        """Submit a SetTool command, get InlineSegment back."""
+        """Submit a SelectTool command, get InlineSegment back."""
         planner = MotionPlanner()
         planner.start()
         try:
             planner.submit(
                 PlanCommand(
                     command_index=0,
-                    params=SetToolCmd(tool_name="PNEUMATIC"),
+                    params=SelectToolCmd(tool_name="PNEUMATIC"),
                     position_in=_home_steps(),
                 )
             )

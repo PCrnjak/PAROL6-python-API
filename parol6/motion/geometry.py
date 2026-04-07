@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
-from pinokin import batch_se3_interp, se3_from_rpy, se3_interp
+from pinokin import batch_se3_interp, se3_from_rpy, se3_interp, so3_rpy
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
@@ -83,6 +83,10 @@ class CircularMotion(_ShapeGenerator):
         r2_norm = r2 / np.linalg.norm(r2)
         cos_angle = np.clip(np.dot(r1_norm, r2_norm), -1, 1)
         arc_angle = np.arccos(cos_angle)
+
+        # Full circle: start ≈ end → 2π arc, not zero
+        if arc_angle < 1e-6 and float(np.linalg.norm(r1 - r2)) < 1.0:
+            arc_angle = 2 * np.pi
 
         cross = np.cross(r1_norm, r2_norm)
         if np.dot(cross, normal_unit) < 0:
@@ -241,11 +245,12 @@ def joint_path_to_tcp_poses(
 
     n_points = len(joint_positions)
     tcp_poses = np.empty((n_points, 6), dtype=np.float64)
+    rpy_buf = np.empty(3, dtype=np.float64)
 
     for i, T in enumerate(transforms):
         tcp_poses[i, :3] = T[:3, 3] * 1000.0  # m -> mm
-        rpy = Rotation.from_matrix(T[:3, :3]).as_euler("xyz", degrees=True)
-        tcp_poses[i, 3:] = rpy
+        so3_rpy(T[:3, :3], rpy_buf)
+        np.degrees(rpy_buf, out=tcp_poses[i, 3:])
 
     return tcp_poses
 
@@ -276,6 +281,22 @@ def compute_circle_from_3_points(
     # Vectors from p1 to p2 and p3
     a = p2 - p1
     b = p3 - p1
+
+    # Full circle: start ≈ end (p1 ≈ p3), via is diametrically opposite.
+    # Threshold accounts for FK/IK precision (~0.1 mm).
+    if float(np.linalg.norm(b)) < 1.0:
+        a_len = float(np.linalg.norm(a))
+        if a_len < 1e-12:
+            raise ValueError("All three points are coincident.")
+        center = (p1 + p2) / 2.0
+        radius = a_len / 2.0
+        d = a / a_len
+        ref = (
+            np.array([0.0, 0.0, 1.0]) if abs(d[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        )
+        normal = np.cross(d, ref)
+        normal /= np.linalg.norm(normal)
+        return center, radius, normal
 
     # Normal to the plane
     normal = np.asarray(np.cross(a, b), dtype=np.float64)

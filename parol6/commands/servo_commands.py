@@ -32,7 +32,7 @@ from .base import ExecutionStatusCode, MotionCommand
 
 logger = logging.getLogger(__name__)
 
-# Velocity ratio uses hardware limits (jog limits only apply to jogJ/jogL)
+# Velocity ratio uses hardware limits (jog limits only apply to jog_j/jog_l)
 _JOINT_MAX_STEP_INV = 1.0 / (
     np.array(LIMITS.joint.hard.velocity, dtype=np.float64) * INTERVAL_S
 )
@@ -131,7 +131,7 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
     def do_setup(self, state: ControllerState) -> None:
         # Convert target from degrees to radians into pre-allocated list
         for i in range(6):
-            self._target_rad[i] = math.radians(self.p.target[i])
+            self._target_rad[i] = math.radians(self.p.angles[i])
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         return _streaming_joint_step(self, state)

@@ -42,6 +42,7 @@ from waldoctl import (
     Robot as _RobotABC,
     ToolSpec,
     ToolsSpec,
+    ToolStatus,
     ToolType,
 )
 
@@ -278,9 +279,11 @@ class _ToolBase:
     Provides ``_execute`` callback binding and ``_cmd()`` dispatch.
     The ``_execute`` callback is set by ``create_async_client()`` via
     shallow copy to bind the tool to a client's ``tool_action`` method.
+    ``_get_status`` is bound to the client's private ``_tool_status`` query.
     """
 
     _execute: Callable[..., Any] | None = None
+    _get_status: Callable[..., Any] | None = None
     key: str  # provided by ToolSpec (mixed in by concrete subclasses)
 
     async def _cmd(
@@ -289,6 +292,11 @@ class _ToolBase:
         if self._execute is None:
             raise RuntimeError("Tool not bound to a client. Access via client.tool.")
         return await self._execute(self.key, action, params or [], **kwargs)
+
+    async def status(self) -> ToolStatus:
+        if self._get_status is None:
+            raise RuntimeError("Tool not bound to a client. Access via client.tool.")
+        return await self._get_status()
 
 
 class _ToolImpl(_ToolBase, ToolSpec):
@@ -311,10 +319,10 @@ class _PneumaticGripperImpl(_ToolBase, PneumaticGripperTool):
         return await self.close(**kwargs)
 
     async def open(self, **kwargs: float | int) -> int:
-        return await self._cmd("open")
+        return await self._cmd("open", params=None, **kwargs)
 
     async def close(self, **kwargs: float | int) -> int:
-        return await self._cmd("close")
+        return await self._cmd("close", params=None, **kwargs)
 
 
 class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
@@ -844,6 +852,7 @@ class Robot(_RobotABC):
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
             bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._get_status = client._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
             bound[spec.key] = bound_spec
         client._bound_tools = bound
         return client
@@ -863,6 +872,7 @@ class Robot(_RobotABC):
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
             bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
         # Wrap async-bound tools in sync adapters

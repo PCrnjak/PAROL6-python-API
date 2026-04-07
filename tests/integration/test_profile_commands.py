@@ -15,26 +15,26 @@ import pytest
 class TestProfileCommands:
     """Test motion profile get/set commands."""
 
-    def test_get_profile_returns_default(self, client, server_proc):
+    def test_profile_returns_default(self, client, server_proc):
         """Test GETPROFILE returns default profile (TOPPRA) after reset."""
         client.reset()
-        profile = client.get_profile()
-        assert profile is not None
-        assert profile == "TOPPRA"
+        result = client.profile()
+        assert result is not None
+        assert result == "TOPPRA"
 
-    def test_set_and_get_profile_roundtrip(self, client, server_proc):
+    def test_select_and_get_profile_roundtrip(self, client, server_proc):
         """Test setting a profile and getting it back."""
-        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            assert client.set_profile(profile) > 0
-            assert client.get_profile() == profile
+        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+            assert client.select_profile(p) > 0
+            assert client.profile() == p
 
-    def test_set_profile_case_insensitive(self, client, server_proc):
+    def test_select_profile_case_insensitive(self, client, server_proc):
         """Test that profile names are case-insensitive."""
-        assert client.set_profile("linear") > 0
-        assert client.get_profile() == "LINEAR"
+        assert client.select_profile("linear") > 0
+        assert client.profile() == "LINEAR"
 
-        assert client.set_profile("Quintic") > 0
-        assert client.get_profile() == "QUINTIC"
+        assert client.select_profile("Quintic") > 0
+        assert client.profile() == "QUINTIC"
 
 
 @pytest.mark.integration
@@ -45,22 +45,22 @@ class TestProfileMotionBehavior:
         """Test that joint moves reach target position with all profiles."""
         target_angles = [10, -50, 190, 5, 10, 15]
 
-        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Reset to home first
             client.home(wait=True)
 
             # Set profile and execute move
-            assert client.set_profile(profile) > 0
-            result = client.moveJ(target_angles, duration=2.0)
+            assert client.select_profile(p) > 0
+            result = client.move_j(target_angles, duration=2.0)
             assert result >= 0
-            assert client.wait_motion_complete(timeout=10.0)
+            assert client.wait_motion(timeout=10.0)
 
             # Verify we reached target (within tolerance)
-            angles = client.get_angles()
+            angles = client.angles()
             assert angles is not None
             for i, (actual, target) in enumerate(zip(angles, target_angles)):
                 assert abs(actual - target) < 1.0, (
-                    f"Profile {profile}: Joint {i} off target "
+                    f"Profile {p}: Joint {i} off target "
                     f"(expected {target}, got {actual})"
                 )
 
@@ -71,7 +71,7 @@ class TestProfileMotionBehavior:
         """
         # Start from home
         client.home(wait=True)
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         assert start_pose is not None
 
         # Target pose (small offset from start)
@@ -86,21 +86,21 @@ class TestProfileMotionBehavior:
 
         # All profiles should work for Cartesian moves
         # RUCKIG falls back to TOPPRA automatically
-        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Reset to home first
             client.home(wait=True)
 
             # Set profile and execute move
-            assert client.set_profile(profile) > 0
-            result = client.moveL(target_pose, duration=2.0)
+            assert client.select_profile(p) > 0
+            result = client.move_l(target_pose, duration=2.0)
             assert result >= 0
-            assert client.wait_motion_complete(timeout=10.0)
+            assert client.wait_motion(timeout=10.0)
 
             # Verify position reached (within tolerance)
-            pose = client.get_pose_rpy()
+            pose = client.pose()
             assert pose is not None
             assert abs(pose[0] - target_pose[0]) < 1.0, (
-                f"Profile {profile}: X position off target "
+                f"Profile {p}: X position off target "
                 f"(expected {target_pose[0]:.1f}, got {pose[0]:.1f})"
             )
 
@@ -109,10 +109,10 @@ class TestProfileMotionBehavior:
 class TestServoCartesian:
     """Test servo Cartesian motion (replaces old streaming mode tests)."""
 
-    def test_servoL_sequential(self, client, server_proc):
-        """Test sequential servoL moves."""
+    def test_servo_l_sequential(self, client, server_proc):
+        """Test sequential servo_l moves."""
         client.home(wait=True)
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         assert start_pose is not None
 
         # Send a sequence of servo Cartesian commands (fire-and-forget)
@@ -125,11 +125,11 @@ class TestServoCartesian:
                 start_pose[4],
                 start_pose[5],
             ]
-            result = client.servoL(target, speed=0.5)
+            result = client.servo_l(target, speed=0.5)
             assert result > 0
             time.sleep(0.1)
 
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
         # Verify robot completed motion
         assert client.is_robot_stopped()
@@ -148,10 +148,10 @@ class TestCartesianPrecision:
         LINEAR uses uniform time distribution, which may require longer durations.
         """
         client.home(wait=True)
-        assert client.set_profile(profile) > 0
+        assert client.select_profile(profile) > 0
 
         # Get current pose after homing to build moves relative to it
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         assert start_pose is not None
 
         # Use smaller offset for LINEAR to keep duration reasonable
@@ -181,12 +181,12 @@ class TestCartesianPrecision:
         ]
 
         for target in moves:
-            result = client.moveL(target, duration=2.0)
+            result = client.move_l(target, duration=2.0)
             assert result >= 0
-            assert client.wait_motion_complete(timeout=15.0)
+            assert client.wait_motion(timeout=15.0)
 
         # Verify final pose
-        pose = client.get_pose_rpy()
+        pose = client.pose()
         assert pose is not None
         final_target = moves[-1]
 
@@ -259,9 +259,9 @@ class TestTCPPathAccuracy:
         lie within tolerance of the expected straight-line path.
         """
         client.home(wait=True)
-        assert client.set_profile(profile) > 0
+        assert client.select_profile(profile) > 0
 
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         assert start_pose is not None
         start_xyz = np.array(start_pose[:3])
 
@@ -287,7 +287,7 @@ class TestTCPPathAccuracy:
         def sample_positions():
             """Background thread to sample TCP positions."""
             while not sampling_done.is_set():
-                status = client.get_status()
+                status = client.status()
                 if status:
                     pos = _extract_position_from_pose_matrix(status.pose)
                     sampled_positions.append(pos)
@@ -298,9 +298,9 @@ class TestTCPPathAccuracy:
         sampler.start()
 
         # Execute move
-        result = client.moveL(target_pose, duration=2.0)
+        result = client.move_l(target_pose, duration=2.0)
         assert result >= 0
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
         # Stop sampling
         sampling_done.set()

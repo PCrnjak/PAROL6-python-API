@@ -8,6 +8,7 @@ data exchange with the robot hardware.
 import logging
 import os
 import time
+from typing import cast
 
 import numba
 import numpy as np
@@ -419,7 +420,9 @@ class SerialTransport:
         Return a tuple of (memoryview|None, version:int, timestamp:float).
         The memoryview points to a stable 52-byte buffer which is updated by the reader.
         """
-        mv = self._frame_mv if self._frame_version > 0 else None
+        mv = cast(
+            "memoryview | None", self._frame_mv if self._frame_version > 0 else None
+        )
         return (mv, self._frame_version, self._frame_ts)
 
     def _update_hz_tracking(self) -> None:

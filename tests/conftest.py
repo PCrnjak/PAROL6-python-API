@@ -85,6 +85,25 @@ def pytest_addoption(parser):
         default=False,
         help="Keep the test server running between test sessions for debugging",
     )
+    parser.addoption(
+        "--examples",
+        action="store_true",
+        default=False,
+        help="Run example script tests (binds port 5001, can't run alongside server tests)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """With --examples: run only example tests. Without: skip them."""
+    if config.getoption("--examples"):
+        deselected = [item for item in items if "examples" not in item.keywords]
+        items[:] = [item for item in items if "examples" in item.keywords]
+        config.hook.pytest_deselected(items=deselected)
+        return
+    skip_examples = pytest.mark.skip(reason="needs --examples to run")
+    for item in items:
+        if "examples" in item.keywords:
+            item.add_marker(skip_examples)
 
 
 # ============================================================================

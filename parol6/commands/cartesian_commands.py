@@ -66,7 +66,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
 
     CSE drives Cartesian velocity (Ruckig-smoothed).  IK converts each
     smoothed pose to joint space.  Velocity clamping and commanded-position
-    tracking match servoL for smooth, deterministic joint trajectories.
+    tracking match servo_l for smooth, deterministic joint trajectories.
     """
 
     PARAMS_TYPE = JogLCmd

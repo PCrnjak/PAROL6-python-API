@@ -70,6 +70,9 @@ dev = [
 [project.scripts]
 parol6-server = "parol6.cli.server:main_entry"
 
+[project.entry-points."waldoctl.robots"]
+parol6 = "parol6.robot:Robot"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -87,6 +90,7 @@ markers = [
     "unit: Unit tests that test individual components in isolation",
     "integration: Integration tests that test component interactions with FAKE_SERIAL",
     "e2e: End-to-end tests that exercise complete workflows",
+    "examples: Standalone example scripts (binds port 5001, run with `pytest -m examples`)",
 ]
 log_cli = false
 log_level = "DEBUG"

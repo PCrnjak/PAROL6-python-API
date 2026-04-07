@@ -27,12 +27,12 @@ class TestJogSpeedExtremes:
         prevent movement at low speeds.
         """
         # Get initial joint angles
-        initial_angles = client.get_angles()
+        initial_angles = client.angles()
         assert initial_angles is not None, "Failed to get initial angles"
         assert len(initial_angles) == 6, "Expected 6 joint angles"
 
         # Jog J1 at slowest speed (1%) for a short duration
-        result = client.jogJ(
+        result = client.jog_j(
             joint=0,
             speed=0.01,  # Slowest speed
             duration=0.5,
@@ -40,10 +40,10 @@ class TestJogSpeedExtremes:
         assert result > 0, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        client.wait_motion_complete(timeout=10, settle_window=1)
+        client.wait_motion(timeout=10, settle_window=1)
 
         # Get final joint angles
-        final_angles = client.get_angles()
+        final_angles = client.angles()
         assert final_angles is not None, "Failed to get final angles"
 
         # Verify J1 actually moved
@@ -64,12 +64,12 @@ class TestJogSpeedExtremes:
         moves as expected and produces more movement than the slow test.
         """
         # Get initial joint angles
-        initial_angles = client.get_angles()
+        initial_angles = client.angles()
         assert initial_angles is not None, "Failed to get initial angles"
         assert len(initial_angles) == 6, "Expected 6 joint angles"
 
         # Jog J1 at fastest speed (100%) for a short duration
-        result = client.jogJ(
+        result = client.jog_j(
             joint=0,
             speed=1.0,  # Fastest speed
             duration=0.5,
@@ -77,10 +77,10 @@ class TestJogSpeedExtremes:
         assert result > 0, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        client.wait_motion_complete(timeout=10)
+        client.wait_motion(timeout=10)
 
         # Get final joint angles
-        final_angles = client.get_angles()
+        final_angles = client.angles()
         assert final_angles is not None, "Failed to get final angles"
 
         # Verify J1 actually moved
@@ -99,26 +99,26 @@ class TestJogSpeedExtremes:
         confirm the speed parameter actually affects motion rate.
         """
         # First, jog at slow speed and measure movement
-        initial_angles_slow = client.get_angles()
+        initial_angles_slow = client.angles()
         assert initial_angles_slow is not None
 
-        result = client.jogJ(joint=1, speed=0.1, duration=1.0)
+        result = client.jog_j(joint=1, speed=0.1, duration=1.0)
         assert result > 0
-        client.wait_motion_complete(timeout=10)
+        client.wait_motion(timeout=10)
 
-        final_angles_slow = client.get_angles()
+        final_angles_slow = client.angles()
         assert final_angles_slow is not None
         slow_movement = abs(final_angles_slow[1] - initial_angles_slow[1])
 
         # Now jog at fast speed
-        initial_angles_fast = client.get_angles()
+        initial_angles_fast = client.angles()
         assert initial_angles_fast is not None
 
-        result = client.jogJ(joint=1, speed=0.9, duration=1.0)
+        result = client.jog_j(joint=1, speed=0.9, duration=1.0)
         assert result > 0
-        client.wait_motion_complete(timeout=10)
+        client.wait_motion(timeout=10)
 
-        final_angles_fast = client.get_angles()
+        final_angles_fast = client.angles()
         assert final_angles_fast is not None
         fast_movement = abs(final_angles_fast[1] - initial_angles_fast[1])
 
@@ -143,12 +143,12 @@ class TestCartesianJogSpeedExtremes:
         tolerance settings might prevent movement at low speeds.
         """
         # Get initial pose
-        initial_pose = client.get_pose_rpy()
+        initial_pose = client.pose()
         assert initial_pose is not None, "Failed to get initial pose"
         assert len(initial_pose) == 6, "Expected 6-element pose [x,y,z,rx,ry,rz]"
 
         # Cartesian jog in +Y direction at slowest speed
-        result = client.jogL(
+        result = client.jog_l(
             frame="WRF",
             axis="Y",
             speed=0.02,
@@ -157,10 +157,10 @@ class TestCartesianJogSpeedExtremes:
         assert result > 0, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        client.wait_motion_complete(timeout=10)
+        client.wait_motion(timeout=10)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         assert final_pose is not None, "Failed to get final pose"
 
         # Verify position actually changed (check Y coordinate)
@@ -179,12 +179,12 @@ class TestCartesianJogSpeedExtremes:
         produces significant movement.
         """
         # Get initial pose
-        initial_pose = client.get_pose_rpy()
+        initial_pose = client.pose()
         assert initial_pose is not None, "Failed to get initial pose"
         assert len(initial_pose) == 6, "Expected 6-element pose [x,y,z,rx,ry,rz]"
 
         # Cartesian jog in +X direction at fastest speed
-        result = client.jogL(
+        result = client.jog_l(
             frame="WRF",
             axis="X",
             speed=1.0,
@@ -193,10 +193,10 @@ class TestCartesianJogSpeedExtremes:
         assert result > 0, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        client.wait_motion_complete(timeout=10)
+        client.wait_motion(timeout=10)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         assert final_pose is not None, "Failed to get final pose"
 
         # Verify position actually changed significantly

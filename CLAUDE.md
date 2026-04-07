@@ -95,7 +95,7 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 ## Simulator Mode
 
 - Uses `MockSerialTransport` to emulate robot dynamics without hardware
-- Toggle via client: `simulator_on()` / `simulator_off()`
+- Toggle via client: `simulator(True)` / `simulator(False)`
 - Controller updates `PAROL6_FAKE_SERIAL` and reinitializes transport seamlessly
 - **Important**: Simulator cannot guarantee hardware success—motor/current limits may cause failures on real robot
 

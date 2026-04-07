@@ -1,5 +1,5 @@
 """
-Integration tests for curved motion commands (moveC, moveS, moveP).
+Integration tests for curved motion commands (move_c, move_s, move_p).
 
 Tests command acceptance, completion, and frame handling in FAKE_SERIAL mode.
 """
@@ -12,19 +12,19 @@ from parol6.motion.geometry import compute_circle_from_3_points
 
 @pytest.mark.integration
 class TestCurvedMotionCommands:
-    """Integration tests for moveC, moveS, moveP."""
+    """Integration tests for move_c, move_s, move_p."""
 
     @pytest.fixture
     def homed_robot(self, client, server_proc, robot_api_env):
         """Ensure robot is homed before tests."""
-        client.set_profile("TOPPRA")
+        client.select_profile("TOPPRA")
         assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
     @pytest.fixture
     def home_pose(self, client, homed_robot) -> list[float]:
         """Return the TCP pose at home [x, y, z, rx, ry, rz] (mm, degrees)."""
-        pose = client.get_pose_rpy()
+        pose = client.pose()
         assert pose is not None and len(pose) == 6
         return pose
 
@@ -39,90 +39,90 @@ class TestCurvedMotionCommands:
             pose[5] + drz,
         ]
 
-    def test_moveC_basic(self, client, server_proc, robot_api_env, home_pose):
-        """Test circular arc through current → via → end."""
-        result = client.moveC(
+    def test_move_c_basic(self, client, server_proc, robot_api_env, home_pose):
+        """Test circular arc through current -> via -> end."""
+        result = client.move_c(
             via=self._offset(home_pose, dx=10, dy=10, dz=-5),
             end=self._offset(home_pose, dx=20),
             duration=2.0,
             frame="WRF",
         )
         assert result >= 0
-        assert client.wait_motion_complete(timeout=9.0)
+        assert client.wait_motion(timeout=9.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveC_with_orientation(
+    def test_move_c_with_orientation(
         self, client, server_proc, robot_api_env, home_pose
     ):
         """Test arc with small orientation change."""
-        result = client.moveC(
+        result = client.move_c(
             via=self._offset(home_pose, dx=10, dy=10, dz=-5, drz=10),
             end=self._offset(home_pose, dx=20, drz=20),
             duration=2.0,
             frame="WRF",
         )
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveC_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
-        """Test that moveC with frame=TRF is accepted and completes."""
-        result = client.moveC(
+    def test_move_c_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
+        """Test that move_c with frame=TRF is accepted and completes."""
+        result = client.move_c(
             via=[10, 5, 0, 0, 0, 0],
             end=[20, 0, 0, 0, 0, 0],
             duration=2.0,
             frame="TRF",
         )
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveS_basic(self, client, server_proc, robot_api_env, home_pose):
+    def test_move_s_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test spline motion through waypoints."""
         waypoints = [
             self._offset(home_pose),
             self._offset(home_pose, dx=20, dy=8, dz=5),
             self._offset(home_pose),
         ]
-        result = client.moveS(waypoints=waypoints, duration=3.0, frame="WRF")
+        result = client.move_s(waypoints=waypoints, duration=3.0, frame="WRF")
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveS_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
-        """Test that moveS with frame=TRF is accepted and completes."""
+    def test_move_s_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
+        """Test that move_s with frame=TRF is accepted and completes."""
         waypoints = [
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [10.0, 5.0, 0.0, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ]
-        result = client.moveS(waypoints=waypoints, duration=3.0, frame="TRF")
+        result = client.move_s(waypoints=waypoints, duration=3.0, frame="TRF")
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveP_basic(self, client, server_proc, robot_api_env, home_pose):
+    def test_move_p_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test process move through waypoints with constant TCP speed."""
         waypoints = [
             self._offset(home_pose, dz=-5),
             self._offset(home_pose, dx=10, dy=5, dz=-5),
             self._offset(home_pose, dz=-5),
         ]
-        result = client.moveP(waypoints=waypoints, speed=0.3, frame="WRF")
+        result = client.move_p(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_moveP_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
-        """Test that moveP with frame=TRF is accepted and completes."""
+    def test_move_p_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
+        """Test that move_p with frame=TRF is accepted and completes."""
         waypoints = [
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [10.0, 5.0, 0.0, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ]
-        result = client.moveP(waypoints=waypoints, speed=0.3, frame="TRF")
+        result = client.move_p(waypoints=waypoints, speed=0.3, frame="TRF")
         assert result >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
 

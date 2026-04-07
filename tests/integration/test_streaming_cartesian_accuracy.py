@@ -1,7 +1,7 @@
 """
 Integration test for servo Cartesian move accuracy.
 
-Tests the servoL path used for TCP dragging.
+Tests the servo_l path used for TCP dragging.
 Catches bugs where reference pose gets corrupted (e.g., aliasing with FK cache).
 """
 
@@ -43,17 +43,17 @@ def assert_pose_accuracy(
 class TestServoCartesianAccuracy:
     """Test that servo cartesian moves reach correct targets."""
 
-    def test_servoL_reaches_target(self, client, server_proc):
-        """servoL move should arrive at the requested target.
+    def test_servo_l_reaches_target(self, client, server_proc):
+        """servo_l move should arrive at the requested target.
 
         Tests the servo Cartesian path (replaces old stream_on + move_cartesian).
         """
         assert client.resume() > 0
         assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
         # Get starting pose
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         print(f"\nStart pose: {start_pose}")
 
         # Target: offset from start (like beginning of a TCP drag)
@@ -63,29 +63,29 @@ class TestServoCartesianAccuracy:
         print(f"Target pose: {target}")
 
         # Send servo cartesian move (fire-and-forget, no stream mode toggle needed)
-        result = client.servoL(target, speed=1.0)
+        result = client.servo_l(target, speed=1.0)
         assert result > 0
 
         # Wait for motion to settle
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
         # Verify final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         print(f"Final pose:  {final_pose}")
 
         assert_pose_accuracy(final_pose, target)
 
-    def test_servoL_sequential_targets(self, client, server_proc):
+    def test_servo_l_sequential_targets(self, client, server_proc):
         """Sequential servo moves should each reach their target.
 
-        Simulates TCP dragging behavior where multiple servoL commands
+        Simulates TCP dragging behavior where multiple servo_l commands
         are sent in sequence.
         """
         assert client.resume() > 0
         assert client.home() >= 0
-        assert client.wait_motion_complete(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
-        start_pose = client.get_pose_rpy()
+        start_pose = client.pose()
         print(f"\nStart pose: {start_pose}")
 
         # Simulate a drag path: series of small incremental moves
@@ -107,13 +107,13 @@ class TestServoCartesianAccuracy:
             print(f"\n--- Move {i + 1}/{len(offsets)} ---")
             print(f"Target: {target[:3]}")
 
-            result = client.servoL(target, speed=1.0)
+            result = client.servo_l(target, speed=1.0)
             assert result > 0
 
             # Wait for this move to complete before next
-            assert client.wait_motion_complete(timeout=10.0, settle_window=2.0)
+            assert client.wait_motion(timeout=10.0, settle_window=2.0)
 
-            final_pose = client.get_pose_rpy()
+            final_pose = client.pose()
             start_pose = final_pose
             print(f"Final:  {final_pose[:3]}")
 

@@ -20,9 +20,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies for mypy
+      - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          if git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
+            pip install "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+          fi
           pip install -e ".[dev]"
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
@@ -47,9 +52,18 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Upgrade pip and install dependencies
+      - name: Install cross-repo dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          # waldoctl: try matching branch, fall back to tagged version
+          if git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
+            pip install "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+          fi
+
+      - name: Install package
+        run: |
           pip install -e ".[dev]" pytest-timeout
 
       - name: Show environment

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
-from pinokin import se3_from_trans, se3_mul, se3_rx
+from pinokin import se3_from_trans
 from waldoctl import (
     LinearMotion,
     MeshRole,
@@ -216,7 +216,7 @@ class ElectricGripperConfig(ToolConfig):
             return 0.0
 
         # Mirror the simulator's speed model
-        speed_byte = max(1, int(round(speed * 255)))
+        speed_byte = max(1, min(255, int(round(speed * 255))))
         min_tps, max_tps = self.firmware_speed_range_tps
         velocity_tps = min_tps + (speed_byte / 255.0) * (max_tps - min_tps)
 
@@ -414,20 +414,19 @@ def _make_tcp_transform(
 ) -> np.ndarray:
     """TCP transform for a tool mounted on the flange.
 
-    Translates to (x, y, z) in the flange frame, then rotates 180deg
-    around X so the TCP Z-axis points in the tool working direction.
+    Pure translation — tool frame orientation matches the flange.
     """
-    trans = np.zeros((4, 4), dtype=np.float64)
-    rot = np.zeros((4, 4), dtype=np.float64)
     out = np.zeros((4, 4), dtype=np.float64)
-    se3_from_trans(x, y, z, trans)
-    se3_rx(np.pi, rot)
-    se3_mul(trans, rot, out)
+    se3_from_trans(x, y, z, out)
     return out
 
 
-# All PAROL6 tools share the same TCP orientation (180deg Rx).
-_TCP_RPY = (math.pi, 0.0, 0.0)
+_TCP_RPY = (0.0, 0.0, 0.0)
+
+# All PAROL6 tool meshes were designed with Rx(π) in the kinematic chain.
+# Now that the kinematic transform is pure translation (for correct IK),
+# the rotation is applied to the mesh definitions instead.
+_MESH_RPY = (math.pi, 0.0, 0.0)
 
 
 register_tool(

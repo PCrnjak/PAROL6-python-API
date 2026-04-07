@@ -13,8 +13,8 @@ def clean_state(server_proc, client):
     Depends on server_proc to ensure server is ready before resetting.
     """
     client.reset()
-    client.set_profile("LINEAR")
+    client.select_profile("LINEAR")
     idx = client.home()
     assert idx >= 0, "Home command failed to send"
-    assert client.wait_command_complete(idx, timeout=5.0), "Home did not complete"
+    assert client.wait_command(idx, timeout=5.0), "Home did not complete"
     return client

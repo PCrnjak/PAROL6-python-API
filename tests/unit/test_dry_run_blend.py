@@ -24,33 +24,33 @@ class TestDryRunBlend:
     """Tests for blend buffering in DryRunRobotClient."""
 
     def test_blend_produces_composite(self, client):
-        """3x moveJ with r > 0 should buffer, then flush returns a single composite."""
-        r1 = client.moveJ(angles=W1, speed=0.5, r=10)
+        """3x move_j with r > 0 should buffer, then flush returns a single composite."""
+        r1 = client.move_j(angles=W1, speed=0.5, r=10)
         assert r1 is None, "r > 0 should buffer, not return immediately"
 
-        r2 = client.moveJ(angles=W2, speed=0.5, r=10)
+        r2 = client.move_j(angles=W2, speed=0.5, r=10)
         assert r2 is None, "r > 0 should buffer"
 
         # r=0 terminates the chain → flush returns composite result
-        r3 = client.moveJ(angles=W3, speed=0.5, r=0)
+        r3 = client.move_j(angles=W3, speed=0.5, r=0)
         assert r3 is not None, "r=0 after buffered commands should flush and return"
         assert r3.tcp_poses.shape[0] > 0
         assert r3.tcp_poses.shape[1] == 6
         assert r3.error is None
 
     def test_no_blend_without_radius(self, client):
-        """moveJ with r=0 should return immediately (no buffering)."""
-        result = client.moveJ(angles=W1, speed=0.5, r=0)
+        """move_j with r=0 should return immediately (no buffering)."""
+        result = client.move_j(angles=W1, speed=0.5, r=0)
         assert result is not None, "r=0 should return immediately"
         assert result.tcp_poses.shape[0] > 0
         assert result.error is None
 
     def test_flush_returns_buffered(self, client):
         """Explicit flush() after buffered commands should return results list."""
-        r1 = client.moveJ(angles=W1, speed=0.5, r=10)
+        r1 = client.move_j(angles=W1, speed=0.5, r=10)
         assert r1 is None
 
-        r2 = client.moveJ(angles=W2, speed=0.5, r=10)
+        r2 = client.move_j(angles=W2, speed=0.5, r=10)
         assert r2 is None
 
         results = client.flush()
@@ -65,13 +65,13 @@ class TestDryRunBlend:
     def test_blended_trajectory_is_longer(self, client):
         """Composite blended trajectory should have longer duration than a single move."""
         single = DryRunRobotClient()
-        single_result = single.moveJ(angles=W3, speed=0.3, r=0)
+        single_result = single.move_j(angles=W3, speed=0.3, r=0)
         assert single_result is not None
 
         # Blended chain of 3 moves
-        client.moveJ(angles=W1, speed=0.3, r=10)
-        client.moveJ(angles=W2, speed=0.3, r=10)
-        r3 = client.moveJ(angles=W3, speed=0.3, r=0)
+        client.move_j(angles=W1, speed=0.3, r=10)
+        client.move_j(angles=W2, speed=0.3, r=10)
+        r3 = client.move_j(angles=W3, speed=0.3, r=0)
         assert r3 is not None
 
         assert r3.duration > single_result.duration, (
@@ -80,9 +80,9 @@ class TestDryRunBlend:
 
     def test_state_updated_after_blend(self, client):
         """Position should reflect the final waypoint after a blended chain."""
-        client.moveJ(angles=W1, speed=0.5, r=10)
-        client.moveJ(angles=W2, speed=0.5, r=0)
+        client.move_j(angles=W1, speed=0.5, r=10)
+        client.move_j(angles=W2, speed=0.5, r=0)
 
-        angles_after = client.get_angles()
+        angles_after = client.angles()
         assert len(angles_after) == 6
         np.testing.assert_allclose(angles_after, W2, atol=0.5)
