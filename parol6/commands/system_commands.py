@@ -19,6 +19,7 @@ from parol6.protocol.wire import (
     HaltCmd,
     ResumeCmd,
     SelectProfileCmd,
+    SetTcpOffsetCmd,
     SimulatorCmd,
     WriteIOCmd,
 )
@@ -173,6 +174,23 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
         logger.info(
             f"SELECT_PROFILE: Changed motion profile from {old_profile} to {profile}"
         )
+
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.SET_TCP_OFFSET)
+class SetTcpOffsetCommand(SystemCommand[SetTcpOffsetCmd]):
+    """Set the TCP offset in the tool's local frame."""
+
+    PARAMS_TYPE = SetTcpOffsetCmd
+
+    __slots__ = ()
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        """Convert mm to meters and apply TCP offset."""
+        offset_m = (self.p.x / 1000.0, self.p.y / 1000.0, self.p.z / 1000.0)
+        state.set_tcp_offset(offset_m)
 
         self.finish()
         return ExecutionStatusCode.COMPLETED

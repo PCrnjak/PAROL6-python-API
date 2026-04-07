@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
-from parol6.protocol.wire import HomeCmd, SelectToolCmd, ToolActionCmd
+from parol6.protocol.wire import HomeCmd, SelectToolCmd, SetTcpOffsetCmd, ToolActionCmd
 from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
@@ -109,6 +109,7 @@ class SyncTool:
 
     tool_name: str
     variant_key: str = ""
+    tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -137,6 +138,7 @@ class PlannerState:
     motion_profile: str = "TOPPRA"
     current_tool: str = "NONE"
     current_tool_variant: str = ""
+    tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
     stop_on_failure: bool = True
 
     # Forward kinematics cache (same layout as ControllerState — needed by
@@ -146,6 +148,7 @@ class PlannerState:
     )
     _fkine_last_tool_name: str = ""
     _fkine_last_tool_variant: str = ""
+    _fkine_last_tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _fkine_mat: np.ndarray = field(
         default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
     )
@@ -223,11 +226,19 @@ class TrajectoryPlanner:
         """Clear blend buffer."""
         self._blend_buffer.clear()
 
-    def sync_tool(self, tool_name: str, variant_key: str = "") -> None:
+    def sync_tool(
+        self,
+        tool_name: str,
+        variant_key: str = "",
+        tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
         """Sync tool state (e.g. after E-stop cancel)."""
         self.state.current_tool = tool_name
         self.state.current_tool_variant = variant_key
-        self._robot_module.apply_tool(tool_name, variant_key=variant_key)
+        self.state.tcp_offset_m = tcp_offset_m
+        self._robot_module.apply_tool(
+            tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
+        )
 
     # -- trajectory handling --
 
@@ -436,8 +447,17 @@ class TrajectoryPlanner:
         if isinstance(params, SelectToolCmd):
             self.state.current_tool = params.tool_name
             self.state.current_tool_variant = params.variant_key
+            self.state.tcp_offset_m = (0.0, 0.0, 0.0)
             self._robot_module.apply_tool(
                 params.tool_name, variant_key=params.variant_key
+            )
+        elif isinstance(params, SetTcpOffsetCmd):
+            offset_m = (params.x / 1000.0, params.y / 1000.0, params.z / 1000.0)
+            self.state.tcp_offset_m = offset_m
+            self._robot_module.apply_tool(
+                self.state.current_tool,
+                variant_key=self.state.current_tool_variant,
+                tcp_offset_m=offset_m,
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
@@ -482,9 +502,16 @@ class PlannerWorker:
         """Clear blend buffer on CancelAll."""
         self._planner.cancel()
 
-    def apply_tool(self, tool_name: str, variant_key: str = "") -> None:
+    def apply_tool(
+        self,
+        tool_name: str,
+        variant_key: str = "",
+        tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
         """Sync tool state (e.g. after E-stop)."""
-        self._planner.sync_tool(tool_name, variant_key=variant_key)
+        self._planner.sync_tool(
+            tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +558,11 @@ def motion_planner_main(
                 continue
 
             if isinstance(msg, SyncTool):
-                worker.apply_tool(msg.tool_name, variant_key=msg.variant_key)
+                worker.apply_tool(
+                    msg.tool_name,
+                    variant_key=msg.variant_key,
+                    tcp_offset_m=msg.tcp_offset_m,
+                )
                 continue
 
             if isinstance(msg, PlanCommand):
@@ -630,9 +661,20 @@ class MotionPlanner:
         """Update the planner's motion profile."""
         self.submit(SyncProfile(profile=profile))
 
-    def sync_tool(self, tool_name: str, variant_key: str = "") -> None:
+    def sync_tool(
+        self,
+        tool_name: str,
+        variant_key: str = "",
+        tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
         """Update the planner's tool state."""
-        self.submit(SyncTool(tool_name=tool_name, variant_key=variant_key))
+        self.submit(
+            SyncTool(
+                tool_name=tool_name,
+                variant_key=variant_key,
+                tcp_offset_m=tcp_offset_m,
+            )
+        )
 
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""

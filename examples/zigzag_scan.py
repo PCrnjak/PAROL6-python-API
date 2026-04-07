@@ -1,9 +1,8 @@
 """Zig-zag raster scan with blended corners.
 
-Generates a raster scan pattern using Python for-loops and the blend
-radius (r) parameter for smooth continuous motion. Moves are queued
-without waiting so the controller blends them into one fluid path.
-Runs in the built-in simulator.
+Queues linear moves with blend radius `r` so the controller rounds
+the corners into one smooth, continuous path. Each row alternates
+sweep direction to minimise repositioning.
 
 Run:
     python examples/zigzag_scan.py
@@ -14,48 +13,35 @@ from parol6 import Robot, RobotClient
 HOST = "127.0.0.1"
 PORT = 5001
 
-ROWS = 5
-X_MIN, X_MAX = -80, 80
-Z_MIN, Z_MAX = 150, 250
-Y = 280
-ORIENTATION = [90, 0, 90]
-BLEND_R = 15  # mm
-SPEED = 0.5
+ZZ_ORI = [-180, -90, -180]
+ROWS = 6
+Y_MIN, Y_MAX = 0, 160
+Z_MIN, Z_MAX = 200, 300
+X = 280
+BLEND = 15
 
 with Robot(host=HOST, port=PORT, normalize_logs=True):
     rbt = RobotClient(host=HOST, port=PORT, timeout=2.0)
     rbt.wait_ready(timeout=5.0)
     rbt.simulator(True)
 
-    print("Homing...")
     rbt.home(wait=True)
 
-    start = [X_MIN, Y, Z_MAX + 30] + ORIENTATION
-    rbt.move_l(start, speed=SPEED, wait=True)
+    # Approach the scan area
+    rbt.move_j(pose=[X, 0, 334] + ZZ_ORI, speed=0.5, wait=True)
+    rbt.move_l([X, Y_MIN, Z_MAX + 30] + ZZ_ORI, speed=0.5, wait=True)
 
+    # Raster scan — queue every move without waiting so the controller
+    # can blend adjacent segments through the blend radius.
     z_step = (Z_MAX - Z_MIN) / (ROWS - 1)
-    print(f"Running {ROWS}-row zig-zag scan (blend radius={BLEND_R}mm)...")
-
     for row in range(ROWS):
         z = Z_MAX - row * z_step
         is_last = row == ROWS - 1
-
-        if row % 2 == 0:
-            x_start, x_end = X_MIN, X_MAX
-        else:
-            x_start, x_end = X_MAX, X_MIN
-
-        # Queue moves without waiting — controller blends them at the corners.
-        rbt.move_l([x_start, Y, z] + ORIENTATION, speed=SPEED, r=BLEND_R, wait=False)
+        y_start, y_end = (Y_MIN, Y_MAX) if row % 2 == 0 else (Y_MAX, Y_MIN)
+        rbt.move_l([X, y_start, z] + ZZ_ORI, speed=0.5, r=BLEND, wait=False)
         rbt.move_l(
-            [x_end, Y, z] + ORIENTATION,
-            speed=SPEED,
-            r=0 if is_last else BLEND_R,
-            wait=False,
+            [X, y_end, z] + ZZ_ORI, speed=0.5, r=0 if is_last else BLEND, wait=False
         )
-
-        direction = "left->right" if row % 2 == 0 else "right->left"
-        print(f"  Row {row + 1}/{ROWS}: Z={z:.0f}mm  {direction}")
 
     rbt.wait_motion()
     print("Done!")

@@ -88,7 +88,8 @@ class QueryType(IntEnum):
     ENABLEMENT = auto()
     ERROR = auto()
     TCP_SPEED = auto()
-    SIMULATOR_STATE = auto()
+    IS_SIMULATOR = auto()
+    TCP_OFFSET = auto()
 
 
 class CmdType(IntEnum):
@@ -112,6 +113,7 @@ class CmdType(IntEnum):
     REACHABLE = auto()
     ERROR = auto()
     TCP_SPEED = auto()
+    TCP_OFFSET = auto()
 
     # System commands (execute regardless of enable state)
     RESUME = auto()
@@ -132,6 +134,7 @@ class CmdType(IntEnum):
     MOVES = auto()
     MOVEP = auto()
     SELECT_TOOL = auto()
+    SET_TCP_OFFSET = auto()
     DELAY = auto()
     CHECKPOINT = auto()
 
@@ -148,7 +151,7 @@ class CmdType(IntEnum):
     TOOL_STATUS = auto()
 
     # Simulator state query
-    SIMULATOR_STATE = auto()
+    IS_SIMULATOR = auto()
 
 
 # =============================================================================
@@ -475,9 +478,9 @@ class JogLCmd(
 ):
     """JOGL: streaming Cartesian velocity. Static 6-element [vx,vy,vz,wx,wy,wz]."""
 
-    frame: Annotated[str, msgspec.Meta(pattern=r"^(WRF|TRF)$")]
     velocities: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
     duration: Annotated[float, msgspec.Meta(gt=0.0)]
+    frame: Annotated[str, msgspec.Meta(pattern=r"^(WRF|TRF)$")] = "WRF"
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
     def __post_init__(self) -> None:
@@ -599,6 +602,20 @@ class SelectToolCmd(
             raise ValueError(f"Unknown tool '{name}'. Available: {list_tools()}")
 
 
+class SetTcpOffsetCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_TCP_OFFSET),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SET_TCP_OFFSET: offset the effective TCP in the tool's local frame (mm)."""
+
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+
 class SelectProfileCmd(
     msgspec.Struct,
     tag=int(CmdType.SELECT_PROFILE),
@@ -647,14 +664,14 @@ class ToolStatusCmd(
     pass
 
 
-class SimulatorStateCmd(
+class IsSimulatorCmd(
     msgspec.Struct,
-    tag=int(CmdType.SIMULATOR_STATE),
+    tag=int(CmdType.IS_SIMULATOR),
     array_like=True,
     frozen=True,
     gc=False,
 ):
-    """SIMULATOR_STATE: [CmdType.SIMULATOR_STATE]"""
+    """IS_SIMULATOR: query whether the controller is in simulator mode."""
 
     pass
 
@@ -691,6 +708,18 @@ class TcpSpeedCmd(
     gc=False,
 ):
     """TCP_SPEED: [CmdType.TCP_SPEED]"""
+
+    pass
+
+
+class TcpOffsetCmd(
+    msgspec.Struct,
+    tag=int(CmdType.TCP_OFFSET),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """TCP_OFFSET: query current TCP offset."""
 
     pass
 
@@ -1074,9 +1103,9 @@ class TcpSpeedResultStruct(
     speed: float
 
 
-class SimulatorStateResultStruct(
+class IsSimulatorResultStruct(
     msgspec.Struct,
-    tag=int(QueryType.SIMULATOR_STATE),
+    tag=int(QueryType.IS_SIMULATOR),
     array_like=True,
     frozen=True,
     gc=False,
@@ -1084,6 +1113,20 @@ class SimulatorStateResultStruct(
     """Simulator mode state."""
 
     active: bool
+
+
+class TcpOffsetResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.TCP_OFFSET),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Current TCP offset in mm (tool-local frame)."""
+
+    x: float
+    y: float
+    z: float
 
 
 # Tagged Union for responses
@@ -1103,7 +1146,8 @@ Response = (
     | EnablementResultStruct
     | ErrorResultStruct
     | TcpSpeedResultStruct
-    | SimulatorStateResultStruct
+    | IsSimulatorResultStruct
+    | TcpOffsetResultStruct
 )
 
 
@@ -1673,14 +1717,16 @@ __all__ = [
     "DelayCmd",
     "TeleportCmd",
     "SelectToolCmd",
+    "SetTcpOffsetCmd",
     "SelectProfileCmd",
     "ToolActionCmd",
     # Command structs — query
     "ToolStatusCmd",
-    "SimulatorStateCmd",
+    "IsSimulatorCmd",
     "ReachableCmd",
     "ErrorCmd",
     "TcpSpeedCmd",
+    "TcpOffsetCmd",
     "PingCmd",
     "StatusCmd",
     "AnglesCmd",
@@ -1711,7 +1757,8 @@ __all__ = [
     "EnablementResultStruct",
     "ErrorResultStruct",
     "TcpSpeedResultStruct",
-    "SimulatorStateResultStruct",
+    "IsSimulatorResultStruct",
+    "TcpOffsetResultStruct",
     "Response",
     # Message types
     "OkMsg",

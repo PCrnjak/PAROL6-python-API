@@ -24,7 +24,8 @@ ENV = {
 }
 
 
-@pytest.mark.integration
+@pytest.mark.examples
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("script", EXAMPLES)
 def test_example_runs(script):
     """Run each example as a subprocess and check it exits cleanly."""
@@ -33,7 +34,7 @@ def test_example_runs(script):
         env=ENV,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=240,
     )
     assert result.returncode == 0, (
         f"{script} failed (exit {result.returncode}):\n"

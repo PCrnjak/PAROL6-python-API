@@ -10,7 +10,7 @@ import socket
 import struct
 import time
 from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
@@ -68,13 +68,16 @@ from ..protocol.wire import (
     ResponseMsg,
     SelectProfileCmd,
     SelectToolCmd,
+    SetTcpOffsetCmd,
     ServoJCmd,
     ServoJPoseCmd,
     ServoLCmd,
     SimulatorCmd,
-    SimulatorStateCmd,
-    SimulatorStateResultStruct,
+    IsSimulatorCmd,
+    IsSimulatorResultStruct,
     StatusCmd,
+    TcpOffsetCmd,
+    TcpOffsetResultStruct,
     TcpSpeedCmd,
     TeleportCmd,
     SpeedsResultStruct,
@@ -704,8 +707,8 @@ class AsyncRobotClient(_RobotClientABC):
         Example:
             active = rbt.is_simulator()
         """
-        resp = await self._request(SimulatorStateCmd())
-        return resp.active if isinstance(resp, SimulatorStateResultStruct) else False
+        resp = await self._request(IsSimulatorCmd())
+        return resp.active if isinstance(resp, IsSimulatorResultStruct) else False
 
     async def teleport(
         self,
@@ -891,6 +894,33 @@ class AsyncRobotClient(_RobotClientABC):
         return await self._send(
             SelectToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
         )
+
+    async def set_tcp_offset(self, x: float = 0, y: float = 0, z: float = 0) -> int:
+        """Set TCP offset in mm, composed on top of the current tool transform.
+
+        The offset shifts the effective TCP point in the tool's local frame.
+        Subsequent motion (especially TRF relative moves) will use the new TCP.
+        Call with (0, 0, 0) to reset. Changing tools resets the offset.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_tcp_offset(0, 0, -190)  # pencil tip 190mm from gripper
+        """
+        return await self._send(SetTcpOffsetCmd(x=x, y=y, z=z))
+
+    async def tcp_offset(self) -> list[float]:
+        """Query current TCP offset in mm [x, y, z].
+
+        Category: Configuration
+
+        Example:
+            offset = rbt.tcp_offset()
+        """
+        resp = await self._request(TcpOffsetCmd())
+        if isinstance(resp, TcpOffsetResultStruct):
+            return [resp.x, resp.y, resp.z]
+        return [0.0, 0.0, 0.0]
 
     async def select_profile(self, profile: str) -> int:
         """Set the motion profile (e.g. ``"TOPPRA"``).
@@ -1235,43 +1265,9 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 
-    @overload
     async def move_j(
         self,
-        angles: list[float],
-        *,
-        duration: float = ...,
-        speed: float = ...,
-        accel: float = ...,
-        r: float = ...,
-        rel: bool = ...,
-        wait: bool = ...,
-        timeout: float = ...,
-        **wait_kwargs: Any,
-    ) -> int:
-        """Joint-space move to target angles."""
-        ...
-
-    @overload
-    async def move_j(
-        self,
-        angles: list[float],
-        *,
-        pose: list[float],
-        duration: float = ...,
-        speed: float = ...,
-        accel: float = ...,
-        r: float = ...,
-        wait: bool = ...,
-        timeout: float = ...,
-        **wait_kwargs: Any,
-    ) -> int:
-        """Joint-space move to Cartesian target via IK."""
-        ...
-
-    async def move_j(
-        self,
-        angles: list[float],
+        angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
         duration: float = 0.0,
@@ -1311,7 +1307,7 @@ class AsyncRobotClient(_RobotClientABC):
         else:
             index = await self._send(
                 MoveJCmd(
-                    angles=angles,
+                    angles=angles or [],
                     duration=duration,
                     speed=speed,
                     accel=accel,
@@ -1433,7 +1429,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
-        Category: Smooth Motion
+        Category: Motion
 
         Example:
             rbt.move_s([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
@@ -1474,7 +1470,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
-        Category: Smooth Motion
+        Category: Motion
 
         Example:
             rbt.move_p([[0, 263, 242, 90, 0, 90], [50, 250, 200, 90, 0, 90]], speed=0.5)
@@ -1709,7 +1705,7 @@ class AsyncRobotClient(_RobotClientABC):
         action: str,
         params: list | None = None,
         *,
-        wait: bool = False,
+        wait: bool = True,
         timeout: float = 10.0,
     ) -> int:
         """Send a generic tool action command.

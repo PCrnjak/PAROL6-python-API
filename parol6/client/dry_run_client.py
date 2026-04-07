@@ -35,48 +35,15 @@ from ..config import (
 from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
 from pinokin import se3_from_rpy, se3_rpy
+import re as _re
+
+import parol6.protocol.wire as _wire
 from ..protocol.wire import (
-    ActivityCmd,
-    AnglesCmd,
-    CheckpointCmd,
-    ConnectHardwareCmd,
-    DelayCmd,
-    ErrorCmd,
-    HaltCmd,
     HomeCmd,
-    IOCmd,
-    JogJCmd,
-    JogLCmd,
-    JointSpeedsCmd,
-    LoopStatsCmd,
-    MoveCCmd,
-    MoveJCmd,
-    MoveJPoseCmd,
-    MoveLCmd,
-    MovePCmd,
-    MoveSCmd,
-    PingCmd,
-    PoseCmd,
-    ProfileCmd,
-    QueueCmd,
-    ReachableCmd,
-    ResetCmd,
-    ResetLoopStatsCmd,
-    ResumeCmd,
-    SelectProfileCmd,
     SelectToolCmd,
-    ServoJCmd,
-    ServoJPoseCmd,
-    ServoLCmd,
-    SimulatorCmd,
-    SimulatorStateCmd,
-    StatusCmd,
-    TcpSpeedCmd,
+    SetTcpOffsetCmd,
     TeleportCmd,
     ToolActionCmd,
-    ToolStatusCmd,
-    ToolsCmd,
-    WriteIOCmd,
 )
 from ..server.command_registry import CommandRegistry
 from ..server.motion_planner import (
@@ -91,71 +58,40 @@ from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
 from parol6.tools import get_registry
 
-# Method name → (struct class, default kwargs applied before caller kwargs)
-CMD_MAP: dict[str, tuple[type, dict[str, Any]]] = {
-    "home": (HomeCmd, {}),
-    "move_j": (MoveJCmd, {}),
-    "move_j_pose": (MoveJPoseCmd, {}),
-    "move_l": (MoveLCmd, {}),
-    "move_c": (MoveCCmd, {"frame": "WRF"}),
-    "move_s": (MoveSCmd, {"frame": "WRF"}),
-    "move_p": (MovePCmd, {"frame": "WRF"}),
-    "jog_j": (JogJCmd, {}),
-    "jog_l": (JogLCmd, {"frame": "WRF"}),
-    "servo_j": (ServoJCmd, {}),
-    "servo_j_pose": (ServoJPoseCmd, {}),
-    "servo_l": (ServoLCmd, {}),
-    "checkpoint": (CheckpointCmd, {}),
-    "delay": (DelayCmd, {}),
-    "resume": (ResumeCmd, {}),
-    "halt": (HaltCmd, {}),
-    "reset": (ResetCmd, {}),
-    "select_tool": (SelectToolCmd, {}),
-    "select_profile": (SelectProfileCmd, {}),
-    "write_io": (WriteIOCmd, {}),
-    "connect_hardware": (ConnectHardwareCmd, {}),
-    "simulator": (SimulatorCmd, {}),
-    "teleport": (TeleportCmd, {}),
-    "tool_action": (ToolActionCmd, {}),
-    "ping": (PingCmd, {}),
-    "angles": (AnglesCmd, {}),
-    "io": (IOCmd, {}),
-    "joint_speeds": (JointSpeedsCmd, {}),
-    "pose": (PoseCmd, {}),
-    "status": (StatusCmd, {}),
-    "loop_stats": (LoopStatsCmd, {}),
-    "reset_loop_stats": (ResetLoopStatsCmd, {}),
-    "profile": (ProfileCmd, {}),
-    "tools": (ToolsCmd, {}),
-    "activity": (ActivityCmd, {}),
-    "queue": (QueueCmd, {}),
-    "_tool_status": (ToolStatusCmd, {}),
-    "reachable": (ReachableCmd, {}),
-    "error": (ErrorCmd, {}),
-    "tcp_speed": (TcpSpeedCmd, {}),
-    "is_simulator": (SimulatorStateCmd, {}),
-}
+
+def _pascal_to_snake(name: str) -> str:
+    """Convert PascalCase to snake_case: MoveJPose → move_j_pose"""
+    s = _re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    s = _re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    return s.lower()
+
+
+# Auto-derive method_name → struct_class from wire module.
+# E.g. MoveJCmd → move_j, IsSimulatorCmd → is_simulator
+_CMD_STRUCTS: dict[str, type] = {}
+for _attr in dir(_wire):
+    if _attr.endswith("Cmd") and isinstance(getattr(_wire, _attr), type):
+        _CMD_STRUCTS[_pascal_to_snake(_attr.removesuffix("Cmd"))] = getattr(
+            _wire, _attr
+        )
 
 _UPPER_FIELDS: frozenset[str] = frozenset({"tool_name", "tool_key", "profile"})
 
 
 def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
     """Build a command struct by method name."""
-    entry = CMD_MAP.get(name)
-    if entry is None:
+    struct_cls = _CMD_STRUCTS.get(name)
+    if struct_cls is None:
         raise ValueError(f"Unknown command: {name}")
-    struct_cls, defaults = entry
     struct_fields: tuple[str, ...] = getattr(struct_cls, "__struct_fields__", ())
-    merged = dict(defaults)
+    filtered = {}
     for k, v in kwargs.items():
-        if v is None:
-            continue
-        if k not in struct_fields:
+        if v is None or k not in struct_fields:
             continue
         if k in _UPPER_FIELDS and isinstance(v, str):
             v = v.upper()
-        merged[k] = v
-    return struct_cls(*args, **merged)
+        filtered[k] = v
+    return struct_cls(*args, **filtered)
 
 
 logger = logging.getLogger(__name__)
@@ -232,6 +168,11 @@ class DryRunRobotClient:
         initial_joints_deg: list[float] | None = None,
         max_snapshot_points: int = 200,
     ) -> None:
+        # Reset tool transform — process pool workers persist across
+        # invocations, so a previous run's select_tool() leaves a stale
+        # TCP offset on the module-level robot singleton.
+        PAROL6_ROBOT.apply_tool("NONE")
+
         self._state = ControllerState()
         init_deg = np.asarray(
             initial_joints_deg if initial_joints_deg is not None else HOME_ANGLES_DEG,
@@ -248,6 +189,7 @@ class DryRunRobotClient:
         self._max_snapshot_points = max_snapshot_points
         self._active_tool_key: str = ""
         self._active_variant_key: str = ""
+        self._tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._tool_proxy = _DryRunTool(self)
 
     @property
@@ -259,6 +201,14 @@ class DryRunRobotClient:
     def tool(self) -> _DryRunTool:
         """Tool proxy that routes actions through the planner."""
         return self._tool_proxy
+
+    def tcp_offset(self) -> list[float]:
+        """Return current TCP offset in mm."""
+        return [
+            self._tcp_offset_m[0] * 1000.0,
+            self._tcp_offset_m[1] * 1000.0,
+            self._tcp_offset_m[2] * 1000.0,
+        ]
 
     def flush(self) -> list[DryRunResult]:
         """Flush pending blend buffer. Call after script completion."""
@@ -289,6 +239,19 @@ class DryRunRobotClient:
         if isinstance(params, SelectToolCmd):
             self._active_tool_key = params.tool_name.strip().upper()
             self._active_variant_key = params.variant_key
+            self._tcp_offset_m = (0.0, 0.0, 0.0)
+        if isinstance(params, SetTcpOffsetCmd):
+            self._tcp_offset_m = (
+                params.x / 1000.0,
+                params.y / 1000.0,
+                params.z / 1000.0,
+            )
+            self._state._tcp_offset_m = self._tcp_offset_m
+            PAROL6_ROBOT.apply_tool(
+                self._active_tool_key or "NONE",
+                variant_key=self._active_variant_key,
+                tcp_offset_m=self._tcp_offset_m,
+            )
         # Detect jog/servo commands — planner doesn't handle streaming.
         # Other non-trajectory MotionCommands (SelectTool, Home) fall through
         # to the planner which handles them as inline segments.
@@ -549,6 +512,28 @@ class DryRunRobotClient:
             float(np.degrees(self._rpy_buf[2])),
         ]
 
+    def move_j(
+        self,
+        angles: list[float] | None = None,
+        *,
+        pose: list[float] | None = None,
+        **kwargs: Any,
+    ) -> DryRunResult | None:
+        if pose is not None:
+            return self._dispatch(build_cmd("move_j_pose", pose, **kwargs))
+        return self._dispatch(build_cmd("move_j", angles or [], **kwargs))
+
+    def servo_j(
+        self,
+        angles: list[float] | None = None,
+        *,
+        pose: list[float] | None = None,
+        **kwargs: Any,
+    ) -> DryRunResult | None:
+        if pose is not None:
+            return self._dispatch(build_cmd("servo_j_pose", pose, **kwargs))
+        return self._dispatch(build_cmd("servo_j", angles or [], **kwargs))
+
     def delay(self, seconds: float = 0.0) -> None:
         pass
 
@@ -560,7 +545,7 @@ class DryRunRobotClient:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
-        if name not in CMD_MAP:
+        if name not in _CMD_STRUCTS:
             raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
         def method(*args: Any, **kwargs: Any) -> DryRunResult | None:

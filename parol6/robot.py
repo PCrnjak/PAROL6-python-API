@@ -319,10 +319,10 @@ class _PneumaticGripperImpl(_ToolBase, PneumaticGripperTool):
         return await self.close(**kwargs)
 
     async def open(self, **kwargs: float | int) -> int:
-        return await self._cmd("open")
+        return await self._cmd("open", params=None, **kwargs)
 
     async def close(self, **kwargs: float | int) -> int:
-        return await self._cmd("close")
+        return await self._cmd("close", params=None, **kwargs)
 
 
 class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):

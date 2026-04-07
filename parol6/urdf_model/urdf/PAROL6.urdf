@@ -387,7 +387,7 @@
     name="L6"
     type="revolute">
     <origin
-      xyz="0 0.044 0"
+      xyz="0 0.037 0"
       rpy="1.5707963267949 0 0" />
     <parent
       link="L5" />

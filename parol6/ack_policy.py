@@ -11,6 +11,7 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
     CmdType.SELECT_PROFILE,
     CmdType.RESET,
     CmdType.WRITE_IO,
+    CmdType.SET_TCP_OFFSET,
 }
 
 # Query command types (use request/response, not ACK)
@@ -30,7 +31,8 @@ QUERY_CMD_TYPES: set[CmdType] = {
     CmdType.ERROR,
     CmdType.TCP_SPEED,
     CmdType.PING,
-    CmdType.SIMULATOR_STATE,
+    CmdType.IS_SIMULATOR,
+    CmdType.TCP_OFFSET,
 }
 
 # Streaming commands are fire-and-forget (no ACK needed)

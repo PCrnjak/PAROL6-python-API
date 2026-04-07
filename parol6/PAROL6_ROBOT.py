@@ -61,7 +61,11 @@ _urdf_path = str(
 robot: Robot = Robot(_urdf_path)
 
 
-def apply_tool(tool_name: str, variant_key: str = "") -> None:
+def apply_tool(
+    tool_name: str,
+    variant_key: str = "",
+    tcp_offset_m: tuple[float, float, float] | None = None,
+) -> None:
     """
     Apply tool transform to the robot model.
 
@@ -71,11 +75,20 @@ def apply_tool(tool_name: str, variant_key: str = "") -> None:
         Name of the tool from the tool registry
     variant_key : str
         Optional variant key for the tool
+    tcp_offset_m : tuple, optional
+        Additional (x, y, z) offset in meters, composed in the tool's local frame.
     """
     T_tool = get_tool_transform(tool_name, variant_key=variant_key or None)
 
+    if tcp_offset_m is not None and any(v != 0 for v in tcp_offset_m):
+        T_offset = np.eye(4, dtype=np.float64)
+        T_offset[0, 3] = tcp_offset_m[0]
+        T_offset[1, 3] = tcp_offset_m[1]
+        T_offset[2, 3] = tcp_offset_m[2]
+        T_tool = T_tool @ T_offset
+
     label = f"'{tool_name}:{variant_key}'" if variant_key else f"'{tool_name}'"
-    if tool_name != "NONE" and not np.allclose(T_tool, np.eye(4)):
+    if not np.allclose(T_tool, np.eye(4)):
         robot.set_tool_transform(T_tool)
         logger.info(f"Applied tool {label} to robot model")
     else:

@@ -310,6 +310,14 @@ class RobotClient:
         """
         return _run(self._inner.select_tool(tool_name, variant_key=variant_key))
 
+    def set_tcp_offset(self, x: float = 0, y: float = 0, z: float = 0) -> int:
+        """Set TCP offset in mm, composed on top of the current tool transform."""
+        return _run(self._inner.set_tcp_offset(x=x, y=y, z=z))
+
+    def tcp_offset(self) -> list[float]:
+        """Query current TCP offset in mm [x, y, z]."""
+        return _run(self._inner.tcp_offset())
+
     def select_profile(self, profile: str) -> int:
         """Set the motion profile (e.g. ``"TOPPRA"``).
 
@@ -505,7 +513,6 @@ class RobotClient:
         if pose is not None:
             return _run(
                 self._inner.move_j(
-                    angles or [],
                     pose=pose,
                     duration=duration,
                     speed=speed,
@@ -515,11 +522,9 @@ class RobotClient:
                     timeout=timeout,
                 )
             )
-        if angles is None:
-            raise ValueError("move_j requires angles or pose")
         return _run(
             self._inner.move_j(
-                angles,
+                angles or [],
                 duration=duration,
                 speed=speed,
                 accel=accel,
@@ -783,7 +788,7 @@ class RobotClient:
         action: str,
         params: list | None = None,
         *,
-        wait: bool = False,
+        wait: bool = True,
         timeout: float = 10.0,
     ) -> int:
         return _run(

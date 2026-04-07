@@ -32,9 +32,11 @@ from parol6.protocol.wire import (
     QueueCmd,
     QueueResultStruct,
     ReachableCmd,
-    SimulatorStateCmd,
-    SimulatorStateResultStruct,
+    IsSimulatorCmd,
+    IsSimulatorResultStruct,
     SpeedsResultStruct,
+    TcpOffsetCmd,
+    TcpOffsetResultStruct,
     StatusCmd,
     StatusResultStruct,
     TcpSpeedCmd,
@@ -339,16 +341,36 @@ class TcpSpeedCommand(QueryCommand[TcpSpeedCmd]):
         return pack_response(TcpSpeedResultStruct(speed=cache.tcp_speed))
 
 
-@register_command(CmdType.SIMULATOR_STATE)
-class SimulatorStateCommand(QueryCommand[SimulatorStateCmd]):
+@register_command(CmdType.IS_SIMULATOR)
+class IsSimulatorCommand(QueryCommand[IsSimulatorCmd]):
     """Query current simulator mode state."""
 
-    PARAMS_TYPE = SimulatorStateCmd
-    QUERY_TYPE = QueryType.SIMULATOR_STATE
+    PARAMS_TYPE = IsSimulatorCmd
+    QUERY_TYPE = QueryType.IS_SIMULATOR
 
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> bytes:
         from parol6.server.transports.transport_factory import is_simulation_mode
 
-        return pack_response(SimulatorStateResultStruct(active=is_simulation_mode()))
+        return pack_response(IsSimulatorResultStruct(active=is_simulation_mode()))
+
+
+@register_command(CmdType.TCP_OFFSET)
+class TcpOffsetCommand(QueryCommand[TcpOffsetCmd]):
+    """Query current TCP offset in mm."""
+
+    PARAMS_TYPE = TcpOffsetCmd
+    QUERY_TYPE = QueryType.TCP_OFFSET
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        offset = state.tcp_offset_m
+        return pack_response(
+            TcpOffsetResultStruct(
+                x=offset[0] * 1000,
+                y=offset[1] * 1000,
+                z=offset[2] * 1000,
+            )
+        )
