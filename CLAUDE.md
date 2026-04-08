@@ -140,6 +140,10 @@ For streamable commands (`streamable = True`), `do_setup()` also runs at high fr
   - `np.atleast_1d()` or similar to guarantee array returns from numpy functions
   - Only use `# type: ignore` as a last resort for genuine type checker limitations (e.g., numpy's `ArrayLike` being too broad)
 
+## Shell Command Style
+
+- **Do NOT use compound `cd` commands** like `cd foo && git status` or `cd foo && pytest`. Compound commands that cross directories require explicit user approval and slow things down. Instead, issue a standalone `cd foo` command first, then run the action as a separate command. The Bash tool's working directory persists between calls.
+
 ## Testing Guidelines
 
 **When CI tests fail, fix them.** Don't waste time analyzing whether failures are "related to your changes" — just fix all failing tests. The goal is a green CI, not attribution.
