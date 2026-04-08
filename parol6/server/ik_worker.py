@@ -112,7 +112,7 @@ def ik_enablement_worker_main(
     # Pre-allocate work array for cartesian targets
     cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
 
-    logger.info("IK worker subprocess started")
+    logger.debug("IK worker subprocess started")
 
     try:
         while not shutdown_event.is_set():
@@ -164,6 +164,10 @@ def ik_enablement_worker_main(
             response_version += 1
             version_view[0] = response_version
 
+    except (EOFError, OSError, BrokenPipeError, KeyboardInterrupt):
+        # Expected when the parent shuts down: shared memory or the request
+        # event get torn down before our shutdown_event check fires.
+        pass
     except Exception as e:
         logger.exception("IK worker subprocess error: %s", e)
     finally:
@@ -183,7 +187,7 @@ def ik_enablement_worker_main(
 
         input_shm.close()
         output_shm.close()
-        logger.info("IK worker subprocess exiting")
+        logger.debug("IK worker subprocess exiting")
 
 
 @njit(cache=True)

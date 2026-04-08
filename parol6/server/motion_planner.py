@@ -532,7 +532,7 @@ def motion_planner_main(
 
     worker = PlannerWorker(segment_queue)
 
-    logger.info(
+    logger.debug(
         "Motion planner subprocess started (PID %d)",
         multiprocessing.current_process().pid,
     )
@@ -589,10 +589,15 @@ def motion_planner_main(
                     worker.cancel()
                     _drain_queue(command_queue)
 
+    except (EOFError, OSError, BrokenPipeError, KeyboardInterrupt):
+        # Expected when the parent process is shutting down: the queue's
+        # underlying pipe gets torn down before our shutdown_event check
+        # fires. Nothing to log.
+        pass
     except Exception:
         logger.exception("Motion planner subprocess error")
     finally:
-        logger.info("Motion planner subprocess exiting")
+        logger.debug("Motion planner subprocess exiting")
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +632,7 @@ class MotionPlanner:
             name="MotionPlannerProcess",
         )
         self._process.start()
-        logger.info("Motion planner started, PID: %s", self._process.pid)
+        logger.debug("Motion planner started, PID: %s", self._process.pid)
 
     def stop(self) -> None:
         """Shut down the planner subprocess gracefully."""
@@ -641,7 +646,7 @@ class MotionPlanner:
         # Drain queues to avoid BrokenPipeError on GC
         _drain_queue(self._command_queue)
         _drain_queue(self._segment_queue)
-        logger.info("Motion planner stopped")
+        logger.debug("Motion planner stopped")
 
     @property
     def alive(self) -> bool:

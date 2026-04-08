@@ -56,7 +56,7 @@ class TransportManager:
                 persisted = get_com_port_with_fallback()
                 if persisted:
                     self.serial_port = persisted
-                    logger.info("Using persisted serial port: %s", persisted)
+                    logger.debug("Using persisted serial port: %s", persisted)
         except Exception as e:
             logger.debug("Failed to load persisted COM port: %s", e)
 
@@ -70,7 +70,7 @@ class TransportManager:
 
             if self.transport:
                 if self.transport.is_connected():
-                    logger.info("Connected to transport: %s", self.transport.port)
+                    logger.debug("Connected to transport: %s", self.transport.port)
                 else:
                     logger.warning(
                         "Serial transport not connected at startup (port=%s)",

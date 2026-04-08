@@ -173,7 +173,7 @@ class Controller:
             discover_commands()
 
             # Initialize UDP transport
-            logger.info(
+            logger.debug(
                 f"Starting UDP server on {self.config.udp_host}:{self.config.udp_port}"
             )
             self.udp_transport = UDPTransport(
@@ -190,7 +190,7 @@ class Controller:
 
             # Create status broadcaster
             try:
-                logger.info(
+                logger.debug(
                     f"StatusBroadcaster config: group={MCAST_GROUP} port={MCAST_PORT} ttl={MCAST_TTL} iface={MCAST_IF} rate_hz={STATUS_RATE_HZ} stale_s={STATUS_STALE_S}"
                 )
                 self._status_broadcaster = StatusBroadcaster(
@@ -202,12 +202,12 @@ class Controller:
                     rate_hz=STATUS_RATE_HZ,
                     stale_s=STATUS_STALE_S,
                 )
-                logger.info("StatusBroadcaster initialized")
+                logger.debug("StatusBroadcaster initialized")
             except Exception as e:
                 logger.warning(f"Failed to create status broadcaster: {e}")
 
             self._initialized = True
-            logger.info("Controller initialized successfully")
+            logger.debug("Controller initialized successfully")
 
         except Exception as e:
             logger.error(f"Failed to initialize controller: {e}")
@@ -238,29 +238,34 @@ class Controller:
         self._gc_tracker.take_control()
 
         # Start main control loop
-        logger.info("Starting main control loop")
+        logger.debug("Starting main control loop")
         self._timer.metrics.mark_started(time.perf_counter())
+        logger.info(
+            "Controller ready on %s:%s",
+            self.config.udp_host,
+            self.config.udp_port,
+        )
         self._main_control_loop()
 
     def stop(self):
         """Stop the controller and clean up resources."""
         if not self.running:
             return
-        logger.info("Stopping controller...")
+        logger.debug("Stopping controller...")
         self.running = False
         self.shutdown_event.set()
 
         # Stop motion planner subprocess
         try:
             self._planner.stop()
-        except Exception:
-            logger.warning("Error stopping motion planner", exc_info=True)
+        except Exception as e:
+            logger.debug("Error stopping motion planner: %s", e)
 
         # Stop IK worker subprocess
         try:
             close_cache()
-        except Exception:
-            logger.warning("Error stopping IK worker", exc_info=True)
+        except Exception as e:
+            logger.debug("Error stopping IK worker: %s", e)
 
         # Close status broadcaster
         try:
@@ -306,7 +311,7 @@ class Controller:
                         get_cache().mark_serial_observed()
                         if not self._transport_mgr.first_frame_received:
                             self._transport_mgr.first_frame_received = True
-                            logger.info("First frame received from robot")
+                            logger.debug("First frame received from robot")
                         self._transport_mgr._last_version = ver
             except Exception as e:
                 logger.warning(f"Error decoding latest serial frame: {e}")
@@ -565,7 +570,7 @@ class Controller:
                 self._timer.wait_for_next_tick()
 
             except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received")
+                logger.debug("Keyboard interrupt received")
                 # Block SIGINT during shutdown so child processes aren't
                 # interrupted while we join them (avoids hang from numba's
                 # internal ProcessPoolExecutor workers catching SIGINT).
@@ -832,12 +837,12 @@ class Controller:
             # Set priority
             if sys.platform == "win32":
                 p.nice(psutil.HIGH_PRIORITY_CLASS)
-                logger.info("Set process priority to HIGH_PRIORITY_CLASS")
+                logger.debug("Set process priority to HIGH_PRIORITY_CLASS")
                 elevated = True
             else:
                 try:
                     p.nice(-10)
-                    logger.info("Set process nice value to -10")
+                    logger.debug("Set process nice value to -10")
                     elevated = True
                 except psutil.AccessDenied:
                     logger.debug("Cannot set negative nice value without privileges")
@@ -849,7 +854,7 @@ class Controller:
                     if cpus and len(cpus) > 1:
                         target_core = cpus[-1]
                         p.cpu_affinity([target_core])
-                        logger.info(f"Pinned process to CPU core {target_core}")
+                        logger.debug(f"Pinned process to CPU core {target_core}")
                 except (AttributeError, NotImplementedError):
                     logger.debug("CPU affinity not supported on this platform")
                 except psutil.AccessDenied:

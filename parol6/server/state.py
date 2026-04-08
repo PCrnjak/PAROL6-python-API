@@ -407,7 +407,7 @@ class ControllerState:
             variant_key=self._current_tool_variant,
             tcp_offset_m=offset_m,
         )
-        logger.info(
+        logger.debug(
             "TCP offset set to (%.1f, %.1f, %.1f) mm",
             offset_m[0] * 1000,
             offset_m[1] * 1000,
@@ -426,7 +426,6 @@ class StateManager:
     def __init__(self):
         """Initialize the state manager."""
         self._state = ControllerState()
-        logger.info("StateManager initialized with NumPy buffers")
 
     def get_state(self) -> ControllerState:
         """
@@ -447,7 +446,7 @@ class StateManager:
         to known defaults.
         """
         self._state = ControllerState()
-        logger.info("Controller state reset")
+        logger.debug("Controller state reset")
 
 
 # Global singleton instance accessor

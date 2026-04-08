@@ -82,7 +82,7 @@ class UDPTransport:
                     time.sleep(_delay_s)
 
             self._running = True
-            logger.info(f"UDP socket created and bound to {self.ip}:{self.port}")
+            logger.debug(f"UDP socket created and bound to {self.ip}:{self.port}")
             return True
 
         except OSError as e:
@@ -101,9 +101,9 @@ class UDPTransport:
         if self.socket:
             try:
                 self.socket.close()
-                logger.info("UDP socket closed")
+                logger.debug("UDP socket closed")
             except Exception as e:
-                logger.error(f"Error closing UDP socket: {e}")
+                logger.debug(f"Error closing UDP socket: {e}")
             finally:
                 self.socket = None
 
@@ -121,6 +121,9 @@ class UDPTransport:
             return None
         except OSError as e:
             if e.errno in (11, 35):  # EAGAIN/EWOULDBLOCK
+                return None
+            if not self._running:
+                # Socket was closed under us during shutdown — expected.
                 return None
             logger.error(f"Socket error in poll_receive: {e}")
             return None
@@ -160,7 +163,7 @@ class UDPTransport:
                     # No more data available (expected)
                     break
         except Exception as e:
-            logger.error(f"Error draining UDP buffer: {e}")
+            logger.debug(f"Error draining UDP buffer: {e}")
 
         return drained_count
 
@@ -184,6 +187,9 @@ class UDPTransport:
             return True
 
         except OSError as e:
+            if not self._running:
+                # Socket was closed under us during shutdown — expected.
+                return False
             logger.error(f"Socket error sending: {e}")
             return False
         except Exception as e:

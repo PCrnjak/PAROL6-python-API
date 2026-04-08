@@ -167,7 +167,7 @@ class CommandRegistry:
         if self._discovered:
             return
 
-        logger.info("Discovering commands...")
+        logger.debug("Discovering commands...")
 
         # Import parol6.commands package
         try:
@@ -198,7 +198,7 @@ class CommandRegistry:
                 logger.error(f"Error loading {full_module_name}: {e}")
 
         self._discovered = True
-        logger.info(
+        logger.debug(
             f"Command discovery complete. {len(self._commands)} commands registered."
         )
 

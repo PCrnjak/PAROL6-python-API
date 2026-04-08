@@ -260,7 +260,7 @@ class StatusCache:
             name="IKWorkerProcess",
         )
         self._ik_process.start()
-        logger.info(f"IK worker started, PID: {self._ik_process.pid}")
+        logger.debug(f"IK worker started, PID: {self._ik_process.pid}")
 
     def _stop_ik_worker(self) -> None:
         """Shut down the IK worker subprocess and release resources."""
@@ -303,7 +303,7 @@ class StatusCache:
         # Clean up shared memory
         _cleanup_shm(self._ik_input_shm)
         _cleanup_shm(self._ik_output_shm)
-        logger.info("IK worker stopped")
+        logger.debug("IK worker stopped")
 
     def _submit_ik_request(self, q_rad: np.ndarray, T_matrix: np.ndarray) -> None:
         """Submit an IK enablement request (non-blocking, zero-alloc).

@@ -75,10 +75,13 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    third_party_log_level = log_level if log_level >= logging.INFO else logging.INFO
-    # Silence toppra's verbose debug output
-    logging.getLogger("toppra").setLevel(third_party_log_level)
-    logging.getLogger("numba").setLevel(third_party_log_level)
+    # At INFO and above, push noisy third-party libraries up to WARNING so a
+    # clean startup stays quiet. DEBUG/TRACE users still see everything.
+    quiet_level = (
+        max(log_level, logging.WARNING) if log_level >= logging.INFO else log_level
+    )
+    for name in ("toppra", "numba", "numba.core", "numba.cuda"):
+        logging.getLogger(name).setLevel(quiet_level)
 
     # Pre-compile numba JIT functions to avoid mid-loop compilation stalls
     from parol6.utils.warmup import warmup_jit
@@ -94,7 +97,7 @@ def main() -> int:
     except (TypeError, ValueError):
         udp_port = args.port
 
-    logger.info(f"Controller bind: host={udp_host} port={udp_port}")
+    logger.debug(f"Controller bind: host={udp_host} port={udp_port}")
 
     config = ControllerConfig(
         udp_host=udp_host,
@@ -123,7 +126,9 @@ def main() -> int:
             try:
                 controller.start()
             except KeyboardInterrupt:
-                logger.info("Shutting down...")
+                # Controller's "Controller stopped" line is the one summary;
+                # no need to announce the interrupt itself.
+                pass
             finally:
                 controller.stop()
         else:

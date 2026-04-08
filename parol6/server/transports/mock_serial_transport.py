@@ -433,7 +433,7 @@ class MockSerialTransport:
         self._frame_version = 1
         self._frame_ts = time.time()
 
-        logger.info("MockSerialTransport initialized - simulation mode active")
+        logger.debug("MockSerialTransport initialized - simulation mode active")
 
     def connect(self, port: str | None = None) -> bool:
         """
@@ -454,7 +454,7 @@ class MockSerialTransport:
         self._simulator_tool_name = ""
         # Initialize time base to perf_counter for consistent scheduling
         self._state.last_update = time.perf_counter()
-        logger.info(f"MockSerialTransport connected to simulated port: {self.port}")
+        logger.debug(f"MockSerialTransport connected to simulated port: {self.port}")
         return True
 
     # Allow controller to sync the simulator pose/homing from live controller state
@@ -475,7 +475,7 @@ class MockSerialTransport:
             # Clear speeds and hold position
             self._state.speed_in = state.Speed_in.copy()
             self._state.command_out = CommandCode.IDLE
-            logger.info("MockSerialTransport: state synchronized from controller")
+            logger.debug("MockSerialTransport: state synchronized from controller")
         except Exception as e:
             logger.warning(
                 "MockSerialTransport: failed to sync from controller state: %s", e
@@ -484,7 +484,7 @@ class MockSerialTransport:
     def disconnect(self) -> None:
         """Simulate serial port disconnection."""
         self._connected = False
-        logger.info(f"MockSerialTransport disconnected from: {self.port}")
+        logger.debug(f"MockSerialTransport disconnected from: {self.port}")
 
     def is_connected(self) -> bool:
         """
