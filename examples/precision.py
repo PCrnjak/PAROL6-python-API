@@ -19,6 +19,7 @@ with Robot(host=HOST, port=PORT, normalize_logs=True) as robot:
     rbt.simulator(True)
 
     rbt.select_tool("SSG-48")
+    rbt.tool.calibrate()
     rbt.home(wait=True)
 
     PRECISION_POSE = [0, -250, 350, -90, 0, -90]

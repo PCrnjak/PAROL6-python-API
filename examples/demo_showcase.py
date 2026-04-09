@@ -21,6 +21,7 @@ with Robot(host=HOST, port=PORT, normalize_logs=True) as robot:
 
     # Select tool and home
     rbt.select_tool("SSG-48")
+    rbt.tool.calibrate()
     rbt.home(wait=True)
 
     # move_j vs move_l (joint-space then linear-cartesian to nearby pose)
