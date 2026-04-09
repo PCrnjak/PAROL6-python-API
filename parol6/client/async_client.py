@@ -287,11 +287,33 @@ class AsyncRobotClient(_RobotClientABC):
         self._active_tool_key: str | None = None
         self._active_variant_key: str = ""
 
-        # Bound tool specs (populated by Robot.create_async_client)
+        # Bound tool specs. Populated from the parol6 tool registry so that
+        # `from parol6 import AsyncRobotClient; c = AsyncRobotClient(...)` works
+        # without going through Robot.create_async_client(). The Robot factory
+        # rebinds these from its own tools.available, which is the same source.
         self._bound_tools: dict[str, ToolSpec] = {}
+        self._bind_default_tools()
 
         # Lifecycle flag
         self._closed: bool = False
+
+    def _bind_default_tools(self) -> None:
+        """Populate self._bound_tools from the parol6 tool registry.
+
+        Lazy import of parol6.robot avoids the import cycle (parol6.robot
+        imports AsyncRobotClient at module level).
+        """
+        import copy
+
+        from parol6.robot import _build_tools
+
+        bound: dict[str, ToolSpec] = {}
+        for spec in _build_tools().available:
+            bound_spec = copy.copy(spec)
+            bound_spec._execute = self.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._get_status = self._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound[spec.key] = bound_spec
+        self._bound_tools = bound
 
     # --------------- Tool access ---------------
 

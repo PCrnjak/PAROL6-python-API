@@ -130,7 +130,21 @@ class RobotClient:
         self._inner = AsyncRobotClient(
             host=host, port=port, timeout=timeout, retries=retries
         )
+        # Wrap the inner async client's bound tools with sync adapters so that
+        # `from parol6 import RobotClient; rbt = RobotClient(...)` works without
+        # going through Robot.create_sync_client(). The Robot factory rebinds
+        # these afterwards from the same registry.
         self._bound_tools: dict[str, ToolSpec] = {}
+        self._bind_default_tools()
+
+    def _bind_default_tools(self) -> None:
+        """Wrap inner async client's bound tools with sync adapters."""
+        from waldoctl.sync_tools import make_sync_tool
+
+        self._bound_tools = {
+            key: make_sync_tool(async_tool, _run)
+            for key, async_tool in self._inner._bound_tools.items()
+        }
 
     # ---------- tool access ----------
 
