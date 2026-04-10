@@ -6,327 +6,371 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6 import config as cfg
-from parol6.commands.base import ExecutionStatus, QueryCommand
+from parol6.commands.base import QueryCommand
+from parol6.protocol.wire import (
+    ActivityCmd,
+    AnglesCmd,
+    AnglesResultStruct,
+    CmdType,
+    CurrentActionResultStruct,
+    EnablementResultStruct,
+    ErrorCmd,
+    ErrorResultStruct,
+    IOCmd,
+    IOResultStruct,
+    JointSpeedsCmd,
+    LoopStatsCmd,
+    LoopStatsResultStruct,
+    PingCmd,
+    PingResultStruct,
+    PoseCmd,
+    PoseResultStruct,
+    ProfileCmd,
+    ProfileResultStruct,
+    QueryType,
+    QueueCmd,
+    QueueResultStruct,
+    ReachableCmd,
+    IsSimulatorCmd,
+    IsSimulatorResultStruct,
+    SpeedsResultStruct,
+    TcpOffsetCmd,
+    TcpOffsetResultStruct,
+    StatusCmd,
+    StatusResultStruct,
+    TcpSpeedCmd,
+    TcpSpeedResultStruct,
+    ToolStatusCmd,
+    ToolResultStruct,
+    ToolStatusResultStruct,
+    ToolsCmd,
+    pack_response,
+)
 from parol6.server.command_registry import register_command
-from parol6.server.state import get_fkine_flat_mm, get_fkine_matrix
+from parol6.server.state import get_fkine_flat_mm, get_fkine_se3
 from parol6.server.status_cache import get_cache
-from parol6.server.transports import is_simulation_mode
 from parol6.tools import list_tools
 
 if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 
-@register_command("GET_POSE")
-class GetPoseCommand(QueryCommand):
+@register_command(CmdType.POSE)
+class PoseCommand(QueryCommand[PoseCmd]):
     """Get current robot pose matrix in specified frame (WRF or TRF)."""
 
-    __slots__ = ("frame",)
+    PARAMS_TYPE = PoseCmd
+    QUERY_TYPE = QueryType.POSE
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_POSE command and parse optional frame parameter."""
-        if parts[0].upper() == "GET_POSE":
-            # Parse optional frame parameter (default WRF for backward compatibility)
-            if len(parts) > 1:
-                self.frame = parts[1].upper()
-                if self.frame not in ("WRF", "TRF"):
-                    return False, f"Invalid frame: {self.frame}. Must be WRF or TRF"
-            else:
-                self.frame = "WRF"
-            return True, None
-        return False, None
+    __slots__ = ()
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return pose data with translation in mm."""
-        if self.frame == "TRF":
-            # Get current pose as 4x4 matrix (translation in meters)
-            T = get_fkine_matrix(state)
-
-            # Compute inverse to express world in tool frame: T^(-1) = [R^T | -R^T * t]
+    def compute(self, state: "ControllerState") -> bytes:
+        frame = self.p.frame or "WRF"
+        if frame == "TRF":
+            T = get_fkine_se3(state)
             T_inv = np.linalg.inv(T)
-
-            # Convert translation to mm
             T_inv[0:3, 3] *= 1000.0
-
-            # Flatten row-major (same format as WRF)
-            pose_flat = T_inv.reshape(-1)
-        else:
-            # WRF: use existing implementation
-            pose_flat = get_fkine_flat_mm(state)
-
-        pose_str = ",".join(map(str, pose_flat))
-        self.reply_ascii("POSE", pose_str)
-
-        self.finish()
-        return ExecutionStatus.completed("Pose sent")
+            return pack_response(PoseResultStruct(pose=T_inv.reshape(-1).tolist()))
+        return pack_response(PoseResultStruct(pose=get_fkine_flat_mm(state).tolist()))
 
 
-@register_command("GET_ANGLES")
-class GetAnglesCommand(QueryCommand):
+@register_command(CmdType.ANGLES)
+class AnglesCommand(QueryCommand[AnglesCmd]):
     """Get current joint angles in degrees."""
 
+    PARAMS_TYPE = AnglesCmd
+    QUERY_TYPE = QueryType.ANGLES
+
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_ANGLES command."""
-        if parts[0].upper() == "GET_ANGLES":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return angle data."""
-        angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
-        angles_deg = np.rad2deg(angles_rad)
-        angles_str = ",".join(map(str, angles_deg))
-        self.reply_ascii("ANGLES", angles_str)
-
-        self.finish()
-        return ExecutionStatus.completed("Angles sent")
+    def compute(self, state: "ControllerState") -> bytes:
+        cfg.steps_to_rad(state.Position_in, self._q_rad_buf)
+        return pack_response(
+            AnglesResultStruct(angles=np.rad2deg(self._q_rad_buf).tolist())
+        )
 
 
-@register_command("GET_IO")
-class GetIOCommand(QueryCommand):
+@register_command(CmdType.IO)
+class IOCommand(QueryCommand[IOCmd]):
     """Get current I/O status."""
 
-    __slots__ = ()
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_IO command."""
-        if parts[0].upper() == "GET_IO":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return I/O data."""
-        io_status_str = ",".join(map(str, state.InOut_in[:5]))
-        self.reply_ascii("IO", io_status_str)
-
-        self.finish()
-        return ExecutionStatus.completed("I/O sent")
-
-
-@register_command("GET_GRIPPER")
-class GetGripperCommand(QueryCommand):
-    """Get current gripper status."""
+    PARAMS_TYPE = IOCmd
+    QUERY_TYPE = QueryType.IO
 
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_GRIPPER command."""
-        if parts[0].upper() == "GET_GRIPPER":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return gripper data."""
-        gripper_status_str = ",".join(map(str, state.Gripper_data_in))
-        self.reply_ascii("GRIPPER", gripper_status_str)
-
-        self.finish()
-        return ExecutionStatus.completed("Gripper sent")
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(IOResultStruct(io=state.InOut_in[:5].tolist()))
 
 
-@register_command("GET_SPEEDS")
-class GetSpeedsCommand(QueryCommand):
+@register_command(CmdType.JOINT_SPEEDS)
+class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
     """Get current joint speeds."""
 
-    __slots__ = ()
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_SPEEDS command."""
-        if parts[0].upper() == "GET_SPEEDS":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return speed data."""
-        speeds_str = ",".join(map(str, state.Speed_in))
-        self.reply_ascii("SPEEDS", speeds_str)
-
-        self.finish()
-        return ExecutionStatus.completed("Speeds sent")
-
-
-@register_command("GET_STATUS")
-class GetStatusCommand(QueryCommand):
-    """Get aggregated robot status (pose, angles, I/O, gripper) from cache."""
+    PARAMS_TYPE = JointSpeedsCmd
+    QUERY_TYPE = QueryType.SPEEDS
 
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_STATUS command."""
-        if parts[0].upper() == "GET_STATUS":
-            return True, None
-        return False, None
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(SpeedsResultStruct(speeds=state.Speed_in.tolist()))
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return cached aggregated status (ASCII)."""
-        # Always refresh cache from current state before replying
+
+@register_command(CmdType.STATUS)
+class StatusCommand(QueryCommand[StatusCmd]):
+    """Get aggregated robot status (pose, angles, I/O, tool_status) from cache."""
+
+    PARAMS_TYPE = StatusCmd
+    QUERY_TYPE = QueryType.STATUS
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
         cache = get_cache()
         cache.update_from_state(state)
-        payload = cache.to_ascii()
-        self.reply_text(payload)  # Already has full format
-
-        self.finish()
-        return ExecutionStatus.completed("Status sent")
-
-
-@register_command("GET_GCODE_STATUS")
-class GetGcodeStatusCommand(QueryCommand):
-    """Get GCODE interpreter status."""
-
-    __slots__ = ()
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_GCODE_STATUS command."""
-        if parts[0].upper() == "GET_GCODE_STATUS":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return GCODE status."""
-        if self.gcode_interpreter:
-            gcode_status = self.gcode_interpreter.get_status()
-        else:
-            gcode_status = {
-                "is_running": False,
-                "is_paused": False,
-                "current_line": None,
-                "total_lines": 0,
-                "state": {},
-            }
-
-        self.reply_json("GCODE_STATUS", gcode_status)
-
-        self.finish()
-        return ExecutionStatus.completed("GCODE status sent")
+        ts = cache.tool_status
+        return pack_response(
+            StatusResultStruct(
+                pose=cache.pose.tolist(),
+                angles=cache.angles_deg.tolist(),
+                speeds=cache.speeds_rad_s.tolist(),
+                io=cache.io.tolist(),
+                tool_status=[
+                    ts.key,
+                    ts.state,
+                    ts.engaged,
+                    ts.part_detected,
+                    ts.fault_code,
+                    list(ts.positions),
+                    list(ts.channels),
+                ],
+            )
+        )
 
 
-@register_command("GET_LOOP_STATS")
-class GetLoopStatsCommand(QueryCommand):
-    """Return control-loop metrics (no ACK dependency)."""
+@register_command(CmdType.LOOP_STATS)
+class LoopStatsCommand(QueryCommand[LoopStatsCmd]):
+    """Return control-loop metrics."""
+
+    PARAMS_TYPE = LoopStatsCmd
+    QUERY_TYPE = QueryType.LOOP_STATS
 
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        if parts[0].upper() == "GET_LOOP_STATS":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+    def compute(self, state: "ControllerState") -> bytes:
         target_hz = 1.0 / max(cfg.INTERVAL_S, 1e-9)
-        ema_hz = (1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0
-        payload = {
-            "target_hz": float(target_hz),
-            "loop_count": int(state.loop_count),
-            "overrun_count": int(state.overrun_count),
-            "last_period_s": float(state.last_period_s),
-            "ema_period_s": float(state.ema_period_s),
-            "ema_hz": float(ema_hz),
-        }
-        self.reply_json("LOOP_STATS", payload)
-        self.finish()
-        return ExecutionStatus.completed("Loop stats sent")
+        mean_hz = (1.0 / state.mean_period_s) if state.mean_period_s > 0.0 else 0.0
+        return pack_response(
+            LoopStatsResultStruct(
+                target_hz=target_hz,
+                loop_count=state.loop_count,
+                overrun_count=state.overrun_count,
+                mean_period_s=state.mean_period_s,
+                std_period_s=state.std_period_s,
+                min_period_s=state.min_period_s,
+                max_period_s=state.max_period_s,
+                p95_period_s=state.p95_period_s,
+                p99_period_s=state.p99_period_s,
+                mean_hz=mean_hz,
+            )
+        )
 
 
-@register_command("PING")
-class PingCommand(QueryCommand):
+@register_command(CmdType.PING)
+class PingCommand(QueryCommand[PingCmd]):
     """Respond to ping requests."""
 
+    PARAMS_TYPE = PingCmd
+    QUERY_TYPE = QueryType.PING
+
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a PING command."""
-        if parts[0].upper() == "PING":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return PONG with serial connectivity bit (0 in simulator mode)."""
-        # Check if we're in simulator mode
-        sim = is_simulation_mode()
-
-        # In simulator mode, report SERIAL=0 (not real hardware)
-        # Otherwise, check if we've observed fresh serial frames recently
-        if sim:
-            serial_connected = 0
-        else:
-            serial_connected = 1 if get_cache().age_s() <= cfg.STATUS_STALE_S else 0
-
-        self.reply_ascii("PONG", f"SERIAL={serial_connected}")
-
-        self.finish()
-        return ExecutionStatus.completed("PONG")
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            PingResultStruct(hardware_connected=int(state.hardware_connected))
+        )
 
 
-@register_command("GET_TOOL")
-class GetToolCommand(QueryCommand):
+@register_command(CmdType.TOOLS)
+class ToolsCommand(QueryCommand[ToolsCmd]):
     """Get current tool configuration and available tools."""
 
+    PARAMS_TYPE = ToolsCmd
+    QUERY_TYPE = QueryType.TOOL
+
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_TOOL command."""
-        if parts[0].upper() == "GET_TOOL":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return current tool info."""
-
-        payload = {"tool": state.current_tool, "available": list_tools()}
-        self.reply_json("TOOL", payload)
-
-        self.finish()
-        return ExecutionStatus.completed("Tool info sent")
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            ToolResultStruct(tool=state.current_tool, available=list_tools())
+        )
 
 
-@register_command("GET_CURRENT_ACTION")
-class GetCurrentActionCommand(QueryCommand):
+@register_command(CmdType.TOOL_STATUS)
+class ToolStatusCommand(QueryCommand[ToolStatusCmd]):
+    """Get current tool status (key + DOF positions)."""
+
+    PARAMS_TYPE = ToolStatusCmd
+    QUERY_TYPE = QueryType.TOOL_STATUS
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        cache = get_cache()
+        cache.update_from_state(state)
+        ts = cache.tool_status
+        return pack_response(
+            ToolStatusResultStruct(
+                tool_key=ts.key,
+                state=ts.state,
+                engaged=ts.engaged,
+                part_detected=ts.part_detected,
+                fault_code=ts.fault_code,
+                positions=list(ts.positions),
+                channels=list(ts.channels),
+            )
+        )
+
+
+@register_command(CmdType.ACTIVITY)
+class ActivityCommand(QueryCommand[ActivityCmd]):
     """Get the current executing action/command and its state."""
 
+    PARAMS_TYPE = ActivityCmd
+    QUERY_TYPE = QueryType.CURRENT_ACTION
+
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_CURRENT_ACTION command."""
-        if parts[0].upper() == "GET_CURRENT_ACTION":
-            return True, None
-        return False, None
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return current action info."""
-        payload = {
-            "current": state.action_current,
-            "state": state.action_state,
-            "next": state.action_next,
-        }
-        self.reply_json("ACTION", payload)
-
-        self.finish()
-        return ExecutionStatus.completed("Current action info sent")
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            CurrentActionResultStruct(
+                current=state.action_current,
+                state=state.action_state.name,
+                next=state.action_next,
+                params=state.action_params,
+            )
+        )
 
 
-@register_command("GET_QUEUE")
-class GetQueueCommand(QueryCommand):
+@register_command(CmdType.QUEUE)
+class QueueCommand(QueryCommand[QueueCmd]):
     """Get the list of queued non-streamable commands."""
 
+    PARAMS_TYPE = QueueCmd
+    QUERY_TYPE = QueryType.QUEUE
+
     __slots__ = ()
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GET_QUEUE command."""
-        if parts[0].upper() == "GET_QUEUE":
-            return True, None
-        return False, None
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            QueueResultStruct(
+                queue=state.queue_nonstreamable,
+                executing_index=state.executing_command_index,
+                completed_index=state.completed_command_index,
+                last_checkpoint=state.last_checkpoint,
+                queued_duration=state.queued_duration,
+            )
+        )
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute immediately and return queue info."""
-        payload = {
-            "non_streamable": state.queue_nonstreamable,
-            "size": len(state.queue_nonstreamable),
-        }
-        self.reply_json("QUEUE", payload)
 
-        self.finish()
-        return ExecutionStatus.completed("Queue info sent")
+@register_command(CmdType.PROFILE)
+class ProfileCommand(QueryCommand[ProfileCmd]):
+    """Query the current motion profile."""
+
+    PARAMS_TYPE = ProfileCmd
+    QUERY_TYPE = QueryType.PROFILE
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(ProfileResultStruct(profile=state.motion_profile))
+
+
+@register_command(CmdType.REACHABLE)
+class ReachableCommand(QueryCommand[ReachableCmd]):
+    """Get joint and Cartesian enablement flags."""
+
+    PARAMS_TYPE = ReachableCmd
+    QUERY_TYPE = QueryType.ENABLEMENT
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        cache = get_cache()
+        cache.update_from_state(state)
+        return pack_response(
+            EnablementResultStruct(
+                joint_en=cache.joint_en.tolist(),
+                cart_en_wrf=cache.cart_en_wrf.tolist(),
+                cart_en_trf=cache.cart_en_trf.tolist(),
+            )
+        )
+
+
+@register_command(CmdType.ERROR)
+class ErrorCommand(QueryCommand[ErrorCmd]):
+    """Get the current error state."""
+
+    PARAMS_TYPE = ErrorCmd
+    QUERY_TYPE = QueryType.ERROR
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        error = state.error
+        return pack_response(
+            ErrorResultStruct(
+                error=error.to_wire() if error is not None else None,
+            )
+        )
+
+
+@register_command(CmdType.TCP_SPEED)
+class TcpSpeedCommand(QueryCommand[TcpSpeedCmd]):
+    """Get current TCP linear speed in mm/s."""
+
+    PARAMS_TYPE = TcpSpeedCmd
+    QUERY_TYPE = QueryType.TCP_SPEED
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        cache = get_cache()
+        cache.update_from_state(state)
+        return pack_response(TcpSpeedResultStruct(speed=cache.tcp_speed))
+
+
+@register_command(CmdType.IS_SIMULATOR)
+class IsSimulatorCommand(QueryCommand[IsSimulatorCmd]):
+    """Query current simulator mode state."""
+
+    PARAMS_TYPE = IsSimulatorCmd
+    QUERY_TYPE = QueryType.IS_SIMULATOR
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        from parol6.server.transports.transport_factory import is_simulation_mode
+
+        return pack_response(IsSimulatorResultStruct(active=is_simulation_mode()))
+
+
+@register_command(CmdType.TCP_OFFSET)
+class TcpOffsetCommand(QueryCommand[TcpOffsetCmd]):
+    """Query current TCP offset in mm."""
+
+    PARAMS_TYPE = TcpOffsetCmd
+    QUERY_TYPE = QueryType.TCP_OFFSET
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        offset = state.tcp_offset_m
+        return pack_response(
+            TcpOffsetResultStruct(
+                x=offset[0] * 1000,
+                y=offset[1] * 1000,
+                z=offset[2] * 1000,
+            )
+        )

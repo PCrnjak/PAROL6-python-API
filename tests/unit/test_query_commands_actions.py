@@ -1,217 +1,148 @@
 """
 Unit tests for action-related query commands.
 
-Tests GET_CURRENT_ACTION and GET_QUEUE query commands without requiring a running server.
-Uses stub UDP transport and minimal state objects to test command logic in isolation.
+Tests ACTIVITY and QUEUE query commands without requiring a running server.
+Uses minimal state objects to test command logic in isolation.
 """
 
-import json
 from types import SimpleNamespace
 
-from parol6.commands.base import CommandContext
-from parol6.commands.query_commands import GetCurrentActionCommand, GetQueueCommand
+from waldoctl import ActionState
+
+from parol6.commands.query_commands import ActivityCommand, QueueCommand
+from parol6.protocol.wire import (
+    CurrentActionResultStruct,
+    ActivityCmd,
+    QueueCmd,
+    QueryType,
+    QueueResultStruct,
+    ResponseMsg,
+    decode_message,
+)
 
 
-class StubUDPTransport:
-    """Stub UDP transport that captures sent responses."""
-
-    def __init__(self):
-        self.sent = []
-
-    def send_response(self, message: str, addr: tuple):
-        """Capture sent responses for verification."""
-        self.sent.append((message, addr))
+def _unpack_response(data: bytes):
+    """Decode packed bytes into a typed result struct."""
+    msg = decode_message(data)
+    assert isinstance(msg, ResponseMsg)
+    return msg.result
 
 
-def test_get_current_action_command_match():
-    """Test that GET_CURRENT_ACTION command matches correctly."""
-    cmd = GetCurrentActionCommand()
+def test_activity_command_init():
+    """Test that ACTIVITY command initializes correctly."""
+    cmd = ActivityCommand(ActivityCmd())
 
-    # Should match
-    can_handle, error = cmd.do_match(["GET_CURRENT_ACTION"])
-    assert can_handle
-    assert error is None
-
-    # Should not match other commands
-    can_handle, error = cmd.do_match(["GET_QUEUE"])
-    assert not can_handle
-
-    can_handle, error = cmd.do_match(["UNKNOWN"])
-    assert not can_handle
+    assert not cmd.is_finished
+    assert cmd.PARAMS_TYPE is not None
+    assert cmd.QUERY_TYPE == QueryType.CURRENT_ACTION
 
 
-def test_get_current_action_replies_json():
-    """Test that GET_CURRENT_ACTION returns correct JSON response."""
-    # Setup
-    udp = StubUDPTransport()
-    ctx = CommandContext(
-        udp_transport=udp, addr=("127.0.0.1", 5001), gcode_interpreter=None, dt=0.01
-    )
-
-    # Create minimal state with action tracking fields
+def test_activity_returns_details():
+    """Test that ACTIVITY compute() returns correct data."""
     state = SimpleNamespace(
-        action_current="MovePoseCommand",
-        action_state="EXECUTING",
+        action_current="MoveJPoseCommand",
+        action_state=ActionState.EXECUTING,
         action_next="HomeCommand",
+        action_params="angles=[10,20,30,40,50,60]",
     )
 
-    # Execute command
-    cmd = GetCurrentActionCommand()
-    cmd.bind(ctx)
+    cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    status = cmd.tick(state)
+    result = _unpack_response(cmd.compute(state))
 
-    # Verify response sent
-    assert len(udp.sent) == 1
-    message, addr = udp.sent[0]
-
-    # Verify message format
-    assert message.startswith("ACTION|")
-
-    # Parse and verify JSON payload
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["current"] == "MovePoseCommand"
-    assert payload["state"] == "EXECUTING"
-    assert payload["next"] == "HomeCommand"
-
-    # Verify command completed
-    assert status.code.value == "COMPLETED"
-    assert cmd.is_finished
+    assert isinstance(result, CurrentActionResultStruct)
+    assert result.current == "MoveJPoseCommand"
+    assert result.state == "EXECUTING"
+    assert result.next == "HomeCommand"
+    assert result.params == "angles=[10,20,30,40,50,60]"
 
 
-def test_get_current_action_with_idle_state():
-    """Test GET_CURRENT_ACTION when robot is idle."""
-    udp = StubUDPTransport()
-    ctx = CommandContext(
-        udp_transport=udp, addr=("127.0.0.1", 5001), gcode_interpreter=None, dt=0.01
-    )
-
-    # Idle state - no current action
-    state = SimpleNamespace(action_current="", action_state="IDLE", action_next="")
-
-    cmd = GetCurrentActionCommand()
-    cmd.bind(ctx)
-    cmd.setup(state)
-    cmd.tick(state)
-
-    # Verify response
-    assert len(udp.sent) == 1
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["current"] == ""
-    assert payload["state"] == "IDLE"
-    assert payload["next"] == ""
-
-
-def test_get_queue_command_match():
-    """Test that GET_QUEUE command matches correctly."""
-    cmd = GetQueueCommand()
-
-    # Should match
-    can_handle, error = cmd.do_match(["GET_QUEUE"])
-    assert can_handle
-    assert error is None
-
-    # Should not match other commands
-    can_handle, error = cmd.do_match(["GET_CURRENT_ACTION"])
-    assert not can_handle
-
-
-def test_get_queue_replies_json():
-    """Test that GET_QUEUE returns correct JSON response."""
-    # Setup
-    udp = StubUDPTransport()
-    ctx = CommandContext(
-        udp_transport=udp, addr=("127.0.0.1", 5001), gcode_interpreter=None, dt=0.01
-    )
-
-    # Create state with queued commands
+def test_activity_with_idle_state():
+    """Test ACTIVITY when robot is idle."""
     state = SimpleNamespace(
-        queue_nonstreamable=["MovePoseCommand", "HomeCommand", "MoveJointCommand"]
+        action_current="",
+        action_state=ActionState.IDLE,
+        action_next="",
+        action_params="",
     )
 
-    # Execute command
-    cmd = GetQueueCommand()
-    cmd.bind(ctx)
+    cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    status = cmd.tick(state)
+    result = _unpack_response(cmd.compute(state))
 
-    # Verify response sent
-    assert len(udp.sent) == 1
-    message, addr = udp.sent[0]
-
-    # Verify message format
-    assert message.startswith("QUEUE|")
-
-    # Parse and verify JSON payload
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["non_streamable"] == [
-        "MovePoseCommand",
-        "HomeCommand",
-        "MoveJointCommand",
-    ]
-    assert payload["size"] == 3
-
-    # Verify command completed
-    assert status.code.value == "COMPLETED"
-    assert cmd.is_finished
+    assert isinstance(result, CurrentActionResultStruct)
+    assert result.current == ""
+    assert result.state == "IDLE"
+    assert result.next == ""
+    assert result.params == ""
 
 
-def test_get_queue_with_empty_queue():
-    """Test GET_QUEUE when queue is empty."""
-    udp = StubUDPTransport()
-    ctx = CommandContext(
-        udp_transport=udp, addr=("127.0.0.1", 5001), gcode_interpreter=None, dt=0.01
+def test_queue_command_init():
+    """Test that QUEUE command initializes correctly."""
+    cmd = QueueCommand(QueueCmd())
+
+    assert not cmd.is_finished
+    assert cmd.PARAMS_TYPE is not None
+    assert cmd.QUERY_TYPE == QueryType.QUEUE
+
+
+def test_queue_returns_details():
+    """Test that QUEUE compute() returns correct data."""
+    state = SimpleNamespace(
+        queue_nonstreamable=["MoveJPoseCommand", "HomeCommand", "MoveJCommand"],
+        executing_command_index=1,
+        completed_command_index=0,
+        last_checkpoint="cp1",
+        queued_duration=3.5,
     )
 
-    # Empty queue
-    state = SimpleNamespace(queue_nonstreamable=[])
-
-    cmd = GetQueueCommand()
-    cmd.bind(ctx)
+    cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
-    cmd.tick(state)
+    result = _unpack_response(cmd.compute(state))
 
-    # Verify response
-    assert len(udp.sent) == 1
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["non_streamable"] == []
-    assert payload["size"] == 0
+    assert isinstance(result, QueueResultStruct)
+    assert result.queue == ["MoveJPoseCommand", "HomeCommand", "MoveJCommand"]
+    assert result.executing_index == 1
+    assert result.completed_index == 0
+    assert result.last_checkpoint == "cp1"
+    assert result.queued_duration == 3.5
 
 
-def test_get_queue_excludes_streamable():
+def test_queue_with_empty_queue():
+    """Test QUEUE when queue is empty."""
+    state = SimpleNamespace(
+        queue_nonstreamable=[],
+        executing_command_index=-1,
+        completed_command_index=-1,
+        last_checkpoint="",
+        queued_duration=0.0,
+    )
+
+    cmd = QueueCommand(QueueCmd())
+    cmd.setup(state)
+    result = _unpack_response(cmd.compute(state))
+
+    assert isinstance(result, QueueResultStruct)
+    assert result.queue == []
+    assert result.executing_index == -1
+    assert result.completed_index == -1
+
+
+def test_queue_excludes_streamable():
     """Test that queue only contains non-streamable commands (by design)."""
-    # This test verifies the API contract - the queue_nonstreamable field
-    # should already have streamable commands filtered out by the controller
-
-    udp = StubUDPTransport()
-    ctx = CommandContext(
-        udp_transport=udp, addr=("127.0.0.1", 5001), gcode_interpreter=None, dt=0.01
+    state = SimpleNamespace(
+        queue_nonstreamable=["MoveJPoseCommand", "HomeCommand"],
+        executing_command_index=2,
+        completed_command_index=1,
+        last_checkpoint="",
+        queued_duration=1.0,
     )
 
-    # State should only contain non-streamable commands
-    # (streamable commands like JogJointCommand are filtered by controller)
-    state = SimpleNamespace(queue_nonstreamable=["MovePoseCommand", "HomeCommand"])
-
-    cmd = GetQueueCommand()
-    cmd.bind(ctx)
+    cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
-    cmd.tick(state)
+    result = _unpack_response(cmd.compute(state))
 
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    # Verify only non-streamable commands in response
-    assert "MovePoseCommand" in payload["non_streamable"]
-    assert "HomeCommand" in payload["non_streamable"]
-    assert payload["size"] == 2
+    assert isinstance(result, QueueResultStruct)
+    assert "MoveJPoseCommand" in result.queue
+    assert "HomeCommand" in result.queue
+    assert len(result.queue) == 2

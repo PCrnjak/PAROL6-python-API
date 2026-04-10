@@ -7,16 +7,110 @@ data exchange with the robot hardware.
 
 import logging
 import os
-import threading
 import time
+from typing import cast
 
+import numba
 import numpy as np
 import serial
 
-from parol6.config import INTERVAL_S, get_com_port_with_fallback
+from parol6.config import SERIAL_RX_RING_DEFAULT
 from parol6.protocol.wire import pack_tx_frame_into
 
 logger = logging.getLogger(__name__)
+
+
+@numba.njit(cache=True)
+def _append_to_ring_numba(
+    rb: np.ndarray, src: np.ndarray, n: int, cap: int, head: int, tail: int
+) -> tuple[int, int]:
+    """JIT-compiled ring buffer append. Returns (new_head, new_tail)."""
+    avail = (head - tail + cap) % cap
+    free = cap - 1 - avail
+    over = max(0, n - free)
+    if over:
+        tail = (tail + over) % cap
+
+    first = min(n, cap - head)
+    for i in range(first):
+        rb[head + i] = src[i]
+    remain = n - first
+    for i in range(remain):
+        rb[i] = src[first + i]
+    head = (head + n) % cap
+
+    return head, tail
+
+
+@numba.njit(cache=True)
+def _parse_frames_njit(
+    rb: np.ndarray,
+    head: int,
+    tail: int,
+    cap: int,
+    frame_buf: np.ndarray,
+) -> tuple[int, int, bool]:
+    """
+    JIT-compiled frame parser. Scans for 0xFF 0xFF 0xFF start sequence,
+    validates end markers 0x01 0x02, extracts 52-byte payload.
+
+    Returns:
+        new_tail: Updated tail position
+        frames_found: Number of complete frames found
+        has_valid_frame: True if frame_buf contains valid data
+    """
+    START0, START1, START2 = 0xFF, 0xFF, 0xFF
+    END0, END1 = 0x01, 0x02
+    frames_found = 0
+    has_valid = False
+
+    while True:
+        avail = (head - tail + cap) % cap
+        if avail < 4:
+            break
+
+        # Find start sequence
+        found = False
+        while avail >= 3:
+            if (
+                rb[tail] == START0
+                and rb[(tail + 1) % cap] == START1
+                and rb[(tail + 2) % cap] == START2
+            ):
+                found = True
+                break
+            tail = (tail + 1) % cap
+            avail = (head - tail + cap) % cap
+
+        if not found or avail < 4:
+            break
+
+        length = rb[(tail + 3) % cap]
+        total_needed = 4 + length
+        if avail < total_needed:
+            break
+
+        # Validate end markers
+        if length >= 2:
+            e0 = rb[(tail + 4 + length - 2) % cap]
+            e1 = rb[(tail + 4 + length - 1) % cap]
+            if not (e0 == END0 and e1 == END1):
+                tail = (tail + 1) % cap
+                continue
+
+        # Extract payload (first 52 bytes)
+        payload_len = 52 if length >= 52 else length
+        start = (tail + 4) % cap
+        for i in range(payload_len):
+            frame_buf[i] = rb[(start + i) % cap]
+
+        if payload_len >= 52:
+            frames_found += 1
+            has_valid = True
+
+        tail = (tail + total_needed) % cap
+
+    return tail, frames_found, has_valid
 
 
 class SerialTransport:
@@ -51,22 +145,21 @@ class SerialTransport:
         self.serial: serial.Serial | None = None
         self.last_reconnect_attempt = 0.0
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
+        self._reconnect_failures = 0  # count consecutive failures to reduce log spam
 
-        # Reduced-copy latest-frame infrastructure (reader thread will publish here)
-        self._scratch = bytearray(4096)
-        self._scratch_mv = memoryview(self._scratch)
+        # Reduced-copy latest-frame infrastructure (poll_read will publish here)
+        self._scratch = np.zeros(4096, dtype=np.uint8)
+        self._scratch_mv = memoryview(self._scratch.data)
         # Fixed-size ring buffer for RX stream (drop-oldest on overflow)
-        _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", "262144"))
-        self._ring = bytearray(_cap)
+        _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", str(SERIAL_RX_RING_DEFAULT)))
+        self._ring = np.zeros(_cap, dtype=np.uint8)
         self._r_cap = _cap
         self._r_head = 0
         self._r_tail = 0
-        self._frame_buf = bytearray(64)  # 52-byte payload + headroom
-        self._frame_mv = memoryview(self._frame_buf)[:52]
+        self._frame_buf = np.zeros(64, dtype=np.uint8)
+        self._frame_mv = memoryview(self._frame_buf)[:52]  # type: ignore[invalid-argument-type, ty:invalid-argument-type]
         self._frame_version = 0
         self._frame_ts = 0.0
-        self._reader_thread: threading.Thread | None = None
-        self._reader_running = False
 
         # Preallocated TX buffer (3 start + 1 len + 52 payload = 56 bytes)
         self._tx_buf = bytearray(56)
@@ -88,38 +181,13 @@ class SerialTransport:
         Returns:
             True if connection successful, False otherwise
         """
-        if port:
-            self.port = port
-
-        if not self.port:
-            logger.warning("No serial port specified")
-            return False
-
-        try:
-            # Close existing connection if any
-            if self.serial and self.serial.is_open:
-                self.serial.close()
-
-            # Create new connection
-            self.serial = serial.Serial(
-                port=self.port, baudrate=self.baudrate, timeout=self.timeout
-            )
-
-            if self.serial.is_open:
-                logger.info(f"Connected to serial port: {self.port}")
-                return True
-            else:
-                logger.error(f"Failed to open serial port: {self.port}")
-                return False
-
-        except serial.SerialException as e:
-            logger.error(f"Serial connection error: {e}")
-            self.serial = None
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected error connecting to serial: {e}")
-            self.serial = None
-            return False
+        # Reset failure counter on explicit connect call
+        self._reconnect_failures = 0
+        success = self._connect_internal(port, quiet=False)
+        if not success:
+            # Mark as failed so auto_reconnect logs at DEBUG level
+            self._reconnect_failures = 1
+        return success
 
     def disconnect(self) -> None:
         """Disconnect from the serial port."""
@@ -146,7 +214,9 @@ class SerialTransport:
         """
         Attempt to reconnect to the serial port if disconnected.
 
-        This implements a rate-limited reconnection attempt.
+        This implements a rate-limited reconnection attempt. After the first
+        failure, subsequent reconnection attempts are logged at DEBUG level
+        to reduce log spam.
 
         Returns:
             True if reconnection successful, False otherwise
@@ -160,10 +230,71 @@ class SerialTransport:
         self.last_reconnect_attempt = now
 
         if self.port:
-            logger.info(f"Attempting to reconnect to {self.port}...")
-            return self.connect(self.port)
+            # Log at INFO only on first attempt, DEBUG on subsequent
+            log_level = logging.DEBUG if self._reconnect_failures > 0 else logging.INFO
+            logger.log(log_level, f"Attempting to reconnect to {self.port}...")
+            success = self._connect_internal(
+                self.port, quiet=self._reconnect_failures > 0
+            )
+            if success:
+                if self._reconnect_failures > 0:
+                    logger.info(
+                        f"Reconnected to {self.port} after {self._reconnect_failures} failed attempts"
+                    )
+                self._reconnect_failures = 0
+            else:
+                self._reconnect_failures += 1
+            return success
 
         return False
+
+    def _connect_internal(self, port: str | None, quiet: bool = False) -> bool:
+        """
+        Internal connection logic with optional quiet mode for reduced logging.
+
+        Args:
+            port: Port to connect to
+            quiet: If True, log errors at DEBUG instead of ERROR
+
+        Returns:
+            True if connection successful, False otherwise
+        """
+        if port:
+            self.port = port
+
+        if not self.port:
+            if not quiet:
+                logger.warning("No serial port specified")
+            return False
+
+        try:
+            # Close existing connection if any
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+
+            # Create new connection
+            self.serial = serial.Serial(
+                port=self.port, baudrate=self.baudrate, timeout=self.timeout
+            )
+
+            if self.serial.is_open:
+                logger.info(f"Connected to serial port: {self.port}")
+                return True
+            else:
+                log_level = logging.DEBUG if quiet else logging.ERROR
+                logger.log(log_level, f"Failed to open serial port: {self.port}")
+                return False
+
+        except serial.SerialException as e:
+            log_level = logging.DEBUG if quiet else logging.ERROR
+            logger.log(log_level, f"Serial connection error: {e}")
+            self.serial = None
+            return False
+        except Exception as e:
+            log_level = logging.DEBUG if quiet else logging.ERROR
+            logger.log(log_level, f"Unexpected error connecting to serial: {e}")
+            self.serial = None
+            return False
 
     def write_frame(
         self,
@@ -227,110 +358,45 @@ class SerialTransport:
     # ================================
     # Latest-frame API (reduced-copy)
     # ================================
-    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
-        """
-        Start a dedicated reader thread that parses incoming frames from the serial port
-        and publishes the latest 52-byte payload into an internal stable buffer.
-
-        Returns the started Thread object. If already running, returns the existing one.
-        """
+    def poll_read(self) -> bool:
+        """Non-blocking read from serial. Returns True if data was read."""
         if not self.is_connected():
-            raise RuntimeError(
-                "SerialTransport.start_reader: serial port not connected"
-            )
+            return False
+        ser = self.serial
+        if not ser or not ser.is_open:
+            return False
 
-        if self._reader_thread and self._reader_thread.is_alive():
-            return self._reader_thread
+        try:
+            iw = ser.in_waiting
+            if iw == 0:
+                return False
 
-        # Ensure a short timeout for responsive shutdown
-        if self.serial:
-            # Small block so as not to busy loop, but can't use a larger timout
-            # because serial will read until buffer is full or timeout.
-            self.serial.timeout = INTERVAL_S / 2
+            k = min(iw, len(self._scratch))
+            n = ser.readinto(self._scratch_mv[:k])
+            if n is None or n <= 0:
+                return False
 
-        def _run() -> None:
-            self._reader_running = True
-            try:
-                while not shutdown_event.is_set():
-                    if not self.is_connected():
-                        # Backoff a bit to avoid busy loop if disconnected
-                        time.sleep(0.1)
-                        continue
-                    # Race-safe read: hold local ref and check is_open
-                    ser = self.serial
-                    if not ser or not getattr(ser, "is_open", False):
-                        # Disconnected between iterations; back off briefly
-                        time.sleep(0.1)
-                        continue
-                    try:
-                        # Check if data is available to avoid empty read syscalls
-                        iw = ser.in_waiting
+            # Append to ring buffer and parse
+            self._append_to_ring(n)
+            self._parse_ring_for_frames()
+            return True
+        except serial.SerialException as e:
+            logger.error(f"Serial poll error: {e}")
+            self.disconnect()
+            return False
+        except (OSError, TypeError, ValueError, AttributeError) as e:
+            logger.debug("Serial disconnect: %s", e)
+            self.disconnect()
+            return False
 
-                        if iw <= 0:
-                            # No data available, short sleep and continue
-                            time.sleep(min(INTERVAL_S, 0.0015))
-                            continue
-
-                        # Read up to available bytes into preallocated scratch buffer
-                        k = min(iw, len(self._scratch))
-                        n = ser.readinto(self._scratch_mv[:k])
-                    except serial.SerialException as e:
-                        logger.error(f"Serial reader error: {e}")
-                        self.disconnect()
-                        break
-                    except (OSError, TypeError, ValueError, AttributeError):
-                        # fd likely closed during disconnect; stop quietly
-                        logger.info(
-                            "Serial reader stopping due to disconnect/closed FD",
-                            exc_info=False,
-                        )
-                        try:
-                            self.disconnect()
-                        except Exception:
-                            pass
-                        break
-                    except Exception:
-                        logger.exception("Serial reader unexpected exception")
-                        break
-
-                    if not n:
-                        # Timeout or no data; loop to check shutdown_event
-                        continue
-
-                    # Batch append into ring buffer and parse
-                    cap = self._r_cap
-                    head = self._r_head
-                    tail = self._r_tail
-                    rb = self._ring
-                    src = self._scratch
-
-                    # Calculate overflow and adjust tail if needed
-                    avail = (head - tail + cap) % cap
-                    free = (
-                        cap - 1 - avail
-                    )  # keep one slot empty to disambiguate full/empty
-                    over = max(0, n - free)
-                    if over:
-                        tail = (tail + over) % cap
-
-                    # Batch copy into ring buffer using slices
-                    first = min(n, cap - head)
-                    rb[head : head + first] = src[:first]
-                    remain = n - first
-                    if remain:
-                        rb[0:remain] = src[first:n]
-                    head = (head + n) % cap
-
-                    self._r_head = head
-                    self._r_tail = tail
-                    self._parse_ring_for_frames()
-            finally:
-                self._reader_running = False
-
-        t = threading.Thread(target=_run, name="SerialReader", daemon=True)
-        self._reader_thread = t
-        t.start()
-        return t
+    def _append_to_ring(self, n: int) -> tuple[int, int]:
+        """Append n bytes from _scratch to ring buffer. Returns (new_head, new_tail)."""
+        head, tail = _append_to_ring_numba(
+            self._ring, self._scratch, n, self._r_cap, self._r_head, self._r_tail
+        )
+        self._r_head = head
+        self._r_tail = tail
+        return head, tail
 
     def _parse_ring_for_frames(self) -> None:
         """
@@ -339,98 +405,25 @@ class SerialTransport:
         Frame format:
           [0xFF,0xFF,0xFF] [LEN] [LEN bytes data ...]
         """
-        START0, START1, START2 = 0xFF, 0xFF, 0xFF
-        END0, END1 = self.END_BYTES[0], self.END_BYTES[1]
-        cap = self._r_cap
-        head = self._r_head
-        tail = self._r_tail
-        rb = self._ring
+        new_tail, frames_found, has_valid = _parse_frames_njit(
+            self._ring, self._r_head, self._r_tail, self._r_cap, self._frame_buf
+        )
 
-        def available(h: int, t: int) -> int:
-            return (h - t + cap) % cap
-
-        while available(head, tail) >= 4:
-            # Find start sequence 0xFF 0xFF 0xFF by advancing tail
-            found = False
-            while available(head, tail) >= 3:
-                b0 = rb[tail]
-                b1 = rb[(tail + 1) % cap]
-                b2 = rb[(tail + 2) % cap]
-                if b0 == START0 and b1 == START1 and b2 == START2:
-                    found = True
-                    break
-                tail = (tail + 1) % cap
-            if not found or available(head, tail) < 4:
-                break
-
-            length = rb[(tail + 3) % cap]
-            total_needed = 4 + length
-            if available(head, tail) < total_needed:
-                # Wait for more data
-                break
-
-            # Validate end markers if possible
-            if length >= 2:
-                e0 = rb[(tail + 4 + length - 2) % cap]
-                e1 = rb[(tail + 4 + length - 1) % cap]
-                if not (e0 == END0 and e1 == END1):
-                    # Bad frame; skip one byte to resync
-                    tail = (tail + 1) % cap
-                    continue
-
-            # Publish first 52 bytes if available
-            payload_len = 52 if length >= 52 else length
-            start = (tail + 4) % cap
-            if start + payload_len <= cap:
-                self._frame_buf[:payload_len] = rb[start : start + payload_len]
-            else:
-                first = cap - start
-                self._frame_buf[:first] = rb[start:cap]
-                self._frame_buf[first:payload_len] = rb[0 : payload_len - first]
-
-            if payload_len >= 52:
-                self._frame_version += 1
-                self._frame_ts = time.time()
-
-                # Update Hz tracking if enabled
-                self._update_hz_tracking()
-
-            # Consume this frame
-            tail = (tail + total_needed) % cap
-
-        # Publish updated tail
-        self._r_tail = tail
+        self._r_tail = new_tail
+        if has_valid:
+            self._frame_version += frames_found
+            self._frame_ts = time.time()
+            self._update_hz_tracking()
 
     def get_latest_frame_view(self) -> tuple[memoryview | None, int, float]:
         """
         Return a tuple of (memoryview|None, version:int, timestamp:float).
         The memoryview points to a stable 52-byte buffer which is updated by the reader.
         """
-        mv = self._frame_mv if self._frame_version > 0 else None
+        mv = cast(
+            "memoryview | None", self._frame_mv if self._frame_version > 0 else None
+        )
         return (mv, self._frame_version, self._frame_ts)
-
-    def get_info(self) -> dict:
-        """
-        Get information about the current serial connection.
-
-        Returns:
-            Dictionary with connection information
-        """
-        info = {
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "connected": self.is_connected(),
-            "timeout": self.timeout,
-        }
-
-        if self.serial and self.serial.is_open:
-            try:
-                info["in_waiting"] = self.serial.in_waiting
-                info["out_waiting"] = self.serial.out_waiting
-            except Exception as e:
-                logger.debug("Failed to read serial wait counts: %s", e)
-
-        return info
 
     def _update_hz_tracking(self) -> None:
         """
@@ -466,30 +459,3 @@ class SerialTransport:
             # Reset interval statistics
             self._last_print_time = current_time
             self._interval_msg_count = 0
-
-
-def create_serial_transport(
-    port: str | None = None, baudrate: int = 2000000
-) -> SerialTransport:
-    """
-    Factory function to create and optionally connect a serial transport.
-
-    Args:
-        port: Optional serial port to connect to
-        baudrate: Baud rate for communication
-
-    Returns:
-        SerialTransport instance (may or may not be connected)
-    """
-    transport = SerialTransport(port=port, baudrate=baudrate)
-
-    # Try to connect if port provided
-    if port:
-        transport.connect(port)
-    else:
-        # Try to load and connect to saved port
-        saved_port = get_com_port_with_fallback()
-        if saved_port:
-            transport.connect(saved_port)
-
-    return transport

@@ -1,33 +1,65 @@
 import os
-from collections.abc import Callable
 
-SYSTEM_COMMANDS: set[str] = {
-    "STOP",
-    "ENABLE",
-    "DISABLE",
-    "SET_PORT",
-    "STREAM",
-    "SIMULATOR",
+from parol6.protocol.wire import CmdType
+
+# System command types (always require ACK)
+SYSTEM_CMD_TYPES: set[CmdType] = {
+    CmdType.RESUME,
+    CmdType.HALT,
+    CmdType.CONNECT_HARDWARE,
+    CmdType.SIMULATOR,
+    CmdType.SELECT_PROFILE,
+    CmdType.RESET,
+    CmdType.WRITE_IO,
+    CmdType.SET_TCP_OFFSET,
 }
 
-QUERY_COMMANDS: set[str] = {
-    "GET_POSE",
-    "GET_ANGLES",
-    "GET_IO",
-    "GET_GRIPPER",
-    "GET_SPEEDS",
-    "GET_STATUS",
-    "GET_GCODE_STATUS",
-    "GET_LOOP_STATS",
-    "GET_CURRENT_ACTION",
-    "GET_QUEUE",
-    "PING",
+# Query command types (use request/response, not ACK)
+QUERY_CMD_TYPES: set[CmdType] = {
+    CmdType.POSE,
+    CmdType.ANGLES,
+    CmdType.IO,
+    CmdType.JOINT_SPEEDS,
+    CmdType.STATUS,
+    CmdType.LOOP_STATS,
+    CmdType.ACTIVITY,
+    CmdType.QUEUE,
+    CmdType.TOOLS,
+    CmdType.TOOL_STATUS,
+    CmdType.PROFILE,
+    CmdType.REACHABLE,
+    CmdType.ERROR,
+    CmdType.TCP_SPEED,
+    CmdType.PING,
+    CmdType.IS_SIMULATOR,
+    CmdType.TCP_OFFSET,
 }
 
+# Streaming commands are fire-and-forget (no ACK needed)
+FIRE_AND_FORGET: set[CmdType] = {
+    CmdType.SERVOJ,
+    CmdType.SERVOJ_POSE,
+    CmdType.SERVOL,
+    CmdType.JOGJ,
+    CmdType.JOGL,
+    CmdType.TELEPORT,
+    CmdType.RESET_LOOP_STATS,
+}
 
-def is_localhost(host: str) -> bool:
-    h = (host or "").strip().lower()
-    return h in {"127.0.0.1", "localhost", "::1"}
+# Queued motion commands that return a command index in their ACK
+QUEUED_CMD_TYPES: set[CmdType] = {
+    CmdType.HOME,
+    CmdType.MOVEJ,
+    CmdType.MOVEJ_POSE,
+    CmdType.MOVEL,
+    CmdType.MOVEC,
+    CmdType.MOVES,
+    CmdType.MOVEP,
+    CmdType.SELECT_TOOL,
+    CmdType.DELAY,
+    CmdType.CHECKPOINT,
+    CmdType.TOOL_ACTION,
+}
 
 
 class AckPolicy:
@@ -36,46 +68,47 @@ class AckPolicy:
 
     Rules:
     - If force_ack is set, it overrides everything.
-    - Safety-critical commands always require ack.
-    - If running on localhost/loopback, default to no-ack (low drop risk).
-    - If stream mode is ON, default to no-ack (high-rate streaming traffic).
-    - Otherwise default to no-ack.
+    - System commands always require ack.
+    - Query commands use request/response, not ACKs.
+    - Streaming commands (servo/jog) are fire-and-forget.
+    - Queued motion commands require ack (returns command index).
+
+    When force_ack is not provided, the PAROL6_FORCE_ACK env var is checked.
     """
 
     def __init__(
         self,
-        get_stream_mode: Callable[[], bool],
         force_ack: bool | None = None,
     ) -> None:
-        self._get_stream_mode = get_stream_mode
+        if force_ack is None:
+            raw = os.getenv("PAROL6_FORCE_ACK", "").strip().lower()
+            if raw in {"1", "true", "yes", "on"}:
+                force_ack = True
+            elif raw in {"0", "false", "no", "off"}:
+                force_ack = False
         self._force_ack = force_ack
 
-    @staticmethod
-    def from_env(get_stream_mode: Callable[[], bool]) -> "AckPolicy":
-        raw = os.getenv("PAROL6_FORCE_ACK", "").strip().lower()
-        if raw in {"1", "true", "yes", "on"}:
-            force = True
-        elif raw in {"0", "false", "no", "off"}:
-            force = False
-        else:
-            force = None
-        return AckPolicy(get_stream_mode=get_stream_mode, force_ack=force)
-
-    def requires_ack(self, message: str) -> bool:
+    def requires_ack(self, cmd_type: CmdType) -> bool:
+        """Check if a command type requires an ACK response."""
         # Forced override (e.g., diagnostics)
         if self._force_ack is not None:
             return bool(self._force_ack)
 
-        name = (message or "").split("|", 1)[0].strip().upper()
-
         # System commands always require ACKs
-        if name in SYSTEM_COMMANDS:
+        if cmd_type in SYSTEM_CMD_TYPES:
             return True
 
         # Query commands use request/response, not ACKs
-        if name in QUERY_COMMANDS:
+        if cmd_type in QUERY_CMD_TYPES:
             return False
 
-        # Motion and other commands: ACKs only when forced
-        # Localhost and stream mode both favor no-ack by default
+        # Streaming commands are fire-and-forget
+        if cmd_type in FIRE_AND_FORGET:
+            return False
+
+        # Queued motion commands require ACK (returns command index)
+        if cmd_type in QUEUED_CMD_TYPES:
+            return True
+
+        # Default: no ACK
         return False

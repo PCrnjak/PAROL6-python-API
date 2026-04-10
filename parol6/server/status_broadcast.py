@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import socket
-import threading
+import sys
 import time
 
 from parol6 import config as cfg
@@ -12,9 +12,9 @@ from parol6.server.status_cache import get_cache
 logger = logging.getLogger(__name__)
 
 
-class StatusBroadcaster(threading.Thread):
+class StatusBroadcaster:
     """
-    Broadcasts ASCII STATUS frames via UDP.
+    Broadcasts binary msgpack STATUS frames via UDP. Called from main loop.
 
     Transport:
       - cfg.STATUS_TRANSPORT: "MULTICAST" (default) or "UNICAST"
@@ -36,45 +36,40 @@ class StatusBroadcaster(threading.Thread):
     def __init__(
         self,
         state_mgr: StateManager,
-        group: str = "239.255.0.101",
-        port: int = 50510,
-        ttl: int = 1,
-        iface_ip: str = "127.0.0.1",
+        group: str = cfg.MCAST_GROUP,
+        port: int = cfg.MCAST_PORT,
+        ttl: int = cfg.MCAST_TTL,
+        iface_ip: str = cfg.MCAST_IF,
         rate_hz: float = cfg.STATUS_RATE_HZ,
         stale_s: float = cfg.STATUS_STALE_S,
     ) -> None:
-        super().__init__(daemon=True)
         self._state_mgr = state_mgr
         self.group = group
         self.port = port
         self.ttl = ttl
         self.iface_ip = iface_ip
-        self._period = 1.0 / max(rate_hz, 1.0)
         self._stale_s = stale_s
 
         # Negotiated transport (can be forced via env or auto-fallback at runtime)
         self._use_unicast: bool = cfg.STATUS_TRANSPORT == "UNICAST"
 
         self._sock: socket.socket | None = None
-        self._running = threading.Event()
-        self._running.set()
-
-        # EMA rate tracking for TX
-        self._tx_count = 0
-        self._tx_last_time = time.monotonic()
-        self._tx_ema_period = 1.0 / rate_hz  # Initialize with expected period
-        self._tx_last_log_time = time.monotonic()  # For 3-second logging interval
 
         # Failure tracking for runtime fallback
         self._send_failures = 0
         self._max_send_failures = 3
+        self._last_fail_log_time = 0.0
+
+        # Setup socket on construction
+        self._setup_socket()
 
     def _detect_primary_ip(self) -> str:
         tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tmp.connect(("1.1.1.1", 80))
             return tmp.getsockname()[0]
-        except Exception:
+        except Exception as e:
+            logger.debug("IP detect: %s", e)
             return "127.0.0.1"
         finally:
             try:
@@ -139,6 +134,7 @@ class StatusBroadcaster(threading.Thread):
         if self._use_unicast:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            sock.setblocking(False)
             self._sock = sock
             logger.info(
                 f"StatusBroadcaster (UNICAST) -> dest={cfg.STATUS_UNICAST_HOST}:{self.port}"
@@ -148,7 +144,10 @@ class StatusBroadcaster(threading.Thread):
         # MULTICAST: configure multicast TTL/IF with verification and fallback
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        # macOS requires loopback enabled for multicast to work on localhost
+        if sys.platform == "darwin":
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        sock.setblocking(False)
 
         try:
             sock.setsockopt(
@@ -194,90 +193,59 @@ class StatusBroadcaster(threading.Thread):
             f"StatusBroadcaster (MULTICAST) -> group={self.group} port={self.port} iface={self.iface_ip} ttl={self.ttl}"
         )
 
-    def run(self) -> None:
-        self._setup_socket()
+    def tick(self) -> None:
+        """Broadcast status if cache is fresh. Called from main loop."""
         cache = get_cache()
-
-        # Validate socket exists
-        if self._sock is None:
-            logger.error("StatusBroadcaster socket not initialized")
+        try:
+            state = self._state_mgr.get_state()
+            cache.update_from_state(state)
+        except Exception as e:
+            logger.debug("StatusBroadcaster cache refresh failed: %s", e)
             return
 
-        # Deadline-based timing to maintain consistent rate
-        next_deadline = time.monotonic() + self._period
+        if cache.age_s() > self._stale_s:
+            return
 
-        while self._running.is_set():
-            # Always refresh cache from latest state before considering broadcast
-            try:
-                state = self._state_mgr.get_state()
-                cache.update_from_state(state)
-            except Exception as e:
-                logger.debug("StatusBroadcaster cache refresh failed: %s", e)
+        payload = cache.to_binary()
+        sock = self._sock
+        if sock is None:
+            self._switch_to_unicast()
+            sock = self._sock
+            assert sock is not None  # _switch_to_unicast always sets _sock
 
-            # Skip broadcast if cache is stale (e.g., serial disconnected)
-            if cache.age_s() <= self._stale_s:
-                payload = cache.to_ascii().encode("ascii", errors="ignore")
-                # Refresh socket and destination each loop in case we switched transports
-                sock = self._sock
-                if sock is None:
-                    # Socket disappeared unexpectedly; try to switch to unicast and continue
-                    self._switch_to_unicast()
-                    sock = self._sock
-                dest = (
-                    (cfg.STATUS_UNICAST_HOST, self.port)
-                    if self._use_unicast
-                    else (self.group, self.port)
-                )
-                try:
-                    sock.sendto(memoryview(payload), dest)  # type: ignore[arg-type]
-                except OSError as e:
-                    self._send_failures += 1
-                    # Log occasionally to avoid flooding
-                    if time.monotonic() - self._tx_last_log_time >= 5.0:
-                        logger.warning(f"StatusBroadcaster send failed: {e}")
-                        self._tx_last_log_time = time.monotonic()
-                    # If too many failures and we are on multicast, fall back to unicast
-                    if (
-                        not self._use_unicast
-                        and self._send_failures >= self._max_send_failures
-                    ):
-                        logger.info(
-                            f"StatusBroadcaster: {self._send_failures} consecutive send errors; switching to UNICAST"
-                        )
-                        self._switch_to_unicast()
-                else:
-                    # Reset failure count on success
-                    self._send_failures = 0
-                    # Track TX rate with EMA
-                    now = time.monotonic()
-                    if self._tx_count > 0:  # Skip first sample for period calculation
-                        period = now - self._tx_last_time
-                        if period > 0:
-                            # EMA update: 0.1 * new + 0.9 * old
-                            self._tx_ema_period = (
-                                0.1 * period + 0.9 * self._tx_ema_period
-                            )
-                    self._tx_last_time = now
-                    self._tx_count += 1
+        dest = (
+            (cfg.STATUS_UNICAST_HOST, self.port)
+            if self._use_unicast
+            else (self.group, self.port)
+        )
 
-                    # Log rate every 3 seconds
-                    if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
-                        tx_hz = 1.0 / self._tx_ema_period
-                        logger.debug(
-                            f"Status TX: {tx_hz:.1f} Hz (count={self._tx_count})"
-                        )
-                        self._tx_last_log_time = now
-
-            # Sleep until next deadline (compensates for work time)
-            sleep_time = next_deadline - time.monotonic()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            next_deadline += self._period
-
-    def stop(self) -> None:
-        self._running.clear()
         try:
-            if self._sock:
+            sock.sendto(payload, dest)
+            self._send_failures = 0
+
+        except BlockingIOError:
+            pass  # Transient kernel buffer pressure — not a multicast failure
+        except OSError as e:
+            self._handle_send_failure(e)
+
+    def _handle_send_failure(self, e: OSError) -> None:
+        """Handle send failure with logging and fallback."""
+        self._send_failures += 1
+        now = time.monotonic()
+        if now - self._last_fail_log_time >= 5.0:
+            logger.warning(f"StatusBroadcaster send failed: {e}")
+            self._last_fail_log_time = now
+        if not self._use_unicast and self._send_failures >= self._max_send_failures:
+            logger.info(
+                f"StatusBroadcaster: {self._send_failures} consecutive send errors; switching to UNICAST"
+            )
+            self._switch_to_unicast()
+
+    def close(self) -> None:
+        """Close socket."""
+        if self._sock:
+            try:
                 self._sock.close()
-        except Exception:
-            pass
+            except Exception:
+                pass
+            self._sock = None

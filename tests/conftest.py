@@ -7,19 +7,11 @@ environment configuration, and test utilities used across the test suite.
 
 import logging
 import os
-import signal
-import sys
-import time
 from collections.abc import Generator
 from dataclasses import dataclass
 
 import pytest
-
-# Add the parent directory to Python path so we can import the API modules
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-# Import parol6 for server management
-from parol6.client.manager import ServerManager
+from parol6 import Robot
 
 
 # Import utilities for port detection
@@ -68,12 +60,6 @@ class TestPorts:
 def pytest_addoption(parser):
     """Add custom command line options for the test suite."""
     parser.addoption(
-        "--run-hardware",
-        action="store_true",
-        default=False,
-        help="Enable hardware tests that require actual robot hardware and human confirmation",
-    )
-    parser.addoption(
         "--server-ip",
         action="store",
         default="127.0.0.1",
@@ -99,6 +85,25 @@ def pytest_addoption(parser):
         default=False,
         help="Keep the test server running between test sessions for debugging",
     )
+    parser.addoption(
+        "--examples",
+        action="store_true",
+        default=False,
+        help="Run example script tests (binds port 5001, can't run alongside server tests)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """With --examples: run only example tests. Without: skip them."""
+    if config.getoption("--examples"):
+        deselected = [item for item in items if "examples" not in item.keywords]
+        items[:] = [item for item in items if "examples" in item.keywords]
+        config.hook.pytest_deselected(items=deselected)
+        return
+    skip_examples = pytest.mark.skip(reason="needs --examples to run")
+    for item in items:
+        if "examples" in item.keywords:
+            item.add_marker(skip_examples)
 
 
 # ============================================================================
@@ -181,132 +186,33 @@ def robot_api_env(ports: TestPorts) -> Generator[dict[str, str], None, None]:
 
 @pytest.fixture(scope="session")
 def server_proc(request, ports: TestPorts, robot_api_env):
-    """
-    Launch parol6 server for integration tests using ServerManager.
+    """Launch parol6 server for integration tests.
 
     Starts the server with FAKE_SERIAL mode and waits for readiness.
     Automatically cleans up the server when tests complete.
     """
-    import asyncio
-    import socket
-
     keep_running = request.config.getoption("--keep-server-running")
 
-    # Create server manager
-    manager = ServerManager()
+    robot = Robot(host=ports.server_ip, port=ports.server_port, timeout=60.0)
 
-    async def start_and_wait():
-        # Start the controller process
-        manager.start_controller(
-            no_autohome=True,
-            extra_env={
-                "PAROL6_FAKE_SERIAL": "1",
-                "PAROL6_NOAUTOHOME": "1",
-                "PAROL6_CONTROLLER_IP": ports.server_ip,
-                "PAROL6_CONTROLLER_PORT": str(ports.server_port),
-            },
-        )
-
-        # Wait for server to be ready with custom ping logic
-        timeout = 10.0
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(1.0)
-                    sock.sendto(b"PING", (ports.server_ip, ports.server_port))
-                    data, _ = sock.recvfrom(256)
-                    if data.decode("utf-8").strip().startswith("PONG"):
-                        return True
-            except (TimeoutError, Exception):
-                pass
-            await asyncio.sleep(0.5)
-        return False
-
-    # Start server using parol6's ServerManager
     logger.info(f"Starting test server on {ports.server_ip}:{ports.server_port}")
-
-    ready = asyncio.run(start_and_wait())
-    if not ready:
-        pytest.fail("Failed to start headless commander server for testing")
+    robot.start(
+        extra_env={
+            "PAROL6_FAKE_SERIAL": "1",
+            "PAROL6_NOAUTOHOME": "1",
+            "PAROL6_CONTROLLER_IP": ports.server_ip,
+            "PAROL6_CONTROLLER_PORT": str(ports.server_port),
+        },
+    )
 
     try:
-        yield manager
-
+        yield robot
     finally:
         if not keep_running:
             logger.info("Stopping test server")
-            manager.stop_controller()
+            robot.stop()
         else:
             logger.info("Leaving test server running (--keep-server-running)")
-
-
-# ============================================================================
-# HARDWARE TEST SUPPORT
-# ============================================================================
-
-
-@pytest.fixture
-def human_prompt(request):
-    """
-    Provide human confirmation prompts for hardware tests.
-
-    Automatically skips tests marked with @pytest.mark.hardware unless
-    --run-hardware is specified. For enabled hardware tests, provides
-    a utility function to prompt for human confirmation.
-    """
-    # Check if hardware tests are enabled
-    run_hardware = request.config.getoption("--run-hardware")
-
-    # Skip hardware tests if not enabled
-    if request.node.get_closest_marker("hardware") and not run_hardware:
-        pytest.skip("Hardware tests disabled. Use --run-hardware to enable.")
-
-    def prompt_user(message: str, timeout: float | None = None) -> bool:
-        """
-        Prompt user for confirmation during hardware tests.
-
-        Args:
-            message: Message to display to user
-            timeout: Optional timeout in seconds
-
-        Returns:
-            True if user confirms, False otherwise
-        """
-        if not run_hardware:
-            return False
-
-        print(f"\n{'=' * 60}")
-        print("HARDWARE TEST CONFIRMATION REQUIRED")
-        print(f"{'=' * 60}")
-        print(f"{message}")
-        print(f"{'=' * 60}")
-
-        try:
-            if timeout:
-
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("User confirmation timeout")
-
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(int(timeout))
-
-            response = input("Continue? [y/N]: ").strip().lower()
-
-            if timeout:
-                signal.alarm(0)  # Cancel timeout
-
-            return response in ["y", "yes"]
-
-        except (KeyboardInterrupt, TimeoutError):
-            print("\nUser confirmation cancelled or timed out")
-            return False
-        except Exception as e:
-            print(f"\nError getting user confirmation: {e}")
-            return False
-
-    return prompt_user
 
 
 # ============================================================================
@@ -393,32 +299,8 @@ def pytest_configure(config):
         "integration: Integration tests that test component interactions with FAKE_SERIAL",
     )
     config.addinivalue_line(
-        "markers",
-        "hardware: Hardware tests that require actual robot hardware and human confirmation",
-    )
-    config.addinivalue_line(
-        "markers",
-        "slow: Slow-running tests (typically hardware or complex integration tests)",
-    )
-    config.addinivalue_line(
         "markers", "e2e: End-to-end tests that exercise complete workflows"
     )
-    config.addinivalue_line(
-        "markers",
-        "gcode: Tests specifically for GCODE parsing and interpretation functionality",
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    """Modify test collection to add markers and skip conditions."""
-    # Skip hardware tests by default unless --run-hardware is specified
-    if not config.getoption("--run-hardware"):
-        skip_hardware = pytest.mark.skip(
-            reason="Hardware tests disabled (use --run-hardware to enable)"
-        )
-        for item in items:
-            if item.get_closest_marker("hardware"):
-                item.add_marker(skip_hardware)
 
 
 def pytest_sessionstart(session):
@@ -427,9 +309,6 @@ def pytest_sessionstart(session):
 
     # Print test configuration info
     config = session.config
-    logger.info(
-        f"Hardware tests: {'enabled' if config.getoption('--run-hardware') else 'disabled'}"
-    )
     logger.info(f"Server IP: {config.getoption('--server-ip')}")
 
     server_port = config.getoption("--server-port")

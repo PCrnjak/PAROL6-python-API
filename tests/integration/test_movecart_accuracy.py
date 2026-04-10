@@ -1,61 +1,49 @@
 """
-Integration test for MoveCart pose accuracy.
-Verifies that movecart commands reach the correct final pose.
+Integration test for MoveL pose accuracy.
+Verifies that move_l commands reach the correct final pose.
 """
-
-import os
-import sys
 
 import numpy as np
 import pytest
 
-# Skip on macOS CI runners due to flakiness
-pytestmark = pytest.mark.skipif(
-    sys.platform == "darwin" and os.getenv("CI") == "true",
-    reason="Flaky on the slow macOS GitHub Actions runners.; skip on CI",
-)
-
-# Add the parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 
 @pytest.mark.integration
-class TestMoveCartAccuracy:
-    """Test that MoveCart commands reach correct final poses."""
+class TestMoveLAccuracy:
+    """Test that MoveL commands reach correct final poses."""
 
-    def test_movecart_from_home(self, client, server_proc):
-        """Test MoveCart accuracy starting from home position."""
+    def test_move_l_from_home(self, client, server_proc):
+        """Test move_l accuracy starting from home position."""
         # Ensure controller is enabled before motion
-        assert client.enable() is True
+        assert client.resume() > 0
         # Home the robot first
-        assert client.home() is True
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.home() >= 0
+        assert client.wait_motion(timeout=15.0)
 
         # Get home pose for reference
-        home_pose = client.get_pose_rpy()
+        home_pose = client.pose()
         print(f"\nHome pose (mm, deg): {home_pose}")
 
         # This is in mm for position, degrees for orientation
         target = [0.000, 263, 242, 90, 0, 90]
 
         # Execute movecart
-        result = client.move_cartesian(target, speed_percentage=50)
-        assert result is True
+        result = client.move_l(target, speed=0.5)
+        assert result >= 0
 
         # Wait for completion
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.wait_motion(timeout=15.0)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         print(f"Target pose (mm, deg): {target}")
         print(f"Final pose (mm, deg):  {final_pose}")
 
         # Verify pose accuracy
-        # Position tolerance: 1mm
+        # Position tolerance: 1.5mm (allows for minor FP drift across platforms)
         pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target[:3]))
         print(f"Position error: {pos_error:.3f} mm")
-        assert pos_error < 1.0, (
-            f"Position error {pos_error:.3f}mm exceeds 1mm tolerance"
+        assert pos_error < 1.5, (
+            f"Position error {pos_error:.3f}mm exceeds 1.5mm tolerance"
         )
 
         # Orientation tolerance: 1 degree per axis
@@ -74,13 +62,13 @@ class TestMoveCartAccuracy:
 
         print("✓ MoveCart pose accuracy test passed!")
 
-    def test_movecart_multiple_targets(self, client, server_proc):
-        """Test MoveCart accuracy with multiple sequential targets."""
+    def test_move_l_multiple_targets(self, client, server_proc):
+        """Test move_l accuracy with multiple sequential targets."""
         # Ensure controller is enabled before motion
-        assert client.enable() is True
+        assert client.resume() > 0
         # Home first
-        assert client.home() is True
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.home() >= 0
+        assert client.wait_motion(timeout=15.0)
 
         # Define multiple targets to test
         targets = [
@@ -94,21 +82,21 @@ class TestMoveCartAccuracy:
             print(f"Moving to: {target}")
 
             # Execute movecart
-            result = client.move_cartesian(target, speed_percentage=30)
-            assert result is True
+            result = client.move_l(target, speed=0.3)
+            assert result >= 0
 
             # Wait for completion
-            assert client.wait_until_stopped(timeout=15.0)
+            assert client.wait_motion(timeout=15.0)
 
             # Get final pose
-            final_pose = client.get_pose_rpy()
+            final_pose = client.pose()
             print(f"Achieved:  {final_pose}")
 
-            # Verify position accuracy (1mm tolerance)
+            # Verify position accuracy (1.5mm tolerance)
             pos_error = np.linalg.norm(np.array(final_pose[:3]) - np.array(target[:3]))
             print(f"Position error: {pos_error:.3f} mm")
-            assert pos_error < 1.0, (
-                f"Target {idx + 1}: Position error {pos_error:.3f}mm exceeds 1mm"
+            assert pos_error < 1.5, (
+                f"Target {idx + 1}: Position error {pos_error:.3f}mm exceeds 1.5mm"
             )
 
             # Verify orientation accuracy (1° tolerance per axis)

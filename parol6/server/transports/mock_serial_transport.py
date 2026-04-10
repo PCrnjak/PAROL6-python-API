@@ -8,18 +8,289 @@ controller code.
 """
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6 import config as cfg
-from parol6.protocol.wire import CommandCode, split_to_3_bytes
+from parol6.config import LIMITS
+from numba import njit
+
+from parol6.protocol.wire import (
+    CommandCode,
+    _pack_bitfield,
+    _pack_positions,
+)
 from parol6.server.state import ControllerState
 
+if TYPE_CHECKING:
+    from parol6.tools import ToolSimulator
+
 logger = logging.getLogger(__name__)
+
+# Gripper ramp array indices and flag values (used in @njit functions)
+_RAMP_TARGET = 0  # target position byte (0–255)
+_RAMP_SPEED = 1  # speed byte (0–255)
+_RAMP_ACTIVE = 2  # active flag: _RAMP_ON or _RAMP_OFF
+_RAMP_ON = 1.0
+_RAMP_OFF = 0.0
+
+
+@njit(cache=True)
+def _simulate_motion_jit(
+    position_f: np.ndarray,
+    position_in: np.ndarray,
+    speed_in: np.ndarray,
+    speed_out: np.ndarray,
+    position_out: np.ndarray,
+    homed_in: np.ndarray,
+    io_in: np.ndarray,
+    prev_pos_f: np.ndarray,
+    vmax_f: np.ndarray,
+    jmin_f: np.ndarray,
+    jmax_f: np.ndarray,
+    home_angles_deg: np.ndarray,
+    command_out: int,
+    dt: float,
+    homing_countdown: int,
+) -> tuple[int, int]:
+    """JIT-compiled motion simulation. Returns (new_homing_countdown, new_command_out).
+
+    Note: CommandCode enums are used directly inside the function (resolved at compile time).
+    Passing enums as arguments would add ~90µs overhead per call.
+    """
+    # Handle homing countdown
+    if homing_countdown > 0:
+        homing_countdown -= 1
+        if homing_countdown == 0:
+            # Homing complete
+            homed_in.fill(1)
+            for i in range(6):
+                steps = cfg.deg_to_steps_scalar(home_angles_deg[i], i)
+                position_in[i] = steps
+                position_f[i] = float(steps)
+                speed_in[i] = 0
+            command_out = CommandCode.IDLE
+
+    # Ensure E-stop stays released
+    io_in[4] = 1
+
+    # Simulate motion based on command type
+    if command_out == CommandCode.HOME:
+        if homing_countdown == 0:
+            for i in range(6):
+                homed_in[i] = 0
+            homing_countdown = max(1, int(0.2 / cfg.INTERVAL_S + 0.5))
+        for i in range(6):
+            speed_in[i] = 0
+
+    elif command_out == CommandCode.JOG or command_out == 123:
+        prev_pos_f[:] = position_f
+
+        # Scalar loop avoids allocations from np.clip().astype() and array arithmetic
+        for i in range(6):
+            v = float(speed_out[i])
+            vmax = vmax_f[i]
+            if v > vmax:
+                v = vmax
+            elif v < -vmax:
+                v = -vmax
+
+            new_pos = position_f[i] + v * dt
+            if new_pos < jmin_f[i]:
+                new_pos = jmin_f[i]
+            elif new_pos > jmax_f[i]:
+                new_pos = jmax_f[i]
+            position_f[i] = new_pos
+
+        if dt > 0:
+            inv_dt = 1.0 / dt
+            for i in range(6):
+                v = round((position_f[i] - prev_pos_f[i]) * inv_dt)
+                vmax = vmax_f[i]
+                if v > vmax:
+                    v = vmax
+                elif v < -vmax:
+                    v = -vmax
+                speed_in[i] = int(v)
+        else:
+            speed_in.fill(0)
+
+    elif command_out == CommandCode.MOVE or command_out == 156:
+        prev_pos_f[:] = position_f
+
+        for i in range(6):
+            target = float(position_out[i])
+            current_f = position_f[i]
+            err_f = target - current_f
+
+            max_step_f = vmax_f[i] * dt
+            if max_step_f < 1.0:
+                max_step_f = 1.0
+
+            move = err_f
+            if move > max_step_f:
+                move = max_step_f
+            elif move < -max_step_f:
+                move = -max_step_f
+
+            pos_f = current_f + move
+            if pos_f < jmin_f[i]:
+                pos_f = jmin_f[i]
+            elif pos_f > jmax_f[i]:
+                pos_f = jmax_f[i]
+            position_f[i] = pos_f
+
+        if dt > 0:
+            inv_dt = 1.0 / dt
+            for i in range(6):
+                v = round((position_f[i] - prev_pos_f[i]) * inv_dt)
+                vmax = vmax_f[i]
+                if v > vmax:
+                    v = vmax
+                elif v < -vmax:
+                    v = -vmax
+                speed_in[i] = int(v)
+        else:
+            speed_in.fill(0)
+
+    elif command_out == CommandCode.TELEPORT:
+        # Instant position set — no ramping
+        for i in range(6):
+            position_in[i] = position_out[i]
+            position_f[i] = float(position_out[i])
+            speed_in[i] = 0
+        command_out = CommandCode.IDLE
+
+    else:
+        for i in range(6):
+            speed_in[i] = 0
+
+    # Sync integer position from float accumulator
+    for i in range(6):
+        position_in[i] = int(round(position_f[i]))
+
+    return homing_countdown, command_out
+
+
+@njit(cache=True)
+def _write_frame_jit(
+    state_position_out: np.ndarray,
+    state_speed_out: np.ndarray,
+    state_gripper_data_in: np.ndarray,
+    position_out: np.ndarray,
+    speed_out: np.ndarray,
+    gripper_data_out: np.ndarray,
+    gripper_ramp: np.ndarray,
+) -> None:
+    """JIT-compiled frame write processing."""
+    state_position_out[:] = position_out
+    state_speed_out[:] = speed_out
+
+    # Simulate gripper state updates
+    if gripper_data_out[4] == 1:  # Calibration mode
+        state_gripper_data_in[0] = gripper_data_out[5]
+        state_gripper_data_in[4] = 0x40
+    elif gripper_data_out[4] == 2:  # Error clear mode
+        state_gripper_data_in[4] &= ~0x20
+
+    if gripper_data_out[3] != 0:
+        new_target = float(gripper_data_out[0])
+        new_speed = float(gripper_data_out[1])
+        # Only (re-)activate ramp when target or speed changes, or ramp is idle.
+        # ElectricGripperCommand sends command_bits every tick — without this
+        # guard, the ramp would be re-activated every tick with the same target.
+        if (
+            gripper_ramp[_RAMP_ACTIVE] < _RAMP_ON
+            or gripper_ramp[_RAMP_TARGET] != new_target
+            or gripper_ramp[_RAMP_SPEED] != new_speed
+        ):
+            gripper_ramp[_RAMP_TARGET] = new_target
+            gripper_ramp[_RAMP_SPEED] = new_speed
+            gripper_ramp[_RAMP_ACTIVE] = _RAMP_ON
+        # Echo speed to feedback (not position — ramp handles that)
+        state_gripper_data_in[2] = gripper_data_out[1]
+        # Current: only drawn while ramp is actively moving
+        if gripper_ramp[_RAMP_ACTIVE] >= _RAMP_ON:
+            state_gripper_data_in[3] = gripper_data_out[2]
+        else:
+            state_gripper_data_in[3] = 0
+
+
+@njit(cache=True)
+def _simulate_gripper_ramp_jit(
+    gripper_ramp: np.ndarray,
+    gripper_data_in: np.ndarray,
+    gripper_pos_f: float,
+    dt: float,
+    tick_range: float,
+    min_speed: float,
+    max_speed: float,
+) -> float:
+    """Ramp gripper feedback_position toward target at speed-dependent rate.
+
+    Returns updated gripper_pos_f. Zero heap allocations.
+    """
+    if gripper_ramp[_RAMP_ACTIVE] < _RAMP_ON:
+        return gripper_pos_f
+    if tick_range == 0.0:
+        return gripper_pos_f
+    target = gripper_ramp[_RAMP_TARGET]
+    speed_byte = gripper_ramp[_RAMP_SPEED]
+    velocity_tps = min_speed + (speed_byte / 255.0) * (max_speed - min_speed)
+    pos_delta = (velocity_tps / tick_range) * 255.0 * dt
+    error = target - gripper_pos_f
+    if abs(error) <= pos_delta:
+        gripper_pos_f = target
+        gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+    elif error > 0:
+        gripper_pos_f += pos_delta
+    else:
+        gripper_pos_f -= pos_delta
+    gripper_data_in[1] = int(gripper_pos_f + 0.5)  # round to int
+    return gripper_pos_f
+
+
+@njit(cache=True)
+def _encode_payload_jit(
+    out: memoryview,
+    position_in: np.ndarray,
+    speed_in: np.ndarray,
+    homed_in: np.ndarray,
+    io_in: np.ndarray,
+    temp_err_in: np.ndarray,
+    pos_err_in: np.ndarray,
+    timing_in: np.ndarray,
+    gripper_in: np.ndarray,
+) -> None:
+    """JIT-compiled payload encoding."""
+    _pack_positions(out, position_in, 0)
+    _pack_positions(out, speed_in, 18)
+
+    out[36] = _pack_bitfield(homed_in)
+    out[37] = _pack_bitfield(io_in)
+    out[38] = _pack_bitfield(temp_err_in)
+    out[39] = _pack_bitfield(pos_err_in)
+
+    t = int(timing_in[0])
+    out[40] = (t >> 8) & 0xFF
+    out[41] = t & 0xFF
+    out[42] = 0
+    out[43] = 0
+
+    out[44] = int(gripper_in[0]) & 0xFF
+    pos = int(gripper_in[1]) & 0xFFFF
+    spd = int(gripper_in[2]) & 0xFFFF
+    cur = int(gripper_in[3]) & 0xFFFF
+    out[45] = (pos >> 8) & 0xFF
+    out[46] = pos & 0xFF
+    out[47] = (spd >> 8) & 0xFF
+    out[48] = spd & 0xFF
+    out[49] = (cur >> 8) & 0xFF
+    out[50] = cur & 0xFF
+    out[51] = int(gripper_in[4]) & 0xFF
 
 
 @dataclass
@@ -42,6 +313,9 @@ class MockRobotState:
     io_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )  # E-stop released
+    io_out: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
+    )  # Commanded outputs (echoed from controller)
     # Error states
     temperature_error_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
@@ -53,6 +327,15 @@ class MockRobotState:
     gripper_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
+    # Gripper ramp state: [target_pos_byte, speed_byte, active_flag(0.0|1.0)]
+    gripper_ramp: np.ndarray = field(
+        default_factory=lambda: np.zeros((3,), dtype=np.float64)
+    )
+    gripper_pos_f: float = 0.0  # float accumulator for smooth ramp (0.0–255.0)
+
+    # Generalized tool ramp for binary-activation tools (pneumatic grippers, etc.)
+    tool_ramp_target: float = 0.0  # target normalized position (0..1)
+    tool_ramp_current: float = 0.0  # current ramp progress (0..1)
     # Timing data
     timing_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((1,), dtype=np.int32)
@@ -60,7 +343,7 @@ class MockRobotState:
 
     # Simulation parameters
     update_rate: float = cfg.INTERVAL_S  # match control loop cadence
-    last_update: float = field(default_factory=time.time)
+    last_update: float = field(default_factory=time.perf_counter)
     homing_countdown: int = 0
 
     # Command state from controller
@@ -76,8 +359,8 @@ class MockRobotState:
         """Initialize robot to standby position."""
         # Set initial positions to standby position for better IK
         for i in range(6):
-            deg = float(PAROL6_ROBOT.joint.standby.deg[i])
-            steps = int(PAROL6_ROBOT.ops.deg_to_steps(deg, i))
+            deg = float(cfg.STANDBY_ANGLES_DEG[i])
+            steps = int(cfg.deg_to_steps_scalar(deg, i))
             self.position_in[i] = steps
         # Initialize float accumulator from integer steps
         self.position_f = self.position_in.astype(np.float64)
@@ -115,15 +398,12 @@ class MockSerialTransport:
         self._state = MockRobotState()
 
         # Frame generation tracking
-        self._frames_to_send: list[bytes] = []
-        self._last_frame_time = time.time()
         self._frame_interval = cfg.INTERVAL_S  # match control loop cadence
 
         # Connection state
         self._connected = False
 
         # Statistics
-        self._frames_sent = 0
         self._frames_received = 0
 
         # Latest-frame infrastructure (simulation publishes into this buffer)
@@ -131,22 +411,29 @@ class MockSerialTransport:
         self._frame_mv = memoryview(self._frame_buf)[:52]
         self._frame_version = 0
         self._frame_ts = 0.0
-        self._reader_thread: threading.Thread | None = None
-        self._reader_running = False
 
-        # Precompute motion simulation constants
-        self._vmax_f = PAROL6_ROBOT.joint.speed.max.astype(np.float64, copy=False)
-        self._vmax_i32 = PAROL6_ROBOT.joint.speed.max.astype(np.int32, copy=False)
-        lims = np.asarray(PAROL6_ROBOT.joint.limits.steps, dtype=np.int64)
+        # Precompute motion simulation constants from LIMITS
+        self._vmax_f = LIMITS.joint.hard.velocity_steps.astype(np.float64, copy=False)
+        lims = np.asarray(LIMITS.joint.position.steps, dtype=np.int64)
         self._jmin_f = lims[:, 0].astype(np.float64, copy=False)
         self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
+        self._home_angles_deg = np.array(cfg.HOME_ANGLES_DEG, dtype=np.float64)
 
-        # Scratch buffers for motion simulation
+        # Scratch buffer for motion simulation (stores previous position)
         self._prev_pos_f = np.zeros((6,), dtype=np.float64)
+
+        # Tool simulator (resolved on tool change, not per-tick)
+        self._simulator: ToolSimulator | None = None
+        self._simulator_tool_name: str = ""
 
         self._state.last_update = time.perf_counter()
 
-        logger.info("MockSerialTransport initialized - simulation mode active")
+        # Write initial frame so first read returns valid data
+        self._encode_payload_into(self._frame_mv)
+        self._frame_version = 1
+        self._frame_ts = time.time()
+
+        logger.debug("MockSerialTransport initialized - simulation mode active")
 
     def connect(self, port: str | None = None) -> bool:
         """
@@ -163,9 +450,11 @@ class MockSerialTransport:
 
         self._connected = True
         self._state = MockRobotState()  # Reset state on connect
+        self._simulator = None  # Force re-resolve on next tick
+        self._simulator_tool_name = ""
         # Initialize time base to perf_counter for consistent scheduling
         self._state.last_update = time.perf_counter()
-        logger.info(f"MockSerialTransport connected to simulated port: {self.port}")
+        logger.debug(f"MockSerialTransport connected to simulated port: {self.port}")
         return True
 
     # Allow controller to sync the simulator pose/homing from live controller state
@@ -186,7 +475,7 @@ class MockSerialTransport:
             # Clear speeds and hold position
             self._state.speed_in = state.Speed_in.copy()
             self._state.command_out = CommandCode.IDLE
-            logger.info("MockSerialTransport: state synchronized from controller")
+            logger.debug("MockSerialTransport: state synchronized from controller")
         except Exception as e:
             logger.warning(
                 "MockSerialTransport: failed to sync from controller state: %s", e
@@ -195,7 +484,7 @@ class MockSerialTransport:
     def disconnect(self) -> None:
         """Simulate serial port disconnection."""
         self._connected = False
-        logger.info(f"MockSerialTransport disconnected from: {self.port}")
+        logger.debug(f"MockSerialTransport disconnected from: {self.port}")
 
     def is_connected(self) -> bool:
         """
@@ -227,279 +516,131 @@ class MockSerialTransport:
         timeout_out: int,
         gripper_data_out: np.ndarray,
     ) -> bool:
-        """
-        Process a command frame from the controller.
-
-        Instead of writing to serial, this updates the internal
-        simulation state.
-
-        Args:
-            position_out: Target positions
-            speed_out: Speed commands
-            command_out: Command code
-            affected_joint_out: Affected joint flags
-            inout_out: I/O commands
-            timeout_out: Timeout value
-            gripper_data_out: Gripper commands
-
-        Returns:
-            True if processed successfully
-        """
+        """Process a command frame from the controller."""
         if not self._connected:
             return False
 
-        # Update simulation state with command
         self._state.command_out = command_out
-        self._state.position_out = np.array(position_out, dtype=np.int32, copy=False)
-        self._state.speed_out = np.array(speed_out, dtype=np.float64, copy=False)
-
-        # Track frame reception
         self._frames_received += 1
-
-        # Simulate gripper state updates
-        if gripper_data_out[4] == 1:  # Calibration mode
-            # Simulate gripper calibration
-            self._state.gripper_data_in[0] = gripper_data_out[5]  # Set device ID
-            self._state.gripper_data_in[4] = 0x40  # Set calibrated bit
-        elif gripper_data_out[4] == 2:  # Error clear mode
-            # Clear gripper errors
-            self._state.gripper_data_in[4] &= ~0x20  # Clear error bit
-
-        # Update gripper position/speed/current if commanded
-        if gripper_data_out[3] != 0:  # Gripper command active
-            self._state.gripper_data_in[1] = gripper_data_out[0]  # Position
-            self._state.gripper_data_in[2] = gripper_data_out[1]  # Speed
-            self._state.gripper_data_in[3] = gripper_data_out[2]  # Current
-
+        _write_frame_jit(
+            self._state.position_out,
+            self._state.speed_out,
+            self._state.gripper_data_in,
+            position_out,
+            speed_out,
+            gripper_data_out,
+            self._state.gripper_ramp,
+        )
+        n = min(len(inout_out), len(self._state.io_out))
+        self._state.io_out[:n] = inout_out[:n]
         return True
 
-    def _simulate_motion(self, dt: float) -> None:
+    def tick_simulation(
+        self,
+        tool_name: str = "NONE",
+        tool_teleport_pos: float = -1.0,
+    ) -> None:
         """
-        Simulate one step of robot motion.
+        Run one physics simulation step. Called by controller each tick.
 
-        Args:
-            dt: Time delta since last update
+        This advances the simulation by the elapsed time since last update,
+        encodes the new state into the frame buffer, and increments the
+        frame version for change detection.
         """
-        state = self._state
+        if not self._connected:
+            return
 
-        # Handle homing countdown
-        if state.homing_countdown > 0:
-            state.homing_countdown -= 1
-            if state.homing_countdown == 0:
-                # Homing complete - mark all joints as homed and move to configured home posture
-                target_deg = cfg.HOME_ANGLES_DEG
-                # Mark all 8 homed bits as 1 to satisfy status bitfield expectations
-                state.homed_in.fill(1)
-                for i in range(6):
-                    steps = int(PAROL6_ROBOT.ops.deg_to_steps(float(target_deg[i]), i))
-                    state.position_in[i] = steps
-                    state.position_f[i] = float(steps)
-                    state.speed_in[i] = 0
-                # Clear HOME command to avoid immediately restarting homing
-                state.command_out = CommandCode.IDLE
+        now = time.perf_counter()
+        dt = now - self._state.last_update
+        self._state.last_update = now
 
-        # Ensure E-stop stays released in simulation
-        state.io_in[4] = 1
+        # Snap gripper position if teleport requested
+        if tool_teleport_pos >= 0:
+            self._state.gripper_pos_f = tool_teleport_pos
+            self._state.gripper_data_in[1] = int(tool_teleport_pos + 0.5)
+            self._state.gripper_ramp[_RAMP_TARGET] = tool_teleport_pos
+            self._state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+            # Also snap the pneumatic/generic ramp so it doesn't overwrite
+            frac = tool_teleport_pos / 255.0
+            self._state.tool_ramp_current = frac
+            self._state.tool_ramp_target = frac
 
-        # Simulate motion based on command type
-        if state.command_out == CommandCode.HOME:
-            # Start homing sequence
-            if state.homing_countdown == 0:
-                for i in range(6):
-                    state.homed_in[i] = 0  # Mark as not homed
-                # Schedule homing completion after ~0.2s (use fixed frame interval for determinism)
-                state.homing_countdown = max(1, int(0.2 / self._frame_interval + 0.5))
-            # Zero speeds during homing
-            for i in range(6):
-                state.speed_in[i] = 0
-
-        elif state.command_out == CommandCode.JOG or state.command_out == 123:
-            # Speed control mode (vectorized float-accumulated integration)
-            np.copyto(self._prev_pos_f, state.position_f)
-
-            # Clip commanded speeds to joint limits
-            v_cmd = np.clip(
-                state.speed_out.astype(np.float64, copy=False),
-                -self._vmax_f,
+        if dt > 0:
+            state = self._state
+            # CommandCode enums are resolved at compile time inside the JIT function.
+            # Passing enums as arguments would add ~90µs overhead per call.
+            state.homing_countdown, state.command_out = _simulate_motion_jit(
+                state.position_f,
+                state.position_in,
+                state.speed_in,
+                state.speed_out,
+                state.position_out,
+                state.homed_in,
+                state.io_in,
+                self._prev_pos_f,
                 self._vmax_f,
+                self._jmin_f,
+                self._jmax_f,
+                self._home_angles_deg,
+                int(state.command_out),
+                dt,
+                state.homing_countdown,
             )
 
-            # Integrate position
-            new_pos_f = state.position_f + v_cmd * dt
+            # Tool simulation: resolve params on change, then tick
+            if tool_name != self._simulator_tool_name:
+                self._simulator_tool_name = tool_name
+                # Clear stale ramp state from the previous tool
+                state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+                state.tool_ramp_current = 0.0
+                state.tool_ramp_target = 0.0
 
-            # Apply joint limits
-            np.clip(new_pos_f, self._jmin_f, self._jmax_f, out=state.position_f)
+                from parol6.tools import get_registry
 
-            # Report actual velocity based on realized motion
-            if dt > 0:
-                realized_v = np.rint((state.position_f - self._prev_pos_f) / dt).astype(
-                    np.int32
-                )
-                np.clip(realized_v, -self._vmax_i32, self._vmax_i32, out=state.speed_in)
-            else:
-                state.speed_in.fill(0)
+                tool_cfg = get_registry().get(tool_name)
+                if tool_cfg is not None:
+                    self._simulator = tool_cfg.create_simulator()
+                    if self._simulator is not None:
+                        self._simulator.resolve_params(tool_cfg)
+                else:
+                    self._simulator = None
 
-        elif state.command_out == CommandCode.MOVE or state.command_out == 156:
-            # Position control mode (float-accumulated and per-tick speed clamp)
-            prev_pos_f = state.position_f.copy()
-            for i in range(6):
-                target = float(state.position_out[i])
-                current_f = float(state.position_f[i])
-                err_f = target - current_f
+            if self._simulator is not None:
+                self._simulator.tick(state, dt)
 
-                # Calculate max move this tick from per-joint max speed
-                max_step_f = float(PAROL6_ROBOT.joint.speed.max[i]) * float(dt)
-                if max_step_f < 1.0:
-                    # ensure some progress at very small dt
-                    max_step_f = 1.0
+            # Echo commanded outputs into io_in (firmware packs
+            # IO_var[] = {In1, In2, Out1, Out2, Estop, ...})
+            state.io_in[2] = state.io_out[2]
+            state.io_in[3] = state.io_out[3]
 
-                move = float(err_f)
-                if move > max_step_f:
-                    move = max_step_f
-                elif move < -max_step_f:
-                    move = -max_step_f
-
-                new_pos_f = current_f + move
-
-                # Apply joint limits
-                jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
-                if new_pos_f < float(jmin):
-                    new_pos_f = float(jmin)
-                elif new_pos_f > float(jmax):
-                    new_pos_f = float(jmax)
-
-                state.position_f[i] = new_pos_f
-
-            # Report actual velocity based on realized motion
-            if dt > 0:
-                realized_v = np.rint((state.position_f - prev_pos_f) / dt).astype(
-                    np.int32
-                )
-            else:
-                realized_v = np.zeros(6, dtype=np.int32)
-            vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)
-            state.speed_in[:] = np.clip(realized_v, -vmax, vmax)
-
-        else:
-            # Idle or unknown command - hold position
-            for i in range(6):
-                state.speed_in[i] = 0
-
-        # Sync integer telemetry from high-fidelity accumulator
-        state.position_in[:] = np.rint(state.position_f).astype(np.int32)
+        self._encode_payload_into(self._frame_mv)
+        self._frame_version += 1
+        self._frame_ts = time.time()
 
     # ================================
     # Latest-frame API (reduced-copy)
     # ================================
-    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
+    def poll_read(self) -> bool:
         """
-        Start simulated latest-frame publisher thread.
+        No-op for mock transport. Simulation is driven by tick_simulation().
+        Returns True if connected (frame data is always available).
         """
-        if self._reader_thread and self._reader_thread.is_alive():
-            return self._reader_thread
-
-        def _run():
-            self._reader_running = True
-            period = self._frame_interval
-            next_deadline = time.perf_counter()
-
-            try:
-                while not shutdown_event.is_set():
-                    if not self._connected:
-                        time.sleep(0.05)
-                        continue
-
-                    now = time.perf_counter()
-                    if now >= next_deadline:
-                        # Advance simulation before publishing a new frame
-                        dt = now - self._state.last_update
-                        if dt > 0:
-                            self._simulate_motion(dt)
-                            self._state.last_update = now
-
-                        self._encode_payload_into(self._frame_mv)
-                        self._frame_version += 1
-                        self._frame_ts = time.time()
-
-                        # Advance deadline
-                        next_deadline += period
-                        # If we fell far behind, resync to avoid tight catch-up loop
-                        if next_deadline < now - period:
-                            next_deadline = now + period
-                    else:
-                        # Sleep until next deadline (or at most 2ms to stay responsive)
-                        sleep_time = min(next_deadline - now, 0.002)
-                        if sleep_time > 0:
-                            time.sleep(sleep_time)
-            finally:
-                self._reader_running = False
-
-        t = threading.Thread(target=_run, name="MockSerialReader", daemon=True)
-        self._reader_thread = t
-        t.start()
-        return t
+        return self._connected
 
     def _encode_payload_into(self, out_mv: memoryview) -> None:
-        """
-        Build a 52-byte payload per firmware layout from the simulated state directly into memoryview.
-        Zero-allocation version for use in the reader loop.
-        """
+        """Build a 52-byte payload per firmware layout from simulated state."""
         st = self._state
-        out = out_mv
-        # Positions (6 * 3 bytes)
-        off = 0
-        for i in range(6):
-            b0, b1, b2 = split_to_3_bytes(int(st.position_in[i]))
-            out[off] = b0
-            out[off + 1] = b1
-            out[off + 2] = b2
-            off += 3
-        # Speeds (6 * 3 bytes)
-        off = 18
-        for i in range(6):
-            b0, b1, b2 = split_to_3_bytes(int(st.speed_in[i]))
-            out[off] = b0
-            out[off + 1] = b1
-            out[off + 2] = b2
-            off += 3
-
-        def bits_to_byte(bits: np.ndarray) -> int:
-            val = 0
-            for b in bits[:8]:
-                val = (val << 1) | (1 if b else 0)
-            return val & 0xFF
-
-        # Bitfields
-        out[36] = bits_to_byte(st.homed_in)
-        out[37] = bits_to_byte(st.io_in)
-        out[38] = bits_to_byte(st.temperature_error_in)
-        out[39] = bits_to_byte(st.position_error_in)
-
-        # Timing (two bytes)
-        t = int(st.timing_data_in[0]) if st.timing_data_in else 0
-        out[40] = (t >> 8) & 0xFF
-        out[41] = t & 0xFF
-
-        # Reserved
-        out[42] = 0
-        out[43] = 0
-
-        # Gripper
-        gd = st.gripper_data_in
-        dev_id = int(gd[0]) if gd.all() else 0
-        pos = int(gd[1]) & 0xFFFF
-        spd = int(gd[2]) & 0xFFFF
-        cur = int(gd[3]) & 0xFFFF
-        status = int(gd[4]) & 0xFF if gd.all() else 0
-
-        out[44] = dev_id & 0xFF
-        out[45] = (pos >> 8) & 0xFF
-        out[46] = pos & 0xFF
-        out[47] = (spd >> 8) & 0xFF
-        out[48] = spd & 0xFF
-        out[49] = (cur >> 8) & 0xFF
-        out[50] = cur & 0xFF
-        out[51] = status & 0xFF
+        _encode_payload_jit(
+            out_mv,
+            st.position_in,
+            st.speed_in,
+            st.homed_in,
+            st.io_in,
+            st.temperature_error_in,
+            st.position_error_in,
+            st.timing_data_in,
+            st.gripper_data_in,
+        )
 
     def get_latest_frame_view(self) -> tuple[memoryview | None, int, float]:
         """
@@ -507,39 +648,3 @@ class MockSerialTransport:
         """
         mv = self._frame_mv if self._frame_version > 0 else None
         return (mv, self._frame_version, self._frame_ts)
-
-    def get_info(self) -> dict:
-        """
-        Get information about the mock transport.
-
-        Returns:
-            Dictionary with transport information
-        """
-        return {
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "connected": self._connected,
-            "timeout": self.timeout,
-            "mode": "MOCK_SERIAL",
-            "frames_sent": self._frames_sent,
-            "frames_received": self._frames_received,
-            "simulation_rate_hz": int(1.0 / self._frame_interval),
-            "robot_state": {
-                "homed": all(self._state.homed_in[i] == 1 for i in range(6)),
-                "estop": self._state.io_in[4] == 0,
-                "command": self._state.command_out,
-            },
-        }
-
-
-def create_mock_serial_transport() -> MockSerialTransport:
-    """
-    Factory function to create a mock serial transport.
-
-    Returns:
-        Configured MockSerialTransport instance
-    """
-    transport = MockSerialTransport()
-    transport.connect()
-    logger.info("Mock serial transport created and connected")
-    return transport

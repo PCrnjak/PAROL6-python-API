@@ -125,3 +125,4 @@ cython_debug/
 .vscode/
 
 serial_port.txt
+test-results.xml

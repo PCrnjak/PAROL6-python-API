@@ -1,277 +1,532 @@
-import threading
+"""
+Cache of the aggregate STATUS payload for binary msgpack broadcasting.
+
+The heavy IK enablement computations are delegated to a separate subprocess
+for true CPU parallelism, communicating via shared memory.
+"""
+
+import logging
+import multiprocessing
 import time
+from multiprocessing import Process
+from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.synchronize import Event
 
 import numpy as np
-from numpy.typing import ArrayLike
+from numba import njit
+from pinokin import arrays_equal_6
+from waldoctl import ActionState, ToolStatus
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.config import speed_steps_to_rad, steps_to_deg, steps_to_rad
+from parol6.protocol.wire import pack_status
+from parol6.tools import get_registry
+from parol6.utils.error_catalog import RobotError
+from parol6.server.ik_layout import (
+    IK_INPUT_Q_OFFSET,
+    IK_INPUT_SIZE,
+    IK_INPUT_T_OFFSET,
+    IK_INPUT_TOOL_OFFSET,
+    IK_OUTPUT_SIZE,
+    SHM_EXTRA_KWARGS,
+    unregister_shm,
+)
+from parol6.server.ik_worker import ik_enablement_worker_main
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
-from parol6.utils.ik import AXIS_MAP, solve_ik
-from spatialmath import SE3
-from typing import Any
-import math
+from parol6.tools import get_tool_transform
+from parol6 import config as _cfg
+
+logger = logging.getLogger(__name__)
+
+
+def _cleanup_shm(shm: SharedMemory | None) -> None:
+    """Safely close and unlink a shared memory segment."""
+    if shm is None:
+        return
+    try:
+        shm.close()
+    except Exception:
+        pass
+    try:
+        shm.unlink()
+    except Exception:
+        pass
+
+
+@njit(cache=True)
+def _unpack_ik_response_into(
+    buf_arr: np.ndarray,
+    last_version: int,
+    joint_en: np.ndarray,
+    cart_en_wrf: np.ndarray,
+    cart_en_trf: np.ndarray,
+) -> int:
+    """
+    Check version and copy IK response if changed (zero-alloc hot path).
+
+    Returns new version if data was copied, 0 if unchanged.
+    """
+    # Version is at offset 36, little-endian uint64
+    version = np.uint64(0)
+    for i in range(8):
+        version |= np.uint64(buf_arr[36 + i]) << np.uint64(i * 8)
+
+    if version == last_version or version == 0:
+        return 0
+
+    for i in range(12):
+        joint_en[i] = buf_arr[i]
+        cart_en_wrf[i] = buf_arr[12 + i]
+        cart_en_trf[i] = buf_arr[24 + i]
+
+    return int(version)
+
+
+# Export for warmup.py
+unpack_ik_response_into = _unpack_ik_response_into
+
+
+@njit(cache=True)
+def _update_arrays(
+    pos_in: np.ndarray,
+    io_in: np.ndarray,
+    spd_in: np.ndarray,
+    pos_last: np.ndarray,
+    angles_deg: np.ndarray,
+    q_rad_buf: np.ndarray,
+    io_cached: np.ndarray,
+    spd_cached: np.ndarray,
+) -> tuple[bool, bool, bool]:
+    """
+    Check for changes and update cached arrays.
+    Returns (pos_changed, io_changed, spd_changed).
+    """
+    pos_changed = not np.array_equal(pos_in, pos_last)
+    io_changed = not np.array_equal(io_in, io_cached)
+    spd_changed = not np.array_equal(spd_in, spd_cached)
+
+    if pos_changed:
+        pos_last[:] = pos_in
+        steps_to_deg(pos_in, angles_deg)
+        steps_to_rad(pos_in, q_rad_buf)
+    if io_changed:
+        io_cached[:] = io_in
+    if spd_changed:
+        spd_cached[:] = spd_in
+
+    return pos_changed, io_changed, spd_changed
 
 
 class StatusCache:
     """
-    Thread-safe cache of the aggregate STATUS payload components and formatted ASCII.
+    Cache of the aggregate STATUS payload components.
 
     Fields:
       - angles_deg: 6 floats
       - speeds: 6 ints (steps/sec)
       - io: 5 ints [in1,in2,out1,out2,estop]
-      - gripper: >=6 ints [id,pos,spd,cur,status,obj]
+      - tool_status: pre-allocated ToolStatus (mutated in-place)
       - pose: 16 floats (flattened transform)
-      - last_update_s: wall clock time of last cache update
+      - last_serial_s: wall clock time of last cache update
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
-
         # Public snapshots (materialized only when they change)
         self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self.speeds_rad_s: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.io: np.ndarray = np.zeros((5,), dtype=np.uint8)
-        self.gripper: np.ndarray = np.zeros((6,), dtype=np.int32)
         self.pose: np.ndarray = np.zeros((16,), dtype=np.float64)
+        self.tcp_speed: float = 0.0  # TCP linear velocity in mm/s
 
-        self.last_update_s: float = 0.0  # last cache build (any section)
+        # Pre-allocated ToolStatus — mutated in-place by populate_status()
+        self.tool_status: ToolStatus = ToolStatus()
+
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
         self._last_tool_name: str = "NONE"  # Track tool changes
-
-        # Cached ASCII fragments to reduce allocations
-        self._angles_ascii: str = "0,0,0,0,0,0"
-        self._speeds_ascii: str = "0,0,0,0,0,0"
-        self._io_ascii: str = "0,0,0,0,0"
-        self._gripper_ascii: str = "0,0,0,0,0,0"
-        self._pose_ascii: str = ",".join("0" for _ in range(16))
+        self._last_tool_variant: str = ""  # Track variant changes
+        self._last_tool_positions: tuple[float, ...] = ()  # Track tool DOF changes
 
         # Action tracking fields
         self._action_current: str = ""
-        self._action_state: str = "IDLE"
+        self._action_params: str = ""
+        self._action_state: ActionState = ActionState.IDLE
 
-        # Enablement arrays (12 ints each)
-        self.joint_en = np.ones((12,), dtype=np.uint8)
-        self.cart_en_wrf = np.ones((12,), dtype=np.uint8)
-        self.cart_en_trf = np.ones((12,), dtype=np.uint8)
-        self._joint_en_ascii: str = ",".join(str(int(v)) for v in self.joint_en)
-        self._cart_en_wrf_ascii: str = ",".join(str(int(v)) for v in self.cart_en_wrf)
-        self._cart_en_trf_ascii: str = ",".join(str(int(v)) for v in self.cart_en_trf)
+        # Queue tracking fields
+        self._executing_index: int = -1
+        self._completed_index: int = -1
+        self._last_checkpoint: str = ""
 
-        self._ascii_full: str = (
-            f"STATUS|POSE={self._pose_ascii}"
-            f"|ANGLES={self._angles_ascii}"
-            f"|SPEEDS={self._speeds_ascii}"
-            f"|IO={self._io_ascii}"
-            f"|GRIPPER={self._gripper_ascii}"
-            f"|ACTION_CURRENT={self._action_current}"
-            f"|ACTION_STATE={self._action_state}"
-            f"|JOINT_EN={self._joint_en_ascii}"
-            f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
-            f"|CART_EN_TRF={self._cart_en_trf_ascii}"
-        )
+        # Error tracking field
+        self._error: RobotError | None = None
+
+        # Pipeline depth fields
+        self._queued_segments: int = 0
+        self._queued_duration: float = 0.0
+
+        # Binary cache
+        self._binary_cache: bytes = b""
+        self._binary_dirty: bool = True
 
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
         self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self._last_io_buf: np.ndarray = np.zeros((5,), dtype=np.uint8)
 
-    def _format_csv_from_list(self, vals: ArrayLike) -> str:
-        # Using str() on each value preserves prior formatting semantics
-        return ",".join(str(v) for v in vals)  # type: ignore
+        # Pre-allocated buffer for IK request (avoids allocation per position change)
+        self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
+        # Dirty-check: last q_rad submitted to the IK worker
+        self._ik_last_q_rad: np.ndarray = np.full(6, np.nan, dtype=np.float64)
 
-    def _compute_joint_enable(
-        self, q_rad: np.ndarray, delta_rad: float = math.radians(0.2)
-    ) -> None:
-        """Compute per-joint +/- enable bits based on joint limits and a small delta."""
-        # Be robust to uninitialized robot in type-checked context
-        robot: Any = getattr(PAROL6_ROBOT, "robot", None)
-        if robot is None:
-            self.joint_en[:] = 1
+        # TCP speed computation state
+        self._prev_tcp_pos: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tcp_pos_initialized: bool = False
+
+        self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
+
+        # IK enablement results (pre-allocated for zero-alloc reads)
+        self._joint_en = np.ones(12, dtype=np.uint8)
+        self._cart_en_wrf = np.ones(12, dtype=np.uint8)
+        self._cart_en_trf = np.ones(12, dtype=np.uint8)
+
+        # IK worker subprocess state
+        self._ik_stopped = False
+        self._ik_last_version = 0
+        shm_suffix = f"_{id(self)}"
+        input_name = f"parol6_ik_in{shm_suffix}"
+        output_name = f"parol6_ik_out{shm_suffix}"
+
+        # Create shared memory segments
+        self._ik_input_shm = SharedMemory(
+            name=input_name, create=True, size=IK_INPUT_SIZE, **SHM_EXTRA_KWARGS
+        )
+        self._ik_output_shm = SharedMemory(
+            name=output_name, create=True, size=IK_OUTPUT_SIZE, **SHM_EXTRA_KWARGS
+        )
+        unregister_shm(self._ik_input_shm)
+        unregister_shm(self._ik_output_shm)
+
+        # SharedMemory.buf is always non-None after successful __init__
+        input_buf = self._ik_input_shm.buf
+        output_buf = self._ik_output_shm.buf
+        assert input_buf is not None
+        assert output_buf is not None
+
+        # Initialize with zeros
+        np.frombuffer(input_buf, dtype=np.uint8)[:] = 0
+        np.frombuffer(output_buf, dtype=np.uint8)[:] = 0
+
+        # Memoryviews for cleanup
+        self._ik_input_mv = memoryview(input_buf)
+        self._ik_output_mv = memoryview(output_buf)
+
+        # Zero-alloc input views: write directly into shared memory
+        self._ik_input_q_view = np.frombuffer(
+            input_buf,
+            dtype=np.float64,
+            count=6,
+            offset=IK_INPUT_Q_OFFSET,
+        )
+        self._ik_input_T_view = np.frombuffer(
+            input_buf,
+            dtype=np.float64,
+            count=16,
+            offset=IK_INPUT_T_OFFSET,
+        )
+        # Tool transform view for syncing tool changes to IK worker
+        self._ik_input_tool_view = np.frombuffer(
+            input_buf,
+            dtype=np.float64,
+            count=16,
+            offset=IK_INPUT_TOOL_OFFSET,
+        )
+        # Initialize to identity (no tool)
+        self._ik_input_tool_view.reshape(4, 4)[:] = np.eye(4)
+
+        # Zero-alloc output view for numba reader
+        self._ik_output_arr = np.frombuffer(output_buf, dtype=np.uint8)
+
+        # Spawn subprocess
+        self._ik_shutdown_event: Event = multiprocessing.Event()
+        self._ik_request_event: Event = multiprocessing.Event()
+        self._ik_process: Process = Process(
+            target=ik_enablement_worker_main,
+            args=(
+                input_name,
+                output_name,
+                self._ik_shutdown_event,
+                self._ik_request_event,
+            ),
+            daemon=True,
+            name="IKWorkerProcess",
+        )
+        self._ik_process.start()
+        logger.debug(f"IK worker started, PID: {self._ik_process.pid}")
+
+    def _stop_ik_worker(self) -> None:
+        """Shut down the IK worker subprocess and release resources."""
+        if self._ik_stopped:
             return
-        qlim = getattr(robot, "qlim", None)
-        if qlim is None:
-            self.joint_en[:] = 1
+        self._ik_stopped = True
+
+        # Signal shutdown
+        self._ik_shutdown_event.set()
+
+        # Wait for process to exit
+        if self._ik_process.is_alive():
+            self._ik_process.join(timeout=2.0)
+            if self._ik_process.is_alive():
+                logger.warning("IK worker did not exit cleanly, terminating")
+                self._ik_process.terminate()
+                self._ik_process.join(timeout=1.0)
+
+        # Wait for exitcode to be set (subprocess's finally block completed)
+        deadline = time.time() + 1.0
+        while self._ik_process.exitcode is None and time.time() < deadline:
+            time.sleep(0.01)
+
+        # Release numpy views before closing shared memory
+        del self._ik_input_q_view
+        del self._ik_input_T_view
+        del self._ik_input_tool_view
+        del self._ik_output_arr
+
+        # Release memoryviews
+        try:
+            self._ik_input_mv.release()
+        except BufferError:
+            pass
+        try:
+            self._ik_output_mv.release()
+        except BufferError:
+            pass
+
+        # Clean up shared memory
+        _cleanup_shm(self._ik_input_shm)
+        _cleanup_shm(self._ik_output_shm)
+        logger.debug("IK worker stopped")
+
+    def _submit_ik_request(self, q_rad: np.ndarray, T_matrix: np.ndarray) -> None:
+        """Submit an IK enablement request (non-blocking, zero-alloc).
+
+        Skips submission if q_rad hasn't changed since the last request.
+        """
+        if self._ik_stopped:
             return
-        allow_plus = (q_rad + delta_rad) <= qlim[1, :]
-        allow_minus = (q_rad - delta_rad) >= qlim[0, :]
-        # Pack into [J1+,J1-,J2+,J2-,...,J6+,J6-]
-        bits = []
-        for i in range(6):
-            bits.append(1 if allow_plus[i] else 0)
-            bits.append(1 if allow_minus[i] else 0)
-        self.joint_en[:] = np.asarray(bits, dtype=np.uint8)
-        self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
+        if arrays_equal_6(q_rad[:6], self._ik_last_q_rad):
+            return
+        self._ik_last_q_rad[:] = q_rad[:6]
+        self._ik_input_q_view[:] = q_rad[:6]
+        self._ik_input_T_view[:] = T_matrix.flat[:16]
+        self._ik_request_event.set()
 
-    def _compute_cart_enable(
-        self,
-        T: SE3,
-        frame: str,
-        q_rad: np.ndarray,
-        delta_mm: float = 0.5,
-        delta_deg: float = 0.5,
-    ) -> None:
-        """Compute per-axis +/- enable bits for the given frame (WRF/TRF) via small-step IK."""
-        bits = []
-        # Build small delta transforms
-        t_step_m = delta_mm / 1000.0
-        r_step_rad = math.radians(delta_deg)
-        for axis, (v_lin, v_rot) in AXIS_MAP.items():
-            # Compose delta SE3 for this axis
-            dT = SE3()
-            # Translation
-            dx = v_lin[0] * t_step_m
-            dy = v_lin[1] * t_step_m
-            dz = v_lin[2] * t_step_m
-            if abs(dx) > 0 or abs(dy) > 0 or abs(dz) > 0:
-                dT = dT * SE3(dx, dy, dz)
-            # Rotation
-            rx = v_rot[0] * r_step_rad
-            ry = v_rot[1] * r_step_rad
-            rz = v_rot[2] * r_step_rad
-            if abs(rx) > 0:
-                dT = dT * SE3.Rx(rx)
-            if abs(ry) > 0:
-                dT = dT * SE3.Ry(ry)
-            if abs(rz) > 0:
-                dT = dT * SE3.Rz(rz)
+    def _poll_ik_results(self) -> bool:
+        """Check for new IK results (non-blocking, zero-alloc). Returns True if updated."""
+        if self._ik_stopped:
+            return False
+        new_version = _unpack_ik_response_into(
+            self._ik_output_arr,
+            self._ik_last_version,
+            self._joint_en,
+            self._cart_en_wrf,
+            self._cart_en_trf,
+        )
+        if new_version > 0:
+            self._ik_last_version = new_version
+            return True
+        return False
 
-            # Apply in specified frame
-            if frame == "WRF":
-                T_target = dT * T
-            else:  # TRF
-                T_target = T * dT
+    def close(self) -> None:
+        """Shut down the IK worker subprocess and release resources."""
+        self._stop_ik_worker()
 
-            try:
-                ik = solve_ik(
-                    PAROL6_ROBOT.robot,
-                    T_target,
-                    q_rad,
-                    jogging=True,
-                    quiet_logging=True,
-                )
-                bits.append(1 if ik.success else 0)
-            except Exception:
-                bits.append(0)
-
-        arr = np.asarray(bits, dtype=np.uint8)
-        if frame == "WRF":
-            self.cart_en_wrf[:] = arr
-            self._cart_en_wrf_ascii = self._format_csv_from_list(arr.tolist())
-        else:
-            self.cart_en_trf[:] = arr
-            self._cart_en_trf_ascii = self._format_csv_from_list(arr.tolist())
+    def __del__(self) -> None:
+        """Safety net: ensure IK worker is stopped if close() was not called."""
+        self.close()
 
     def update_from_state(self, state: ControllerState) -> None:
         """
         Update cache from current controller state with change gating:
-          - Only recompute angles/pose when Position_in changes (and beyond optional deadband)
-          - Only refresh IO/speeds/gripper when their inputs actually change
+          - Only recompute angles/pose when Position_in changes
+          - Only refresh IO/speeds when their inputs actually change
+          - Tool status populated via tool config's populate_status()
+          - IK enablement is computed asynchronously in a subprocess
         """
-        now = time.time()
-        changed_any = False
+        # Do change detection
+        self._last_io_buf[:] = state.InOut_in[:5]
+        pos_changed, io_changed, spd_changed = _update_arrays(
+            state.Position_in,
+            self._last_io_buf,
+            state.Speed_in,
+            self._last_pos_in,
+            self.angles_deg,
+            self._q_rad_buf,
+            self.io,
+            self.speeds,
+        )
+        tool_changed = (
+            state.current_tool != self._last_tool_name
+            or state.current_tool_variant != self._last_tool_variant
+        )
 
-        with self._lock:
-            # Check if position or tool changed
-            tool_changed = state.current_tool != self._last_tool_name
-            pos_changed = self._last_pos_in is None or not np.array_equal(
-                state.Position_in, self._last_pos_in
+        # Convert speeds from steps/s to rad/s when they change
+        if spd_changed:
+            speed_steps_to_rad(self.speeds, self.speeds_rad_s)
+
+        if tool_changed:
+            self._last_tool_name = state.current_tool
+            self._last_tool_variant = state.current_tool_variant
+            self._tcp_pos_initialized = (
+                False  # avoid speed spike from TCP offset change
             )
+            # Sync tool transform to IK worker
+            T_tool = get_tool_transform(
+                state.current_tool, variant_key=state.current_tool_variant
+            )
+            self._ik_input_tool_view.reshape(4, 4)[:] = T_tool
 
-            if pos_changed or tool_changed:
-                if pos_changed:
-                    np.copyto(self._last_pos_in, state.Position_in)
-                if tool_changed:
-                    self._last_tool_name = state.current_tool
+        if pos_changed or tool_changed:
+            self.pose[:] = get_fkine_flat_mm(state)
 
-                # Vectorized steps->deg
-                self.angles_deg = np.asarray(
-                    PAROL6_ROBOT.ops.steps_to_deg(state.Position_in)
-                )  # float64, shape (6,)
-                # Publish angles list and ASCII
-                self._angles_ascii = self._format_csv_from_list(self.angles_deg)
-                changed_any = True
+            # Compute TCP speed from consecutive FK positions (mm/s)
+            # pose is row-major 4x4: translation at indices 3,7,11
+            self._tcp_pos_buf[0] = self.pose[3]
+            self._tcp_pos_buf[1] = self.pose[7]
+            self._tcp_pos_buf[2] = self.pose[11]
+            if self._tcp_pos_initialized:
+                dt = 1.0 / self._status_rate_hz
+                dx = self._tcp_pos_buf[0] - self._prev_tcp_pos[0]
+                dy = self._tcp_pos_buf[1] - self._prev_tcp_pos[1]
+                dz = self._tcp_pos_buf[2] - self._prev_tcp_pos[2]
+                self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
+            else:
+                self._tcp_pos_initialized = True
+            self._prev_tcp_pos[:] = self._tcp_pos_buf
+        else:
+            # Robot not moving — reset TCP speed to zero
+            self.tcp_speed = 0.0
 
-                # Get cached fkine (automatically updates if needed)
-                pose_flat_mm = get_fkine_flat_mm(state)  # Already in mm for translation
-                np.copyto(self.pose, pose_flat_mm)
-                self._pose_ascii = self._format_csv_from_list(self.pose)
-                changed_any = True
+            # Submit IK request asynchronously
+            try:
+                T_matrix = get_fkine_se3(state)
+                self._submit_ik_request(self._q_rad_buf, T_matrix)
+            except (ValueError, OSError):
+                pass
 
-                # Compute enablement arrays at 50 Hz when pose/angles change
-                try:
-                    q_rad = np.asarray(
-                        PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
-                    )
-                except Exception:
-                    q_rad = np.zeros((6,), dtype=float)
-                try:
-                    T = get_fkine_se3(state)
-                except Exception:
-                    T = SE3()
-                # JOINT_EN
-                self._compute_joint_enable(q_rad)
-                # CART_EN for both frames
-                self._compute_cart_enable(T, "WRF", q_rad)
-                self._compute_cart_enable(T, "TRF", q_rad)
+        # Populate tool status from hardware state via the tool config
+        ts = self.tool_status
+        ts.key = state.current_tool
+        cfg = get_registry().get(state.current_tool)
+        if cfg is not None:
+            cfg.populate_status(state, ts)
 
-            # 2) IO (first 5)
-            if not np.array_equal(self.io, state.InOut_in[:5]):
-                np.copyto(self.io, state.InOut_in[:5])
-                self._io_ascii = self._format_csv_from_list(self.io)
-                changed_any = True
+        # Track tool DOF position changes (gripper jaw, spindle, etc.)
+        tool_status_changed = ts.positions != self._last_tool_positions
+        if tool_status_changed:
+            self._last_tool_positions = ts.positions
 
-            # 3) Speeds (steps/sec from Speed_in)
-            if not np.array_equal(self.speeds, state.Speed_in):
-                np.copyto(self.speeds, state.Speed_in)
-                self._speeds_ascii = self._format_csv_from_list(self.speeds)
-                changed_any = True
+        # Poll for async IK results (non-blocking, zero-alloc)
+        ik_changed = self._poll_ik_results()
 
-            # 4) Gripper
-            if not np.array_equal(self.gripper, state.Gripper_data_in):
-                np.copyto(self.gripper, state.Gripper_data_in)
-                self._gripper_ascii = self._format_csv_from_list(self.gripper)
-                changed_any = True
+        action_changed = (
+            self._action_current != state.action_current
+            or self._action_params != state.action_params
+            or self._action_state != state.action_state
+        )
+        if action_changed:
+            self._action_current = state.action_current
+            self._action_params = state.action_params
+            self._action_state = state.action_state
 
-            # 5) Action tracking
-            if (
-                self._action_current != state.action_current
-                or self._action_state != state.action_state
-            ):
-                self._action_current = state.action_current
-                self._action_state = state.action_state
-                changed_any = True
+        queue_changed = (
+            self._executing_index != state.executing_command_index
+            or self._completed_index != state.completed_command_index
+            or self._last_checkpoint != state.last_checkpoint
+        )
+        if queue_changed:
+            self._executing_index = state.executing_command_index
+            self._completed_index = state.completed_command_index
+            self._last_checkpoint = state.last_checkpoint
 
-            # 6) Assemble full ASCII only if any section changed
-            if changed_any:
-                self._ascii_full = (
-                    f"STATUS|POSE={self._pose_ascii}"
-                    f"|ANGLES={self._angles_ascii}"
-                    f"|SPEEDS={self._speeds_ascii}"
-                    f"|IO={self._io_ascii}"
-                    f"|GRIPPER={self._gripper_ascii}"
-                    f"|ACTION_CURRENT={self._action_current}"
-                    f"|ACTION_STATE={self._action_state}"
-                    f"|JOINT_EN={self._joint_en_ascii}"
-                    f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
-                    f"|CART_EN_TRF={self._cart_en_trf_ascii}"
-                )
-                self.last_update_s = now
+        error_changed = self._error is not state.error
+        if error_changed:
+            self._error = state.error
 
-    def to_ascii(self) -> str:
-        """Return the full ASCII STATUS payload."""
-        with self._lock:
-            return self._ascii_full
+        depth_changed = (
+            self._queued_segments != state.queued_segments
+            or self._queued_duration != state.queued_duration
+        )
+        if depth_changed:
+            self._queued_segments = state.queued_segments
+            self._queued_duration = state.queued_duration
+
+        # Mark binary cache dirty if anything changed
+        if (
+            pos_changed
+            or tool_changed
+            or tool_status_changed
+            or io_changed
+            or spd_changed
+            or ik_changed
+            or action_changed
+            or queue_changed
+            or error_changed
+            or depth_changed
+        ):
+            self._binary_dirty = True
+
+    def to_binary(self) -> bytes:
+        """Return the msgpack-encoded STATUS payload."""
+        if self._binary_dirty:
+            from parol6.server.transports.transport_factory import is_simulation_mode
+
+            self._binary_cache = pack_status(
+                self.pose,
+                self.angles_deg,
+                self.speeds_rad_s,
+                self.io,
+                self._action_current,
+                self._action_state,
+                self._joint_en,
+                self._cart_en_wrf,
+                self._cart_en_trf,
+                self._executing_index,
+                self._completed_index,
+                self._last_checkpoint,
+                self._error,
+                self._queued_segments,
+                self._queued_duration,
+                self._action_params,
+                self.tool_status,
+                self.tcp_speed,
+                simulator_active=is_simulation_mode(),
+            )
+            self._binary_dirty = False
+        return self._binary_cache
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""
-        with self._lock:
-            self.last_serial_s = time.time()
+        self.last_serial_s = time.monotonic()
 
     def age_s(self) -> float:
         """Seconds since last fresh serial observation (used to gate broadcasting)."""
-        with self._lock:
-            if self.last_serial_s <= 0:
-                return 1e9
-            return time.time() - self.last_serial_s
+        if self.last_serial_s <= 0:
+            return 1e9
+        return time.monotonic() - self.last_serial_s
+
+    @property
+    def joint_en(self) -> np.ndarray:
+        """Joint enablement flags (12 elements)."""
+        return self._joint_en
+
+    @property
+    def cart_en_wrf(self) -> np.ndarray:
+        """Cartesian enablement flags in world reference frame (12 elements)."""
+        return self._cart_en_wrf
+
+    @property
+    def cart_en_trf(self) -> np.ndarray:
+        """Cartesian enablement flags in tool reference frame (12 elements)."""
+        return self._cart_en_trf
 
 
 # Module-level singleton
@@ -283,3 +538,11 @@ def get_cache() -> StatusCache:
     if _status_cache is None:
         _status_cache = StatusCache()
     return _status_cache
+
+
+def close_cache() -> None:
+    """Shut down the global cache if it exists."""
+    global _status_cache
+    if _status_cache is not None:
+        _status_cache.close()
+        _status_cache = None

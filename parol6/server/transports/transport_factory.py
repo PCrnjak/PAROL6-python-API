@@ -3,7 +3,7 @@ Transport factory for creating appropriate transport instances.
 
 This module provides a factory pattern for creating transport instances
 based on configuration and environment. It automatically selects between
-real serial, mock serial, or other transport types.
+real serial or mock serial (inline simulation) transport types.
 """
 
 import logging
@@ -31,7 +31,8 @@ def is_simulation_mode() -> bool:
 def create_transport(
     transport_type: str | None = None,
     port: str | None = None,
-    baudrate: int = 2000000,
+    *,
+    baudrate: int,
     **kwargs: Any,
 ) -> SerialTransport | MockSerialTransport:
     """
@@ -60,13 +61,13 @@ def create_transport(
 
     # Create appropriate transport
     if transport_type == "mock":
-        logger.info("Creating MockSerialTransport for simulation")
+        logger.debug("Creating MockSerialTransport for simulation")
         transport: MockSerialTransport | SerialTransport = MockSerialTransport(
             port=port, baudrate=baudrate, **kwargs
         )
 
     elif transport_type == "serial":
-        logger.info(f"Creating SerialTransport for port: {port}")
+        logger.debug(f"Creating SerialTransport for port: {port}")
         transport = SerialTransport(port=port, baudrate=baudrate, **kwargs)
 
     else:
@@ -78,7 +79,8 @@ def create_transport(
 def create_and_connect_transport(
     transport_type: str | None = None,
     port: str | None = None,
-    baudrate: int = 2000000,
+    *,
+    baudrate: int,
     auto_find_port: bool = True,
     **kwargs: Any,
 ) -> SerialTransport | MockSerialTransport | None:
@@ -111,7 +113,7 @@ def create_and_connect_transport(
         # Try to load saved port
         port = get_com_port_with_fallback()
         if port:
-            logger.info(f"Using saved serial port: {port}")
+            logger.debug(f"Using saved serial port: {port}")
 
     # Create transport
     transport = create_transport(transport_type, port=port, baudrate=baudrate, **kwargs)

@@ -1,8 +1,8 @@
 """
 UDP transport implementation for PAROL6 controller.
 
-This module handles UDP socket communication, message parsing, and
-response handling for the controller's network interface.
+This module handles UDP socket communication using binary msgpack protocol
+for the controller's network interface.
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ class UDPTransport:
         self._running = False
         self._rx = bytearray(self.buffer_size)
         self._rxv = memoryview(self._rx)
+        # Pre-allocated buffer for poll_receive_all (avoids list allocation per call)
+        self._recv_all_buf: list[tuple[bytes, tuple[str, int]]] = []
 
     def create_socket(self) -> bool:
         """
@@ -55,9 +57,8 @@ class UDPTransport:
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            # Use blocking mode with short timeout for responsive shutdown
-            self.socket.setblocking(True)
-            self.socket.settimeout(0.25)
+            # Non-blocking mode for polling
+            self.socket.setblocking(False)
 
             # Allow address/port reuse for fast restarts
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -81,7 +82,7 @@ class UDPTransport:
                     time.sleep(_delay_s)
 
             self._running = True
-            logger.info(f"UDP socket created and bound to {self.ip}:{self.port}")
+            logger.debug(f"UDP socket created and bound to {self.ip}:{self.port}")
             return True
 
         except OSError as e:
@@ -100,43 +101,45 @@ class UDPTransport:
         if self.socket:
             try:
                 self.socket.close()
-                logger.info("UDP socket closed")
+                logger.debug("UDP socket closed")
             except Exception as e:
-                logger.error(f"Error closing UDP socket: {e}")
+                logger.debug(f"Error closing UDP socket: {e}")
             finally:
                 self.socket = None
 
-    def receive_one(self) -> tuple[str, tuple[str, int]] | None:
-        """
-        Blocking receive of a single datagram using recvfrom_into with a short timeout.
-        Returns (message_str, address) on success, or None on timeout/error.
-        """
+    def poll_receive(self) -> tuple[bytes, tuple[str, int]] | None:
+        """Non-blocking receive. Returns raw bytes and address, or None if no data."""
         if not self.socket or not self._running:
             return None
         try:
             nbytes, address = self.socket.recvfrom_into(self._rxv)
             if nbytes <= 0:
                 return None
-            try:
-                # Decode ASCII payload and trim only CR/LF to avoid extra copies
-                message_str = (
-                    self._rxv[:nbytes]
-                    .tobytes()
-                    .decode("ascii", errors="ignore")
-                    .rstrip("\r\n")
-                )
-            except Exception:
-                logger.warning(f"Failed to decode UDP datagram from {address}")
-                return None
-            return (message_str, address)
-        except TimeoutError:
+            # Return raw bytes - let caller decode via msgspec
+            return (bytes(self._rxv[:nbytes]), address)
+        except BlockingIOError:
             return None
         except OSError as e:
-            logger.error(f"Socket error receiving UDP message: {e}")
+            if e.errno in (11, 35):  # EAGAIN/EWOULDBLOCK
+                return None
+            if not self._running:
+                # Socket was closed under us during shutdown — expected.
+                return None
+            logger.error(f"Socket error in poll_receive: {e}")
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error in receive_one: {e}")
-            return None
+
+    def poll_receive_all(
+        self, max_count: int = 10
+    ) -> list[tuple[bytes, tuple[str, int]]]:
+        """Non-blocking batch receive up to max_count. Reuses internal buffer."""
+        # Returns the internal list directly; caller must consume before next call.
+        self._recv_all_buf.clear()
+        for _ in range(max_count):
+            msg = self.poll_receive()
+            if msg is None:
+                break
+            self._recv_all_buf.append(msg)
+        return self._recv_all_buf
 
     def drain_buffer(self) -> int:
         """
@@ -149,83 +152,49 @@ class UDPTransport:
             return 0
 
         drained_count = 0
-        original_timeout = None
-
         try:
-            # Temporarily switch to non-blocking mode
-            original_timeout = self.socket.gettimeout()
-            self.socket.setblocking(False)
-
-            # Read all pending messages until buffer is empty
+            # Socket is already non-blocking; read all pending messages
             while True:
                 try:
                     nbytes, _ = self.socket.recvfrom_into(self._rxv)
                     if nbytes > 0:
                         drained_count += 1
-                except OSError:
+                except (BlockingIOError, OSError):
                     # No more data available (expected)
                     break
-
-            # Restore original timeout
-            self.socket.settimeout(original_timeout)
-
         except Exception as e:
-            logger.error(f"Error draining UDP buffer: {e}")
-            # Try to restore timeout even if draining failed
-            try:
-                if original_timeout is not None:
-                    self.socket.settimeout(original_timeout)
-            except Exception as e2:
-                logger.debug("Failed to restore UDP socket timeout: %s", e2)
+            logger.debug(f"Error draining UDP buffer: {e}")
 
         return drained_count
 
-    def send_response(self, message: str, address: tuple[str, int]) -> bool:
+    def send(self, data: bytes, address: tuple[str, int]) -> bool:
         """
-        Send a response message to a specific address.
+        Send raw bytes to a specific address.
 
         Args:
-            message: The message string to send
+            data: Pre-packed msgpack bytes to send
             address: Tuple of (ip, port) to send to
 
         Returns:
             True if successful, False otherwise
         """
         if not self.socket or not self._running:
-            logger.warning("Cannot send response - socket not available")
+            logger.warning("Cannot send - socket not available")
             return False
 
         try:
-            # Encode and send the message
-            data = message.encode("ascii")
             self.socket.sendto(data, address)
             return True
 
         except OSError as e:
-            logger.error(f"Socket error sending UDP response: {e}")
+            if not self._running:
+                # Socket was closed under us during shutdown — expected.
+                return False
+            logger.error(f"Socket error sending: {e}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error sending UDP response: {e}")
+            logger.error(f"Unexpected error sending: {e}")
             return False
-
-    def broadcast_message(self, message: str, addresses: list[tuple[str, int]]) -> int:
-        """
-        Broadcast a message to multiple addresses.
-
-        Args:
-            message: The message to broadcast
-            addresses: List of (ip, port) tuples to send to
-
-        Returns:
-            Number of successful sends
-        """
-        success_count = 0
-
-        for address in addresses:
-            if self.send_response(message, address):
-                success_count += 1
-
-        return success_count
 
     def is_running(self) -> bool:
         """
@@ -259,24 +228,3 @@ class UDPTransport:
                 logger.debug("Failed to get UDP sockname: %s", e)
 
         return info
-
-
-def create_udp_transport(
-    ip: str = "127.0.0.1", port: int = 5001
-) -> UDPTransport | None:
-    """
-    Factory function to create and initialize a UDP transport.
-
-    Args:
-        ip: IP address to bind to
-        port: Port number to listen on
-
-    Returns:
-        Initialized UDPTransport instance, or None if initialization failed
-    """
-    transport = UDPTransport(ip, port)
-
-    if transport.create_socket():
-        return transport
-    else:
-        return None

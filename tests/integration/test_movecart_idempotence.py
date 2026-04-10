@@ -1,42 +1,37 @@
 """
-Integration test for MoveCart idempotence.
+Integration test for MoveL idempotence.
 Verifies that moving to the current pose results in no motion (angular distance ≈ 0).
 """
-
-import os
-import sys
 
 import numpy as np
 import pytest
 
-# Add the parent directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 
 @pytest.mark.integration
-class TestMoveCartIdempotence:
-    """Test that MoveCart to current pose results in zero movement."""
+class TestMoveLIdempotence:
+    """Test that MoveL to current pose results in zero movement."""
 
-    def test_movecart_to_current_pose_no_rotation(self, client, server_proc):
+    def test_move_l_to_current_pose_no_rotation(self, client, server_proc):
         """Test that moving to the current pose results in no rotation."""
         # Home the robot first
-        assert client.home() is True
-        assert client.wait_until_stopped(timeout=15.0)
+        idx = client.home()
+        assert idx >= 0
+        assert client.wait_command(idx, timeout=15.0)
 
         # Get current pose (should be home position)
-        current_pose = client.get_pose_rpy()
+        current_pose = client.pose()
         print(f"\nCurrent pose at home (mm, deg): {current_pose}")
 
         # Move to the exact same pose - should result in zero angular distance
         # and effectively be a no-op
-        result = client.move_cartesian(current_pose, speed_percentage=50)
-        assert result is True
+        result = client.move_l(current_pose, speed=0.5)
+        assert result >= 0
 
         # Wait for completion (should be instant if duration is ~0)
-        assert client.wait_until_stopped(timeout=10.0)
+        assert client.wait_motion(timeout=10.0)
 
         # Get final pose
-        final_pose = client.get_pose_rpy()
+        final_pose = client.pose()
         print(f"Final pose after 'move to same' (mm, deg): {final_pose}")
 
         # Verify pose hasn't changed significantly
