@@ -2,13 +2,14 @@
 
 import atexit
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import numpy as np
 from numpy.typing import NDArray
-from pinokin import Robot
+from pinokin import CollisionChecker, Robot
 
 from parol6.tools import get_tool_transform
 
@@ -56,9 +57,82 @@ _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree)
 _urdf_path = str(
     Path(__file__).resolve().parent / "urdf_model" / "urdf" / "PAROL6.urdf"
 )
+_mesh_dir = str(Path(_urdf_path).resolve().parent.parent)
 
 # Current robot instance (tool transform applied in-place)
 robot: Robot = Robot(_urdf_path)
+
+# Self-collision checker bound to the same pinokin Robot. Lazy: only
+# constructed when collision checking is enabled and geometry loads
+# successfully. Treat None as "checks disabled" everywhere.
+collision: CollisionChecker | None = None
+
+
+def _resolved_urdf_for_collision() -> str:
+    """Return a path to a URDF with `package://parol6/...` rewritten to
+    absolute `file://` paths so pinokin's mesh loader can resolve them.
+
+    The PAROL6 URDF was authored for a ROS package layout (meshes at
+    `parol6/meshes/`) but the Python package places them at
+    `parol6/urdf_model/meshes/`. Rewriting at runtime keeps the source
+    URDF unchanged and avoids fragile symlink farms.
+
+    The rewritten file is created in the system temp dir on first call and
+    cleaned up at interpreter exit.
+    """
+    import tempfile
+
+    src = Path(_urdf_path)
+    text = src.read_text()
+    mesh_root = Path(_urdf_path).resolve().parent.parent / "meshes"
+    # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`
+    rewritten = text.replace(
+        "package://parol6/meshes/", f"file://{mesh_root}/"
+    )
+    fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(rewritten)
+
+    @atexit.register
+    def _cleanup_tmp_urdf() -> None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    return tmp_path
+
+
+def _init_collision_checker() -> None:
+    """Build the singleton CollisionChecker if enabled in config."""
+    global collision
+    # Late import so importing this module never crashes on a circular import
+    # with parol6.config.
+    from parol6.config import (
+        COLLISION_CHECK_ENABLED,
+        COLLISION_SRDF_PATH,
+    )
+
+    if not COLLISION_CHECK_ENABLED:
+        collision = None
+        return
+
+    try:
+        urdf_for_collision = _resolved_urdf_for_collision()
+        c = CollisionChecker(robot, urdf_for_collision, package_dirs=[_mesh_dir])
+        if COLLISION_SRDF_PATH and os.path.exists(COLLISION_SRDF_PATH):
+            c.load_srdf(COLLISION_SRDF_PATH)
+        collision = c
+        logger.info(
+            "Collision checker loaded: %d pairs, %d geometry objects",
+            c.num_collision_pairs,
+            c.num_geometry_objects,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Failed to initialize collision checker (continuing without): %s", e
+        )
+        collision = None
 
 
 def apply_tool(

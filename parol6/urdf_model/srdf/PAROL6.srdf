@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<!--
+  Semantic robot description for PAROL6. Lists self-collision pairs that
+  pinokin's CollisionChecker should ignore.
+
+  Adjacent (parent/child) pairs are already disabled by
+  CollisionChecker(remove_adjacent_pairs=True), so we don't list them.
+
+  Below are pairs that are physically impossible to collide given the link
+  geometry and joint limits in PAROL6.urdf. Tighten or relax this list
+  after running `colliding_pairs(q)` over a sampled workspace.
+-->
+<robot name="parol6">
+
+  <!-- The base is fixed; the wrist links cannot reach back to it given
+       J2/J3 limits (lower=-2.53/1.88 rad respectively). -->
+  <disable_collisions link1="base_link" link2="L4" reason="Never" />
+  <disable_collisions link1="base_link" link2="L5" reason="Never" />
+  <disable_collisions link1="base_link" link2="L6" reason="Never" />
+
+  <!-- L1 (shoulder) and the wrist (L5, L6) are kept apart by the upper
+       arm + forearm length. -->
+  <disable_collisions link1="L1" link2="L5" reason="Never" />
+  <disable_collisions link1="L1" link2="L6" reason="Never" />
+
+</robot>
