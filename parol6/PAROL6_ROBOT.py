@@ -86,9 +86,7 @@ def _resolved_urdf_for_collision() -> str:
     text = src.read_text()
     mesh_root = Path(_urdf_path).resolve().parent.parent / "meshes"
     # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`
-    rewritten = text.replace(
-        "package://parol6/meshes/", f"file://{mesh_root}/"
-    )
+    rewritten = text.replace("package://parol6/meshes/", f"file://{mesh_root}/")
     fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
     with os.fdopen(fd, "w") as f:
         f.write(rewritten)
