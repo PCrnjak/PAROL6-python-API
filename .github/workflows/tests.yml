@@ -31,33 +31,78 @@ jobs:
           pip install -e ".[dev]"
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.11', '3.12', '3.13', '3.14']
 
+    defaults:
+      run:
+        shell: bash -l {0}
+
     steps:
       - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Detect matching pinokin branch
+        id: pinokin
+        shell: bash
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          if git ls-remote --heads https://github.com/Jepson2k/pinokin.git "$BRANCH" 2>/dev/null | grep -q .; then
+            echo "matching=true" >> "$GITHUB_OUTPUT"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "matching=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ----------------------------------------------------------------------
+      # Path A: matching pinokin branch -> conda env (provides libpinocchio +
+      # libcoal headers/libs) so pinokin can be built from source. We install
+      # PAROL6 first (which pulls in the pinned pinokin v0.1.6 wheel) and
+      # then override pinokin with the source-built wheel from the matching
+      # branch. This is the only way to exercise unreleased pinokin features
+      # before a release lands.
+      # ----------------------------------------------------------------------
+      - name: Setup Miniforge (matching pinokin branch)
+        if: steps.pinokin.outputs.matching == 'true'
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: ${{ matrix.python-version }}
+          conda-remove-defaults: true
+          activate-environment: parol6-test
+
+      - name: Clone matching pinokin branch
+        if: steps.pinokin.outputs.matching == 'true'
+        run: |
+          git clone --depth=1 --branch="${{ steps.pinokin.outputs.branch }}" https://github.com/Jepson2k/pinokin.git pinokin-src
+          conda env update -n parol6-test -f pinokin-src/environment.yml
+
+      # ----------------------------------------------------------------------
+      # Path B: no matching pinokin branch -> plain pip with the pinned
+      # release wheel. Anything in PAROL6 that requires a newer pinokin
+      # feature will fail loudly here (intended).
+      # ----------------------------------------------------------------------
+      - name: Setup Python (pinned pinokin)
+        if: steps.pinokin.outputs.matching != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # ---- Common: waldoctl override + PAROL6 install ----
       - name: Install cross-repo dependencies
-        shell: bash
         run: |
           python -m pip install --upgrade pip
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-          # waldoctl: try matching branch, fall back to tagged version
           if git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
             pip install "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
           fi
@@ -65,6 +110,16 @@ jobs:
       - name: Install package
         run: |
           pip install -e ".[dev]" pytest-timeout
+
+      # Override the pinned pinokin v0.1.6 wheel with the matching-branch
+      # source build. --force-reinstall + --no-deps swaps just pinokin
+      # without disturbing other resolved dependencies.
+      - name: Override pinokin with matching-branch source build
+        if: steps.pinokin.outputs.matching == 'true'
+        run: |
+          cd pinokin-src
+          pip install . --no-build-isolation --force-reinstall --no-deps
+          python -c "from pinokin import CollisionChecker; print('CollisionChecker available')"
 
       - name: Show environment
         run: |
