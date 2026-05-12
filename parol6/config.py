@@ -570,10 +570,9 @@ IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
 # Pre-flight collision checks reject motion commands whose interpolated
 # joint path enters a self-colliding (or world-colliding) configuration.
 # Disable via env: PAROL6_COLLISION_CHECK=0
-COLLISION_CHECK_ENABLED: bool = (
-    os.getenv("PAROL6_COLLISION_CHECK", "1").strip().lower()
-    in ("1", "true", "yes", "on")
-)
+COLLISION_CHECK_ENABLED: bool = os.getenv(
+    "PAROL6_COLLISION_CHECK", "1"
+).strip().lower() in ("1", "true", "yes", "on")
 
 # Number of interior joint-space samples checked along an interpolated path.
 # Endpoints are always checked. 0 => endpoints only.

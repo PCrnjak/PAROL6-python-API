@@ -1,4 +1,4 @@
-"""Unified PAROL6 robot — lifecycle, configuration, kinematics, and factories.
+"""Unified PAROL6 robot - lifecycle, configuration, kinematics, and factories.
 
 Inherits from ``waldoctl.Robot`` ABC.
 All parol6-specific details (subprocess management, pinokin, IK solver, etc.)
@@ -509,7 +509,7 @@ def _resolve_mesh_dir() -> str:
 
 @dataclass
 class Parol6IKResult:
-    """IK result — structurally compatible with the web commander's IKResult Protocol."""
+    """IK result - structurally compatible with the web commander's IKResult Protocol."""
 
     q: NDArray[np.float64]  # radians
     success: bool
@@ -524,7 +524,7 @@ class Parol6IKResult:
 
 
 class Robot(_RobotABC):
-    """Unified PAROL6 robot — inherits from waldoctl.Robot ABC.
+    """Unified PAROL6 robot - inherits from waldoctl.Robot ABC.
 
     Combines identity, configuration, FK/IK kinematics, controller lifecycle,
     and client factories. Supports both sync and async context managers::
@@ -760,6 +760,7 @@ class Robot(_RobotABC):
     def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
         """Return True iff `q_rad` is in self/world collision. False if disabled."""
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
         if PAROL6_ROBOT.collision is None:
             return False
         self._load_q_buf(q_rad)
@@ -771,17 +772,17 @@ class Robot(_RobotABC):
         `q_path_rad` is (N, nq) joint positions in radians.
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
         if PAROL6_ROBOT.collision is None:
             return -1
         return PAROL6_ROBOT.collision.check_path(
             np.ascontiguousarray(q_path_rad, dtype=np.float64)
         )
 
-    def colliding_pairs(
-        self, q_rad: NDArray[np.float64]
-    ) -> list[tuple[int, int]]:
+    def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[int, int]]:
         """Return list of (i, j) geometry pairs in collision at `q_rad`."""
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
         if PAROL6_ROBOT.collision is None:
             return []
         self._load_q_buf(q_rad)
@@ -794,6 +795,7 @@ class Robot(_RobotABC):
         Returns +inf when collision checking is disabled.
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
         if PAROL6_ROBOT.collision is None:
             return float("inf")
         self._load_q_buf(q_rad)
