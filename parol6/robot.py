@@ -757,6 +757,48 @@ class Robot(_RobotABC):
             result[i, 5] = rpy[2]
         return result
 
+    def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
+        """Return True iff `q_rad` is in self/world collision. False if disabled."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        if PAROL6_ROBOT.collision is None:
+            return False
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.in_collision(self._q_buf)
+
+    def check_trajectory(self, q_path_rad: NDArray[np.float64]) -> int:
+        """Returns first colliding row index in `q_path_rad`, or -1 if clear.
+
+        `q_path_rad` is (N, nq) joint positions in radians.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        if PAROL6_ROBOT.collision is None:
+            return -1
+        return PAROL6_ROBOT.collision.check_path(
+            np.ascontiguousarray(q_path_rad, dtype=np.float64)
+        )
+
+    def colliding_pairs(
+        self, q_rad: NDArray[np.float64]
+    ) -> list[tuple[int, int]]:
+        """Return list of (i, j) geometry pairs in collision at `q_rad`."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        if PAROL6_ROBOT.collision is None:
+            return []
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.colliding_pairs(self._q_buf)
+
+    def min_distance(self, q_rad: NDArray[np.float64]) -> float:
+        """Return the minimum clearance over all active pairs at `q_rad`.
+
+        Positive => separation; negative => penetration depth.
+        Returns +inf when collision checking is disabled.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        if PAROL6_ROBOT.collision is None:
+            return float("inf")
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.min_distance(self._q_buf)
+
     def ik_batch(
         self,
         poses: NDArray[np.float64],
