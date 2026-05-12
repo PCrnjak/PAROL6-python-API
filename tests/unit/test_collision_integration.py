@@ -19,19 +19,30 @@ from parol6.commands._collision_guard import guard_joint_path
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import MotionError
 
+# Released pinokin v0.1.6 lacks CollisionChecker; everything end-to-end on it
+# degrades to None. Skip the integration tests in that case rather than fail
+# them - the unit-level guard tests below still exercise the PAROL6 wiring.
+needs_collision = pytest.mark.skipif(
+    PAROL6_ROBOT.CollisionChecker is None,
+    reason="installed pinokin lacks CollisionChecker (need >= 0.1.7)",
+)
 
+
+@needs_collision
 def test_singleton_checker_initialized():
     assert PAROL6_ROBOT.collision is not None
     assert PAROL6_ROBOT.collision.num_geometry_objects > 0
     assert PAROL6_ROBOT.collision.num_collision_pairs > 0
 
 
+@needs_collision
 def test_srdf_disabled_pairs_reduce_pair_count():
-    # Without SRDF: 7 link geometries → 21 pairs minus 6 parent/child adjacent = 15.
-    # The bundled SRDF disables 5 more pairs (base↔L4/L5/L6 + L1↔L5/L6).
+    # Without SRDF: 7 link geometries -> 21 pairs minus 6 parent/child adjacent = 15.
+    # The bundled SRDF disables 5 more pairs (base<->L4/L5/L6 + L1<->L5/L6).
     assert PAROL6_ROBOT.collision.num_collision_pairs == 10
 
 
+@needs_collision
 def test_home_is_clear():
     q = np.zeros(PAROL6_ROBOT.robot.nq)
     assert PAROL6_ROBOT.collision.in_collision(q) is False
@@ -46,6 +57,7 @@ def test_robot_in_collision_method():
         del r
 
 
+@needs_collision
 def test_robot_min_distance_positive_at_home():
     r = Robot()
     try:
@@ -59,7 +71,7 @@ def test_robot_min_distance_positive_at_home():
 def test_robot_check_trajectory_clear():
     r = Robot()
     try:
-        # Tiny perturbation around home — definitely clear.
+        # Tiny perturbation around home - definitely clear.
         q_path = np.linspace(np.zeros(6), 0.01 * np.ones(6), 5)
         assert r.check_trajectory(q_path) == -1
     finally:
