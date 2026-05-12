@@ -165,6 +165,12 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Profile not changed.",
         remedy="Use one of: TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR.",
     ),
+    ErrorCode.SYS_SELF_COLLISION: _ErrorTemplate(
+        title="Self-collision predicted",
+        cause="Planned configuration would self-collide at sample {sample}/{total}: pairs={pairs}",
+        effect="Motion command rejected before dispatch.",
+        remedy="Choose a different target, add intermediate waypoints, or disable via PAROL6_COLLISION_CHECK=0.",
+    ),
 }
 
 

@@ -86,6 +86,8 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         current_rad = self._q_rad_buf
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
+        from parol6.commands._collision_guard import guard_joint_path
+        guard_joint_path(joint_path.positions)
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=state.motion_profile,
@@ -194,6 +196,8 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
             return 0
 
         joint_path = JointPath(positions=positions)
+        from parol6.commands._collision_guard import guard_joint_path
+        guard_joint_path(joint_path.positions)
 
         # Use minimum speed/accel across chain, sum durations when all duration-based
         min_speed = self.p.resolved_speed
