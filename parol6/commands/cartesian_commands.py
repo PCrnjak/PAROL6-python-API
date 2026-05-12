@@ -217,9 +217,8 @@ class JogLCommand(MotionCommand[JogLCmd]):
         # Self-collision predicted at next streamed config? Mirror the
         # IK-failure graceful-stop pathway: decelerate via cse.stop() rather
         # than raising mid-jog. Operator regains control after smoothing.
-        if (
-            PAROL6_ROBOT.collision is not None
-            and PAROL6_ROBOT.collision.in_collision(ik_result.q)
+        if PAROL6_ROBOT.collision is not None and PAROL6_ROBOT.collision.in_collision(
+            ik_result.q
         ):
             if not self._ik_stopping:
                 _ik_warn(
@@ -303,6 +302,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
 
         if not joint_path.is_partial:
             from parol6.commands._collision_guard import guard_joint_path
+
             guard_joint_path(joint_path.positions)
 
         if joint_path.is_partial:
@@ -351,7 +351,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         )
 
     def _compute_target_pose(self, state: "ControllerState") -> None:
-        """Compute target pose — absolute or relative based on rel flag."""
+        """Compute target pose - absolute or relative based on rel flag."""
         pose = self.p.pose
 
         if self.p.rel:
@@ -464,6 +464,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             return 0
 
         from parol6.commands._collision_guard import guard_joint_path
+
         guard_joint_path(joint_path.positions)
 
         # Use minimum speed/accel across chain, sum durations when all duration-based
