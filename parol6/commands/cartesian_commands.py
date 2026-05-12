@@ -214,6 +214,22 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
 
+        # Self-collision predicted at next streamed config? Mirror the
+        # IK-failure graceful-stop pathway: decelerate via cse.stop() rather
+        # than raising mid-jog. Operator regains control after smoothing.
+        if (
+            PAROL6_ROBOT.collision is not None
+            and PAROL6_ROBOT.collision.in_collision(ik_result.q)
+        ):
+            if not self._ik_stopping:
+                _ik_warn(
+                    logger,
+                    "[CARTJOG] self-collision predicted - initiating stop",
+                )
+                cse.stop()
+                self._ik_stopping = True
+            return ExecutionStatusCode.EXECUTING
+
         # IK succeeded - if we were stopping, recover by resuming jogging
         if self._ik_stopping:
             logger.info("[CARTJOG] IK recovered - resuming jog")
@@ -284,6 +300,10 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             current_rad,
             stop_on_failure=stop_on_failure,
         )
+
+        if not joint_path.is_partial:
+            from parol6.commands._collision_guard import guard_joint_path
+            guard_joint_path(joint_path.positions)
 
         if joint_path.is_partial:
             ik_valid = joint_path.valid
@@ -442,6 +462,9 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             )
             self.do_setup(state)
             return 0
+
+        from parol6.commands._collision_guard import guard_joint_path
+        guard_joint_path(joint_path.positions)
 
         # Use minimum speed/accel across chain, sum durations when all duration-based
         min_speed = self.p.resolved_speed
