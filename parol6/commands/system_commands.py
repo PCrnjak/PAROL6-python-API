@@ -11,7 +11,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from parol6.commands.base import ExecutionStatusCode, SystemCommand
+from parol6.commands.base import ExecutionStatusCode, MotionCommand, SystemCommand
 from parol6.config import save_com_port
 from parol6.protocol.wire import (
     CmdType,
@@ -180,8 +180,14 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
 
 
 @register_command(CmdType.SET_TCP_OFFSET)
-class SetTcpOffsetCommand(SystemCommand[SetTcpOffsetCmd]):
-    """Set the TCP offset in the tool's local frame."""
+class SetTcpOffsetCommand(MotionCommand[SetTcpOffsetCmd]):
+    """Set the TCP offset in the tool's local frame.
+
+    Routed through the planner (like SELECT_TOOL) so the planner subprocess
+    updates its own robot model — otherwise subsequent trajectory IK would
+    compute against the old TCP and rotations would pivot around the flange
+    instead of the offset point.
+    """
 
     PARAMS_TYPE = SetTcpOffsetCmd
 

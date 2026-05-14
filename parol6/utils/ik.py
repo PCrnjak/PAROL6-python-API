@@ -86,7 +86,7 @@ def _ensure_cache(robot: Robot) -> None:
         damping=_Damping.Sugihara,
         tol=1e-12,
         lm_lambda=0.0,
-        max_iter=10,
+        max_iter=20,
         max_restarts=10,
     )
     _cached_buffered_min = qlim[0, :] + IK_SAFETY_MARGINS_RAD[:, 0]

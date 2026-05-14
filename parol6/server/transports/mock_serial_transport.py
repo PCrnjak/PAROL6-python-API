@@ -550,8 +550,15 @@ class MockSerialTransport:
         if not self._connected:
             return
 
+        # Use the controller's fixed control interval rather than wallclock
+        # dt so the simulator behaves like the firmware (which reads encoders
+        # on its own fixed-rate timer). Wallclock dt inherits the host's
+        # scheduling jitter, which causes the simulator to under- or
+        # over-advance Position_in around slow ticks — visible as ghost
+        # spikes in recorded velocities even though the commanded trajectory
+        # is bit-identical across runs.
         now = time.perf_counter()
-        dt = now - self._state.last_update
+        dt = cfg.INTERVAL_S
         self._state.last_update = now
 
         # Snap gripper position if teleport requested

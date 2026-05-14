@@ -33,6 +33,7 @@ from parol6.motion.streaming_executors import (
     _pose_to_tangent_jit,
     _tangent_to_pose_jit,
 )
+from parol6.motion.trajectory import _smooth_singularity_outliers
 from parol6.protocol.wire import (
     _pack_bitfield,
     _pack_positions,
@@ -294,6 +295,14 @@ def warmup_jit() -> float:
 
     # parol6/commands/servo_commands.py
     _max_vel_ratio_jit(dummy_6f, dummy_6f)
+
+    # parol6/motion/trajectory.py — non-trivial array exercises every branch
+    # (diff loop, median, bad-detection, interp loop).
+    dummy_chain = np.zeros((10, 6), dtype=np.float64)
+    for i in range(10):
+        dummy_chain[i] = i * 0.01
+    dummy_chain[5, 3] += 1.0  # synthetic outlier so the interp loop compiles
+    _smooth_singularity_outliers(dummy_chain)
 
     elapsed = time.perf_counter() - start
     logger.info(f"\tJIT warmup completed in {elapsed * 1000:.1f}ms")

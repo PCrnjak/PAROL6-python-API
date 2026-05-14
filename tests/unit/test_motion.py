@@ -5,6 +5,11 @@ import pytest
 
 from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import JointPath, ProfileType, Trajectory, TrajectoryBuilder
+from parol6.motion.trajectory import (
+    _IK_OUTLIER_PADDING,
+    _IK_OUTLIER_RATIO,
+    _smooth_singularity_outliers,
+)
 
 
 class TestJointPath:
@@ -231,3 +236,128 @@ class TestTrajectory:
         assert np.array_equal(traj[0], steps[0])
         assert np.array_equal(traj[5], steps[5])
         assert np.array_equal(traj[-1], steps[-1])
+
+
+class TestSmoothSingularityOutliers:
+    """Tests for _smooth_singularity_outliers: LM-IK branch-hop repair."""
+
+    @staticmethod
+    def _smooth_chain(n: int = 40, step: float = 0.01) -> np.ndarray:
+        """A 6-DOF chain with uniform per-sample step magnitude."""
+        positions = np.zeros((n, 6), dtype=np.float64)
+        for i in range(n):
+            positions[i] = i * step
+        return positions
+
+    def test_smooth_path_unchanged(self):
+        positions = self._smooth_chain()
+        original = positions.copy()
+        n = _smooth_singularity_outliers(positions)
+        assert n == 0
+        assert np.array_equal(positions, original)
+
+    def test_single_sample_hop_is_smoothed(self):
+        """One outlier sample fires bad-flags on both neighbors (both adjacent
+        diffs are large) → run of 3, plus pad on each side → 2*pad+3 patched."""
+        positions = self._smooth_chain(n=40)
+        bad_idx = 20
+        positions[bad_idx, 3] += 5.0  # 5 rad J4 jump — well past 10× median
+
+        n_patched = _smooth_singularity_outliers(positions)
+        assert n_patched == 2 * _IK_OUTLIER_PADDING + 3
+        # The outlier is gone; uniform-step chain interpolates exactly.
+        assert positions[bad_idx, 3] == pytest.approx(bad_idx * 0.01, abs=1e-9)
+        # Samples just outside the patched window are untouched.
+        outside_lo = bad_idx - 1 - _IK_OUTLIER_PADDING - 1
+        outside_hi = bad_idx + 1 + _IK_OUTLIER_PADDING
+        assert positions[outside_lo, 3] == pytest.approx(outside_lo * 0.01)
+        assert positions[outside_hi, 3] == pytest.approx(outside_hi * 0.01)
+
+    def test_multi_sample_run_is_smoothed(self):
+        """Wide hop with monotonically rising outliers → each step is large,
+        so the whole shelf forms one contiguous bad run."""
+        positions = self._smooth_chain(n=40)
+        # Use increasing magnitudes so every adjacent diff exceeds threshold.
+        positions[20, 3] += 4.0
+        positions[21, 3] += 8.0
+        positions[22, 3] += 12.0
+
+        n_patched = _smooth_singularity_outliers(positions)
+        # Bad samples: {19, 20, 21, 22, 23} → run [19, 24).
+        # Patched: [max(1,19-pad), min(n-1,23+pad)+1) = [15, 28) → 13.
+        assert n_patched == 5 + 2 * _IK_OUTLIER_PADDING
+        # All run samples land back on the chain.
+        for k in (20, 21, 22):
+            assert positions[k, 3] == pytest.approx(k * 0.01, abs=1e-9)
+
+    def test_outlier_near_start_clamps_padding(self):
+        """Padding clamps at the array boundary; bookend at index 0."""
+        positions = self._smooth_chain(n=40)
+        positions[2, 3] += 5.0
+        original_first = positions[0].copy()
+        original_last = positions[-1].copy()
+
+        _smooth_singularity_outliers(positions)
+        assert positions[2, 3] == pytest.approx(2 * 0.01, abs=1e-9)
+        # Endpoints must never be modified.
+        assert np.array_equal(positions[0], original_first)
+        assert np.array_equal(positions[-1], original_last)
+
+    def test_outlier_near_end_clamps_padding(self):
+        positions = self._smooth_chain(n=40)
+        positions[-3, 3] += 5.0
+        original_first = positions[0].copy()
+        original_last = positions[-1].copy()
+
+        _smooth_singularity_outliers(positions)
+        assert positions[-3, 3] == pytest.approx((40 - 3) * 0.01, abs=1e-9)
+        assert np.array_equal(positions[0], original_first)
+        assert np.array_equal(positions[-1], original_last)
+
+    def test_short_path_is_noop(self):
+        for n in (0, 1, 2):
+            positions = np.zeros((n, 6), dtype=np.float64)
+            assert _smooth_singularity_outliers(positions) == 0
+
+    def test_zero_motion_is_noop(self):
+        """Median step = 0 → can't form a ratio threshold; bail."""
+        positions = np.zeros((20, 6), dtype=np.float64)
+        positions[10, 3] = 5.0  # would-be outlier but median is 0
+        n = _smooth_singularity_outliers(positions)
+        assert n == 0
+        assert positions[10, 3] == 5.0
+
+    def test_below_threshold_step_not_smoothed(self):
+        """Steps within `_IK_OUTLIER_RATIO`× median are normal motion, not hops."""
+        positions = self._smooth_chain(n=40)
+        # Bump one sample by ~5× the median step — should NOT trigger.
+        positions[20, 3] += 5 * 0.01
+        original = positions.copy()
+        n = _smooth_singularity_outliers(positions)
+        assert n == 0
+        assert np.array_equal(positions, original)
+
+    def test_threshold_exactly_at_ratio_not_smoothed(self):
+        """Strict > comparison: step == threshold is NOT an outlier."""
+        positions = self._smooth_chain(n=40)
+        # Each step ~ sqrt(6) * 0.01; bump just at the threshold boundary.
+        median_step = np.sqrt(6) * 0.01
+        # Add exactly ratio * median to one component so the step magnitude
+        # is just over the legitimate motion but well within tolerance.
+        positions[20, 3] += _IK_OUTLIER_RATIO * median_step - 0.5 * median_step
+        n = _smooth_singularity_outliers(positions)
+        assert n == 0
+
+    def test_repair_preserves_endpoints(self):
+        """No matter where the hop is, positions[0] and positions[-1] are
+        always exactly preserved (they're the IK seed and final target)."""
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            positions = self._smooth_chain(n=50)
+            hop_idx = int(rng.integers(2, 48))
+            positions[hop_idx, rng.integers(0, 6)] += rng.uniform(2.0, 8.0)
+            first = positions[0].copy()
+            last = positions[-1].copy()
+            _smooth_singularity_outliers(positions)
+            assert np.array_equal(positions[0], first)
+            assert np.array_equal(positions[-1], last)

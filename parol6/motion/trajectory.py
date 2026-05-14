@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
 
@@ -97,6 +98,71 @@ class ProfileType(Enum):
         except KeyError:
             logger.warning("Unknown profile type '%s', using TOPPRA", name)
             return cls.TOPPRA
+
+
+# Step is anomalous if its magnitude exceeds this multiple of the chain's
+# median step. Relative threshold keeps the rule invariant to sample density,
+# speed, and move type. Insensitive in [10, 20+]; real LM hops exceed 20×.
+_IK_OUTLIER_RATIO: float = 10.0
+
+# Symmetric padding around each outlier run; absorbs LM seed-bleed into the
+# samples just after the hop. FK deviation scales linearly with pad.
+_IK_OUTLIER_PADDING: int = 4
+
+
+@njit(cache=True)
+def _smooth_singularity_outliers(positions: NDArray[np.float64]) -> int:
+    """In-place repair of LM-IK branch hops near wrist singularities.
+
+    pinokin's LM picks IK solutions without a continuity preference, so at
+    J5 ≈ 0 it can jump several degrees off the natural chain in one or two
+    samples. Detected as steps > _IK_OUTLIER_RATIO × the chain's median
+    step; replaced by linear interpolation over the run plus padding.
+    """
+    n = positions.shape[0]
+    dims = positions.shape[1]
+    if n < 3:
+        return 0
+
+    diffs = np.empty(n - 1)
+    for i in range(n - 1):
+        s = 0.0
+        for c in range(dims):
+            v = positions[i + 1, c] - positions[i, c]
+            s += v * v
+        diffs[i] = np.sqrt(s)
+
+    median_step = np.median(diffs)
+    if median_step == 0.0:
+        return 0
+    threshold = _IK_OUTLIER_RATIO * median_step
+
+    n_patched = 0
+    i = 1
+    while i < n - 1:
+        if diffs[i - 1] <= threshold and diffs[i] <= threshold:
+            i += 1
+            continue
+        j = i
+        while j < n - 1 and (diffs[j - 1] > threshold or diffs[j] > threshold):
+            j += 1
+        lo = i - _IK_OUTLIER_PADDING
+        if lo < 1:
+            lo = 1
+        hi = j + _IK_OUTLIER_PADDING
+        if hi > n - 1:
+            hi = n - 1
+        span = hi - (lo - 1)
+        inv_span = 1.0 / span
+        for k in range(lo, hi):
+            alpha = (k - (lo - 1)) * inv_span
+            for c in range(dims):
+                positions[k, c] = positions[lo - 1, c] + alpha * (
+                    positions[hi, c] - positions[lo - 1, c]
+                )
+            n_patched += 1
+        i = hi + 1
+    return n_patched
 
 
 @dataclass
@@ -190,7 +256,9 @@ class JointPath:
         )
 
         if result.all_valid:
-            return cls(positions=result.joint_positions)
+            positions = np.asarray(result.joint_positions, dtype=np.float64)
+            _smooth_singularity_outliers(positions)
+            return cls(positions=positions)
 
         valid = np.array(result.valid, dtype=np.bool_)
         # Count consecutive valid from start

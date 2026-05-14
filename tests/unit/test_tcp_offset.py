@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from parol6.protocol.wire import SetTcpOffsetCmd, TcpOffsetResultStruct
+from parol6.protocol.wire import SelectToolCmd, SetTcpOffsetCmd, TcpOffsetResultStruct
 
 
 # ── Wire round-trip ──────────────────────────────────────────────────────
@@ -96,3 +96,40 @@ def test_dry_run_select_tool_resets_tcp_offset():
     # Selecting a tool resets offset
     client.select_tool("SSG-48")
     assert client.tcp_offset() == [0.0, 0.0, 0.0]
+
+
+# ── Planner routing (regression: SetTcpOffsetCmd must reach the planner) ──
+
+
+def test_set_tcp_offset_command_is_motion_command():
+    """SetTcpOffsetCommand must inherit from MotionCommand, not SystemCommand.
+
+    SystemCommands execute in the controller process and bypass the planner
+    subprocess. If SetTcpOffsetCommand is a SystemCommand, the planner's
+    own robot model never sees the offset, so subsequent trajectory IK
+    runs against the stale TCP — TRF rotations end up pivoting around the
+    flange instead of the offset point.
+    """
+    from parol6.commands.base import MotionCommand, SystemCommand
+    from parol6.commands.system_commands import SetTcpOffsetCommand
+
+    assert issubclass(SetTcpOffsetCommand, MotionCommand)
+    assert not issubclass(SetTcpOffsetCommand, SystemCommand)
+
+
+def test_planner_updates_state_on_set_tcp_offset():
+    """TrajectoryPlanner.process(SetTcpOffsetCmd) must update planner state
+    so subsequent move_l calls use the new TCP for IK.
+    """
+    import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+    from parol6.server.motion_planner import TrajectoryPlanner
+
+    planner = TrajectoryPlanner()
+    planner.process(SelectToolCmd(tool_name="SSG-48", variant_key=""))
+    assert planner.state.tcp_offset_m == (0.0, 0.0, 0.0)
+
+    planner.process(SetTcpOffsetCmd(x=0.0, y=0.0, z=-190.0))
+    assert planner.state.tcp_offset_m == (0.0, 0.0, -0.190)
+
+    # Cleanup global robot state mutated by apply_tool
+    PAROL6_ROBOT.apply_tool("NONE")

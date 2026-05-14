@@ -121,7 +121,7 @@ with Robot(host=HOST, port=PORT, normalize_logs=True) as robot:
     rbt.move_j(pose=PRECISION_POSE, speed=0.3, wait=True)
 
     # Offset TCP to pencil tip (~100mm exposed below gripper)
-    rbt.set_tcp_offset(-100, 0, 0)
+    rbt.set_tcp_offset(0, 0, -100)
 
     # Pencil tip traces straight lines (linear precision demo)
     # Forward/back (tool Z = world -Y at this pose)

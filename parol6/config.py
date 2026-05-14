@@ -48,8 +48,11 @@ DEFAULT_ACCEL_PERCENT: float = 100.0
 NEAR_MM_TOL_MM: float = 2.0  # Proximity threshold for considering positions "near" (mm)
 ENTRY_MM_TOL_MM: float = 5.0  # Entry trajectory threshold for smooth motion (mm)
 
-# Trajectory path sampling (fixed samples for TOPP-RA input)
-PATH_SAMPLES: int = int(os.getenv("PAROL6_PATH_SAMPLES", "50"))
+# Trajectory path sampling (IK waypoints fed to TOPP-RA's piecewise-linear path).
+# 200 halves per-tick acceleration jitter on the wrist relative to the old 50,
+# converging by ~500. Higher values cost one extra IK solve per sample at
+# trajectory build time.
+PATH_SAMPLES: int = int(os.getenv("PAROL6_PATH_SAMPLES", "200"))
 
 # Centralized loop interval (seconds).
 INTERVAL_S: float = max(1e-6, 1.0 / max(CONTROL_RATE_HZ, 1.0))

@@ -29,7 +29,7 @@ def test_pose_identity_translation(monkeypatch):
     result = _pose_result(mat)
 
     mock_request = AsyncMock(return_value=result)
-    monkeypatch.setattr(client.async_client, "_request", mock_request)
+    monkeypatch.setattr(client._inner, "_request", mock_request)
 
     pose_rpy = client.pose()
     assert pose_rpy is not None
@@ -49,7 +49,7 @@ def test_pose_malformed_payload(monkeypatch):
     client = RobotClient()
 
     mock_request = AsyncMock(return_value=PoseResultStruct(pose=[1, 2, 3]))
-    monkeypatch.setattr(client.async_client, "_request", mock_request)
+    monkeypatch.setattr(client._inner, "_request", mock_request)
 
     pose_rpy = client.pose()
     assert pose_rpy is None

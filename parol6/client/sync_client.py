@@ -102,7 +102,7 @@ def _run(coro: Coroutine[Any, Any, T]) -> T:
     # A loop is running in this thread; blocking would be unsafe.
     raise RuntimeError(
         "RobotClient was used while an event loop is running.\n"
-        "Use AsyncRobotClient and `await` the method instead."
+        "Construct an AsyncRobotClient in this loop and `await` it instead."
     )
 
 
@@ -165,11 +165,6 @@ class RobotClient:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
-
-    @property
-    def async_client(self) -> AsyncRobotClient:
-        """Access the underlying async client if you need it."""
-        return self._inner
 
     # Expose common configuration attributes
     @property

@@ -198,3 +198,49 @@ class TestElectricGripperConfigSpecs:
         travel_mm = motion.travel_m * 1000.0
         tick_range = (travel_mm / (math.pi * cfg.gear_pd_mm)) * cfg.encoder_cpr
         assert tick_range == pytest.approx(8_353, rel=0.02)
+
+
+class TestElectricGripperStallCompletion:
+    """Regression: stall detection must complete the command without releasing
+    the grip (move_active stays set), so the firmware keeps applying motor
+    force on the grasped object and the item doesn't slip out.
+    """
+
+    def test_stall_completes_and_keeps_grip_pressure(self):
+        from parol6.commands.base import ExecutionStatusCode
+        from parol6.commands.gripper_commands import (
+            ElectricGripperCommand,
+            ElectricGripperParams,
+        )
+        from parol6.server.state import ControllerState
+
+        state = ControllerState()
+        cmd = ElectricGripperCommand(
+            ElectricGripperParams(action="move", position=1.0, speed=0.5, current=500)
+        )
+        cmd.do_setup(state)
+
+        # Hold feedback_position at a value far from target_position=255 so
+        # neither the position-match (≤5) nor object-detection paths can
+        # complete first — only stall detection should fire.
+        state.Gripper_data_in[1] = 100
+
+        # Budget well above grace (10) + stall window (20).
+        max_ticks = 60
+        code = ExecutionStatusCode.EXECUTING
+        for _ in range(max_ticks):
+            code = cmd.execute_step(state)
+            if code == ExecutionStatusCode.COMPLETED:
+                break
+
+        assert code == ExecutionStatusCode.COMPLETED, (
+            "stall detection failed to complete the command within "
+            f"{max_ticks} ticks while feedback_position was held at 100"
+        )
+
+        # The MOVE_ACTIVE bit (0x40) must remain set after stall completion
+        # so the firmware keeps motor force on the grasped object.
+        assert state.gripper_hw.command_bits & 0x40, (
+            "move_active bit must stay set after stall completion to maintain "
+            f"grip pressure; got command_bits=0x{state.gripper_hw.command_bits:02x}"
+        )

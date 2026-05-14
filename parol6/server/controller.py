@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -407,9 +407,10 @@ class Controller:
                 type(self._tool_cmd).__name__,
                 self._tool_cmd.robot_error,
             )
-            state.error = self._tool_cmd.robot_error or make_error(
+            raw_error = self._tool_cmd.robot_error or make_error(
                 ErrorCode.MOTN_TICK_FAILED, detail=type(self._tool_cmd).__name__
             )
+            state.error = replace(raw_error, command_index=self._tool_cmd_index)
             state.action_state = ActionState.ERROR
             state.completed_command_index = max(
                 state.completed_command_index, self._tool_cmd_index
@@ -696,6 +697,11 @@ class Controller:
         # Tool actions bypass planner — execute directly via side channel
         # (writes to gripper_hw, not Position_out, so concurrent with everything)
         if isinstance(command.p, ToolActionCmd):
+            # Clear error state from previous failure (same as non-streaming path)
+            if state.error is not None:
+                state.error = None
+                state.action_state = ActionState.IDLE
+
             cmd_obj, _, error_msg = create_command_from_struct(command.p)
             if cmd_obj is None:
                 logger.error("Failed to create tool command: %s", error_msg)
