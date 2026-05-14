@@ -167,7 +167,7 @@ _CATALOG: dict[int, _ErrorTemplate] = {
     ),
     ErrorCode.SYS_SELF_COLLISION: _ErrorTemplate(
         title="Self-collision predicted",
-        cause="Planned configuration would self-collide at sample {sample}/{total}: pairs={pairs}",
+        cause="Planned configuration would self-collide at sample {sample} of {total}: {pairs}",
         effect="Motion command rejected before dispatch.",
         remedy="Choose a different target, add intermediate waypoints, or disable via PAROL6_COLLISION_CHECK=0.",
     ),
