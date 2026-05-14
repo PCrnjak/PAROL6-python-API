@@ -18,6 +18,22 @@ from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import MotionError
 
 
+def _format_pairs(pairs: list[tuple[str, str]]) -> str:
+    """Render colliding (name, name) pairs as a human-readable string.
+
+    Caps at 4 to keep error messages tractable when many pairs collide
+    simultaneously (rare in practice; usually the first one is the
+    actionable one anyway).
+    """
+    if not pairs:
+        return "?"
+    head = pairs[:4]
+    rendered = ", ".join(f"{a} vs {b}" for a, b in head)
+    if len(pairs) > 4:
+        rendered += f" (+{len(pairs) - 4} more)"
+    return rendered
+
+
 def guard_config(q: NDArray[np.float64]) -> None:
     """Raise MotionError if q is in collision. No-op if checker disabled."""
     checker = PAROL6_ROBOT.collision
@@ -31,7 +47,7 @@ def guard_config(q: NDArray[np.float64]) -> None:
                 ErrorCode.SYS_SELF_COLLISION,
                 sample="target",
                 total="1",
-                pairs=str(pairs[:4]),
+                pairs=_format_pairs(pairs),
             )
         )
 
@@ -75,6 +91,6 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
                 ErrorCode.SYS_SELF_COLLISION,
                 sample=str(sample),
                 total=str(n),
-                pairs=str(pairs[:4]),
+                pairs=_format_pairs(pairs),
             )
         )

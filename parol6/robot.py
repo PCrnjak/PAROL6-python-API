@@ -682,6 +682,11 @@ class Robot(_RobotABC):
         *tcp_offset_m*: optional (x, y, z) user offset in meters, composed
         on top of the tool's registered transform.
         *variant_key*: optional variant whose TCP overrides the tool default.
+
+        Note: this mutates the per-instance pinokin Robot, not the global
+        `PAROL6_ROBOT.collision` scene. Server-side tool changes route
+        through `PAROL6_ROBOT.apply_tool`, which is where collision-mesh
+        attachment is wired.
         """
         from parol6.tools import get_tool_transform
 
@@ -779,8 +784,13 @@ class Robot(_RobotABC):
             np.ascontiguousarray(q_path_rad, dtype=np.float64)
         )
 
-    def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[int, int]]:
-        """Return list of (i, j) geometry pairs in collision at `q_rad`."""
+    def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[str, str]]:
+        """Return list of (name, name) geometry pairs in collision at `q_rad`.
+
+        Names are URDF link names for arm geometry (e.g. ``"L4_0"``) and
+        the user-supplied name for runtime-attached geometry (e.g.
+        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh).
+        """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
         if PAROL6_ROBOT.collision is None:

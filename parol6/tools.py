@@ -444,9 +444,13 @@ register_tool(
 # ---------------------------------------------------------------------------
 
 _PNEUMATIC_VERTICAL_MESHES = (
-    MeshSpec(file="pneumatic_gripper_vertical_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="pneumatic_gripper_vertical_right_jaw.stl", role=MeshRole.JAW),
-    MeshSpec(file="pneumatic_gripper_vertical_left_jaw.stl", role=MeshRole.JAW),
+    MeshSpec(file="pneumatic_gripper_vertical_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(
+        file="pneumatic_gripper_vertical_right_jaw_simplified.stl", role=MeshRole.JAW
+    ),
+    MeshSpec(
+        file="pneumatic_gripper_vertical_left_jaw_simplified.stl", role=MeshRole.JAW
+    ),
 )
 _PNEUMATIC_VERTICAL_MOTION = (
     LinearMotion(
@@ -460,9 +464,15 @@ _PNEUMATIC_VERTICAL_MOTION = (
 )
 
 _PNEUMATIC_HORIZONTAL_MESHES = (
-    MeshSpec(file="pneumatic_gripper_horizontal_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="pneumatic_gripper_horizontal_right_jaw.stl", role=MeshRole.JAW),
-    MeshSpec(file="pneumatic_gripper_horizontal_left_jaw.stl", role=MeshRole.JAW),
+    MeshSpec(
+        file="pneumatic_gripper_horizontal_body_simplified.stl", role=MeshRole.BODY
+    ),
+    MeshSpec(
+        file="pneumatic_gripper_horizontal_right_jaw_simplified.stl", role=MeshRole.JAW
+    ),
+    MeshSpec(
+        file="pneumatic_gripper_horizontal_left_jaw_simplified.stl", role=MeshRole.JAW
+    ),
 )
 _PNEUMATIC_HORIZONTAL_MOTION = (
     LinearMotion(
@@ -517,15 +527,15 @@ _SSG48_JAW_MOTION = (
 )
 
 _SSG48_FINGER_MESHES = (
-    MeshSpec(file="ssg48_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="ssg48_finger_right.stl", role=MeshRole.JAW),
-    MeshSpec(file="ssg48_finger_left.stl", role=MeshRole.JAW),
+    MeshSpec(file="ssg48_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(file="ssg48_finger_right_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(file="ssg48_finger_left_simplified.stl", role=MeshRole.JAW),
 )
 
 _SSG48_PINCH_MESHES = (
-    MeshSpec(file="ssg48_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="ssg48_pinch_right.stl", role=MeshRole.JAW),
-    MeshSpec(file="ssg48_pinch_left.stl", role=MeshRole.JAW),
+    MeshSpec(file="ssg48_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(file="ssg48_pinch_right_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(file="ssg48_pinch_left_simplified.stl", role=MeshRole.JAW),
 )
 
 register_tool(
@@ -582,21 +592,21 @@ _MSG_200_JAW_MOTION = (
 )
 
 _MSG_100_MESHES = (
-    MeshSpec(file="msg_ai_100_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_100_right_jaw.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_100_left_jaw.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_100_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(file="msg_ai_100_right_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_100_left_jaw_simplified.stl", role=MeshRole.JAW),
 )
 
 _MSG_150_MESHES = (
-    MeshSpec(file="msg_ai_150_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_150_right_jaw.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_150_left_jaw.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_150_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(file="msg_ai_150_right_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_150_left_jaw_simplified.stl", role=MeshRole.JAW),
 )
 
 _MSG_200_MESHES = (
-    MeshSpec(file="msg_ai_200_body.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_200_right_jaw.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_200_left_jaw.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_200_body_simplified.stl", role=MeshRole.BODY),
+    MeshSpec(file="msg_ai_200_right_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(file="msg_ai_200_left_jaw_simplified.stl", role=MeshRole.JAW),
 )
 
 register_tool(
@@ -652,7 +662,9 @@ register_tool(
         name="Vacuum Gripper",
         description="Vacuum gripper (pneumatic valve I/O)",
         transform=_make_tcp_transform(z=-0.037),
-        meshes=(MeshSpec(file="vacuum_gripper_body.stl", role=MeshRole.BODY),),
+        meshes=(
+            MeshSpec(file="vacuum_gripper_body_simplified.stl", role=MeshRole.BODY),
+        ),
         motions=(),
         io_port=1,
     ),

@@ -18,9 +18,16 @@
   <disable_collisions link1="base_link" link2="L5" reason="Never" />
   <disable_collisions link1="base_link" link2="L6" reason="Never" />
 
-  <!-- L1 (shoulder) and the wrist (L5, L6) are kept apart by the upper
-       arm + forearm length. -->
+  <!-- L1 (shoulder) and the forearm/wrist are kept apart by the upper
+       arm + forearm length. L1-L4 added 2026-05 after audit found the
+       simplified collision STLs report overlap at certain elbow poses
+       even though the physical links can't touch. -->
+  <disable_collisions link1="L1" link2="L4" reason="Never" />
   <disable_collisions link1="L1" link2="L5" reason="Never" />
   <disable_collisions link1="L1" link2="L6" reason="Never" />
+
+  <!-- L2-L4 simplified-mesh artifact at certain elbow poses; physically
+       L2 and L4 cannot touch given the forearm geometry. -->
+  <disable_collisions link1="L2" link2="L4" reason="Never" />
 
 </robot>

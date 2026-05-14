@@ -133,6 +133,56 @@ def _init_collision_checker() -> None:
         collision = None
 
 
+# Geometry-object names for meshes attached to the collision checker on
+# behalf of the currently-active tool. Mutated by
+# `_refresh_collision_tool_geometry` on every `apply_tool` call.
+_active_tool_geom_names: list[str] = []
+
+
+def _refresh_collision_tool_geometry(
+    tool_key: str,
+    variant_key: str | None = None,
+) -> None:
+    """Sync the global collision checker's tool geometry with the active
+    tool. No-op if the checker isn't built yet (so this is safe to call
+    during early module init, before `_init_collision_checker` runs)."""
+    if collision is None:
+        return
+    for name in _active_tool_geom_names:
+        collision.remove_geometry_by_name(name)
+    _active_tool_geom_names.clear()
+    if tool_key == "NONE":
+        return
+    from parol6.tools import get_registry
+
+    cfg = get_registry().get(tool_key)
+    if cfg is None:
+        return
+    # ToolVariant.meshes (when non-empty) wholesale replaces cfg.meshes;
+    # mirrors WC's swap_tool_mesh semantics in urdf_scene.py.
+    meshes = cfg.meshes
+    if variant_key:
+        for v in cfg.variants:
+            if v.key == variant_key and v.meshes:
+                meshes = v.meshes
+                break
+    mesh_root = Path(_mesh_dir) / "meshes"
+    for spec in meshes:
+        path = mesh_root / spec.file
+        # All current MeshSpecs use rpy=(0,0,0); rotation is baked into
+        # the STL geometry (see _MESH_RPY comment in tools.py). Add a
+        # rotation branch here when a non-identity rpy appears.
+        T = np.eye(4, dtype=np.float64)
+        T[:3, 3] = spec.origin
+        collision.attach_mesh_to_frame(
+            spec.file,
+            str(path),
+            parent_frame="L6",
+            placement=T,
+        )
+        _active_tool_geom_names.append(spec.file)
+
+
 def apply_tool(
     tool_name: str,
     variant_key: str = "",
@@ -166,6 +216,8 @@ def apply_tool(
     else:
         robot.clear_tool_transform()
         logger.info(f"Applied tool {label} (identity)")
+
+    _refresh_collision_tool_geometry(tool_name, variant_key=variant_key or None)
 
 
 # Initialize with no tool
