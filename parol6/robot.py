@@ -473,6 +473,7 @@ def _build_tools() -> _ToolsCollection:
             meshes=cfg.meshes,
             motions=cfg.motions,
             variants=cfg.variants,
+            camera_spec=cfg.camera_spec,
         )
 
         if isinstance(cfg, PneumaticGripperConfig):
