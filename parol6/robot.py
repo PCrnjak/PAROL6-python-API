@@ -404,13 +404,16 @@ class _ToolsCollection(ToolsSpec):
         return self._by_key[key]
 
     def __contains__(self, item: object) -> bool:
-        if isinstance(item, str):
-            return item in self._by_key
+        # ToolType is a StrEnum, so test it before the plain-str branch —
+        # otherwise a category like ToolType.GRIPPER would misroute to the
+        # by-key lookup (keyed by tool key, not category) and return False.
         if isinstance(item, ToolType):
             return any(t.tool_type == item for t in self._tools)
+        if isinstance(item, str):
+            return item in self._by_key
         return False
 
-    def by_type(self, tool_type: ToolType) -> tuple[ToolSpec, ...]:
+    def by_type(self, tool_type: str | ToolType) -> tuple[ToolSpec, ...]:
         return tuple(t for t in self._tools if t.tool_type == tool_type)
 
 
