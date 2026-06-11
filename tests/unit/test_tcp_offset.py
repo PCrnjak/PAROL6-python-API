@@ -98,6 +98,43 @@ def test_dry_run_select_tool_resets_tcp_offset():
     assert client.tcp_offset() == [0.0, 0.0, 0.0]
 
 
+# ── Variant TCP resolution ───────────────────────────────────────────────
+
+
+def test_get_tool_transform_variant_honors_rpy():
+    """Variant tcp_origin/tcp_rpy override the tool transform field-independently
+    (matching the client-side ToolSpec semantics)."""
+    from waldoctl import ToolVariant
+
+    from parol6.tools import _TOOL_REGISTRY, ToolConfig, get_tool_transform
+
+    cfg = ToolConfig(
+        name="Test",
+        description="",
+        transform=np.eye(4),
+        variants=(
+            ToolVariant(
+                key="angled",
+                display_name="Angled",
+                tcp_origin=(0.012, 0.0, 0.09),
+                tcp_rpy=(0.0, 0.26, 0.0),
+            ),
+            ToolVariant(key="rpy_only", display_name="RPY", tcp_rpy=(0.0, 0.26, 0.0)),
+        ),
+    )
+    _TOOL_REGISTRY["_TEST_VARIANT_TOOL"] = cfg
+    try:
+        T = get_tool_transform("_TEST_VARIANT_TOOL", variant_key="angled")
+        np.testing.assert_allclose(T[:3, 3], (0.012, 0.0, 0.09), atol=1e-12)
+        assert np.isclose(T[0, 0], np.cos(0.26), atol=1e-9)
+
+        T = get_tool_transform("_TEST_VARIANT_TOOL", variant_key="rpy_only")
+        np.testing.assert_allclose(T[:3, 3], (0.0, 0.0, 0.0), atol=1e-12)
+        assert np.isclose(T[0, 0], np.cos(0.26), atol=1e-9)
+    finally:
+        del _TOOL_REGISTRY["_TEST_VARIANT_TOOL"]
+
+
 # ── Planner routing (regression: SetTcpOffsetCmd must reach the planner) ──
 
 
