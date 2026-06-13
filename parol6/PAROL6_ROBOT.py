@@ -62,9 +62,12 @@ _mesh_dir = str(Path(_urdf_path).resolve().parent.parent)
 # Current robot instance (tool transform applied in-place)
 robot: Robot = Robot(_urdf_path)
 
-# Self-collision checker bound to the same pinokin Robot. Lazy: only
-# constructed when collision checking is enabled and geometry loads
-# successfully. Treat None as "checks disabled" everywhere.
+# Self-collision checker bound to the same pinokin Robot. Built eagerly when
+# ``parol6.config`` is imported (config.py calls ``_init_collision_checker``),
+# i.e. on any ``import parol6``; stays None when collision checking is disabled
+# or geometry fails to load. Treat None as "checks disabled" everywhere.
+# TODO: defer construction to a server-side ``ensure_collision_checker()`` so
+# pure RobotClient script subprocesses don't pay the URDF-rewrite + BVH build.
 collision: CollisionChecker | None = None
 
 
@@ -77,14 +80,13 @@ def _resolved_urdf_for_collision() -> str:
     `parol6/urdf_model/meshes/`. Rewriting at runtime keeps the source
     URDF unchanged and avoids fragile symlink farms.
 
-    The rewritten file is created in the system temp dir on first call and
-    cleaned up at interpreter exit.
+    Writes a fresh temp file each call and cleans it up at interpreter exit.
     """
     import tempfile
 
     src = Path(_urdf_path)
     text = src.read_text()
-    mesh_root = Path(_urdf_path).resolve().parent.parent / "meshes"
+    mesh_root = Path(_mesh_dir) / "meshes"
     # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`
     rewritten = text.replace("package://parol6/meshes/", f"file://{mesh_root}/")
     fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
@@ -101,25 +103,25 @@ def _resolved_urdf_for_collision() -> str:
     return tmp_path
 
 
-def _init_collision_checker() -> None:
-    """Build the singleton CollisionChecker if enabled in config."""
-    global collision
-    # Late import so importing this module never crashes on a circular import
-    # with parol6.config.
-    from parol6.config import (
-        COLLISION_CHECK_ENABLED,
-        COLLISION_SRDF_PATH,
-    )
+def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
+    """Build the singleton CollisionChecker when *enabled*.
 
-    if not COLLISION_CHECK_ENABLED:
+    Config values are passed in (by ``parol6.config`` after its knobs are
+    defined) rather than imported here, keeping the dependency one-directional
+    — ``config`` imports ``PAROL6_ROBOT``, not the other way around.
+    """
+    global collision
+    if not enabled:
         collision = None
         return
 
     try:
+        # All package:// mesh URIs are rewritten to absolute file:// paths in
+        # the temp URDF, so no package_dirs resolution is needed.
         urdf_for_collision = _resolved_urdf_for_collision()
-        c = CollisionChecker(robot, urdf_for_collision, package_dirs=[_mesh_dir])
-        if COLLISION_SRDF_PATH and os.path.exists(COLLISION_SRDF_PATH):
-            c.load_srdf(COLLISION_SRDF_PATH)
+        c = CollisionChecker(robot, urdf_for_collision)
+        if srdf_path and os.path.exists(srdf_path):
+            c.load_srdf(srdf_path)
         collision = c
         logger.info(
             "Collision checker loaded: %d pairs, %d geometry objects",
@@ -134,9 +136,10 @@ def _init_collision_checker() -> None:
 
 
 # Geometry-object names for meshes attached to the collision checker on
-# behalf of the currently-active tool. Mutated by
-# `_refresh_collision_tool_geometry` on every `apply_tool` call.
+# behalf of the currently-active tool, plus the (tool, variant) they were
+# attached for so an unchanged re-apply can skip the disk reload.
 _active_tool_geom_names: list[str] = []
+_active_tool_geom_key: tuple[str, str | None] | None = None
 
 
 def _refresh_collision_tool_geometry(
@@ -145,9 +148,20 @@ def _refresh_collision_tool_geometry(
 ) -> None:
     """Sync the global collision checker's tool geometry with the active
     tool. No-op if the checker isn't built yet (so this is safe to call
-    during early module init, before `_init_collision_checker` runs)."""
+    during early module init, before the checker is ensured).
+
+    Skips the work entirely when the (tool, variant) is unchanged: collision
+    mesh placement comes only from ``spec.origin``, never the TCP offset, so a
+    TCP-offset-only ``apply_tool`` would otherwise reload STLs and rebuild BVHs
+    on the control-loop thread for no change.
+    """
+    global _active_tool_geom_key
     if collision is None:
         return
+    key = (tool_key, variant_key)
+    if key == _active_tool_geom_key:
+        return
+    _active_tool_geom_key = key
     for name in _active_tool_geom_names:
         collision.remove_geometry_by_name(name)
     _active_tool_geom_names.clear()
@@ -158,8 +172,9 @@ def _refresh_collision_tool_geometry(
     cfg = get_registry().get(tool_key)
     if cfg is None:
         return
-    # ToolVariant.meshes (when non-empty) wholesale replaces cfg.meshes;
-    # mirrors WC's swap_tool_mesh semantics in urdf_scene.py.
+    # A variant with non-empty meshes wholesale replaces cfg.meshes; an empty
+    # variant falls back to cfg.meshes (deliberately — unlike WC's
+    # swap_tool_mesh, which renders nothing for a mesh-less variant).
     meshes = cfg.meshes
     if variant_key:
         for v in cfg.variants:

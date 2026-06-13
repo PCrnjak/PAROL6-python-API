@@ -4,7 +4,7 @@ Covers:
 - Singleton checker initialization in PAROL6_ROBOT
 - SRDF disabled-pair count
 - Public Robot.in_collision / colliding_pairs / min_distance / check_trajectory
-- guard_joint_path raising MotionError on a colliding sample
+- guard_joint_path raising TrajectoryPlanningError on a colliding sample
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import parol6.config  # noqa: F401 - imports trigger collision-checker init
 from parol6 import Robot
 from parol6.commands._collision_guard import guard_joint_path
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.errors import MotionError
+from parol6.utils.errors import TrajectoryPlanningError
 
 
 def test_singleton_checker_initialized():
@@ -37,33 +37,18 @@ def test_home_is_clear():
     assert PAROL6_ROBOT.collision.in_collision(q) is False
 
 
-def test_robot_in_collision_method():
+def test_robot_collision_methods_clear_at_home():
+    """Public Robot collision methods report clear at/near home on one instance.
+    (Robot defines no __del__; an unstarted instance holds no subprocess, so the
+    old per-test try/finally del was a no-op.)"""
     r = Robot()
-    try:
-        q = np.zeros(6)
-        assert r.in_collision(q) is False
-    finally:
-        del r
-
-
-def test_robot_min_distance_positive_at_home():
-    r = Robot()
-    try:
-        q = np.zeros(6)
-        d = r.min_distance(q)
-        assert d > 0.0 and d != float("inf")
-    finally:
-        del r
-
-
-def test_robot_check_trajectory_clear():
-    r = Robot()
-    try:
-        # Tiny perturbation around home - definitely clear.
-        q_path = np.linspace(np.zeros(6), 0.01 * np.ones(6), 5)
-        assert r.check_trajectory(q_path) == -1
-    finally:
-        del r
+    q = np.zeros(6)
+    assert r.in_collision(q) is False
+    d = r.min_distance(q)
+    assert d > 0.0 and d != float("inf")
+    # Tiny perturbation around home — definitely clear.
+    q_path = np.linspace(np.zeros(6), 0.01 * np.ones(6), 5)
+    assert r.check_trajectory(q_path) == -1
 
 
 def test_guard_joint_path_clear_returns_none():
@@ -73,8 +58,8 @@ def test_guard_joint_path_clear_returns_none():
 
 
 def test_guard_joint_path_raises_on_explicit_collision(monkeypatch):
-    """Force a fake collision by patching the singleton checker temporarily."""
-    real = PAROL6_ROBOT.collision
+    """Force a fake collision by patching the singleton checker temporarily.
+    monkeypatch auto-restores the real checker at teardown."""
 
     class FakeChecker:
         def in_collision(self, q):
@@ -89,14 +74,12 @@ def test_guard_joint_path_raises_on_explicit_collision(monkeypatch):
     monkeypatch.setattr(PAROL6_ROBOT, "collision", FakeChecker())
 
     positions = np.zeros((5, 6))
-    with pytest.raises(MotionError) as exc_info:
+    with pytest.raises(TrajectoryPlanningError) as exc_info:
         guard_joint_path(positions)
     err = exc_info.value.robot_error
     assert err.code == int(ErrorCode.SYS_SELF_COLLISION)
     # Cause string should embed the named pair, not raw int indices.
     assert "ssg48_body_simplified.stl vs L4_0" in err.cause
-
-    monkeypatch.setattr(PAROL6_ROBOT, "collision", real)
 
 
 def test_guard_disabled_when_checker_is_none(monkeypatch):
@@ -155,11 +138,10 @@ def test_no_spurious_self_overlap_at_home_or_joint_limits():
 def test_collision_check_speed_diagnostic(capsys):
     """Time in_collision and colliding_pairs across a sampled workspace.
 
-    Diagnostic only — does not assert a threshold. Prints percentiles so
-    the JogLCommand mid-motion check can be evaluated against the 100 Hz
-    tick budget (10 ms). Decision criterion: if `in_collision` p99 is
-    well under 1000 us, the JogLCommand check is viable; otherwise drop
-    it and rely on the trajectory-build pre-flight guards.
+    Diagnostic only — does not assert a threshold. The per-tick mid-motion
+    collision check shipped (JogL release-decel gate, JogJ stop); this prints
+    percentiles to confirm its cost stays well within the 100 Hz tick budget
+    (10 ms).
 
     Run via:  pytest tests/unit/test_collision_integration.py::test_collision_check_speed_diagnostic -v -s
     """

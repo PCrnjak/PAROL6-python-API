@@ -576,8 +576,9 @@ COLLISION_CHECK_ENABLED: bool = os.getenv(
 
 # Number of interior joint-space samples checked along an interpolated path.
 # Endpoints are always checked. 0 => endpoints only.
-# Starting value 16 ≈ ~17 ms overhead per command at ~1 ms/check; tune after
-# benchmarking with world geometry attached.
+# At ~38 us p99 per check on the bundled simplified meshes (see the speed
+# diagnostic), 16 samples is ~0.7 ms per command; world geometry attached at
+# runtime may raise the per-check cost.
 COLLISION_PATH_SAMPLES: int = int(os.getenv("PAROL6_COLLISION_PATH_SAMPLES", "16"))
 
 # Optional SRDF file with disabled-pair info. Defaults to the bundled
@@ -589,7 +590,7 @@ COLLISION_SRDF_PATH: str = os.getenv(
 )
 
 # Populate PAROL6_ROBOT.collision now that the config knobs are defined.
-PAROL6_ROBOT._init_collision_checker()
+PAROL6_ROBOT._init_collision_checker(COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH)
 
 
 # -----------------------------------------------------------------------------

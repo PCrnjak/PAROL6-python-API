@@ -763,7 +763,13 @@ class Robot(_RobotABC):
         return result
 
     def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
-        """Return True iff `q_rad` is in self/world collision. False if disabled."""
+        """Return True iff `q_rad` is in self/world collision. False if disabled.
+
+        Queries the process-global ``PAROL6_ROBOT.collision`` checker (shared by
+        all Robot methods here); its tool geometry reflects ``PAROL6_ROBOT
+        .apply_tool`` calls in this process (server / dry-run), not
+        :meth:`set_active_tool`, which only mutates this instance's pinokin Robot.
+        """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
         if PAROL6_ROBOT.collision is None:
@@ -789,7 +795,9 @@ class Robot(_RobotABC):
 
         Names are URDF link names for arm geometry (e.g. ``"L4_0"``) and
         the user-supplied name for runtime-attached geometry (e.g.
-        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh).
+        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh). Tool
+        geometry is present only when ``PAROL6_ROBOT.apply_tool`` attached it in
+        this process (see :meth:`in_collision`).
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 

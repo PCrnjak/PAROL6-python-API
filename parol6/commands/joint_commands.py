@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, TypeVar
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import TrajectoryMoveCommandBase
 from parol6.config import (
     INTERVAL_S,
@@ -86,8 +87,6 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         current_rad = self._q_rad_buf
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
-        from parol6.commands._collision_guard import guard_joint_path
-
         guard_joint_path(joint_path.positions)
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -197,8 +196,6 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
             return 0
 
         joint_path = JointPath(positions=positions)
-        from parol6.commands._collision_guard import guard_joint_path
-
         guard_joint_path(joint_path.positions)
 
         # Use minimum speed/accel across chain, sum durations when all duration-based

@@ -9,6 +9,7 @@ from typing import cast
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.commands._collision_guard import guard_joint_path
 from parol6.config import (
     CART_ANG_JOG_MIN,
     CART_LIN_JOG_MIN,
@@ -155,7 +156,11 @@ class JogLCommand(MotionCommand[JogLCmd]):
             if not finished and self._dot_buf > 1e-8:
                 ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
                 if ik_result.success and ik_result.q is not None:
-                    self._track_and_send(state, ik_result.q)
+                    # Don't stream a self-colliding config during the release
+                    # deceleration; skip the send and let the CSE finish stopping.
+                    checker = PAROL6_ROBOT.collision
+                    if checker is None or not checker.in_collision(ik_result.q):
+                        self._track_and_send(state, ik_result.q)
                 return ExecutionStatusCode.EXECUTING
 
             cse.active = False
@@ -229,9 +234,10 @@ class JogLCommand(MotionCommand[JogLCmd]):
                 self._ik_stopping = True
             return ExecutionStatusCode.EXECUTING
 
-        # IK succeeded - if we were stopping, recover by resuming jogging
+        # Reachable + collision-free again — if we were stopping (IK failure or
+        # predicted self-collision), recover by resuming jogging.
         if self._ik_stopping:
-            logger.info("[CARTJOG] IK recovered - resuming jog")
+            logger.info("[CARTJOG] constraint cleared - resuming jog")
             steps_to_rad(state.Position_in, self._q_rad_buf)
             cse.sync_pose(get_fkine_se3(state))
             self._q_commanded[:] = self._q_rad_buf
@@ -301,8 +307,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         )
 
         if not joint_path.is_partial:
-            from parol6.commands._collision_guard import guard_joint_path
-
             guard_joint_path(joint_path.positions)
 
         if joint_path.is_partial:
@@ -462,8 +466,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             )
             self.do_setup(state)
             return 0
-
-        from parol6.commands._collision_guard import guard_joint_path
 
         guard_joint_path(joint_path.positions)
 
