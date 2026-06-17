@@ -127,6 +127,18 @@ def ports(request) -> TestPorts:
     )
 
 
+@pytest.fixture
+def free_port(monkeypatch) -> int:
+    """A free command port for a test that starts its own throwaway controller.
+
+    Also moves the controller's status port off its fixed default (via PAROL6_MCAST_PORT,
+    inherited by the subprocess) so neither bind can land on a Windows-reserved/excluded
+    port and fail with WinError 10013.
+    """
+    monkeypatch.setenv("PAROL6_MCAST_PORT", str(free_udp_port()))
+    return free_udp_port()
+
+
 # ============================================================================
 # ENVIRONMENT CONFIGURATION FIXTURE
 # ============================================================================
