@@ -26,12 +26,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           # Override the pinned waldoctl with the matching feature branch if one
-          # exists, AFTER ".[dev]" (with --force-reinstall --no-deps) so the
-          # pinned tag in pyproject can't clobber it. Skipped on main so main CI
-          # exercises the released pin.
+          # exists, AFTER ".[dev]" (and with --force-reinstall) so the pinned tag
+          # in pyproject can't clobber it. Deps are kept (no --no-deps): the
+          # refactored waldoctl imports nicegui, which parol6 doesn't otherwise
+          # install. Skipped on main so main CI exercises the released pin.
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
           if [ "$BRANCH" != "main" ] && git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
-            pip install --force-reinstall --no-deps "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+            pip install --force-reinstall "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
           fi
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
@@ -62,12 +63,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]" pytest-timeout
           # Override the pinned waldoctl with the matching feature branch if one
-          # exists, AFTER ".[dev]" (with --force-reinstall --no-deps) so the
-          # pinned tag in pyproject can't clobber it. Skipped on main so main CI
-          # exercises the released pin.
+          # exists, AFTER ".[dev]" (and with --force-reinstall) so the pinned tag
+          # in pyproject can't clobber it. Deps are kept (no --no-deps): the
+          # refactored waldoctl imports nicegui, which parol6 doesn't otherwise
+          # install. Skipped on main so main CI exercises the released pin.
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
           if [ "$BRANCH" != "main" ] && git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
-            pip install --force-reinstall --no-deps "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+            pip install --force-reinstall "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
           fi
 
       - name: Show environment
