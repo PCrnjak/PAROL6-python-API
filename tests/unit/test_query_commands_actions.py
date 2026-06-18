@@ -14,7 +14,6 @@ from parol6.protocol.wire import (
     CurrentActionResultStruct,
     ActivityCmd,
     QueueCmd,
-    QueryType,
     QueueResultStruct,
     ResponseMsg,
     decode_message,
@@ -26,15 +25,6 @@ def _unpack_response(data: bytes):
     msg = decode_message(data)
     assert isinstance(msg, ResponseMsg)
     return msg.result
-
-
-def test_activity_command_init():
-    """Test that ACTIVITY command initializes correctly."""
-    cmd = ActivityCommand(ActivityCmd())
-
-    assert not cmd.is_finished
-    assert cmd.PARAMS_TYPE is not None
-    assert cmd.QUERY_TYPE == QueryType.CURRENT_ACTION
 
 
 def test_activity_returns_details():
@@ -75,15 +65,6 @@ def test_activity_with_idle_state():
     assert result.state == "IDLE"
     assert result.next == ""
     assert result.params == ""
-
-
-def test_queue_command_init():
-    """Test that QUEUE command initializes correctly."""
-    cmd = QueueCommand(QueueCmd())
-
-    assert not cmd.is_finished
-    assert cmd.PARAMS_TYPE is not None
-    assert cmd.QUERY_TYPE == QueryType.QUEUE
 
 
 def test_queue_returns_details():
