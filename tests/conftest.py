@@ -7,37 +7,24 @@ environment configuration, and test utilities used across the test suite.
 
 import logging
 import os
+import socket
 from collections.abc import Generator
 from dataclasses import dataclass
 
 import pytest
-from parol6 import Robot
+from parol6 import Robot, config as cfg
 
 
-# Import utilities for port detection
-def find_available_ports(start_port: int = 5001, count: int = 2) -> list[int]:
-    """Simple fallback port finder if utils import fails."""
-    import socket
+def free_udp_port() -> int:
+    """Allocate a free UDP port from the OS ephemeral range.
 
-    available_ports: list[int] = []
-    current_port = start_port
-
-    while len(available_ports) < count:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.bind(("127.0.0.1", current_port))
-                available_ports.append(current_port)
-        except OSError:
-            # Port in use, reset search if we were building a consecutive sequence
-            available_ports.clear()
-
-        current_port += 1
-
-        # Prevent infinite loop
-        if current_port > start_port + 1000:
-            break
-
-    return available_ports
+    Binds ("", 0) so the kernel hands back a usable port — never one in a reserved or
+    excluded range — bound the same all-interfaces way the real sockets bind. Avoids the
+    fixed-port WinError 10013 flake that hit the hard-coded status port on Windows.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
 
 
 logger = logging.getLogger(__name__)
@@ -49,7 +36,7 @@ class TestPorts:
 
     server_ip: str = "127.0.0.1"
     server_port: int = 5001
-    ack_port: int = 5002
+    mcast_port: int = 50510
 
 
 # ============================================================================
@@ -73,11 +60,11 @@ def pytest_addoption(parser):
         help="Port for robot server communication (auto-detected if not specified)",
     )
     parser.addoption(
-        "--ack-port",
+        "--mcast-port",
         action="store",
         type=int,
         default=None,
-        help="Port for acknowledgment communication (auto-detected if not specified)",
+        help="Port for status multicast/unicast (auto-detected if not specified)",
     )
     parser.addoption(
         "--keep-server-running",
@@ -121,24 +108,35 @@ def ports(request) -> TestPorts:
     """
     server_ip = request.config.getoption("--server-ip")
     server_port = request.config.getoption("--server-port")
-    ack_port = request.config.getoption("--ack-port")
+    mcast_port = request.config.getoption("--mcast-port")
 
-    # Auto-detect available ports if not specified
-    if server_port is None or ack_port is None:
-        logger.info("Auto-detecting available ports...")
-        available_ports = find_available_ports(start_port=5001, count=2)
+    # Auto-detect free ports if not specified. The status port in particular is
+    # otherwise a fixed default (50510) that nothing probes, so it can fail when that
+    # port is unavailable on a runner (e.g. Windows excluded-port ranges → WinError
+    # 10013 binding the status socket); ephemeral allocation avoids that.
+    if server_port is None:
+        server_port = free_udp_port()
+    if mcast_port is None:
+        mcast_port = free_udp_port()
+    logger.info(f"Test ports: server={server_port}, status={mcast_port}")
 
-        if len(available_ports) < 2:
-            pytest.fail("Could not find 2 consecutive available ports for testing")
+    return TestPorts(
+        server_ip=server_ip,
+        server_port=server_port,
+        mcast_port=mcast_port,
+    )
 
-        if server_port is None:
-            server_port = available_ports[0]
-        if ack_port is None:
-            ack_port = available_ports[1]
 
-        logger.info(f"Using auto-detected ports: server={server_port}, ack={ack_port}")
+@pytest.fixture
+def free_port(monkeypatch) -> int:
+    """A free command port for a test that starts its own throwaway controller.
 
-    return TestPorts(server_ip=server_ip, server_port=server_port, ack_port=ack_port)
+    Also moves the controller's status port off its fixed default (via PAROL6_MCAST_PORT,
+    inherited by the subprocess) so neither bind can land on a Windows-reserved/excluded
+    port and fail with WinError 10013.
+    """
+    monkeypatch.setenv("PAROL6_MCAST_PORT", str(free_udp_port()))
+    return free_udp_port()
 
 
 # ============================================================================
@@ -159,11 +157,17 @@ def robot_api_env(ports: TestPorts) -> Generator[dict[str, str], None, None]:
     env_vars = {
         "PAROL6_CONTROLLER_IP": ports.server_ip,
         "PAROL6_CONTROLLER_PORT": str(ports.server_port),
+        "PAROL6_MCAST_PORT": str(ports.mcast_port),
     }
 
     for key, value in env_vars.items():
         original_env[key] = os.environ.get(key)
         os.environ[key] = value
+
+    # The env var only reaches fresh imports (the controller subprocess). The
+    # in-process client reads cfg.MCAST_PORT live, so patch the module attribute too.
+    original_mcast_port = cfg.MCAST_PORT
+    cfg.MCAST_PORT = ports.mcast_port
 
     logger.debug(f"Set test environment: {env_vars}")
 
@@ -176,6 +180,7 @@ def robot_api_env(ports: TestPorts) -> Generator[dict[str, str], None, None]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original_value
+        cfg.MCAST_PORT = original_mcast_port
         logger.debug("Restored original environment")
 
 
@@ -202,6 +207,7 @@ def server_proc(request, ports: TestPorts, robot_api_env):
             "PAROL6_NOAUTOHOME": "1",
             "PAROL6_CONTROLLER_IP": ports.server_ip,
             "PAROL6_CONTROLLER_PORT": str(ports.server_port),
+            "PAROL6_MCAST_PORT": str(ports.mcast_port),
         },
     )
 
@@ -312,11 +318,10 @@ def pytest_sessionstart(session):
     logger.info(f"Server IP: {config.getoption('--server-ip')}")
 
     server_port = config.getoption("--server-port")
-    ack_port = config.getoption("--ack-port")
-    if server_port and ack_port:
-        logger.info(f"Server ports: {server_port}/{ack_port}")
+    if server_port:
+        logger.info(f"Server port: {server_port}")
     else:
-        logger.info("Server ports: auto-detect")
+        logger.info("Server port: auto-detect")
 
 
 # ============================================================================

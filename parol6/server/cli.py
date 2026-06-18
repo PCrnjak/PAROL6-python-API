@@ -76,12 +76,28 @@ def main() -> int:
     )
 
     # At INFO and above, push noisy third-party libraries up to WARNING so a
-    # clean startup stays quiet. DEBUG/TRACE users still see everything.
+    # clean startup stays quiet.
     quiet_level = (
         max(log_level, logging.WARNING) if log_level >= logging.INFO else log_level
     )
     for name in ("toppra", "numba", "numba.core", "numba.cuda"):
         logging.getLogger(name).setLevel(quiet_level)
+
+    # numba's per-statement compiler tracers emit hundreds of log lines per
+    # JIT'd function (byteflow ~900, ssa ~370 each). During the cold JIT warmup
+    # that firehose — tens of thousands of lines — is slow enough to stall
+    # controller startup on slow runners; it pushed the first integration test's
+    # 5s home past timeout on Windows CI. Pin just those tracers to WARNING even
+    # at DEBUG. Higher-level numba logging stays at the chosen level, and the
+    # warmup logs its own progress, so "it's compiling, not frozen" is still
+    # visible without the firehose.
+    for name in (
+        "numba.core.byteflow",
+        "numba.core.ssa",
+        "numba.core.interpreter",
+        "numba.core.typeinfer",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     # Pre-compile numba JIT functions to avoid mid-loop compilation stalls
     from parol6.utils.warmup import warmup_jit
