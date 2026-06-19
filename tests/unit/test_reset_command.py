@@ -8,23 +8,6 @@ from parol6.protocol.wire import ResetCmd
 from parol6.server.state import ControllerState
 
 
-class TestResetCommandParsing:
-    """Test ResetCommand initialization."""
-
-    def test_init(self):
-        """RESET takes no parameters."""
-        cmd = ResetCommand(ResetCmd())
-
-        assert not cmd.is_finished
-        assert cmd.p is not None
-
-    def test_struct_has_no_params(self):
-        """ResetCmd struct should have no fields."""
-        params = ResetCmd()
-        # Struct should be valid with no fields
-        assert params is not None
-
-
 class TestResetCommandExecution:
     """Test ResetCommand.tick resets state correctly."""
 

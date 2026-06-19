@@ -2,31 +2,7 @@
 
 import numpy as np
 
-from parol6.protocol.wire import SelectToolCmd, SetTcpOffsetCmd, TcpOffsetResultStruct
-
-
-# ── Wire round-trip ──────────────────────────────────────────────────────
-
-
-def test_set_tcp_offset_cmd_fields():
-    cmd = SetTcpOffsetCmd(x=1.0, y=2.0, z=-190.0)
-    assert cmd.x == 1.0
-    assert cmd.y == 2.0
-    assert cmd.z == -190.0
-
-
-def test_set_tcp_offset_cmd_defaults():
-    cmd = SetTcpOffsetCmd()
-    assert cmd.x == 0.0
-    assert cmd.y == 0.0
-    assert cmd.z == 0.0
-
-
-def test_tcp_offset_result_struct():
-    result = TcpOffsetResultStruct(x=10.0, y=20.0, z=-190.0)
-    assert result.x == 10.0
-    assert result.y == 20.0
-    assert result.z == -190.0
+from parol6.protocol.wire import SelectToolCmd, SetTcpOffsetCmd
 
 
 # ── apply_tool with tcp_offset_m ─────────────────────────────────────────

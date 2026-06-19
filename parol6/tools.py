@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 from pinokin import se3_from_trans
 from waldoctl import (
+    CameraSpec,
     LinearMotion,
     MeshRole,
     MeshSpec,
@@ -77,6 +78,11 @@ class ToolConfig:
     meshes: tuple[MeshSpec, ...] = ()
     motions: tuple[PartMotion, ...] = ()
     variants: tuple[ToolVariant, ...] = ()
+    camera_spec: "CameraSpec | None" = None
+    """Optional camera attached to this tool. Wired through ``_build_tools``
+    into the live ``ToolSpec`` so the frontend can stream the feed when this
+    tool is active. The user can override the device per session via the
+    tool's ``runtime_settings.camera_device``."""
 
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         """Fill *out* from hardware state. Override in subclasses."""

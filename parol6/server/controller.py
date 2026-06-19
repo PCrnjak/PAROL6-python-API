@@ -231,8 +231,15 @@ class Controller:
         # Start async logging to move I/O off the control loop thread
         self._async_log.start()
 
-        # Start motion planner subprocess
-        self._planner.start()
+        # Spawn the motion planner subprocess BEFORE pinning ourselves to a core,
+        # so the child inherits the full CPU affinity (its heavy spawn import runs
+        # on any free core) and we tell it which core to keep off at runtime.
+        loop_core = self._loop_core()
+        self._planner.start(avoid_core=loop_core)
+
+        # Now pin ourselves to the real-time core — after the child has spawned.
+        if loop_core is not None:
+            self._pin_to_core(loop_core)
 
         # Disable automatic GC — collections are deferred to slack time
         self._gc_tracker.take_control()
@@ -832,15 +839,17 @@ class Controller:
         return idx
 
     def _set_high_priority(self) -> bool:
-        """Set highest non-privileged process priority and pin to CPU core.
+        """Elevate this process's scheduling priority.
+
+        CPU-core pinning is intentionally separate (see :meth:`_loop_core` /
+        :meth:`_pin_to_core`) and done *after* the planner subprocess is spawned,
+        so the child does not inherit a single-core affinity.
 
         Returns True if priority was successfully elevated.
         """
         elevated = False
         try:
             p = psutil.Process()
-
-            # Set priority
             if sys.platform == "win32":
                 p.nice(psutil.HIGH_PRIORITY_CLASS)
                 logger.debug("Set process priority to HIGH_PRIORITY_CLASS")
@@ -852,20 +861,31 @@ class Controller:
                     elevated = True
                 except psutil.AccessDenied:
                     logger.debug("Cannot set negative nice value without privileges")
-
-            # Pin to last CPU core (usually less contention from system tasks)
-            if hasattr(p, "cpu_affinity"):
-                try:
-                    cpus = p.cpu_affinity()
-                    if cpus and len(cpus) > 1:
-                        target_core = cpus[-1]
-                        p.cpu_affinity([target_core])
-                        logger.debug(f"Pinned process to CPU core {target_core}")
-                except (AttributeError, NotImplementedError):
-                    logger.debug("CPU affinity not supported on this platform")
-                except psutil.AccessDenied:
-                    logger.debug("Cannot set CPU affinity without privileges")
-
         except Exception as e:
-            logger.warning(f"Failed to set process priority/affinity: {e}")
+            logger.warning(f"Failed to set process priority: {e}")
         return elevated
+
+    def _loop_core(self) -> int | None:
+        """The CPU core the control loop will pin to — the last core, usually the
+        least contended by system tasks — or None if pinning isn't applicable."""
+        try:
+            p = psutil.Process()
+            if hasattr(p, "cpu_affinity"):
+                cpus = p.cpu_affinity()
+                if cpus and len(cpus) > 1:
+                    return cpus[-1]
+        except (AttributeError, NotImplementedError, psutil.Error) as e:
+            logger.debug("CPU affinity not available: %s", e)
+        return None
+
+    def _pin_to_core(self, core: int) -> None:
+        """Pin this process to a single core for the real-time loop.
+
+        Called after :meth:`MotionPlanner.start` so the planner child (spawned
+        with the full affinity) is never stuck on the loop's core.
+        """
+        try:
+            psutil.Process().cpu_affinity([core])
+            logger.debug("Pinned process to CPU core %d", core)
+        except (AttributeError, NotImplementedError, psutil.AccessDenied) as e:
+            logger.debug("Could not pin to CPU core: %s", e)
