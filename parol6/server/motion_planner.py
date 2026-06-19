@@ -529,8 +529,14 @@ def motion_planner_main(
     """Worker process main loop — compute trajectories and forward inline commands."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from parol6.server import set_pdeathsig
+    from parol6.tools import register_plugin_tools
 
     set_pdeathsig()
+
+    # Spawn-mode subprocess: the registry is freshly imported with only native
+    # tools, so plugin tools must be registered here too or SELECT_TOOL/SyncTool
+    # of a plugin tool fails in apply_tool.
+    register_plugin_tools()
 
     # Keep planning off the control loop's core so it never steals real-time
     # cycles. We were spawned before the controller pinned itself, so we still
