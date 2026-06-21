@@ -187,11 +187,18 @@ class JogLCommand(MotionCommand[JogLCmd]):
         if self._vel_ratio > 1.0:
             velocity /= self._vel_ratio
 
-        # Set target velocity (WRF transforms to body frame, TRF uses body directly)
-        if self.p.frame == "WRF":
-            cse.set_jog_velocity_1dof_wrf(self._axis_index, velocity, self.is_rotation)
-        else:
-            cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
+        # Set target velocity (WRF transforms to body frame, TRF uses body
+        # directly). While stopping (IK failure or predicted self-collision)
+        # leave the CSE target at zero so cse.stop()'s deceleration actually
+        # takes effect — re-commanding full velocity every tick would overwrite
+        # it and the arm would never decelerate (nor reach the vel<1e-6 exit).
+        if not self._ik_stopping:
+            if self.p.frame == "WRF":
+                cse.set_jog_velocity_1dof_wrf(
+                    self._axis_index, velocity, self.is_rotation
+                )
+            else:
+                cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
         smoothed_pose, smoothed_vel, _finished = cse.tick()
 

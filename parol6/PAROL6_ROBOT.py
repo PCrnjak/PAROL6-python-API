@@ -87,8 +87,10 @@ def _resolved_urdf_for_collision() -> str:
     src = Path(_urdf_path)
     text = src.read_text()
     mesh_root = Path(_mesh_dir) / "meshes"
-    # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`
-    rewritten = text.replace("package://parol6/meshes/", f"file://{mesh_root}/")
+    # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`.
+    # Path.as_uri() yields a valid file URI on every platform (Windows drive
+    # letters / backslashes break a hand-built `file://` + str(path)).
+    rewritten = text.replace("package://parol6/meshes/", mesh_root.as_uri() + "/")
     fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
     with os.fdopen(fd, "w") as f:
         f.write(rewritten)
@@ -129,10 +131,21 @@ def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
             c.num_geometry_objects,
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "Failed to initialize collision checker (continuing without): %s", e
-        )
-        collision = None
+        # Enabled but failed to build: fail loud. Silently running the arm with
+        # no collision checking is unsafe; require an explicit opt-out.
+        if os.getenv("PAROL6_ALLOW_NO_COLLISION"):
+            logger.warning(
+                "Collision checker init failed; continuing without it because "
+                "PAROL6_ALLOW_NO_COLLISION is set (UNSAFE): %s",
+                e,
+            )
+            collision = None
+            return
+        raise RuntimeError(
+            "Collision checker failed to initialize. Fix the cause, or set "
+            "PAROL6_ALLOW_NO_COLLISION=1 to run without collision checking "
+            f"(UNSAFE). Original error: {e}"
+        ) from e
 
 
 # Geometry-object names for meshes attached to the collision checker on
@@ -161,41 +174,51 @@ def _refresh_collision_tool_geometry(
     key = (tool_key, variant_key)
     if key == _active_tool_geom_key:
         return
-    _active_tool_geom_key = key
+    # Clear the previous tool's geometry. Mark the key inconsistent until the
+    # new attaches finish, so a mid-loop failure self-repairs on the next call
+    # (otherwise the early-return above would skip a partial attach forever).
     for name in _active_tool_geom_names:
         collision.remove_geometry_by_name(name)
     _active_tool_geom_names.clear()
-    if tool_key == "NONE":
-        return
+    _active_tool_geom_key = None
+
     from parol6.tools import get_registry
 
-    cfg = get_registry().get(tool_key)
-    if cfg is None:
-        return
-    # A variant with non-empty meshes wholesale replaces cfg.meshes; an empty
-    # variant falls back to cfg.meshes (deliberately — unlike WC's
-    # swap_tool_mesh, which renders nothing for a mesh-less variant).
-    meshes = cfg.meshes
-    if variant_key:
-        for v in cfg.variants:
-            if v.key == variant_key and v.meshes:
-                meshes = v.meshes
-                break
-    mesh_root = Path(_mesh_dir) / "meshes"
-    for spec in meshes:
-        path = mesh_root / spec.file
-        # All current MeshSpecs use rpy=(0,0,0); rotation is baked into
-        # the STL geometry (see _MESH_RPY comment in tools.py). Add a
-        # rotation branch here when a non-identity rpy appears.
-        T = np.eye(4, dtype=np.float64)
-        T[:3, 3] = spec.origin
-        collision.attach_mesh_to_frame(
-            spec.file,
-            str(path),
-            parent_frame="L6",
-            placement=T,
-        )
-        _active_tool_geom_names.append(spec.file)
+    cfg = None if tool_key == "NONE" else get_registry().get(tool_key)
+    if cfg is not None:
+        # A variant with non-empty meshes wholesale replaces cfg.meshes; an
+        # empty variant falls back to cfg.meshes (deliberately — unlike WC's
+        # swap_tool_mesh, which renders nothing for a mesh-less variant).
+        meshes = cfg.meshes
+        if variant_key:
+            for v in cfg.variants:
+                if v.key == variant_key and v.meshes:
+                    meshes = v.meshes
+                    break
+        mesh_root = Path(_mesh_dir) / "meshes"
+        try:
+            for spec in meshes:
+                path = mesh_root / spec.file
+                # All current MeshSpecs use rpy=(0,0,0); rotation is baked into
+                # the STL geometry (see _MESH_RPY comment in tools.py). Add a
+                # rotation branch here when a non-identity rpy appears.
+                T = np.eye(4, dtype=np.float64)
+                T[:3, 3] = spec.origin
+                collision.attach_mesh_to_frame(
+                    spec.file,
+                    str(path),
+                    parent_frame="L6",
+                    placement=T,
+                )
+                _active_tool_geom_names.append(spec.file)
+        except Exception:
+            # Roll back a partial attach so the checker never holds half a tool.
+            for name in _active_tool_geom_names:
+                collision.remove_geometry_by_name(name)
+            _active_tool_geom_names.clear()
+            raise
+
+    _active_tool_geom_key = key
 
 
 def apply_tool(
