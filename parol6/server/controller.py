@@ -892,5 +892,11 @@ class Controller:
         try:
             psutil.Process().cpu_affinity([core])
             logger.debug("Pinned process to CPU core %d", core)
-        except (AttributeError, NotImplementedError, psutil.AccessDenied) as e:
+        except (
+            AttributeError,
+            NotImplementedError,
+            psutil.Error,
+            OSError,
+            ValueError,
+        ) as e:
             logger.debug("Could not pin to CPU core: %s", e)

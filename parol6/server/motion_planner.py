@@ -685,12 +685,19 @@ class MotionPlanner:
         # off the CPU the loop will pin (avoiding ~3s of contention) and ensures
         # the controller does not accept a motion command before the worker can
         # process it (which otherwise stalls the first command for ~5s).
-        if self._ready_event.wait(timeout=30.0):
-            logger.debug("Motion planner worker ready")
-        else:
-            logger.warning(
-                "Motion planner worker not ready after 30s; continuing anyway"
-            )
+        # Poll for readiness; fail fast if the worker dies during its heavy spawn
+        # import instead of blocking the full 30s on a dead process.
+        for _ in range(300):  # 300 * 0.1s = 30s
+            if self._ready_event.wait(timeout=0.1):
+                logger.debug("Motion planner worker ready")
+                return
+            if not self._process.is_alive():
+                logger.error(
+                    "Motion planner worker died during startup (exit code %s)",
+                    self._process.exitcode,
+                )
+                return
+        logger.warning("Motion planner worker not ready after 30s; continuing anyway")
 
     def stop(self) -> None:
         """Shut down the planner subprocess gracefully."""
