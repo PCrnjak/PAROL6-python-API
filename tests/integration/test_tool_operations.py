@@ -218,7 +218,7 @@ class TestToolRegistry:
         tools = robot.tools
 
         # Native count stays 5; robot.tools may compose plugin tools on top.
-        native_keys = [t.key for t in robot._native_tools.available]
+        native_keys = [t.key for t in robot.native_tools.available]
         assert len(native_keys) == 5
         keys = [t.key for t in tools.available]
         for expected in ("NONE", "PNEUMATIC", "SSG-48", "MSG", "VACUUM"):

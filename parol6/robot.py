@@ -575,7 +575,7 @@ class Robot(_RobotABC):
         return self._joints
 
     @property
-    def _native_tools(self) -> ToolsCollection:
+    def native_tools(self) -> ToolsCollection:
         """PAROL6's built-in tools. The waldoctl ``Robot.tools`` property
         composes these with any plugin tools registered via ``waldoctl.tools``."""
         return self._tools
