@@ -120,7 +120,7 @@ class _UDPClientProtocol(asyncio.DatagramProtocol):
         try:
             self.rx_queue.put_nowait((data, addr))
         except asyncio.QueueFull:
-            pass  # Drop packet when queue is full (expected under load)
+            pass  # Dropping under backpressure is expected
 
     def error_received(self, exc: Exception) -> None:
         pass
@@ -133,7 +133,6 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
     """Create and configure a multicast socket with loopback-first semantics."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
-    # Allow multiple listeners on same port
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
@@ -141,13 +140,11 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
         pass
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
 
-    # Bind to port
     try:
         sock.bind(("", port))
     except OSError:
         sock.bind((iface_ip, port))
 
-    # Helper to detect primary NIC IP
     def _detect_primary_ip() -> str:
         tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -159,7 +156,7 @@ def _create_multicast_socket(group: str, port: int, iface_ip: str) -> socket.soc
             with contextlib.suppress(Exception):
                 tmp.close()
 
-    # Join multicast group with fallbacks
+    # Join the multicast group, falling back through the primary NIC then INADDR_ANY.
     try:
         mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton(iface_ip))
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -221,7 +218,7 @@ class _StatusProtocol(asyncio.DatagramProtocol):
         # Zero-allocation decode directly into shared buffer
         if decode_status_bin_into(data, self._client._shared_status):
             self._client._status_generation += 1
-            # Event.set() is synchronous and wakes all waiters
+            # Event.set() is synchronous, so it's safe to wake waiters from this callback
             self._client._status_event.set()
 
     def error_received(self, exc: Exception) -> None:
@@ -246,7 +243,7 @@ class AsyncRobotClient(_RobotClientABC):
         timeout: float = 1.0,
         retries: int = 1,
     ) -> None:
-        # Endpoint configuration (host/port immutable after endpoint creation)
+        # host/port are immutable after endpoint creation
         self._host = host
         self._port = port
         self.timeout = timeout
@@ -259,7 +256,6 @@ class AsyncRobotClient(_RobotClientABC):
         # Pre-allocated TX buffer for fire-and-forget command encoding
         self._tx_buf = bytearray(256)
 
-        # Persistent asyncio datagram endpoint
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _UDPClientProtocol | None = None
         self._rx_queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(
@@ -267,13 +263,12 @@ class AsyncRobotClient(_RobotClientABC):
         )
         self._ep_lock = asyncio.Lock()
 
-        # Serialize request/response
+        # Serializes request/response so concurrent queries don't steal each other's replies
         self._req_lock = asyncio.Lock()
 
-        # ACK policy (category-based, no stream_mode dependency)
         self._ack_policy = AckPolicy()
 
-        # Shared status state (single buffer, event-based notification)
+        # Single shared buffer with event-based notification
         self._status_transport: asyncio.DatagramTransport | None = None
         self._status_sock: socket.socket | None = None
         self._shared_status: StatusBuffer = StatusBuffer()
@@ -283,18 +278,16 @@ class AsyncRobotClient(_RobotClientABC):
         # Last command index returned by server for queued commands
         self._last_command_index: int | None = None
 
-        # Active tool key (set by select_tool)
         self._active_tool_key: str | None = None
         self._active_variant_key: str = ""
 
-        # Bound tool specs. Populated from the parol6 tool registry so that
+        # Populated from the parol6 tool registry so that
         # `from parol6 import AsyncRobotClient; c = AsyncRobotClient(...)` works
         # without going through Robot.create_async_client(). The Robot factory
         # rebinds these from its own tools.available, which is the same source.
         self._bound_tools: dict[str, ToolSpec] = {}
         self._bind_default_tools()
 
-        # Lifecycle flag
         self._closed: bool = False
 
     def _bind_default_tools(self) -> None:
@@ -519,7 +512,6 @@ class AsyncRobotClient(_RobotClientABC):
                 yield self._shared_status
                 continue
 
-            # Wait for next update
             await self._status_event.wait()
 
             if self._closed:
@@ -539,12 +531,11 @@ class AsyncRobotClient(_RobotClientABC):
         await self._ensure_endpoint()
         assert self._transport is not None
 
-        # Get command type from struct's tag
         cmd_type = STRUCT_TO_CMDTYPE.get(type(cmd))
         if cmd_type is None:
             return 0
 
-        # System commands: need stable bytes across await
+        # System commands need stable bytes across the await, so encode a fresh buffer
         if cmd_type in SYSTEM_CMD_TYPES:
             try:
                 await self._request_ok_raw(encode_command(cmd), self.timeout)
@@ -552,7 +543,6 @@ class AsyncRobotClient(_RobotClientABC):
             except TimeoutError:
                 return 0
 
-        # Motion and other non-query commands
         if cmd_type not in QUERY_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
                 try:
@@ -561,12 +551,11 @@ class AsyncRobotClient(_RobotClientABC):
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
                     return -1
-            # Fire-and-forget: reuse pre-allocated buffer (sendto copies)
+            # Fire-and-forget: safe to reuse the shared buffer since sendto copies it
             encode_command_into(cmd, self._tx_buf)
             self._transport.sendto(self._tx_buf)
             return 1
 
-        # Queries via _send: fire-and-forget
         encode_command_into(cmd, self._tx_buf)
         self._transport.sendto(self._tx_buf)
         return 1
@@ -1230,7 +1219,6 @@ class AsyncRobotClient(_RobotClientABC):
                     logger.debug("Status predicate raised", exc_info=True)
                 continue
 
-            # Wait for next update with timeout
             remaining = max(0.0, end_time - time.monotonic())
             if remaining <= 0:
                 return False

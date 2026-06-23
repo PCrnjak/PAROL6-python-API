@@ -1,10 +1,4 @@
-"""
-Transport factory for creating appropriate transport instances.
-
-This module provides a factory pattern for creating transport instances
-based on configuration and environment. It automatically selects between
-real serial or mock serial (inline simulation) transport types.
-"""
+"""Factory for selecting between real serial and mock (inline simulation) transports based on configuration and environment."""
 
 import logging
 import os
@@ -18,12 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_simulation_mode() -> bool:
-    """
-    Check if simulation mode is enabled.
-
-    Returns:
-        True if simulation mode is enabled via environment variable
-    """
+    """Whether simulation mode is enabled via the PAROL6_FAKE_SERIAL environment variable."""
     fake_serial = str(os.getenv("PAROL6_FAKE_SERIAL", "0")).lower()
     return fake_serial in ("1", "true", "yes", "on")
 
@@ -51,15 +40,12 @@ def create_transport(
     Returns:
         Transport instance (SerialTransport or MockSerialTransport)
     """
-    # Determine transport type
     if transport_type is None:
-        # Auto-detect based on environment
         if is_simulation_mode():
             transport_type = "mock"
         else:
             transport_type = "serial"
 
-    # Create appropriate transport
     if transport_type == "mock":
         logger.debug("Creating MockSerialTransport for simulation")
         transport: MockSerialTransport | SerialTransport = MockSerialTransport(
@@ -110,15 +96,12 @@ def create_and_connect_transport(
 
     # For real serial, handle port finding
     if not port and auto_find_port:
-        # Try to load saved port
         port = get_com_port_with_fallback()
         if port:
             logger.debug(f"Using saved serial port: {port}")
 
-    # Create transport
     transport = create_transport(transport_type, port=port, baudrate=baudrate, **kwargs)
 
-    # Attempt connection if port is known
     if port:
         if transport.connect(port):
             return transport

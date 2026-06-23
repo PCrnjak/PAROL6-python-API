@@ -13,19 +13,11 @@ if TYPE_CHECKING:
     from typing import Self
 
 
-# =============================================================================
-# Constants for power-of-2 buffer operations
-# =============================================================================
 # ~5 seconds of data, rounded up to next power of 2 for fast modulo via bitmask
 _TARGET_BUFFER_SECONDS = 5.0
 _raw_size = int(cfg.CONTROL_RATE_HZ * _TARGET_BUFFER_SECONDS)
-BUFFER_SIZE = 1 << (_raw_size - 1).bit_length()  # Next power of 2
+BUFFER_SIZE = 1 << (_raw_size - 1).bit_length()
 BUFFER_MASK = BUFFER_SIZE - 1
-
-
-# =============================================================================
-# Numba-accelerated statistics functions (cached to disk)
-# =============================================================================
 
 
 @njit(cache=True)
@@ -65,7 +57,6 @@ def _compute_phase_stats(
     if n == 0:
         return 0.0, 0.0, 0.0
 
-    # Compute mean and max in single pass
     total = 0.0
     max_val = samples[0]
     for i in range(n):
@@ -90,28 +81,25 @@ def _compute_phase_stats(
 def _compute_loop_stats(
     samples: np.ndarray, scratch: np.ndarray, n: int
 ) -> tuple[float, float, float, float, float, float]:
-    """Compute loop stats using single-pass Welford's algorithm for mean+std.
+    """Compute loop stats via single-pass Welford for mean+std.
 
-    Uses pre-allocated scratch buffer for percentile computation.
-    Only one copy to scratch (p99 first, then p95 on same data).
+    Uses the pre-allocated scratch buffer for percentiles (no hot-path alloc):
+    one copy to scratch, p99 first then p95 on the same data.
     """
     if n == 0:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    # Single-pass Welford's algorithm for mean and variance + min/max
     mean = 0.0
-    m2 = 0.0  # Sum of squared differences
+    m2 = 0.0  # sum of squared differences
     min_val = samples[0]
     max_val = samples[0]
 
     for i in range(n):
         x = samples[i]
-        # Welford's online algorithm
         delta = x - mean
         mean += delta / (i + 1)
         delta2 = x - mean
         m2 += delta * delta2
-        # Track min/max
         if x < min_val:
             min_val = x
         if x > max_val:
@@ -119,17 +107,14 @@ def _compute_loop_stats(
 
     std = np.sqrt(m2 / n) if n > 0 else 0.0
 
-    # p95 and p99 via quickselect with single copy
     if n >= 20:
-        # Copy to scratch once
         for i in range(n):
             scratch[i] = samples[i]
 
-        # Compute p99 first (higher index)
+        # p95 reuses the scratch array post-p99 because k95 < k99
         k99 = int(n * 0.99)
         p99 = _quickselect(scratch[:n], k99)
 
-        # Compute p95 on same array (works because k95 < k99)
         k95 = int(n * 0.95)
         p95 = _quickselect(scratch[:n], k95)
     else:
@@ -137,11 +122,6 @@ def _compute_loop_stats(
         p99 = max_val
 
     return mean, std, min_val, max_val, p95, p99
-
-
-# =============================================================================
-# EventRateMetrics - track rate of sporadic events
-# =============================================================================
 
 
 @njit(cache=True)
@@ -325,7 +305,6 @@ class GCTracker:
         if now - last_ts > max_age_s:
             return 0.0, 0.0
 
-        # Compute rate and windowed mean duration
         cutoff = now - max_age_s
         total_dur = 0.0
         count_in_window = 0
@@ -385,11 +364,6 @@ class GCTracker:
             gc.callbacks.remove(self._callback)
         except ValueError:
             pass
-
-
-# =============================================================================
-# PhaseMetrics - regular Python class (no jitclass overhead)
-# =============================================================================
 
 
 class PhaseMetrics:
@@ -521,11 +495,6 @@ class PhaseContext:
         self._timer.stop()
 
 
-# =============================================================================
-# LoopMetrics
-# =============================================================================
-
-
 class LoopMetrics:
     """Metrics tracked by the loop timer with rolling statistics.
 
@@ -574,7 +543,6 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
-        # Overshoot stats
         self.mean_overshoot_s = 0.0
         self.max_overshoot_s = 0.0
         self.p99_overshoot_s = 0.0
@@ -676,7 +644,7 @@ class LoopMetrics:
             self.p95_period_s = p95
             self.p99_period_s = p99
 
-        # Compute overshoot stats using the simpler phase stats function
+        # overshoot only needs mean/max/p99, so reuse the simpler phase stats
         if self._overshoot_count > 0:
             mean, max_val, p99 = _compute_phase_stats(
                 self._overshoot_buffer, self._scratch, self._overshoot_count
@@ -700,7 +668,6 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
-        # Reset overshoot stats
         self._overshoot_buffer.fill(0.0)
         self._overshoot_idx = 0
         self._overshoot_count = 0
@@ -782,23 +749,20 @@ class LoopTimer:
         """
         self.metrics.loop_count += 1
 
-        # Compute stats periodically (not every loop)
         if self.metrics.loop_count % self._stats_interval == 0:
             self.metrics.compute_stats()
 
-        # Advance deadline
         self._next_deadline += self._interval
         sleep_time = self._next_deadline - time.perf_counter()
 
         if sleep_time > self._busy_threshold:
-            # Sleep for most of the time, leaving headroom for busy-loop
+            # leave headroom for the busy-loop so the sleep can't overshoot
             time.sleep(sleep_time - self._busy_threshold)
 
         if sleep_time > 0:
-            # Busy-loop for remaining time (precise timing)
+            # busy-loop the remainder for precise timing without OS jitter
             while time.perf_counter() < self._next_deadline:
                 pass
-            # Track how much we overshot the deadline
             now = time.perf_counter()
             self.metrics.record_overshoot(now - self._next_deadline)
         else:

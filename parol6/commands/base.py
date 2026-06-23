@@ -29,9 +29,6 @@ class ExecutionStatusCode(Enum):
     CANCELLED = auto()
 
 
-# ----- Small utilities -----
-
-
 class Countdown:
     """Simple count-down timer."""
 
@@ -108,9 +105,8 @@ class CommandBase(ABC, Generic[P]):
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
         self._steps_buf: np.ndarray = np.zeros(6, dtype=np.int32)
 
-    # Ensure command objects are usable as dict keys (identity-based)
     def __hash__(self) -> int:
-        # Identity-based hash is appropriate for ephemeral command instances
+        # Identity-based hash: command instances are ephemeral dict keys.
         return id(self)
 
     @property
@@ -247,8 +243,7 @@ class QueryCommand(CommandBase[P]):
         ...
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        # Queries are dispatched via compute() by the controller.
-        # This exists only to satisfy the abstract method.
+        # Queries are dispatched via compute(); execute_step is never used.
         raise NotImplementedError("Queries use compute(), not execute_step()")
 
 

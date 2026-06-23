@@ -111,17 +111,14 @@ class Controller:
         self.shutdown_event = threading.Event()
         self._initialized = False
 
-        # Core components
         self.state_manager = StateManager()
         self.udp_transport: UDPTransport | None = None
 
-        # E-stop state tracking (start as released to avoid false positive on first check)
+        # Start as released to avoid a false positive on the first check
         self.estop_active: bool = False
 
-        # Status multicast broadcaster
         self._status_broadcaster: Any | None = None
 
-        # Helper classes
         self._timer = LoopTimer(self.config.loop_interval)
         self._phase_timer = PhaseTimer(
             [
@@ -134,8 +131,8 @@ class Controller:
                 "sim",  # tick_simulation
             ]
         )
-        self._cmd_rate = EventRateMetrics()  # Command reception rate
-        self._gc_tracker = GCTracker()  # GC frequency and duration tracking
+        self._cmd_rate = EventRateMetrics()
+        self._gc_tracker = GCTracker()
         self._ack_policy = AckPolicy()
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
@@ -158,7 +155,6 @@ class Controller:
         self._tool_cmd_activated: bool = False
         self._tool_cmd_index: int = -1
 
-        # Initialize components on construction
         self._initialize_components()
 
     def _initialize_components(self) -> None:
@@ -169,10 +165,8 @@ class Controller:
             RuntimeError: If critical components fail to initialize
         """
         try:
-            # Discover and register all commands
             discover_commands()
 
-            # Initialize UDP transport
             logger.debug(
                 f"Starting UDP server on {self.config.udp_host}:{self.config.udp_port}"
             )
@@ -182,13 +176,10 @@ class Controller:
             if not self.udp_transport.create_socket():
                 raise RuntimeError("Failed to create UDP socket")
 
-            # Initialize robot state
             self.state_manager.reset_state()
 
-            # Initialize serial transport via TransportManager
             self._transport_mgr.initialize()
 
-            # Create status broadcaster
             try:
                 logger.debug(
                     f"StatusBroadcaster config: group={MCAST_GROUP} port={MCAST_PORT} ttl={MCAST_TTL} iface={MCAST_IF} rate_hz={STATUS_RATE_HZ} stale_s={STATUS_STALE_S}"
@@ -244,7 +235,6 @@ class Controller:
         # Disable automatic GC — collections are deferred to slack time
         self._gc_tracker.take_control()
 
-        # Start main control loop
         logger.debug("Starting main control loop")
         self._timer.metrics.mark_started(time.perf_counter())
         logger.info(
@@ -262,26 +252,23 @@ class Controller:
         self.running = False
         self.shutdown_event.set()
 
-        # Stop motion planner subprocess
         try:
             self._planner.stop()
         except Exception as e:
             logger.debug("Error stopping motion planner: %s", e)
 
-        # Stop IK worker subprocess
+        # close_cache() also tears down the IK worker subprocess
         try:
             close_cache()
         except Exception as e:
             logger.debug("Error stopping IK worker: %s", e)
 
-        # Close status broadcaster
         try:
             if self._status_broadcaster:
                 self._status_broadcaster.close()
         except Exception as e:
             logger.debug("Error closing status broadcaster: %s", e)
 
-        # Clean up transports
         if self.udp_transport:
             self.udp_transport.close_socket()
 
@@ -298,7 +285,6 @@ class Controller:
     def _read_from_firmware(self, state: ControllerState) -> None:
         """Phase 1: Poll serial for data, unpack frames, handle auto-reconnect."""
         if self._transport_mgr.is_connected():
-            # Poll serial for new data
             self._transport_mgr.poll_serial()
             try:
                 mv, ver, ts = self._transport_mgr.get_latest_frame()
@@ -445,7 +431,6 @@ class Controller:
         """Copy timing metrics from LoopTimer and PhaseTimer to controller state."""
         m = self._timer.metrics
 
-        # Check if loop stats reset was requested
         if state.loop_stats_reset_pending:
             m.reset_stats(include_counters=True)
             state.loop_stats_reset_pending = False
@@ -492,7 +477,6 @@ class Controller:
                 gc_dur,
             )
 
-        # Rate-limited debug log every 3s
         if not m.should_log(now, 3.0):
             return
 

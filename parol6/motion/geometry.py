@@ -24,7 +24,6 @@ from parol6.config import CONTROL_RATE_HZ, PATH_SAMPLES
 
 logger = logging.getLogger(__name__)
 
-# Default control rate for geometry sampling
 DEFAULT_CONTROL_RATE = CONTROL_RATE_HZ
 
 
@@ -96,7 +95,6 @@ class CircularMotion(_ShapeGenerator):
 
         num_points = max(2, n_samples)
 
-        # Vectorized arc position generation using scipy Rotation
         t_values = np.linspace(0, 1, num_points) if num_points > 1 else np.array([1.0])
         angles = t_values * arc_angle
 
@@ -278,7 +276,6 @@ def compute_circle_from_3_points(
     p2 = np.asarray(p2, dtype=np.float64)
     p3 = np.asarray(p3, dtype=np.float64)
 
-    # Vectors from p1 to p2 and p3
     a = p2 - p1
     b = p3 - p1
 
@@ -298,7 +295,6 @@ def compute_circle_from_3_points(
         normal /= np.linalg.norm(normal)
         return center, radius, normal
 
-    # Normal to the plane
     normal = np.asarray(np.cross(a, b), dtype=np.float64)
     normal_len = float(np.linalg.norm(normal))
     if normal_len < 1e-12:
@@ -409,7 +405,7 @@ def build_composite_cartesian_path(
         _linear_se3_segment_into(waypoints[0], waypoints[1], out)
         return out
 
-    # Compute segment lengths (mm)
+    # Segment lengths in mm (FK transforms are in meters)
     seg_lengths: list[float] = [0.0] * (n - 1)
     for i in range(n - 1):
         seg_lengths[i] = (

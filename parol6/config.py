@@ -199,7 +199,6 @@ _joint_ratio = PAROL6_ROBOT.joint.ratio
 
 # Standby/home position in degrees - pass-through from robot definition
 STANDBY_ANGLES_DEG: list[float] = list(PAROL6_ROBOT.joint.standby_deg)
-# Alias
 HOME_ANGLES_DEG: list[float] = STANDBY_ANGLES_DEG
 
 

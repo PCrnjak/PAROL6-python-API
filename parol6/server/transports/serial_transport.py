@@ -69,7 +69,7 @@ def _parse_frames_njit(
         if avail < 4:
             break
 
-        # Find start sequence
+        # Find start sequence (0xFF 0xFF 0xFF)
         found = False
         while avail >= 3:
             if (
@@ -90,7 +90,7 @@ def _parse_frames_njit(
         if avail < total_needed:
             break
 
-        # Validate end markers
+        # Validate end markers (0x01 0x02)
         if length >= 2:
             e0 = rb[(tail + 4 + length - 2) % cap]
             e1 = rb[(tail + 4 + length - 1) % cap]
@@ -98,7 +98,7 @@ def _parse_frames_njit(
                 tail = (tail + 1) % cap
                 continue
 
-        # Extract payload (first 52 bytes)
+        # Extract payload (fixed 52-byte status frame)
         payload_len = 52 if length >= 52 else length
         start = (tail + 4) % cap
         for i in range(payload_len):
@@ -144,10 +144,12 @@ class SerialTransport:
         self.timeout = timeout
         self.serial: serial.Serial | None = None
         self.last_reconnect_attempt = 0.0
-        self.reconnect_interval = 1.0  # seconds between reconnect attempts
-        self._reconnect_failures = 0  # count consecutive failures to reduce log spam
+        self.reconnect_interval = 1.0  # seconds
+        self._reconnect_failures = (
+            0  # consecutive failures; throttles reconnect log level
+        )
 
-        # Reduced-copy latest-frame infrastructure (poll_read will publish here)
+        # Reduced-copy latest-frame infrastructure; poll_read publishes here
         self._scratch = np.zeros(4096, dtype=np.uint8)
         self._scratch_mv = memoryview(self._scratch.data)
         # Fixed-size ring buffer for RX stream (drop-oldest on overflow)
@@ -181,11 +183,10 @@ class SerialTransport:
         Returns:
             True if connection successful, False otherwise
         """
-        # Reset failure counter on explicit connect call
         self._reconnect_failures = 0
         success = self._connect_internal(port, quiet=False)
         if not success:
-            # Mark as failed so auto_reconnect logs at DEBUG level
+            # so auto_reconnect logs subsequent attempts at DEBUG level
             self._reconnect_failures = 1
         return success
 
@@ -230,7 +231,6 @@ class SerialTransport:
         self.last_reconnect_attempt = now
 
         if self.port:
-            # Log at INFO only on first attempt, DEBUG on subsequent
             log_level = logging.DEBUG if self._reconnect_failures > 0 else logging.INFO
             logger.log(log_level, f"Attempting to reconnect to {self.port}...")
             success = self._connect_internal(
@@ -268,11 +268,9 @@ class SerialTransport:
             return False
 
         try:
-            # Close existing connection if any
             if self.serial and self.serial.is_open:
                 self.serial.close()
 
-            # Create new connection
             self.serial = serial.Serial(
                 port=self.port, baudrate=self.baudrate, timeout=self.timeout
             )
@@ -328,7 +326,6 @@ class SerialTransport:
             return False
 
         try:
-            # Write to serial using preallocated buffer and zero-alloc pack
             ser = self.serial
             if ser is None:
                 return False
@@ -348,7 +345,6 @@ class SerialTransport:
 
         except serial.SerialException as e:
             logger.error(f"Serial write error: {e}")
-            # Mark connection as lost
             self.disconnect()
             return False
         except Exception as e:
@@ -376,7 +372,6 @@ class SerialTransport:
             if n is None or n <= 0:
                 return False
 
-            # Append to ring buffer and parse
             self._append_to_ring(n)
             self._parse_ring_for_frames()
             return True
@@ -426,24 +421,15 @@ class SerialTransport:
         return (mv, self._frame_version, self._frame_ts)
 
     def _update_hz_tracking(self) -> None:
-        """
-        Update EMA Hz tracking and print debug info periodically.
-
-        This method calculates the instantaneous Hz based on time between messages,
-        updates the EMA (Exponential Moving Average), tracks min/max values,
-        and prints debug info every few seconds.
-        """
+        """Tally RX messages and log average Hz every _print_interval seconds."""
         current_time = time.perf_counter()
 
-        # Increment message counters
         self._rx_msg_count += 1
         self._interval_msg_count += 1
 
-        # Check if it's time to print debug info
         if self._last_print_time == 0.0:
             self._last_print_time = current_time
         elif current_time - self._last_print_time >= self._print_interval:
-            # Print debug information
             if self._interval_msg_count > 0:
                 avg_hz = self._interval_msg_count / (
                     current_time - self._last_print_time
@@ -456,6 +442,5 @@ class SerialTransport:
                     f"Serial RX Stats - No messages received in last {self._print_interval:.1f}s"
                 )
 
-            # Reset interval statistics
             self._last_print_time = current_time
             self._interval_msg_count = 0

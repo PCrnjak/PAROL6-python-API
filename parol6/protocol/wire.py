@@ -45,7 +45,7 @@ def _enc_hook(obj: object) -> object:
     if isinstance(obj, np.ndarray):
         return obj.tolist()  # type: ignore[no-matching-overload, ty:no-matching-overload]
     if isinstance(obj, (np.integer, np.floating)):
-        return obj.item()  # Convert numpy scalar to Python native type
+        return obj.item()
     raise NotImplementedError(f"Cannot encode {type(obj)}")
 
 
@@ -843,7 +843,6 @@ def _collect_command_structs() -> list[type]:
             continue
         if not issubclass(cls, msgspec.Struct):
             continue
-        # Check for tag in struct config
         config = getattr(cls, "__struct_config__", None)
         if config is not None and config.tag is not None:
             structs.append(cls)
@@ -1592,18 +1591,15 @@ def pack_tx_frame_into(
     out[2] = 0xFF
     out[3] = 52
 
-    # Positions and speeds: JIT-compiled packing
+    # Positions and speeds packed via JIT-compiled helper
     _pack_positions(out, position_out, 4)
     _pack_positions(out, speed_out, 22)
 
-    # Command
     out[40] = command_code
 
-    # Bitfields
     out[41] = _pack_bitfield(affected_joint_out)
     out[42] = _pack_bitfield(inout_out)
 
-    # Timeout
     out[43] = int(timeout_out) & 0xFF
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
@@ -1625,7 +1621,6 @@ def pack_tx_frame_into(
     # CRC placeholder byte (0xE4) — fixed value, not computed
     out[53] = 228
 
-    # End bytes
     out[54] = 0x01
     out[55] = 0x02
 

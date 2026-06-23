@@ -61,11 +61,9 @@ def _simulate_motion_jit(
     Note: CommandCode enums are used directly inside the function (resolved at compile time).
     Passing enums as arguments would add ~90µs overhead per call.
     """
-    # Handle homing countdown
     if homing_countdown > 0:
         homing_countdown -= 1
         if homing_countdown == 0:
-            # Homing complete
             homed_in.fill(1)
             for i in range(6):
                 steps = cfg.deg_to_steps_scalar(home_angles_deg[i], i)
@@ -77,7 +75,6 @@ def _simulate_motion_jit(
     # Ensure E-stop stays released
     io_in[4] = 1
 
-    # Simulate motion based on command type
     if command_out == CommandCode.HOME:
         if homing_countdown == 0:
             for i in range(6):
@@ -189,7 +186,6 @@ def _write_frame_jit(
     state_position_out[:] = position_out
     state_speed_out[:] = speed_out
 
-    # Simulate gripper state updates
     if gripper_data_out[4] == 1:  # Calibration mode
         state_gripper_data_in[0] = gripper_data_out[5]
         state_gripper_data_in[4] = 0x40
@@ -249,7 +245,7 @@ def _simulate_gripper_ramp_jit(
         gripper_pos_f += pos_delta
     else:
         gripper_pos_f -= pos_delta
-    gripper_data_in[1] = int(gripper_pos_f + 0.5)  # round to int
+    gripper_data_in[1] = int(gripper_pos_f + 0.5)
     return gripper_pos_f
 
 
@@ -307,23 +303,19 @@ class MockRobotState:
     )
     # Joint speeds (in steps/sec)
     speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
-    # Homed status per joint
     homed_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
-    # I/O states
     io_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )  # E-stop released
     io_out: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )  # Commanded outputs (echoed from controller)
-    # Error states
     temperature_error_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )
     position_error_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )
-    # Gripper state
     gripper_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
@@ -336,7 +328,6 @@ class MockRobotState:
     # Generalized tool ramp for binary-activation tools (pneumatic grippers, etc.)
     tool_ramp_target: float = 0.0  # target normalized position (0..1)
     tool_ramp_current: float = 0.0  # current ramp progress (0..1)
-    # Timing data
     timing_data_in: np.ndarray = field(
         default_factory=lambda: np.zeros((1,), dtype=np.int32)
     )
@@ -362,7 +353,6 @@ class MockRobotState:
             deg = float(cfg.STANDBY_ANGLES_DEG[i])
             steps = int(cfg.deg_to_steps_scalar(deg, i))
             self.position_in[i] = steps
-        # Initialize float accumulator from integer steps
         self.position_f = self.position_in.astype(np.float64)
 
         # Ensure E-stop is not pressed (bit 4 = 1 means released)
@@ -394,16 +384,12 @@ class MockSerialTransport:
         self.baudrate = baudrate
         self.timeout = timeout
 
-        # Internal robot state
         self._state = MockRobotState()
 
-        # Frame generation tracking
         self._frame_interval = cfg.INTERVAL_S  # match control loop cadence
 
-        # Connection state
         self._connected = False
 
-        # Statistics
         self._frames_received = 0
 
         # Latest-frame infrastructure (simulation publishes into this buffer)
@@ -449,7 +435,7 @@ class MockSerialTransport:
             self.port = port
 
         self._connected = True
-        self._state = MockRobotState()  # Reset state on connect
+        self._state = MockRobotState()
         self._simulator = None  # Force re-resolve on next tick
         self._simulator_tool_name = ""
         # Initialize time base to perf_counter for consistent scheduling
@@ -457,7 +443,6 @@ class MockSerialTransport:
         logger.debug(f"MockSerialTransport connected to simulated port: {self.port}")
         return True
 
-    # Allow controller to sync the simulator pose/homing from live controller state
     def sync_from_controller_state(self, state: ControllerState) -> None:
         """
         Synchronize the mock robot internal state from a controller state snapshot.

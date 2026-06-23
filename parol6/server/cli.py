@@ -21,7 +21,6 @@ def main() -> int:
     parser.add_argument("--serial", help="Serial port (e.g., /dev/ttyUSB0 or COM3)")
     parser.add_argument("--baudrate", type=int, default=3000000, help="Serial baudrate")
 
-    # Verbose logging options
     parser.add_argument(
         "-v",
         "--verbose",
@@ -122,7 +121,6 @@ def main() -> int:
         serial_baudrate=args.baudrate,
     )
 
-    # Create and run controller
     controller = None
 
     def handle_sigterm(signum, frame):
@@ -132,7 +130,7 @@ def main() -> int:
             controller.stop()
         raise SystemExit(0)
 
-    # Install signal handler for graceful shutdown on SIGTERM
+    # Graceful shutdown on SIGTERM
     signal.signal(signal.SIGTERM, handle_sigterm)
 
     try:

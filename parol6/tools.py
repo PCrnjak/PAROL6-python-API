@@ -117,10 +117,10 @@ class PneumaticGripperConfig(ToolConfig):
 
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         port_idx = 2 if self.io_port == 1 else 3
-        # Simulator writes ramped position into Gripper_data_in[1] (0-255).
-        # Real hardware has no position feedback — use valve output directly.
-        # Convention: 0.0 = open, 1.0 = closed. Pneumatic simulator ramps
-        # toward 255 for open, so we invert.
+        # Simulator writes the ramped position (0-255) into Gripper_data_in[1];
+        # real hardware has no position feedback, so fall back to the valve
+        # output. Convention: 0.0 = open, 1.0 = closed; the simulator ramps
+        # toward 255 for open, hence the inversion.
         pos_byte = hw.Gripper_data_in[1]
         if pos_byte > 0 or hw.InOut_out[port_idx] == 0:
             out.positions = (1.0 - float(pos_byte) / 255.0,)
@@ -226,7 +226,6 @@ class ElectricGripperConfig(ToolConfig):
         min_tps, max_tps = self.firmware_speed_range_tps
         velocity_tps = min_tps + (speed_byte / 255.0) * (max_tps - min_tps)
 
-        # Compute tick_range from mechanical params
         travel_mm = 0.0
         for m in self.motions:
             if isinstance(m, LinearMotion):
@@ -275,28 +274,26 @@ class PneumaticToolSimulator:
         if not isinstance(cfg, PneumaticGripperConfig):
             return
 
-        # Find first LinearMotion with estimated speed
         for m in cfg.motions:
             if isinstance(m, LinearMotion) and m.estimated_speed_m_s:
-                # Normalized speed: fraction of full travel per second
+                # Normalized speed: fraction of full travel per second.
                 self._ramp_speed = m.estimated_speed_m_s / m.travel_m
                 break
 
         if self._ramp_speed > 0:
-            # Map io_port to InOut_out index (port 1 -> index 2, port 2 -> index 3)
+            # Map io_port to InOut_out index (port 1 -> index 2, port 2 -> index 3).
             self._io_port = cfg.io_port + 1
 
     def tick(self, state: MockRobotState, dt: float) -> None:
         if self._io_port < 0:
             return
 
-        # Read commanded I/O output to determine target (0=closed, 1=open)
+        # Commanded I/O output sets the target: 0 = closed, 1 = open.
         io_val = float(state.io_out[self._io_port])
         target = 1.0 if io_val > 0 else 0.0
         if target != state.tool_ramp_target:
             state.tool_ramp_target = target
 
-        # Ramp toward target
         error = state.tool_ramp_target - state.tool_ramp_current
         if abs(error) < 1e-6:
             return
@@ -308,10 +305,10 @@ class PneumaticToolSimulator:
         else:
             state.tool_ramp_current -= step
 
-        # Write ramped position as byte into gripper_data_in[1] (same slot electric uses)
+        # gripper_data_in[1] is the same slot the electric simulator uses.
         state.gripper_data_in[1] = int(state.tool_ramp_current * 255.0 + 0.5)
 
-        # Update part detection input when ramp completes
+        # Update part-detection input once the ramp reaches the target.
         if abs(state.tool_ramp_current - state.tool_ramp_target) < 1e-6:
             det_idx = self._io_port
             state.io_in[det_idx] = 1 if state.tool_ramp_target < 0.5 else 0
@@ -335,7 +332,6 @@ class ElectricGripperSimulator:
     def resolve_params(self, cfg: ToolConfig) -> None:
         if not isinstance(cfg, ElectricGripperConfig):
             return
-        # Find jaw travel from default motion
         for m in cfg.motions:
             if isinstance(m, LinearMotion):
                 travel_mm = m.travel_m * 1000.0
@@ -430,8 +426,8 @@ def _make_tcp_transform(
 _TCP_RPY = (0.0, 0.0, 0.0)
 
 # All PAROL6 tool meshes were designed with Rx(π) in the kinematic chain.
-# Now that the kinematic transform is pure translation (for correct IK),
-# the rotation is applied to the mesh definitions instead.
+# The kinematic transform is pure translation (for correct IK), so the
+# rotation lives on the mesh definitions instead.
 _MESH_RPY = (math.pi, 0.0, 0.0)
 
 

@@ -1,8 +1,8 @@
 """
 IK Worker subprocess.
 
-This module runs the computationally expensive IK enablement calculations
-in a separate process, communicating with the main process via shared memory.
+Runs the computationally expensive IK enablement calculations in a separate
+process, communicating with the main process via shared memory.
 """
 
 import logging
@@ -54,7 +54,6 @@ def ik_enablement_worker_main(
 
     set_pdeathsig()
 
-    # Attach to shared memory
     input_shm = SharedMemory(name=input_shm_name, create=False, **SHM_EXTRA_KWARGS)
     output_shm = SharedMemory(name=output_shm_name, create=False, **SHM_EXTRA_KWARGS)
     unregister_shm(input_shm)
@@ -100,7 +99,7 @@ def ik_enablement_worker_main(
     cart_en_wrf[:] = 1
     cart_en_trf[:] = 1
 
-    # Initialize robot model in this process
+    # Robot model must be built inside this subprocess, not inherited.
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
     from parol6.utils.ik import solve_ik
 
@@ -131,14 +130,10 @@ def ik_enablement_worker_main(
                     robot.set_tool_transform(tool_T.copy())
                 logger.info("IK worker: tool transform updated")
 
-            # Input data is already available via views (q_rad, T_matrix)
-
-            # Compute joint enablement
             if qlim is not None:
                 _compute_joint_enable(q_rad, qlim, joint_en)
             # else: joint_en stays all ones (pre-allocated default)
 
-            # Compute cartesian enablement for both frames
             _compute_cart_enable(
                 T_matrix,
                 True,
@@ -171,11 +166,10 @@ def ik_enablement_worker_main(
     except Exception as e:
         logger.exception("IK worker subprocess error: %s", e)
     finally:
-        # Release numpy views before closing shared memory
+        # Release numpy views before closing shared memory.
         del q_rad, T_flat, T_matrix, tool_T_flat, tool_T
         del joint_en, cart_en_wrf, cart_en_trf, version_view
 
-        # Release memoryviews
         try:
             input_mv.release()
         except BufferError:
@@ -296,7 +290,6 @@ def _compute_cart_enable(
     # Compute all 12 target poses in one numba call
     _compute_target_poses(T, t_step, r_step, is_wrf, axis_dirs, targets)
 
-    # Check IK for each target
     for i in range(12):
         try:
             ik = solve_ik(robot, targets[i], q_rad, quiet_logging=True)

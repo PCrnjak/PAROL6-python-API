@@ -56,13 +56,12 @@ class CommandRegistry:
     _discovered: bool
 
     def __new__(cls) -> CommandRegistry:
-        """Ensure singleton pattern."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
-        """Initialize the registry (only runs once due to singleton)."""
+        # Guarded so the singleton only initializes once across repeated __init__ calls.
         if not hasattr(self, "_initialized"):
             self._commands = {}
             self._class_to_type = {}
@@ -101,14 +100,12 @@ class CommandRegistry:
                 )
         else:
             self._commands[cmd_type] = command_class
-            # Maintain reverse mapping for fast class -> type lookup
+            # Reverse map for fast class -> type lookup.
             self._class_to_type[command_class] = cmd_type
 
-            # Determine and store category at registration time
             category = self._determine_category(command_class)
             self._class_to_category[command_class] = category
 
-            # Also register by struct type if PARAMS_TYPE is set
             params_type = getattr(command_class, "PARAMS_TYPE", None)
             if params_type is not None:
                 self._struct_to_command[params_type] = command_class
@@ -127,7 +124,6 @@ class CommandRegistry:
         Returns:
             The command class if found, None otherwise
         """
-        # Ensure commands are discovered
         if not self._discovered:
             self.discover_commands()
 
@@ -138,7 +134,6 @@ class CommandRegistry:
         Retrieve the registered CmdType for a given command class.
         Returns None if the class is not registered.
         """
-        # Ensure commands are discovered
         if not self._discovered:
             self.discover_commands()
         # Prefer explicit reverse map; fall back to class attribute set by decorator
@@ -151,7 +146,6 @@ class CommandRegistry:
         Returns:
             List of CmdType values (sorted by int value)
         """
-        # Ensure commands are discovered
         if not self._discovered:
             self.discover_commands()
 
@@ -169,27 +163,25 @@ class CommandRegistry:
 
         logger.debug("Discovering commands...")
 
-        # Import parol6.commands package
         try:
             commands_package = import_module("parol6.commands")
         except ImportError as e:
             logger.error(f"Failed to import parol6.commands: {e}")
             return
 
-        # Iterate through all modules in the commands package
         package_path = commands_package.__path__
         for _, modname, ispkg in pkgutil.iter_modules(package_path):
             if ispkg:
-                continue  # Skip subpackages
+                continue
 
             full_module_name = f"parol6.commands.{modname}"
 
-            # Skip the base module
+            # base holds the abstract classes, not a registrable command.
             if modname == "base":
                 continue
 
             try:
-                # Import the module (this triggers decorators)
+                # Importing the module triggers its @register_command decorators.
                 import_module(full_module_name)
                 logger.debug(f"Imported command module: {full_module_name}")
             except ImportError as e:
@@ -287,7 +279,6 @@ class CommandRegistry:
         logger.debug("Command registry cleared")
 
 
-# Global registry instance
 _registry = CommandRegistry()
 
 
@@ -313,14 +304,12 @@ def register_command(
     """
 
     def decorator(cls: type[_CmdT]) -> type[_CmdT]:
-        # Verify it's a CommandBase subclass
         if not issubclass(cls, CommandBase):
             raise TypeError(f"Class {cls.__name__} must inherit from CommandBase")
 
-        # Register with the global registry
         _registry.register(cmd_type, cls)
 
-        # Add the command type as a class attribute for reference
+        # Stash on the class as a fallback for get_type_for_class.
         cls._cmd_type = cmd_type
 
         return cls
