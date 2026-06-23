@@ -87,10 +87,12 @@ def _resolved_urdf_for_collision() -> str:
     src = Path(_urdf_path)
     text = src.read_text()
     mesh_root = Path(_mesh_dir) / "meshes"
-    # `package://parol6/meshes/foo.STL` -> `file:///abs/path/to/foo.STL`.
-    # Path.as_uri() yields a valid file URI on every platform (Windows drive
-    # letters / backslashes break a hand-built `file://` + str(path)).
-    rewritten = text.replace("package://parol6/meshes/", mesh_root.as_uri() + "/")
+    # `package://parol6/meshes/foo.STL` -> a plain absolute path coal/assimp can
+    # open. Use a POSIX-style path, NOT a `file://` URI: coal strips the scheme
+    # naively, which on Windows leaves an invalid `/D:/...` (leading slash before
+    # the drive letter). `as_posix()` gives `/abs/...` on POSIX and `D:/abs/...`
+    # on Windows — both openable directly.
+    rewritten = text.replace("package://parol6/meshes/", mesh_root.as_posix() + "/")
     fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
     with os.fdopen(fd, "w") as f:
         f.write(rewritten)
