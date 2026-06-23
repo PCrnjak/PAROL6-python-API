@@ -41,9 +41,10 @@ from waldoctl import (
     PositionLimits,
     Robot as _RobotABC,
     ToolSpec,
-    ToolsSpec,
+    ToolsCollection,
     ToolStatus,
     ToolType,
+    resolve_variant_tcp,
 )
 
 from parol6.client.async_client import AsyncRobotClient
@@ -56,6 +57,8 @@ from parol6.tools import (
     ElectricGripperConfig,
     PneumaticGripperConfig,
     get_registry,
+    plugin_tool_keys,
+    register_plugin_tools,
 )
 from parol6.utils.ik import check_limits, solve_ik
 
@@ -385,38 +388,6 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         )
 
 
-class _ToolsCollection(ToolsSpec):
-    """Concrete ToolsSpec for PAROL6."""
-
-    def __init__(self, tools: tuple[ToolSpec, ...]) -> None:
-        self._tools = tools
-        self._by_key = {t.key: t for t in tools}
-
-    @property
-    def available(self) -> tuple[ToolSpec, ...]:
-        return self._tools
-
-    @property
-    def default(self) -> ToolSpec:
-        return self._by_key.get("NONE", self._tools[0])
-
-    def __getitem__(self, key: str) -> ToolSpec:
-        return self._by_key[key]
-
-    def __contains__(self, item: object) -> bool:
-        # ToolType is a StrEnum, so test it before the plain-str branch —
-        # otherwise a category like ToolType.GRIPPER would misroute to the
-        # by-key lookup (keyed by tool key, not category) and return False.
-        if isinstance(item, ToolType):
-            return any(t.tool_type == item for t in self._tools)
-        if isinstance(item, str):
-            return item in self._by_key
-        return False
-
-    def by_type(self, tool_type: str | ToolType) -> tuple[ToolSpec, ...]:
-        return tuple(t for t in self._tools if t.tool_type == tool_type)
-
-
 # ===========================================================================
 # Helper builders
 # ===========================================================================
@@ -462,10 +433,15 @@ def _decompose_transform(
     return origin, rpy
 
 
-def _build_tools() -> _ToolsCollection:
-    """Build typed tool specs from the parol6 tool registry."""
+def _build_tools() -> ToolsCollection:
+    """Build typed tool specs from the parol6 tool registry. Plugin-registered
+    keys are excluded — they reach ``robot.tools`` through waldoctl composition
+    as their own ToolSpec classes, not as registry-derived natives."""
+    plugin_keys = plugin_tool_keys()
     tools: list[ToolSpec] = []
     for key, cfg in get_registry().items():
+        if key in plugin_keys:
+            continue
         origin, rpy = _decompose_transform(cfg.transform)
         common = dict(
             key=key,
@@ -493,7 +469,7 @@ def _build_tools() -> _ToolsCollection:
         else:
             tools.append(_ToolImpl(**common, tool_type=ToolType.NONE))
 
-    return _ToolsCollection(tuple(tools))
+    return ToolsCollection(tuple(tools), default_key="NONE")
 
 
 def _resolve_urdf_path() -> str:
@@ -555,9 +531,12 @@ class Robot(_RobotABC):
         self._timeout = timeout
         self._manager = _ServerManager(normalize_logs=normalize_logs)
 
-        # Build configuration eagerly
+        # Build configuration eagerly. Native tools snapshot first, then plugin
+        # tools join this process's registry so client-side paths (e.g. the
+        # SelectToolCmd wire validation) accept them.
         self._joints = _build_joints()
         self._tools = _build_tools()
+        register_plugin_tools()
         self._urdf_path = _resolve_urdf_path()
         self._mesh_dir = _resolve_mesh_dir()
         self._motion_profiles = tuple(p.value.upper() for p in ProfileType)
@@ -596,7 +575,9 @@ class Robot(_RobotABC):
         return self._joints
 
     @property
-    def tools(self) -> _ToolsCollection:
+    def native_tools(self) -> ToolsCollection:
+        """PAROL6's built-in tools. The waldoctl ``Robot.tools`` property
+        composes these with any plugin tools registered via ``waldoctl.tools``."""
         return self._tools
 
     @property
@@ -689,7 +670,12 @@ class Robot(_RobotABC):
         """
         from parol6.tools import get_tool_transform
 
-        T_tool = get_tool_transform(tool_key, variant_key=variant_key)
+        try:
+            T_tool = get_tool_transform(tool_key, variant_key=variant_key)
+        except ValueError:
+            # Plugin tool (waldoctl.tools) not in PAROL6's registry — derive its
+            # TCP from the ToolSpec instead.
+            T_tool = self._plugin_tool_transform(tool_key, variant_key)
 
         if tcp_offset_m is not None and any(v != 0 for v in tcp_offset_m):
             T_offset = np.eye(4)
@@ -702,6 +688,28 @@ class Robot(_RobotABC):
             self._pinokin.set_tool_transform(T_tool)
         else:
             self._pinokin.clear_tool_transform()
+
+    def _plugin_tool_transform(
+        self, tool_key: str, variant_key: str | None
+    ) -> NDArray[np.float64]:
+        """Flange→TCP transform for a plugin tool, from its ToolSpec's
+        ``tcp_origin``/``tcp_rpy`` (variant overrides win). Identity (with a
+        warning) if the key is unknown to both registries."""
+        try:
+            spec = self.tools[tool_key]
+        except KeyError:
+            logger.warning(
+                "Unknown tool %r; using identity TCP. Available: %s",
+                tool_key,
+                [t.key for t in self.tools.available],
+            )
+            return np.eye(4)
+        origin, rpy = resolve_variant_tcp(
+            spec.tcp_origin, spec.tcp_rpy, spec.variants, variant_key
+        )
+        T = np.zeros((4, 4), dtype=np.float64)
+        se3_from_rpy(origin[0], origin[1], origin[2], rpy[0], rpy[1], rpy[2], T)
+        return T
 
     def fk(
         self, q_rad: NDArray[np.float64], out: NDArray[np.float64]
