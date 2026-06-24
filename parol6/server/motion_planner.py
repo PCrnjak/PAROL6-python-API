@@ -523,14 +523,46 @@ def motion_planner_main(
     command_queue: multiprocessing.Queue,
     segment_queue: multiprocessing.Queue,
     shutdown_event: EventType,
+    ready_event: EventType,
+    avoid_core: int | None = None,
 ) -> None:
     """Worker process main loop — compute trajectories and forward inline commands."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from parol6.server import set_pdeathsig
+    from parol6.tools import register_plugin_tools
 
     set_pdeathsig()
 
+    # Spawn-mode subprocess: the registry is freshly imported with only native
+    # tools, so plugin tools must be registered here too or SELECT_TOOL/SyncTool
+    # of a plugin tool fails in apply_tool.
+    register_plugin_tools()
+
+    # Keep planning off the control loop's core so it never steals real-time
+    # cycles. We were spawned before the controller pinned itself, so we still
+    # hold the full affinity here and just drop the loop's core.
+    if avoid_core is not None:
+        try:
+            import os
+
+            import psutil
+
+            other_cores = [c for c in range(os.cpu_count() or 1) if c != avoid_core]
+            if other_cores:
+                psutil.Process().cpu_affinity(other_cores)
+                logger.debug(
+                    "Planner worker avoiding loop core %d -> %s",
+                    avoid_core,
+                    other_cores,
+                )
+        except (NotImplementedError, AttributeError, OSError, psutil.Error) as e:
+            logger.debug("Planner worker affinity unchanged: %s", e)
+
     worker = PlannerWorker(segment_queue)
+
+    # Signal the parent that the heavy spawn startup (imports + planner build) is
+    # done, so it can finish coming up and start accepting commands.
+    ready_event.set()
 
     logger.debug(
         "Motion planner subprocess started (PID %d)",
@@ -616,23 +648,56 @@ class MotionPlanner:
         self._command_queue: multiprocessing.Queue = multiprocessing.Queue()
         self._segment_queue: multiprocessing.Queue = multiprocessing.Queue()
         self._shutdown_event: EventType = multiprocessing.Event()
+        self._ready_event: EventType = multiprocessing.Event()
         self._process: multiprocessing.Process | None = None
 
     # -- lifecycle --
 
-    def start(self) -> None:
-        """Start the planner subprocess."""
+    def start(self, avoid_core: int | None = None) -> None:
+        """Start the planner subprocess.
+
+        ``avoid_core`` is the CPU core the controller's real-time loop will pin
+        to; the worker keeps off it so planning never competes with the loop.
+        Spawn happens before the controller pins itself, so the worker inherits
+        the full affinity and its heavy import runs on any free core.
+        """
         if self._process is not None and self._process.is_alive():
             return
         self._shutdown_event.clear()
+        self._ready_event.clear()
         self._process = multiprocessing.Process(
             target=motion_planner_main,
-            args=(self._command_queue, self._segment_queue, self._shutdown_event),
+            args=(
+                self._command_queue,
+                self._segment_queue,
+                self._shutdown_event,
+                self._ready_event,
+                avoid_core,
+            ),
             daemon=True,
             name="MotionPlannerProcess",
         )
         self._process.start()
         logger.debug("Motion planner started, PID: %s", self._process.pid)
+        # Block until the worker finishes its heavy spawn startup (a fresh
+        # interpreter re-importing the full stack — ~2s, more on slow runners).
+        # start() runs before the control loop, so waiting here keeps that import
+        # off the CPU the loop will pin (avoiding ~3s of contention) and ensures
+        # the controller does not accept a motion command before the worker can
+        # process it (which otherwise stalls the first command for ~5s).
+        # Poll for readiness; fail fast if the worker dies during its heavy spawn
+        # import instead of blocking the full 30s on a dead process.
+        for _ in range(300):  # 300 * 0.1s = 30s
+            if self._ready_event.wait(timeout=0.1):
+                logger.debug("Motion planner worker ready")
+                return
+            if not self._process.is_alive():
+                logger.error(
+                    "Motion planner worker died during startup (exit code %s)",
+                    self._process.exitcode,
+                )
+                return
+        logger.warning("Motion planner worker not ready after 30s; continuing anyway")
 
     def stop(self) -> None:
         """Shut down the planner subprocess gracefully."""

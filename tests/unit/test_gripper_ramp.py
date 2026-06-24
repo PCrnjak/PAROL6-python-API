@@ -163,20 +163,6 @@ class TestGripperRampJit:
 class TestElectricGripperConfigSpecs:
     """Verify physical specs on tool configs match expected values."""
 
-    def test_ssg48_config(self):
-        cfg = get_registry()["SSG-48"]
-        assert isinstance(cfg, ElectricGripperConfig)
-        assert cfg.encoder_cpr == 16_384
-        assert cfg.gear_pd_mm == 12.0
-        assert cfg.firmware_speed_range_tps == (40, 80_000)
-
-    def test_msg_config(self):
-        cfg = get_registry()["MSG"]
-        assert isinstance(cfg, ElectricGripperConfig)
-        assert cfg.encoder_cpr == 16_384
-        assert cfg.gear_pd_mm == pytest.approx(16.67, abs=0.01)
-        assert cfg.firmware_speed_range_tps == (500, 60_000)
-
     def test_ssg48_tick_range_derivation(self):
         """Tick range derived from gear PD + travel_m should match expected ~10,432."""
         cfg = get_registry()["SSG-48"]

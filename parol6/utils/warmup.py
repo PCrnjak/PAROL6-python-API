@@ -2,7 +2,8 @@
 JIT warmup utilities.
 
 Call warmup_jit() on startup to pre-compile all numba functions before the control loop.
-With cache=True, this is fast (~100ms) if cache exists, slower (~3-10s) on first run.
+With cache=True, this is fast (~100ms) if the on-disk cache exists, slower (~10-30s on a
+slow machine) on a cold first run.
 """
 
 import logging
@@ -65,6 +66,10 @@ from parol6.server.transports.mock_serial_transport import (
     _simulate_motion_jit,
     _write_frame_jit,
 )
+from parol6.server.transports.serial_transport import (
+    _append_to_ring_numba,
+    _parse_frames_njit,
+)
 from parol6.utils.ik import _check_limits_core, _ik_safety_check
 from pinokin import warmup_numba_se3
 
@@ -77,8 +82,19 @@ def warmup_jit() -> float:
 
     Returns the time taken in seconds.
     """
-    logging.info("Warming JIT...")
+    logger.info(
+        "Warming up numba JIT compiler (first run is a one-time cold compile, "
+        "~10-30s on a slow machine; cached afterwards so later starts are "
+        "instant). This is normal startup, not a hang..."
+    )
     start = time.perf_counter()
+
+    def _progress(label: str) -> None:
+        # Only chatter when it's genuinely a slow cold compile, so warm-cache
+        # starts stay quiet while a cold start visibly shows it isn't frozen.
+        elapsed = time.perf_counter() - start
+        if elapsed > 1.0:
+            logger.info("  ...JIT warmup: %s ready (%.1fs)", label, elapsed)
 
     # Warm up pinokin's zero-allocation SE3/SO3 functions
     warmup_numba_se3()
@@ -105,6 +121,7 @@ def warmup_jit() -> float:
     speed_steps_to_rad_scalar(0.0, 0)
     speed_rad_to_steps(dummy_6f, out_6i)
     speed_rad_to_steps_scalar(0.0, 0)
+    _progress("joint conversions")
 
     # parol6/utils/ik.py
     _ik_safety_check(dummy_6f, dummy_6f, dummy_6f, dummy_6f, dummy_6f, dummy_6f)
@@ -203,6 +220,15 @@ def warmup_jit() -> float:
         dummy_grip_out,  # grip_out
     )
 
+    # parol6/server/transports/serial_transport.py - real-hardware frame I/O.
+    # Not exercised by the simulator, but warmed so a hardware controller does
+    # not cold-compile these on its first serial frame.
+    dummy_ring = np.zeros(256, dtype=np.uint8)
+    dummy_src = np.zeros(8, dtype=np.uint8)
+    _append_to_ring_numba(dummy_ring, dummy_src, 8, 256, 0, 0)
+    _parse_frames_njit(dummy_ring, 0, 0, 256, np.zeros(64, dtype=np.uint8))
+    _progress("protocol & kinematics")
+
     # parol6/server/loop_timer.py - stats computation
     dummy_1000f = np.zeros(1000, dtype=np.float64)
     dummy_1000f_scratch = np.zeros(1000, dtype=np.float64)
@@ -268,6 +294,7 @@ def warmup_jit() -> float:
         dummy_timing,  # timing_in
         dummy_gripper_in,  # gripper_in
     )
+    _progress("simulator & I/O")
 
     # Workspace arrays for jit functions below (SE3 funcs already warmed by pinokin)
     dummy_twist = np.zeros(6, dtype=np.float64)
@@ -305,5 +332,5 @@ def warmup_jit() -> float:
     _smooth_singularity_outliers(dummy_chain)
 
     elapsed = time.perf_counter() - start
-    logger.info(f"\tJIT warmup completed in {elapsed * 1000:.1f}ms")
+    logger.info("JIT warmup complete (%.1fs).", elapsed)
     return elapsed

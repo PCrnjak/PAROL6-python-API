@@ -144,6 +144,7 @@ For streamable commands (`streamable = True`), `do_setup()` also runs at high fr
 **When CI tests fail, fix them.** Don't waste time analyzing whether failures are "related to your changes" — just fix all failing tests. The goal is a green CI, not attribution.
 
 Prefer fewer, comprehensive integration tests that mimic manual testing over a large number of unit tests. We have no code coverage requirements—the goal is working features, not metrics.
+- **No tautological tests.** Assert behavior, not what's true by construction — not default fields, constructor args echoed back, enum literals, `isinstance`/frozen-raises, or stub-raises-`NotImplementedError`. Drive a method/workflow and assert the outcome.
 - **Test results are in `test-results.xml`.** Pytest writes JUnit XML to `test-results.xml` automatically. When diagnosing failures, read this file — it contains test names, durations, failure messages, and captured output. This is more reliable than parsing console output.
 - **NEVER run parol6 and web commander test suites in parallel** — no proper isolation, they share resources and have timing issues when resource-constrained. Always run sequentially.
 - **NEVER allow subagents to run tests.** Many tests are timing-sensitive and the system doesn't have enough resources for agents and tests to run simultaneously. Only the main conversation should run tests, and only after all agents have completed.

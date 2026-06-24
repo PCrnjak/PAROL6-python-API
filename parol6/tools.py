@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
-from pinokin import se3_from_trans
+from pinokin import se3_from_rpy, se3_from_trans
 from waldoctl import (
+    CameraSpec,
     LinearMotion,
     MeshRole,
     MeshSpec,
@@ -26,7 +27,7 @@ from waldoctl import (
 )
 
 if TYPE_CHECKING:
-    from waldoctl import ToolStatus
+    from waldoctl import ToolSpec, ToolStatus
 
     from parol6.commands.base import MotionCommand
     from parol6.commands.gripper_commands import (
@@ -77,6 +78,11 @@ class ToolConfig:
     meshes: tuple[MeshSpec, ...] = ()
     motions: tuple[PartMotion, ...] = ()
     variants: tuple[ToolVariant, ...] = ()
+    camera_spec: "CameraSpec | None" = None
+    """Optional camera attached to this tool. Wired through ``_build_tools``
+    into the live ``ToolSpec`` so the frontend can stream the feed when this
+    tool is active. The user can override the device per session via the
+    tool's ``runtime_settings.camera_device``."""
 
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         """Fill *out* from hardware state. Override in subclasses."""
@@ -379,15 +385,66 @@ def list_tools() -> list[str]:
     return list(_TOOL_REGISTRY.keys())
 
 
+def _tool_config_from_spec(spec: "ToolSpec") -> ToolConfig:
+    """Build a minimal controller :class:`ToolConfig` from a waldoctl ToolSpec
+    (TCP transform only; base no-op status/command suit non-actuated tools)."""
+    transform = np.zeros((4, 4), dtype=np.float64)
+    ox, oy, oz = spec.tcp_origin
+    rx, ry, rz = spec.tcp_rpy
+    se3_from_rpy(ox, oy, oz, rx, ry, rz, transform)
+    return ToolConfig(
+        name=spec.display_name,
+        description=spec.description,
+        transform=transform,
+        meshes=spec.meshes,
+        motions=spec.motions,
+        variants=spec.variants,
+        camera_spec=spec.camera_spec,
+    )
+
+
+_PLUGIN_KEYS: set[str] = set()
+
+
+def plugin_tool_keys() -> frozenset[str]:
+    """Keys added by :func:`register_plugin_tools` (vs. native registrations)."""
+    return frozenset(_PLUGIN_KEYS)
+
+
+def register_plugin_tools() -> int:
+    """Register ``waldoctl.tools`` entry-point tools into the controller registry
+    so ``SELECT_TOOL`` resolves their TCP. Idempotent; no-op when none installed;
+    on collision the first registration wins (natives register at import time).
+    Returns the number added."""
+    from waldoctl.discovery import iter_plugin_tool_specs
+
+    count = 0
+    for spec in iter_plugin_tool_specs():
+        if spec.key != spec.key.upper():
+            logger.warning(
+                "Plugin tool key %r is not uppercase; SELECT_TOOL uppercases "
+                "names on the wire, so this tool cannot be selected",
+                spec.key,
+            )
+        if spec.key in _TOOL_REGISTRY:
+            continue
+        _TOOL_REGISTRY[spec.key] = _tool_config_from_spec(spec)
+        _PLUGIN_KEYS.add(spec.key)
+        count += 1
+    if count:
+        logger.info("Registered %d plugin tool(s) into the controller registry", count)
+    return count
+
+
 def get_tool_transform(
     tool_name: str,
     variant_key: str | None = None,
 ) -> np.ndarray:
     """Get the 4x4 transformation matrix for a tool or variant.
 
-    When *variant_key* is given and the matching variant has a
-    ``tcp_origin``, returns a transform built from the variant's TCP
-    instead of the tool-level transform.
+    When *variant_key* is given and matches, the variant's ``tcp_origin`` /
+    ``tcp_rpy`` override the tool-level transform field-independently
+    (matching the client-side ToolSpec semantics).
 
     Raises ValueError if *tool_name* is not registered.
     """
@@ -396,8 +453,15 @@ def get_tool_transform(
         raise ValueError(f"Unknown tool '{tool_name}'. Available: {list_tools()}")
     if variant_key:
         for v in cfg.variants:
-            if v.key == variant_key and v.tcp_origin is not None:
-                return _make_tcp_transform(*v.tcp_origin)
+            if v.key == variant_key:
+                out = cfg.transform.copy()
+                if v.tcp_rpy is not None:
+                    rot = np.zeros((4, 4), dtype=np.float64)
+                    se3_from_rpy(0.0, 0.0, 0.0, *v.tcp_rpy, rot)
+                    out[:3, :3] = rot[:3, :3]
+                if v.tcp_origin is not None:
+                    out[:3, 3] = v.tcp_origin
+                return out
         logger.warning("Variant '%s' not found for tool '%s'", variant_key, tool_name)
     return cfg.transform
 

@@ -217,9 +217,10 @@ class TestToolRegistry:
         robot = Robot()
         tools = robot.tools
 
-        # 5 tools registered
+        # Native count stays 5; robot.tools may compose plugin tools on top.
+        native_keys = [t.key for t in robot.native_tools.available]
+        assert len(native_keys) == 5
         keys = [t.key for t in tools.available]
-        assert len(keys) == 5
         for expected in ("NONE", "PNEUMATIC", "SSG-48", "MSG", "VACUUM"):
             assert expected in keys, f"{expected} not in {keys}"
 
