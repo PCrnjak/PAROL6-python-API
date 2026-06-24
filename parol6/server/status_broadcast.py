@@ -60,7 +60,6 @@ class StatusBroadcaster:
         self._max_send_failures = 3
         self._last_fail_log_time = 0.0
 
-        # Setup socket on construction
         self._setup_socket()
 
     def _detect_primary_ip(self) -> str:
@@ -179,11 +178,11 @@ class StatusBroadcaster:
                 logger.warning(
                     f"StatusBroadcaster: failed to set IP_MULTICAST_IF: {e2}"
                 )
-                # As a last resort, switch to UNICAST
                 try:
                     sock.close()
                 except Exception:
                     pass
+                # Both multicast-interface attempts failed; fall back to unicast.
                 self._switch_to_unicast()
                 return
 

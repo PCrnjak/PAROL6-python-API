@@ -65,7 +65,7 @@ def _unpack_ik_response_into(
 
     Returns new version if data was copied, 0 if unchanged.
     """
-    # Version is at offset 36, little-endian uint64
+    # Version is a little-endian uint64 at offset 36.
     version = np.uint64(0)
     for i in range(8):
         version |= np.uint64(buf_arr[36 + i]) << np.uint64(i * 8)
@@ -130,7 +130,7 @@ class StatusCache:
     """
 
     def __init__(self) -> None:
-        # Public snapshots (materialized only when they change)
+        # Public snapshots, materialized only when they change.
         self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
         self.speeds_rad_s: np.ndarray = np.zeros((6,), dtype=np.float64)
@@ -142,60 +142,52 @@ class StatusCache:
         self.tool_status: ToolStatus = ToolStatus()
 
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
-        self._last_tool_name: str = "NONE"  # Track tool changes
-        self._last_tool_variant: str = ""  # Track variant changes
-        self._last_tool_positions: tuple[float, ...] = ()  # Track tool DOF changes
+        self._last_tool_name: str = "NONE"
+        self._last_tool_variant: str = ""
+        self._last_tool_positions: tuple[float, ...] = ()
 
-        # Action tracking fields
         self._action_current: str = ""
         self._action_params: str = ""
         self._action_state: ActionState = ActionState.IDLE
 
-        # Queue tracking fields
         self._executing_index: int = -1
         self._completed_index: int = -1
         self._last_checkpoint: str = ""
 
-        # Error tracking field
         self._error: RobotError | None = None
 
-        # Pipeline depth fields
         self._queued_segments: int = 0
         self._queued_duration: float = 0.0
 
-        # Binary cache
         self._binary_cache: bytes = b""
         self._binary_dirty: bool = True
 
-        # Change-detection caches to avoid expensive recomputation when inputs unchanged
+        # Change-detection caches to avoid expensive recomputation when inputs unchanged.
         self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
         self._last_io_buf: np.ndarray = np.zeros((5,), dtype=np.uint8)
 
-        # Pre-allocated buffer for IK request (avoids allocation per position change)
+        # Pre-allocated buffer for IK request (avoids allocation per position change).
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
-        # Dirty-check: last q_rad submitted to the IK worker
+        # Dirty-check: last q_rad submitted to the IK worker.
         self._ik_last_q_rad: np.ndarray = np.full(6, np.nan, dtype=np.float64)
 
-        # TCP speed computation state
         self._prev_tcp_pos: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_initialized: bool = False
 
         self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
 
-        # IK enablement results (pre-allocated for zero-alloc reads)
+        # IK enablement results, pre-allocated for zero-alloc reads.
         self._joint_en = np.ones(12, dtype=np.uint8)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
         self._cart_en_trf = np.ones(12, dtype=np.uint8)
 
-        # IK worker subprocess state
         self._ik_stopped = False
         self._ik_last_version = 0
         shm_suffix = f"_{id(self)}"
         input_name = f"parol6_ik_in{shm_suffix}"
         output_name = f"parol6_ik_out{shm_suffix}"
 
-        # Create shared memory segments
         self._ik_input_shm = SharedMemory(
             name=input_name, create=True, size=IK_INPUT_SIZE, **SHM_EXTRA_KWARGS
         )
@@ -211,15 +203,14 @@ class StatusCache:
         assert input_buf is not None
         assert output_buf is not None
 
-        # Initialize with zeros
         np.frombuffer(input_buf, dtype=np.uint8)[:] = 0
         np.frombuffer(output_buf, dtype=np.uint8)[:] = 0
 
-        # Memoryviews for cleanup
+        # Retained so the buffers can be released before unlinking the segments.
         self._ik_input_mv = memoryview(input_buf)
         self._ik_output_mv = memoryview(output_buf)
 
-        # Zero-alloc input views: write directly into shared memory
+        # Zero-alloc input views: write directly into shared memory.
         self._ik_input_q_view = np.frombuffer(
             input_buf,
             dtype=np.float64,
@@ -232,20 +223,19 @@ class StatusCache:
             count=16,
             offset=IK_INPUT_T_OFFSET,
         )
-        # Tool transform view for syncing tool changes to IK worker
+        # Syncs tool changes to the IK worker.
         self._ik_input_tool_view = np.frombuffer(
             input_buf,
             dtype=np.float64,
             count=16,
             offset=IK_INPUT_TOOL_OFFSET,
         )
-        # Initialize to identity (no tool)
+        # Identity = no tool.
         self._ik_input_tool_view.reshape(4, 4)[:] = np.eye(4)
 
-        # Zero-alloc output view for numba reader
+        # Zero-alloc output view for numba reader.
         self._ik_output_arr = np.frombuffer(output_buf, dtype=np.uint8)
 
-        # Spawn subprocess
         self._ik_shutdown_event: Event = multiprocessing.Event()
         self._ik_request_event: Event = multiprocessing.Event()
         self._ik_process: Process = Process(
@@ -268,10 +258,8 @@ class StatusCache:
             return
         self._ik_stopped = True
 
-        # Signal shutdown
         self._ik_shutdown_event.set()
 
-        # Wait for process to exit
         if self._ik_process.is_alive():
             self._ik_process.join(timeout=2.0)
             if self._ik_process.is_alive():
@@ -284,13 +272,12 @@ class StatusCache:
         while self._ik_process.exitcode is None and time.time() < deadline:
             time.sleep(0.01)
 
-        # Release numpy views before closing shared memory
+        # Release numpy views and memoryviews before closing shared memory.
         del self._ik_input_q_view
         del self._ik_input_T_view
         del self._ik_input_tool_view
         del self._ik_output_arr
 
-        # Release memoryviews
         try:
             self._ik_input_mv.release()
         except BufferError:
@@ -300,7 +287,6 @@ class StatusCache:
         except BufferError:
             pass
 
-        # Clean up shared memory
         _cleanup_shm(self._ik_input_shm)
         _cleanup_shm(self._ik_output_shm)
         logger.debug("IK worker stopped")
@@ -351,7 +337,6 @@ class StatusCache:
           - Tool status populated via tool config's populate_status()
           - IK enablement is computed asynchronously in a subprocess
         """
-        # Do change detection
         self._last_io_buf[:] = state.InOut_in[:5]
         pos_changed, io_changed, spd_changed = _update_arrays(
             state.Position_in,
@@ -368,7 +353,6 @@ class StatusCache:
             or state.current_tool_variant != self._last_tool_variant
         )
 
-        # Convert speeds from steps/s to rad/s when they change
         if spd_changed:
             speed_steps_to_rad(self.speeds, self.speeds_rad_s)
 
@@ -378,7 +362,7 @@ class StatusCache:
             self._tcp_pos_initialized = (
                 False  # avoid speed spike from TCP offset change
             )
-            # Sync tool transform to IK worker
+            # Sync tool transform to IK worker.
             T_tool = get_tool_transform(
                 state.current_tool, variant_key=state.current_tool_variant
             )
@@ -402,10 +386,9 @@ class StatusCache:
                 self._tcp_pos_initialized = True
             self._prev_tcp_pos[:] = self._tcp_pos_buf
         else:
-            # Robot not moving — reset TCP speed to zero
+            # Robot not moving — reset TCP speed to zero.
             self.tcp_speed = 0.0
 
-            # Submit IK request asynchronously
             try:
                 T_matrix = get_fkine_se3(state)
                 self._submit_ik_request(self._q_rad_buf, T_matrix)
@@ -433,7 +416,6 @@ class StatusCache:
         if tool_status_changed:
             self._last_tool_positions = ts.positions
 
-        # Poll for async IK results (non-blocking, zero-alloc)
         ik_changed = self._poll_ik_results()
 
         action_changed = (
@@ -468,7 +450,6 @@ class StatusCache:
             self._queued_segments = state.queued_segments
             self._queued_duration = state.queued_duration
 
-        # Mark binary cache dirty if anything changed
         if (
             pos_changed
             or tool_changed

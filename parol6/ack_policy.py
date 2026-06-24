@@ -90,15 +90,14 @@ class AckPolicy:
 
     def requires_ack(self, cmd_type: CmdType) -> bool:
         """Check if a command type requires an ACK response."""
-        # Forced override (e.g., diagnostics)
+        # Forced override (e.g., diagnostics) takes precedence over everything
         if self._force_ack is not None:
             return bool(self._force_ack)
 
-        # System commands always require ACKs
         if cmd_type in SYSTEM_CMD_TYPES:
             return True
 
-        # Query commands use request/response, not ACKs
+        # Queries use request/response, not ACKs
         if cmd_type in QUERY_CMD_TYPES:
             return False
 
@@ -106,9 +105,8 @@ class AckPolicy:
         if cmd_type in FIRE_AND_FORGET:
             return False
 
-        # Queued motion commands require ACK (returns command index)
+        # Queued motion commands ACK to return the command index
         if cmd_type in QUEUED_CMD_TYPES:
             return True
 
-        # Default: no ACK
         return False

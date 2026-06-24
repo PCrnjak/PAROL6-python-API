@@ -34,7 +34,6 @@ class AsyncLogHandler:
         if self._started:
             return
 
-        # Get the root logger's handlers if this logger has none
         if self._logger.handlers:
             target_handlers = self._logger.handlers[:]
         else:
@@ -50,21 +49,16 @@ class AsyncLogHandler:
                 current = current.parent
 
         if not target_handlers:
-            # No handlers found, nothing to wrap
             return
 
-        # Store original handlers
         self._original_handlers = target_handlers
 
-        # Create QueueHandler
         queue_handler = QueueHandler(self._queue)
 
-        # For the controller logger specifically, replace its handlers
-        # and stop propagation so we control all output
+        # Stop propagation so this handler controls all output for the logger.
         self._logger.handlers = [queue_handler]
         self._logger.propagate = False
 
-        # Start listener thread to process queued records
         self._listener = QueueListener(
             self._queue, *self._original_handlers, respect_handler_level=True
         )
@@ -83,7 +77,6 @@ class AsyncLogHandler:
             self._listener.stop()
             self._listener = None
 
-        # Restore propagation and clear our handler
         self._logger.handlers = []
         self._logger.propagate = True
 

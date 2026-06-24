@@ -36,7 +36,6 @@ class DelayCommand(CommandBase[DelayCmd]):
     __slots__ = ()
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Start the delay timer."""
         self.start_timer(self.p.seconds)
         logger.info(f"  -> Delay starting for {self.p.seconds} seconds...")
 
@@ -64,7 +63,6 @@ class ResetCommand(SystemCommand[ResetCmd]):
     __slots__ = ()
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
-        """Reset state immediately."""
         state.reset()
         self._sync_mock = True
         self.finish()
@@ -85,7 +83,6 @@ class ResetLoopStatsCommand(SystemCommand[ResetLoopStatsCmd]):
     __slots__ = ()
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
-        """Signal controller to reset loop stats."""
         state.loop_stats_reset_pending = True
         logger.debug("RESET_LOOP_STATS command executed")
         self.finish()

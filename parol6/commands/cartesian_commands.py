@@ -41,7 +41,7 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-# Pre-computed Cartesian jog limit constants (avoid per-tick recomputation)
+# Pre-computed to avoid per-tick recomputation.
 _CART_ANG_JOG_MIN_RAD: float = float(np.deg2rad(CART_ANG_JOG_MIN))
 _CART_ANG_JOG_MAX_RAD: float = float(LIMITS.cart.jog.velocity.angular)
 _CART_LIN_JOG_MIN_MS: float = CART_LIN_JOG_MIN / 1000.0
@@ -137,7 +137,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         """Execute one tick of Cartesian jogging."""
         cse = state.cartesian_streaming_executor
 
-        # Initialize only if not already active (preserve velocity across streaming)
+        # Initialize only if not already active, to preserve velocity across streaming.
         if not cse.active:
             steps_to_rad(state.Position_in, self._q_rad_buf)
             cse.sync_pose(get_fkine_se3(state))
@@ -146,7 +146,6 @@ class JogLCommand(MotionCommand[JogLCmd]):
             self._q_ik_seed[:] = self._q_rad_buf
             self._vel_ratio = 1.0
 
-        # Handle timer expiry - stop smoothly
         if self.timer_expired():
             cse.set_jog_velocity_1dof(self._axis_index, 0.0, self.is_rotation)
             smoothed_pose, smoothed_vel, finished = cse.tick()
@@ -163,7 +162,6 @@ class JogLCommand(MotionCommand[JogLCmd]):
             self.stop_and_idle(state)
             return ExecutionStatusCode.COMPLETED
 
-        # Compute target velocity based on speed fraction from velocity vector
         vels = self.p.velocities
         speed_mag = abs(vels[self._axis_index + (3 if self.is_rotation else 0)])
         if self.is_rotation:
@@ -182,7 +180,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         if self._vel_ratio > 1.0:
             velocity /= self._vel_ratio
 
-        # Set target velocity (WRF transforms to body frame, TRF uses body directly)
+        # WRF transforms to body frame; TRF uses the body frame directly.
         if self.p.frame == "WRF":
             cse.set_jog_velocity_1dof_wrf(self._axis_index, velocity, self.is_rotation)
         else:
@@ -288,7 +286,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         if joint_path.is_partial:
             ik_valid = joint_path.valid
             assert ik_valid is not None
-            # Extract TCP poses (x,y,z,rx,ry,rz) in meters+radians from SE3
+            # TCP poses are (x,y,z,rx,ry,rz) in meters+radians.
             n = len(cart_poses)
             tcp_poses = np.empty((n, 6), dtype=np.float64)
             _rpy_buf = np.empty(3, dtype=np.float64)
@@ -335,8 +333,8 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         pose = self.p.pose
 
         if self.p.rel:
-            # Relative move: compute delta SE3, then apply in tool frame (TRF)
-            # or world frame (WRF) depending on self.p.frame
+            # Relative move: apply the delta SE3 in tool frame (TRF) or world
+            # frame (WRF) per self.p.frame.
             delta_se3 = np.zeros((4, 4), dtype=np.float64)
             se3_from_rpy(
                 pose[0] / 1000.0,
@@ -354,7 +352,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
                 # Pre-multiply for world-relative motion
                 self.target_pose = delta_se3 @ cast(np.ndarray, self.initial_pose)
         else:
-            # Absolute target pose
             self.target_pose = np.zeros((4, 4), dtype=np.float64)
             se3_from_rpy(
                 pose[0] / 1000.0,

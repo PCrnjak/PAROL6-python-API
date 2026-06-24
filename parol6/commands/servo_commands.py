@@ -129,7 +129,7 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
-        # Convert target from degrees to radians into pre-allocated list
+        # Target arrives in degrees; convert into pre-allocated radian buffer
         for i in range(6):
             self._target_rad[i] = math.radians(self.p.angles[i])
 
@@ -175,7 +175,7 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
             self._target_se3,
         )
 
-        # Solve IK using current joint angles as seed
+        # Seed IK with current joint angles for branch continuity
         steps_to_rad(state.Position_in, self._q_rad_buf)
         ik_result = solve_ik(PAROL6_ROBOT.robot, self._target_se3, self._q_rad_buf)
         if not ik_result.success or ik_result.q is None:
@@ -251,7 +251,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             self._q_ik_seed[:] = self._q_rad_buf
             self._initialized = True
 
-        # CSE drives Cartesian path
         cse.set_pose_target(self._target_se3)
         smoothed_pose, vel, finished = cse.tick()
 
@@ -273,7 +272,6 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             else:
                 self._q_ik_seed[:] = ik_result.q
 
-                # Compute per-joint delta from commanded position
                 dq = self._dq_buf
                 for i in range(6):
                     dq[i] = float(ik_result.q[i]) - self._q_commanded[i]

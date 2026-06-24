@@ -76,7 +76,7 @@ class CommandExecutor:
 
     def _update_queue_state(self, state: "ControllerState") -> None:
         """Update queue snapshot and next action in state."""
-        # Reuse list to avoid allocation (clear + extend pattern)
+        # Reuse the list to avoid an allocation on the hot path.
         state.queue_nonstreamable.clear()
         for qc in self.command_queue:
             if not (isinstance(qc.command, MotionCommand) and qc.command.streamable):
@@ -109,17 +109,17 @@ class CommandExecutor:
         if not (isinstance(active_inst, MotionCommand) and active_inst.streamable):
             return False
 
-        # Decode incoming command
         try:
             cmd_struct = decode_command(data)
         except Exception as e:
             logger.debug("Stream fast-path decode failed: %s", e)
             return False
 
-        # Check if struct type matches active command's expected type
         active_params_type = getattr(active_inst, "PARAMS_TYPE", None)
         if active_params_type is None or type(cmd_struct) is not active_params_type:
-            return cmd_struct  # Return decoded struct for caller to reuse
+            return (
+                cmd_struct  # Hand the decoded struct back so the caller can reuse it.
+            )
 
         logger.log(
             TRACE,
@@ -128,10 +128,9 @@ class CommandExecutor:
             type(cmd_struct).__name__,
         )
 
-        # Assign new params (validation already done by decode)
+        # Validation already happened during decode.
         active_inst.assign_params(cmd_struct)
 
-        # Re-setup with new params
         try:
             active_inst.setup(state)
             logger.log(TRACE, "stream_fast_path applied")
@@ -165,12 +164,10 @@ class CommandExecutor:
             logger.warning("Command queue full (max %d)", MAX_COMMAND_QUEUE_SIZE)
             raise QueueFullError("Queue full")
 
-        # Assign monotonic command index
         state = self._state_manager.get_state()
         cmd_index = state.next_command_index
         state.next_command_index += 1
 
-        # Create queued command
         queued_cmd = QueuedCommand(
             command=command,
             command_id=command_id,
@@ -180,7 +177,6 @@ class CommandExecutor:
 
         self.command_queue.append(queued_cmd)
 
-        # Update queue snapshot
         self._update_queue_state(state)
 
         logger.log(
@@ -226,7 +222,6 @@ class CommandExecutor:
                     ac.command_index,
                 )
 
-            # Execute one tick
             if not ac.first_tick_logged:
                 logger.log(TRACE, "tick_start name=%s", type(ac.command).__name__)
                 ac.first_tick_logged = True
@@ -296,7 +291,7 @@ class CommandExecutor:
             state.action_params = ""
             state.action_state = ActionState.IDLE
 
-            # Clear queued streamable commands on failure to prevent pileup
+            # Drop queued streamable commands so they don't pile up after a failure.
             if isinstance(ac.command, MotionCommand) and ac.command.streamable:
                 removed = self.clear_streamable_commands(
                     f"Active streamable command failed: {ac.command.robot_error}"

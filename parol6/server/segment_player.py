@@ -89,10 +89,8 @@ class SegmentPlayer:
                 state.queued_duration += seg.duration
             seg = self._planner.poll_segment()
 
-        # Process active segment or activate next
         max_immediate = 8  # prevent infinite recursion on back-to-back instant commands
         for _ in range(max_immediate):
-            # Activate next segment if idle
             if self._active is None:
                 if not self._buffer:
                     return False
@@ -100,7 +98,6 @@ class SegmentPlayer:
 
             active = self._active
 
-            # --- Trajectory segment: index into waypoints ---
             if isinstance(active, TrajectorySegment):
                 if self._step < len(active.trajectory_steps):
                     state.Position_out[:] = active.trajectory_steps[self._step]
@@ -126,7 +123,6 @@ class SegmentPlayer:
                 state.Command_out = CommandCode.MOVE
                 return True
 
-            # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
                 result = self._tick_inline(active, state)
                 if result is None:
@@ -134,7 +130,6 @@ class SegmentPlayer:
                     continue
                 return result
 
-            # --- Error segment: halt advance run ---
             if isinstance(active, ErrorSegment):
                 logger.error(
                     "Command %d failed: %s", active.command_index, active.error
@@ -144,13 +139,11 @@ class SegmentPlayer:
                 state.action_current = ""
                 state.action_params = ""
                 self._active = None
-                # Halt: cancel all remaining planned work
                 self._buffer.clear()
                 self._planner.cancel()
                 self._drain_planner_queue(state)
                 return False
 
-            # Unknown segment type
             logger.error("Unknown segment type: %s", type(active).__name__)
             self._active = None
             continue
@@ -250,7 +243,6 @@ class SegmentPlayer:
         self._inline_activated = False
         self._buffer.clear()
         self._planner.cancel()
-        # Drain stale segments from planner output queue
         self._drain_planner_queue(state)
 
     def _drain_planner_queue(self, state: ControllerState) -> None:

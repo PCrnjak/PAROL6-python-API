@@ -553,7 +553,7 @@ class Robot(_RobotABC):
             ),
         )
 
-        # Initialize pinokin for FK/IK
+        # pinokin provides FK/IK
         self._pinokin = PinokinRobot(self._urdf_path)
 
         # Pre-allocated buffers for FK/IK
@@ -879,7 +879,6 @@ class Robot(_RobotABC):
         port: int = kwargs.get("port", self._port)
         timeout: float = kwargs.get("timeout", 5.0)
         client = SyncRobotClient(host=host, port=port, timeout=timeout)
-        # Bind async tools to the inner async client
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
@@ -887,7 +886,6 @@ class Robot(_RobotABC):
             bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
-        # Wrap async-bound tools in sync adapters
         bound: dict[str, ToolSpec] = {}
         for key, async_tool in async_bound.items():
             bound[key] = make_sync_tool(async_tool, _run)

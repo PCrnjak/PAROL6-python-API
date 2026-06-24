@@ -27,11 +27,9 @@ SHM_EXTRA_KWARGS: dict = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 def unregister_shm(shm: SharedMemory) -> None:
-    """Unregister a SharedMemory segment from the resource_tracker (pre-3.13).
-
-    On Python 3.13+ with track=False this is a no-op. On older versions, this
-    prevents the resource_tracker daemon from lingering as an orphan process.
-    Skipped on Windows where the resource_tracker uses _posixsubprocess.
+    """Unregister a SharedMemory segment from the resource_tracker so its daemon
+    doesn't linger as an orphan. No-op on 3.13+ (track=False) and on Windows
+    (where the resource_tracker uses _posixsubprocess).
     """
     if sys.version_info >= (3, 13) or sys.platform == "win32":
         return

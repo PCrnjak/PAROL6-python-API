@@ -90,8 +90,8 @@ def warmup_jit() -> float:
     start = time.perf_counter()
 
     def _progress(label: str) -> None:
-        # Only chatter when it's genuinely a slow cold compile, so warm-cache
-        # starts stay quiet while a cold start visibly shows it isn't frozen.
+        # Only chatter on a genuinely slow cold compile: warm-cache starts stay
+        # quiet while a cold start visibly shows it isn't frozen.
         elapsed = time.perf_counter() - start
         if elapsed > 1.0:
             logger.info("  ...JIT warmup: %s ready (%.1fs)", label, elapsed)
@@ -156,14 +156,14 @@ def warmup_jit() -> float:
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)
     _update_arrays(
-        dummy_6i,  # pos_in
-        dummy_5u8,  # io_in
-        dummy_6i,  # spd_in
-        dummy_6i,  # pos_last
-        dummy_6f,  # angles_deg
-        dummy_6f,  # q_rad_buf
-        dummy_5u8,  # io_cached
-        dummy_6i,  # spd_cached
+        dummy_6i,
+        dummy_5u8,
+        dummy_6i,
+        dummy_6i,
+        dummy_6f,
+        dummy_6f,
+        dummy_5u8,
+        dummy_6i,
     )
 
     # Dummy SE3 matrices for jit warmups below
@@ -191,15 +191,16 @@ def warmup_jit() -> float:
     dummy_tx_frame = memoryview(bytearray(64))
     dummy_gripper_data = np.zeros(6, dtype=np.int32)
     dummy_8u8_bitfield = np.zeros(8, dtype=np.uint8)
+    # bitfield args need 8 elements for _pack_bitfield
     pack_tx_frame_into(
-        dummy_tx_frame,  # out
-        dummy_6i,  # position_out
-        dummy_6i,  # speed_out
-        0,  # command_code
-        dummy_8u8_bitfield,  # affected_joint_out (8 elements for _pack_bitfield)
-        dummy_8u8_bitfield,  # inout_out (8 elements for _pack_bitfield)
-        0,  # timeout_out
-        dummy_gripper_data,  # gripper_data_out
+        dummy_tx_frame,
+        dummy_6i,
+        dummy_6i,
+        0,
+        dummy_8u8_bitfield,
+        dummy_8u8_bitfield,
+        0,
+        dummy_gripper_data,
     )
     dummy_rx_frame = memoryview(bytearray(64))
     dummy_8u8_homed = np.zeros(8, dtype=np.uint8)
@@ -209,15 +210,15 @@ def warmup_jit() -> float:
     dummy_timing_out = np.zeros(1, dtype=np.int32)
     dummy_grip_out = np.zeros(6, dtype=np.int32)
     unpack_rx_frame_into(
-        dummy_rx_frame,  # data
-        dummy_6i,  # pos_out
-        dummy_6i,  # spd_out
-        dummy_8u8_homed,  # homed_out
-        dummy_8u8_io,  # io_out
-        dummy_8u8_temp,  # temp_out
-        dummy_8u8_poserr,  # poserr_out
-        dummy_timing_out,  # timing_out
-        dummy_grip_out,  # grip_out
+        dummy_rx_frame,
+        dummy_6i,
+        dummy_6i,
+        dummy_8u8_homed,
+        dummy_8u8_io,
+        dummy_8u8_temp,
+        dummy_8u8_poserr,
+        dummy_timing_out,
+        dummy_grip_out,
     )
 
     # parol6/server/transports/serial_transport.py - real-hardware frame I/O.
@@ -232,7 +233,7 @@ def warmup_jit() -> float:
     # parol6/server/loop_timer.py - stats computation
     dummy_1000f = np.zeros(1000, dtype=np.float64)
     dummy_1000f_scratch = np.zeros(1000, dtype=np.float64)
-    # Fill with some data for realistic warmup
+    # Fill with realistic timing data so the stats kernels warm a real code path
     dummy_1000f[:100] = np.linspace(0.004, 0.006, 100)
     _quickselect_partition(dummy_1000f_scratch[:10].copy(), 0, 9)
     _quickselect(dummy_1000f_scratch[:100].copy(), 50)
@@ -245,54 +246,55 @@ def warmup_jit() -> float:
     dummy_8u8 = np.zeros(8, dtype=np.uint8)
     dummy_gripper_6i = np.zeros(6, dtype=np.int32)
     _simulate_motion_jit(
-        dummy_pos_f,  # position_f
-        dummy_6i,  # position_in
-        dummy_6i,  # speed_in
-        dummy_6i,  # speed_out
-        dummy_6i,  # position_out
-        dummy_8u8,  # homed_in
-        dummy_8u8,  # io_in
-        dummy_6f.copy(),  # prev_pos_f
-        dummy_6f.copy(),  # vmax_f
-        dummy_6f.copy(),  # jmin_f
-        dummy_6f.copy(),  # jmax_f
-        dummy_6f.copy(),  # home_angles_deg
-        0,  # command_out
-        0.004,  # dt
-        0,  # homing_countdown
+        dummy_pos_f,
+        dummy_6i,
+        dummy_6i,
+        dummy_6i,
+        dummy_6i,
+        dummy_8u8,
+        dummy_8u8,
+        dummy_6f.copy(),
+        dummy_6f.copy(),
+        dummy_6f.copy(),
+        dummy_6f.copy(),
+        dummy_6f.copy(),
+        0,
+        0.004,
+        0,
     )
     dummy_gripper_ramp = np.zeros(3, dtype=np.float64)
     _write_frame_jit(
-        dummy_6i,  # state_position_out
-        dummy_6i,  # state_speed_out
-        dummy_gripper_6i,  # state_gripper_data_in
-        dummy_6i,  # position_out
-        dummy_6i,  # speed_out
-        dummy_gripper_6i,  # gripper_data_out
-        dummy_gripper_ramp,  # gripper_ramp
+        dummy_6i,
+        dummy_6i,
+        dummy_gripper_6i,
+        dummy_6i,
+        dummy_6i,
+        dummy_gripper_6i,
+        dummy_gripper_ramp,
     )
     _simulate_gripper_ramp_jit(
-        dummy_gripper_ramp,  # gripper_ramp
-        dummy_gripper_6i,  # gripper_data_in
-        0.0,  # gripper_pos_f
-        0.004,  # dt
-        10432.0,  # tick_range
-        40.0,  # min_speed
-        80000.0,  # max_speed
+        dummy_gripper_ramp,
+        dummy_gripper_6i,
+        0.0,
+        0.004,
+        10432.0,
+        40.0,
+        80000.0,
     )
     dummy_payload = memoryview(bytearray(64))
     dummy_timing = np.zeros(1, dtype=np.int32)
     dummy_gripper_in = np.zeros(6, dtype=np.int32)
+    # io_in needs 8 elements for _pack_bitfield
     _encode_payload_jit(
-        dummy_payload,  # out
-        dummy_6i,  # position_in
-        dummy_6i,  # speed_in
-        dummy_8u8,  # homed_in
-        dummy_8u8,  # io_in (8 elements for _pack_bitfield)
-        dummy_8u8,  # temp_err_in
-        dummy_8u8,  # pos_err_in
-        dummy_timing,  # timing_in
-        dummy_gripper_in,  # gripper_in
+        dummy_payload,
+        dummy_6i,
+        dummy_6i,
+        dummy_8u8,
+        dummy_8u8,
+        dummy_8u8,
+        dummy_8u8,
+        dummy_timing,
+        dummy_gripper_in,
     )
     _progress("simulator & I/O")
 

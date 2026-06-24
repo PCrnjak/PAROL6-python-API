@@ -14,28 +14,18 @@ from parol6.tools import get_tool_transform
 
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Typing aliases
-# -----------------------------
 Vec6f = NDArray[np.float64]
 Vec6i = NDArray[np.int32]
 Limits2f = NDArray[np.float64]  # shape (6,2)
 
-# -----------------------------
-# Kinematics and conversion constants
-# -----------------------------
 Microstep = 32
 steps_per_revolution = 200
 
-# Conversion constants
 degree_per_step_constant: float = 360.0 / (Microstep * steps_per_revolution)
 radian_per_step_constant: float = (2.0 * np.pi) / (Microstep * steps_per_revolution)
 radian_per_sec_2_deg_per_sec_const: float = 360.0 / (2.0 * np.pi)
 deg_per_sec_2_radian_per_sec_const: float = (2.0 * np.pi) / 360.0
 
-# -----------------------------
-# Joint limits
-# -----------------------------
 # Limits (deg) you get after homing and moving to extremes
 _joint_limits_degree: Limits2f = np.array(
     [
@@ -52,12 +42,12 @@ _joint_limits_degree: Limits2f = np.array(
 _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree)
 
 
-# URDF path for pinokin Robot
+# URDF consumed by the pinokin Robot below.
 _urdf_path = str(
     Path(__file__).resolve().parent / "urdf_model" / "urdf" / "PAROL6.urdf"
 )
 
-# Current robot instance (tool transform applied in-place)
+# Tool transform is applied in-place on this shared instance.
 robot: Robot = Robot(_urdf_path)
 
 
@@ -66,17 +56,10 @@ def apply_tool(
     variant_key: str = "",
     tcp_offset_m: tuple[float, float, float] | None = None,
 ) -> None:
-    """
-    Apply tool transform to the robot model.
+    """Apply tool transform to the robot model.
 
-    Parameters
-    ----------
-    tool_name : str
-        Name of the tool from the tool registry
-    variant_key : str
-        Optional variant key for the tool
-    tcp_offset_m : tuple, optional
-        Additional (x, y, z) offset in meters, composed in the tool's local frame.
+    ``tcp_offset_m`` is an additional (x, y, z) offset in meters, composed in
+    the tool's local frame.
     """
     T_tool = get_tool_transform(tool_name, variant_key=variant_key or None)
 
@@ -96,7 +79,6 @@ def apply_tool(
         logger.info(f"Applied tool {label} (identity)")
 
 
-# Initialize with no tool
 apply_tool("NONE")
 
 
@@ -106,9 +88,6 @@ def _cleanup_robot() -> None:
     del robot
 
 
-# -----------------------------
-# Additional raw parameter arrays
-# -----------------------------
 # Reduction ratio per joint
 _joint_ratio: NDArray[np.float64] = np.array(
     [6.4, 20.0, 20.0 * (38.0 / 42.0), 4.0, 4.0, 10.0], dtype=np.float64
@@ -120,10 +99,9 @@ _joint_max_speed_hw: Vec6i = np.array(
 )
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
-# Effective max speeds with scaling applied
 _joint_max_speed: Vec6i = _joint_max_speed_hw.copy()
 
-# Jog speeds (steps/s) - 80% of scaled max for safety margin during jogging
+# 80% of scaled max for safety margin during jogging
 _joint_max_jog_speed: Vec6i = (_joint_max_speed * 0.8).astype(np.int32)
 _joint_min_jog_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
@@ -135,7 +113,6 @@ _joint_max_acc: Vec6i = (_joint_max_speed * 3).astype(np.int32)
 # Derived: j_max = a_max * 10 (reach max accel in ~0.1s)
 _joint_max_jerk: Vec6i = (_joint_max_acc * 10).astype(np.int32)
 
-# Compute joint angular velocities/accelerations in rad/s
 _joint_speed_rad = (
     _joint_max_speed.astype(float) * radian_per_step_constant / _joint_ratio
 )
