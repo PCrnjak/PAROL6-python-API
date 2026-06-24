@@ -49,7 +49,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/base_link.STL" />
+          filename="package://parol6/meshes/base_link_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -89,7 +89,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L1.STL" />
+          filename="package://parol6/meshes/L1_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -147,7 +147,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L2.STL" />
+          filename="package://parol6/meshes/L2_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -205,7 +205,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L3.STL" />
+          filename="package://parol6/meshes/L3_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -263,7 +263,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L4.STL" />
+          filename="package://parol6/meshes/L4_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -321,7 +321,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L5.STL" />
+          filename="package://parol6/meshes/L5_simplified.stl" />
       </geometry>
     </collision>
   </link>
@@ -379,7 +379,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://parol6/meshes/L6.STL" />
+          filename="package://parol6/meshes/L6_simplified.stl" />
       </geometry>
     </collision>
   </link>

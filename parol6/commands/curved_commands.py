@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
+from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import TrajectoryMoveCommandBase
 from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import CircularMotion, JointPath, SplineMotion, TrajectoryBuilder
@@ -153,6 +154,8 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
                     ErrorCode.IK_PARTIAL_PATH, valid=str(n_valid), total=str(n_total)
                 )
             )
+
+        guard_joint_path(joint_path.positions)
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,

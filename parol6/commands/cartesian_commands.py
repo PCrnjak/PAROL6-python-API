@@ -9,6 +9,7 @@ from typing import cast
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.commands._collision_guard import guard_joint_path
 from parol6.config import (
     CART_ANG_JOG_MIN,
     CART_LIN_JOG_MIN,
@@ -155,7 +156,11 @@ class JogLCommand(MotionCommand[JogLCmd]):
             if not finished and self._dot_buf > 1e-8:
                 ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
                 if ik_result.success and ik_result.q is not None:
-                    self._track_and_send(state, ik_result.q)
+                    # Don't stream a self-colliding config during the release
+                    # deceleration; skip the send and let the CSE finish stopping.
+                    checker = PAROL6_ROBOT.collision
+                    if checker is None or not checker.in_collision(ik_result.q):
+                        self._track_and_send(state, ik_result.q)
                 return ExecutionStatusCode.EXECUTING
 
             cse.active = False
@@ -182,11 +187,18 @@ class JogLCommand(MotionCommand[JogLCmd]):
         if self._vel_ratio > 1.0:
             velocity /= self._vel_ratio
 
-        # Set target velocity (WRF transforms to body frame, TRF uses body directly)
-        if self.p.frame == "WRF":
-            cse.set_jog_velocity_1dof_wrf(self._axis_index, velocity, self.is_rotation)
-        else:
-            cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
+        # Set target velocity (WRF transforms to body frame, TRF uses body
+        # directly). While stopping (IK failure or predicted self-collision)
+        # leave the CSE target at zero so cse.stop()'s deceleration actually
+        # takes effect — re-commanding full velocity every tick would overwrite
+        # it and the arm would never decelerate (nor reach the vel<1e-6 exit).
+        if not self._ik_stopping:
+            if self.p.frame == "WRF":
+                cse.set_jog_velocity_1dof_wrf(
+                    self._axis_index, velocity, self.is_rotation
+                )
+            else:
+                cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
         smoothed_pose, smoothed_vel, _finished = cse.tick()
 
@@ -214,9 +226,25 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
 
-        # IK succeeded - if we were stopping, recover by resuming jogging
+        # Self-collision predicted at next streamed config? Mirror the
+        # IK-failure graceful-stop pathway: decelerate via cse.stop() rather
+        # than raising mid-jog. Operator regains control after smoothing.
+        if PAROL6_ROBOT.collision is not None and PAROL6_ROBOT.collision.in_collision(
+            ik_result.q
+        ):
+            if not self._ik_stopping:
+                _ik_warn(
+                    logger,
+                    "[CARTJOG] self-collision predicted - initiating stop",
+                )
+                cse.stop()
+                self._ik_stopping = True
+            return ExecutionStatusCode.EXECUTING
+
+        # Reachable + collision-free again — if we were stopping (IK failure or
+        # predicted self-collision), recover by resuming jogging.
         if self._ik_stopping:
-            logger.info("[CARTJOG] IK recovered - resuming jog")
+            logger.info("[CARTJOG] constraint cleared - resuming jog")
             steps_to_rad(state.Position_in, self._q_rad_buf)
             cse.sync_pose(get_fkine_se3(state))
             self._q_commanded[:] = self._q_rad_buf
@@ -285,6 +313,9 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             stop_on_failure=stop_on_failure,
         )
 
+        if not joint_path.is_partial:
+            guard_joint_path(joint_path.positions)
+
         if joint_path.is_partial:
             ik_valid = joint_path.valid
             assert ik_valid is not None
@@ -331,7 +362,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         )
 
     def _compute_target_pose(self, state: "ControllerState") -> None:
-        """Compute target pose — absolute or relative based on rel flag."""
+        """Compute target pose - absolute or relative based on rel flag."""
         pose = self.p.pose
 
         if self.p.rel:
@@ -442,6 +473,8 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
             )
             self.do_setup(state)
             return 0
+
+        guard_joint_path(joint_path.positions)
 
         # Use minimum speed/accel across chain, sum durations when all duration-based
         min_speed = self.p.resolved_speed

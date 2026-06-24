@@ -1,4 +1,4 @@
-"""Unified PAROL6 robot — lifecycle, configuration, kinematics, and factories.
+"""Unified PAROL6 robot - lifecycle, configuration, kinematics, and factories.
 
 Inherits from ``waldoctl.Robot`` ABC.
 All parol6-specific details (subprocess management, pinokin, IK solver, etc.)
@@ -489,7 +489,7 @@ def _resolve_mesh_dir() -> str:
 
 @dataclass
 class Parol6IKResult:
-    """IK result — structurally compatible with the web commander's IKResult Protocol."""
+    """IK result - structurally compatible with the web commander's IKResult Protocol."""
 
     q: NDArray[np.float64]  # radians
     success: bool
@@ -504,7 +504,7 @@ class Parol6IKResult:
 
 
 class Robot(_RobotABC):
-    """Unified PAROL6 robot — inherits from waldoctl.Robot ABC.
+    """Unified PAROL6 robot - inherits from waldoctl.Robot ABC.
 
     Combines identity, configuration, FK/IK kinematics, controller lifecycle,
     and client factories. Supports both sync and async context managers::
@@ -667,6 +667,11 @@ class Robot(_RobotABC):
         *tcp_offset_m*: optional (x, y, z) user offset in meters, composed
         on top of the tool's registered transform.
         *variant_key*: optional variant whose TCP overrides the tool default.
+
+        Note: this mutates the per-instance pinokin Robot, not the global
+        `PAROL6_ROBOT.collision` scene. Server-side tool changes route
+        through `PAROL6_ROBOT.apply_tool`, which is where collision-mesh
+        attachment is wired.
         """
         from parol6.tools import get_tool_transform
 
@@ -768,6 +773,63 @@ class Robot(_RobotABC):
             result[i, 4] = rpy[1]
             result[i, 5] = rpy[2]
         return result
+
+    def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
+        """Return True iff `q_rad` is in self/world collision. False if disabled.
+
+        Queries the process-global ``PAROL6_ROBOT.collision`` checker (shared by
+        all Robot methods here); its tool geometry reflects ``PAROL6_ROBOT
+        .apply_tool`` calls in this process (server / dry-run), not
+        :meth:`set_active_tool`, which only mutates this instance's pinokin Robot.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        if PAROL6_ROBOT.collision is None:
+            return False
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.in_collision(self._q_buf)
+
+    def check_trajectory(self, q_path_rad: NDArray[np.float64]) -> int:
+        """Returns first colliding row index in `q_path_rad`, or -1 if clear.
+
+        `q_path_rad` is (N, nq) joint positions in radians.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        if PAROL6_ROBOT.collision is None:
+            return -1
+        return PAROL6_ROBOT.collision.check_path(
+            np.ascontiguousarray(q_path_rad, dtype=np.float64)
+        )
+
+    def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[str, str]]:
+        """Return list of (name, name) geometry pairs in collision at `q_rad`.
+
+        Names are URDF link names for arm geometry (e.g. ``"L4_0"``) and
+        the user-supplied name for runtime-attached geometry (e.g.
+        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh). Tool
+        geometry is present only when ``PAROL6_ROBOT.apply_tool`` attached it in
+        this process (see :meth:`in_collision`).
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        if PAROL6_ROBOT.collision is None:
+            return []
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.colliding_pairs(self._q_buf)
+
+    def min_distance(self, q_rad: NDArray[np.float64]) -> float:
+        """Return the minimum clearance over all active pairs at `q_rad`.
+
+        Positive => separation; negative => penetration depth.
+        Returns +inf when collision checking is disabled.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        if PAROL6_ROBOT.collision is None:
+            return float("inf")
+        self._load_q_buf(q_rad)
+        return PAROL6_ROBOT.collision.min_distance(self._q_buf)
 
     def ik_batch(
         self,

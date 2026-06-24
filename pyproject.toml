@@ -112,6 +112,14 @@ include = [
 [tool.ty.overrides.rules]
 invalid-type-form = "ignore"
 
+# pinokin is a compiled extension; the lint env's build can predate
+# CollisionChecker, so ty can't resolve that symbol (it resolves fine at runtime
+# and against a matching pinokin build).
+[[tool.ty.overrides]]
+include = ["parol6/PAROL6_ROBOT.py"]
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
 [tool.setuptools]
 include-package-data = true
 

@@ -2,13 +2,14 @@
 
 import atexit
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import numpy as np
 from numpy.typing import NDArray
-from pinokin import Robot
+from pinokin import CollisionChecker, Robot
 
 from parol6.tools import get_tool_transform
 
@@ -56,9 +57,170 @@ _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree)
 _urdf_path = str(
     Path(__file__).resolve().parent / "urdf_model" / "urdf" / "PAROL6.urdf"
 )
+_mesh_dir = str(Path(_urdf_path).resolve().parent.parent)
 
 # Current robot instance (tool transform applied in-place)
 robot: Robot = Robot(_urdf_path)
+
+# Self-collision checker bound to the same pinokin Robot. Built eagerly when
+# ``parol6.config`` is imported (config.py calls ``_init_collision_checker``),
+# i.e. on any ``import parol6``; stays None when collision checking is disabled
+# or geometry fails to load. Treat None as "checks disabled" everywhere.
+# TODO: defer construction to a server-side ``ensure_collision_checker()`` so
+# pure RobotClient script subprocesses don't pay the URDF-rewrite + BVH build.
+collision: CollisionChecker | None = None
+
+
+def _resolved_urdf_for_collision() -> str:
+    """Return a path to a URDF with `package://parol6/...` rewritten to
+    absolute `file://` paths so pinokin's mesh loader can resolve them.
+
+    The PAROL6 URDF was authored for a ROS package layout (meshes at
+    `parol6/meshes/`) but the Python package places them at
+    `parol6/urdf_model/meshes/`. Rewriting at runtime keeps the source
+    URDF unchanged and avoids fragile symlink farms.
+
+    Writes a fresh temp file each call and cleans it up at interpreter exit.
+    """
+    import tempfile
+
+    src = Path(_urdf_path)
+    text = src.read_text()
+    mesh_root = Path(_mesh_dir) / "meshes"
+    # `package://parol6/meshes/foo.STL` -> a plain absolute path coal/assimp can
+    # open. Use a POSIX-style path, NOT a `file://` URI: coal strips the scheme
+    # naively, which on Windows leaves an invalid `/D:/...` (leading slash before
+    # the drive letter). `as_posix()` gives `/abs/...` on POSIX and `D:/abs/...`
+    # on Windows — both openable directly.
+    rewritten = text.replace("package://parol6/meshes/", mesh_root.as_posix() + "/")
+    fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(rewritten)
+
+    @atexit.register
+    def _cleanup_tmp_urdf() -> None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    return tmp_path
+
+
+def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
+    """Build the singleton CollisionChecker when *enabled*.
+
+    Config values are passed in (by ``parol6.config`` after its knobs are
+    defined) rather than imported here, keeping the dependency one-directional
+    — ``config`` imports ``PAROL6_ROBOT``, not the other way around.
+    """
+    global collision
+    if not enabled:
+        collision = None
+        return
+
+    try:
+        # All package:// mesh URIs are rewritten to absolute file:// paths in
+        # the temp URDF, so no package_dirs resolution is needed.
+        urdf_for_collision = _resolved_urdf_for_collision()
+        c = CollisionChecker(robot, urdf_for_collision)
+        if srdf_path and os.path.exists(srdf_path):
+            c.load_srdf(srdf_path)
+        collision = c
+        logger.info(
+            "Collision checker loaded: %d pairs, %d geometry objects",
+            c.num_collision_pairs,
+            c.num_geometry_objects,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Enabled but failed to build: fail loud. Silently running the arm with
+        # no collision checking is unsafe; require an explicit opt-out.
+        if os.getenv("PAROL6_ALLOW_NO_COLLISION"):
+            logger.warning(
+                "Collision checker init failed; continuing without it because "
+                "PAROL6_ALLOW_NO_COLLISION is set (UNSAFE): %s",
+                e,
+            )
+            collision = None
+            return
+        raise RuntimeError(
+            "Collision checker failed to initialize. Fix the cause, or set "
+            "PAROL6_ALLOW_NO_COLLISION=1 to run without collision checking "
+            f"(UNSAFE). Original error: {e}"
+        ) from e
+
+
+# Geometry-object names for meshes attached to the collision checker on
+# behalf of the currently-active tool, plus the (tool, variant) they were
+# attached for so an unchanged re-apply can skip the disk reload.
+_active_tool_geom_names: list[str] = []
+_active_tool_geom_key: tuple[str, str | None] | None = None
+
+
+def _refresh_collision_tool_geometry(
+    tool_key: str,
+    variant_key: str | None = None,
+) -> None:
+    """Sync the global collision checker's tool geometry with the active
+    tool. No-op if the checker isn't built yet (so this is safe to call
+    during early module init, before the checker is ensured).
+
+    Skips the work entirely when the (tool, variant) is unchanged: collision
+    mesh placement comes only from ``spec.origin``, never the TCP offset, so a
+    TCP-offset-only ``apply_tool`` would otherwise reload STLs and rebuild BVHs
+    on the control-loop thread for no change.
+    """
+    global _active_tool_geom_key
+    if collision is None:
+        return
+    key = (tool_key, variant_key)
+    if key == _active_tool_geom_key:
+        return
+    # Clear the previous tool's geometry. Mark the key inconsistent until the
+    # new attaches finish, so a mid-loop failure self-repairs on the next call
+    # (otherwise the early-return above would skip a partial attach forever).
+    for name in _active_tool_geom_names:
+        collision.remove_geometry_by_name(name)
+    _active_tool_geom_names.clear()
+    _active_tool_geom_key = None
+
+    from parol6.tools import get_registry
+
+    cfg = None if tool_key == "NONE" else get_registry().get(tool_key)
+    if cfg is not None:
+        # A variant with non-empty meshes wholesale replaces cfg.meshes; an
+        # empty variant falls back to cfg.meshes (deliberately — unlike WC's
+        # swap_tool_mesh, which renders nothing for a mesh-less variant).
+        meshes = cfg.meshes
+        if variant_key:
+            for v in cfg.variants:
+                if v.key == variant_key and v.meshes:
+                    meshes = v.meshes
+                    break
+        mesh_root = Path(_mesh_dir) / "meshes"
+        try:
+            for spec in meshes:
+                path = mesh_root / spec.file
+                # All current MeshSpecs use rpy=(0,0,0); rotation is baked into
+                # the STL geometry (see _MESH_RPY comment in tools.py). Add a
+                # rotation branch here when a non-identity rpy appears.
+                T = np.eye(4, dtype=np.float64)
+                T[:3, 3] = spec.origin
+                collision.attach_mesh_to_frame(
+                    spec.file,
+                    str(path),
+                    parent_frame="L6",
+                    placement=T,
+                )
+                _active_tool_geom_names.append(spec.file)
+        except Exception:
+            # Roll back a partial attach so the checker never holds half a tool.
+            for name in _active_tool_geom_names:
+                collision.remove_geometry_by_name(name)
+            _active_tool_geom_names.clear()
+            raise
+
+    _active_tool_geom_key = key
 
 
 def apply_tool(
@@ -94,6 +256,8 @@ def apply_tool(
     else:
         robot.clear_tool_transform()
         logger.info(f"Applied tool {label} (identity)")
+
+    _refresh_collision_tool_geometry(tool_name, variant_key=variant_key or None)
 
 
 # Initialize with no tool

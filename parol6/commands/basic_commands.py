@@ -29,6 +29,8 @@ from parol6.utils.error_codes import ErrorCode
 from parol6.config import deg_to_steps
 from parol6.server.transports.transport_factory import is_simulation_mode
 
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT  # noqa: N811
+
 from .base import (
     ExecutionStatusCode,
     MotionCommand,
@@ -187,6 +189,19 @@ class JogJCommand(MotionCommand[JogJCmd]):
 
         se.set_jog_velocity(self._jog_vel_rad)
         pos_rad, _vel, _finished = se.tick()
+
+        # Don't stream a self-colliding configuration. This only fires in the
+        # collision case (in_collision is False during normal jogging), so it
+        # never affects ordinary motion; an abrupt stop is acceptable when the
+        # alternative is driving the arm into itself. (The Cartesian jog uses a
+        # graceful CSE-based stop; JogJ has no equivalent smoother, so it halts.)
+        checker = PAROL6_ROBOT.collision
+        if checker is not None and checker.in_collision(pos_rad):
+            logger.warning("[JOGJ] self-collision predicted - stopping jog")
+            se.active = False
+            self.finish()
+            return ExecutionStatusCode.COMPLETED
+
         self._q_rad_buf[:] = pos_rad
         rad_to_steps(self._q_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)

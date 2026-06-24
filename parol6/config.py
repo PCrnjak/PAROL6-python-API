@@ -564,6 +564,34 @@ IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
     dtype=np.float64,
 )
 
+# -----------------------------------------------------------------------------
+# Self-collision checking (pinokin CollisionChecker)
+# -----------------------------------------------------------------------------
+# Pre-flight collision checks reject motion commands whose interpolated
+# joint path enters a self-colliding (or world-colliding) configuration.
+# Disable via env: PAROL6_COLLISION_CHECK=0
+COLLISION_CHECK_ENABLED: bool = os.getenv(
+    "PAROL6_COLLISION_CHECK", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Number of interior joint-space samples checked along an interpolated path.
+# Endpoints are always checked. 0 => endpoints only.
+# At ~38 us p99 per check on the bundled simplified meshes (see the speed
+# diagnostic), 16 samples is ~0.7 ms per command; world geometry attached at
+# runtime may raise the per-check cost.
+COLLISION_PATH_SAMPLES: int = int(os.getenv("PAROL6_COLLISION_PATH_SAMPLES", "16"))
+
+# Optional SRDF file with disabled-pair info. Defaults to the bundled
+# parol6/urdf_model/srdf/PAROL6.srdf when present.
+_default_srdf = Path(__file__).resolve().parent / "urdf_model" / "srdf" / "PAROL6.srdf"
+COLLISION_SRDF_PATH: str = os.getenv(
+    "PAROL6_COLLISION_SRDF",
+    str(_default_srdf) if _default_srdf.exists() else "",
+)
+
+# Populate PAROL6_ROBOT.collision now that the config knobs are defined.
+PAROL6_ROBOT._init_collision_checker(COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH)
+
 
 # -----------------------------------------------------------------------------
 # Utility Functions
