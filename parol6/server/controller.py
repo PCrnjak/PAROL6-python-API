@@ -111,6 +111,12 @@ class Controller:
         self.shutdown_event = threading.Event()
         self._initialized = False
 
+        # Register plugin tools (waldoctl.tools) before any SELECT_TOOL.
+        from parol6.tools import register_plugin_tools
+
+        register_plugin_tools()
+
+        # Core components
         self.state_manager = StateManager()
         self.udp_transport: UDPTransport | None = None
 
@@ -871,5 +877,11 @@ class Controller:
         try:
             psutil.Process().cpu_affinity([core])
             logger.debug("Pinned process to CPU core %d", core)
-        except (AttributeError, NotImplementedError, psutil.AccessDenied) as e:
+        except (
+            AttributeError,
+            NotImplementedError,
+            psutil.Error,
+            OSError,
+            ValueError,
+        ) as e:
             logger.debug("Could not pin to CPU core: %s", e)

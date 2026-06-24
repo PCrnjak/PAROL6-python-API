@@ -15,7 +15,7 @@ from multiprocessing.synchronize import Event
 import numpy as np
 from numba import njit
 from pinokin import arrays_equal_6
-from waldoctl import ActionState, ToolStatus
+from waldoctl import ActionState, ToolState, ToolStatus
 
 from parol6.config import speed_steps_to_rad, steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
@@ -398,6 +398,15 @@ class StatusCache:
         # Populate tool status from hardware state via the tool config
         ts = self.tool_status
         ts.key = state.current_tool
+        # Reset value fields to defaults first so a tool whose populate_status is
+        # a no-op (NONE / passive / plugin tools) doesn't inherit the previous
+        # tool's engaged/part_detected/positions/etc. (in-place, zero-alloc).
+        ts.state = ToolState.OFF
+        ts.engaged = False
+        ts.part_detected = False
+        ts.fault_code = 0
+        ts.positions = ()
+        ts.channels = ()
         cfg = get_registry().get(state.current_tool)
         if cfg is not None:
             cfg.populate_status(state, ts)

@@ -41,12 +41,12 @@ dependencies = [
     "ruckig>=0.12.2",
     "toppra>=0.6.3",
     "interpolatepy>=2.0.0",
-    "numpy>=2.0",
+    "numpy>=2.0,<2.5",  # numba (0.6x) requires numpy<2.5
     "numba>=0.59",
     "psutil>=5.9",
     "msgspec>=0.18",
     "ormsgpack>=1.4.0",
-    "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@v0.2.0",
+    "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@v0.4.0",
 ]
 
 [tool.setuptools.packages.find]

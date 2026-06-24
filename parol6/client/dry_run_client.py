@@ -173,6 +173,14 @@ class DryRunRobotClient:
         # TCP offset on the module-level robot singleton.
         PAROL6_ROBOT.apply_tool("NONE")
 
+        # Spawn-mode subprocess: the tool registry is freshly imported with only
+        # native tools, so plugin tools must be registered here too or
+        # select_tool() of a plugin tool fails in apply_tool (mirrors the planner
+        # worker).
+        from parol6.tools import register_plugin_tools
+
+        register_plugin_tools()
+
         self._state = ControllerState()
         init_deg = np.asarray(
             initial_joints_deg if initial_joints_deg is not None else HOME_ANGLES_DEG,

@@ -16,5 +16,6 @@ def clean_state(server_proc, client):
     client.select_profile("LINEAR")
     idx = client.home()
     assert idx >= 0, "Home command failed to send"
-    assert client.wait_command(idx, timeout=5.0), "Home did not complete"
+    # Generous timeout: the first home cold-JITs the numba motion pipeline.
+    assert client.wait_command(idx, timeout=30.0), "Home did not complete"
     return client
