@@ -3,9 +3,10 @@
 import atexit
 import logging
 import os
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -156,6 +157,10 @@ def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
 _active_tool_geom_names: list[str] = []
 _active_tool_geom_key: tuple[str, str | None] | None = None
 
+# Geometry-object names for user-placed workspace shapes (keep-out barriers)
+# currently on this process's collision checker.
+_active_shape_names: list[str] = []
+
 
 def _refresh_collision_tool_geometry(
     tool_key: str,
@@ -258,6 +263,47 @@ def apply_tool(
         logger.info(f"Applied tool {label} (identity)")
 
     _refresh_collision_tool_geometry(tool_name, variant_key=variant_key or None)
+
+
+def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
+    """[x, y, z, rx, ry, rz] (m, rad RPY) -> 4x4 world transform (R = Rz·Ry·Rx)."""
+    x, y, z, rx, ry, rz = pose
+    cx, sx = np.cos(rx), np.sin(rx)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cz, sz = np.cos(rz), np.sin(rz)
+    rot = np.array(
+        [
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ]
+    )
+    T = np.eye(4)
+    T[:3, :3] = rot
+    T[:3, 3] = (x, y, z)
+    return T
+
+
+def apply_shapes(shapes: "Iterable[Any]") -> None:
+    """Replace the workspace collision-world shapes on this process's checker.
+
+    Each shape exposes ``kind``/``params``/``pose``/``collision``/``name`` (a
+    parol6 ``ShapeWire`` or any duck-typed equivalent). Only collision-enabled
+    shapes are added — visual-only ones are skipped. Runs per-process; the
+    controller and planner each call it against their own checker.
+    """
+    global _active_shape_names
+    if collision is None:
+        return
+    for name in _active_shape_names:
+        collision.remove_geometry_by_name(name)
+    _active_shape_names = []
+    for s in shapes:
+        if not s.collision:
+            continue
+        name = f"shape:{s.name}"
+        collision.add_obstacle(name, s.kind, list(s.params), _pose_to_matrix(s.pose))
+        _active_shape_names.append(name)
 
 
 # Initialize with no tool

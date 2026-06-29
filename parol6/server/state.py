@@ -406,6 +406,10 @@ class ControllerState:
             label = f"{tool_name}:{variant_key}" if variant_key else tool_name
             logger.info(f"Tool changed to {label}")
 
+    def set_shapes(self, shapes: list) -> None:
+        """Apply the workspace collision-world shapes to the control-loop checker."""
+        PAROL6_ROBOT.apply_shapes(shapes)
+
     @property
     def tcp_offset_m(self) -> tuple[float, float, float]:
         """Current TCP offset in meters (tool-local frame)."""

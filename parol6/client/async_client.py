@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
-from waldoctl import RobotClient as _RobotClientABC, ToolStatus
+from waldoctl import RobotClient as _RobotClientABC, Shape, ToolStatus
 from waldoctl.status import ActionState, ActivityResult, ToolResult
 from waldoctl.tools import ToolSpec
 
@@ -68,7 +68,9 @@ from ..protocol.wire import (
     ResponseMsg,
     SelectProfileCmd,
     SelectToolCmd,
+    SetShapesCmd,
     SetTcpOffsetCmd,
+    ShapeWire,
     ServoJCmd,
     ServoJPoseCmd,
     ServoLCmd,
@@ -930,6 +932,22 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.set_tcp_offset(0, 0, -190)  # pencil tip 190mm from gripper
         """
         return await self._send(SetTcpOffsetCmd(x=x, y=y, z=z))
+
+    async def set_shapes(self, shapes: list[Shape]) -> int:
+        """Replace the workspace collision-world shapes (keep-out barriers).
+
+        Collision-enabled shapes are added to the controller's checkers so motion
+        is blocked against them; an empty list clears all shapes.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_shapes([Box(name="table", x=0.6, y=0.4, z=0.02,
+                                pose=(0.3, 0, -0.01, 0, 0, 0))])
+        """
+        return await self._send(
+            SetShapesCmd(shapes=[ShapeWire(*s.to_wire()) for s in shapes])
+        )
 
     async def tcp_offset(self) -> list[float]:
         """Query current TCP offset in mm [x, y, z].

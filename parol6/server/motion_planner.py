@@ -23,7 +23,13 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
-from parol6.protocol.wire import HomeCmd, SelectToolCmd, SetTcpOffsetCmd, ToolActionCmd
+from parol6.protocol.wire import (
+    HomeCmd,
+    SelectToolCmd,
+    SetShapesCmd,
+    SetTcpOffsetCmd,
+    ToolActionCmd,
+)
 from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
@@ -463,6 +469,8 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
+        elif isinstance(params, SetShapesCmd):
+            self._robot_module.apply_shapes(params.shapes)
 
 
 # ---------------------------------------------------------------------------

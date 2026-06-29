@@ -152,6 +152,8 @@ class CmdType(IntEnum):
 
     # Simulator state query
     IS_SIMULATOR = auto()
+    # Workspace collision-world shapes (keep-out geometry)
+    SET_SHAPES = auto()
 
 
 # =============================================================================
@@ -614,6 +616,29 @@ class SetTcpOffsetCmd(
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
+
+
+class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
+    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``."""
+
+    kind: str
+    params: list[float]
+    pose: list[float]
+    collision: bool
+    margin: float | None
+    name: str
+
+
+class SetShapesCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SET_SHAPES: replace the workspace collision-world shapes."""
+
+    shapes: list[ShapeWire]
 
 
 class SelectProfileCmd(
