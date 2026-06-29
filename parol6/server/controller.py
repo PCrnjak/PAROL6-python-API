@@ -713,6 +713,8 @@ class Controller:
             if state.error is not None:
                 state.error = None
                 state.action_state = ActionState.IDLE
+            # Unconditional: a jog self-collision sets the viz but no state.error.
+            state.clear_collision()
 
             cmd_obj, _, error_msg = create_command_from_struct(command.p)
             if cmd_obj is None:
@@ -743,6 +745,8 @@ class Controller:
         if state.error is not None:
             state.error = None
             state.action_state = ActionState.IDLE
+        # Unconditional: a jog self-collision sets the viz but no state.error.
+        state.clear_collision()
 
         cmd_index = self._assign_command_index(state)
         # Only sync Position_in when segment player is idle — if segments are

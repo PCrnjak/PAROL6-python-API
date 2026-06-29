@@ -115,6 +115,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         self._axis_sign = 1.0 if vels[max_idx] >= 0 else -1.0
         self.start_timer(self.p.duration)
         self._ik_stopping = False
+        state.clear_collision()
 
     def _track_and_send(self, state: "ControllerState", ik_q: np.ndarray) -> None:
         """Velocity-clamp IK result, update tracked position, send MOVE."""
@@ -237,6 +238,11 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     logger,
                     "[CARTJOG] self-collision predicted - initiating stop",
                 )
+                # Capture once on the stop transition (not every decel tick).
+                state.collision_pairs = tuple(
+                    PAROL6_ROBOT.collision.colliding_pairs(ik_result.q)
+                )
+                state.collision_active = True
                 cse.stop()
                 self._ik_stopping = True
             return ExecutionStatusCode.EXECUTING
@@ -245,6 +251,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         # predicted self-collision), recover by resuming jogging.
         if self._ik_stopping:
             logger.info("[CARTJOG] constraint cleared - resuming jog")
+            state.clear_collision()
             steps_to_rad(state.Position_in, self._q_rad_buf)
             cse.sync_pose(get_fkine_se3(state))
             self._q_commanded[:] = self._q_rad_buf

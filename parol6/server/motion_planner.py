@@ -69,6 +69,7 @@ class ErrorSegment:
     error: RobotError
     cartesian_path: np.ndarray | None = None  # (N, 6) full TCP path
     ik_valid: np.ndarray | None = None  # (N,) per-pose bool
+    colliding_pairs: list[tuple[str, str]] | None = None  # self-collision viz
 
 
 Segment = Union[TrajectorySegment, InlineSegment, ErrorSegment]
@@ -386,6 +387,7 @@ class TrajectoryPlanner:
                 error=robot_error,
                 cartesian_path=cartesian_path,
                 ik_valid=ik_valid,
+                colliding_pairs=getattr(exc, "colliding_pairs", None),
             )
         )
 

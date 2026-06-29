@@ -159,6 +159,10 @@ class StatusCache:
         # Error tracking field
         self._error: RobotError | None = None
 
+        # Self-collision viz tracking
+        self._collision_active: bool = False
+        self._collision_pairs: tuple[tuple[str, str], ...] = ()
+
         # Pipeline depth fields
         self._queued_segments: int = 0
         self._queued_duration: float = 0.0
@@ -460,6 +464,14 @@ class StatusCache:
         if error_changed:
             self._error = state.error
 
+        collision_changed = (
+            self._collision_active != state.collision_active
+            or self._collision_pairs != state.collision_pairs
+        )
+        if collision_changed:
+            self._collision_active = state.collision_active
+            self._collision_pairs = state.collision_pairs
+
         depth_changed = (
             self._queued_segments != state.queued_segments
             or self._queued_duration != state.queued_duration
@@ -479,6 +491,7 @@ class StatusCache:
             or action_changed
             or queue_changed
             or error_changed
+            or collision_changed
             or depth_changed
         ):
             self._binary_dirty = True
@@ -508,6 +521,8 @@ class StatusCache:
                 self.tool_status,
                 self.tcp_speed,
                 simulator_active=is_simulation_mode(),
+                collision_active=self._collision_active,
+                collision_pairs=self._collision_pairs,
             )
             self._binary_dirty = False
         return self._binary_cache

@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -1279,6 +1279,8 @@ def pack_status(
     tool_status: ToolStatus | None = None,
     tcp_speed: float = 0.0,
     simulator_active: bool = False,
+    collision_active: bool = False,
+    collision_pairs: tuple[tuple[str, str], ...] = (),
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1318,6 +1320,8 @@ def pack_status(
             else None,
             tcp_speed,
             simulator_active,
+            collision_active,
+            collision_pairs,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1355,6 +1359,8 @@ class StatusBuffer:
     queued_duration: float = 0.0
     tcp_speed: float = 0.0
     simulator_active: bool = False
+    collision_active: bool = False
+    collision_pairs: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._cart_en_dict: dict[str, np.ndarray] = {
@@ -1398,6 +1404,8 @@ class StatusBuffer:
             queued_duration=self.queued_duration,
             tcp_speed=self.tcp_speed,
             simulator_active=self.simulator_active,
+            collision_active=self.collision_active,
+            collision_pairs=list(self.collision_pairs),
         )
 
 
@@ -1408,7 +1416,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
                      executing_index, completed_index, last_checkpoint,
                      error, queued_segments, queued_duration, action_params,
-                     tool_status_tuple, tcp_speed, simulator_active]
+                     tool_status_tuple, tcp_speed, simulator_active,
+                     collision_active, collision_pairs]
 
     Args:
         data: Raw msgpack bytes
@@ -1464,6 +1473,18 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
         if len(msg) > 19:
             buf.simulator_active = bool(msg[19])
+
+        # Collision viz (appended after simulator_active; len-guarded for
+        # backward-compat with pre-collision status producers).
+        if len(msg) > 20:
+            buf.collision_active = bool(msg[20])
+        if len(msg) > 21:
+            raw_pairs = msg[21]
+            cp = buf.collision_pairs
+            cp.clear()
+            if raw_pairs:
+                for p in raw_pairs:
+                    cp.append((p[0], p[1]))
 
         return True
     except Exception as e:

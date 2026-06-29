@@ -76,7 +76,7 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
         sub = pos[idx]  # fancy indexing yields a fresh contiguous float64 array
 
     def _raise(sample: int, pairs: list[tuple[str, str]]) -> None:
-        raise TrajectoryPlanningError(
+        exc = TrajectoryPlanningError(
             make_error(
                 ErrorCode.SYS_SELF_COLLISION,
                 sample=str(sample),
@@ -84,6 +84,9 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
                 pairs=_format_pairs(pairs),
             )
         )
+        # Structured channel for the viz, alongside the formatted error string.
+        exc.colliding_pairs = list(pairs)
+        raise exc
 
     hit = checker.check_path(sub)
     if hit < 0:

@@ -140,6 +140,9 @@ class SegmentPlayer:
                     "Command %d failed: %s", active.command_index, active.error
                 )
                 state.error = active.error
+                pairs = active.colliding_pairs
+                state.collision_active = bool(pairs)
+                state.collision_pairs = tuple(pairs) if pairs else ()
                 state.action_state = ActionState.ERROR
                 state.action_current = ""
                 state.action_params = ""

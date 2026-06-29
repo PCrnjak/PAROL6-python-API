@@ -601,6 +601,12 @@ class Robot(_RobotABC):
         return False
 
     @property
+    def has_collision_checking(self) -> bool:
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return PAROL6_ROBOT.collision is not None
+
+    @property
     def digital_outputs(self) -> int:
         return 2
 

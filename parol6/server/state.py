@@ -251,6 +251,12 @@ class ControllerState:
     queued_segments: int = 0
     queued_duration: float = 0.0
 
+    # Self-collision viz: colliding pairs captured at the predicted colliding
+    # config when a move is blocked or a jog is stopped; cleared when a
+    # subsequent motion proceeds without collision.
+    collision_active: bool = False
+    collision_pairs: tuple[tuple[str, str], ...] = ()
+
     # Network setup and uptime
     ip: str = "127.0.0.1"
     port: int = 5001
@@ -299,6 +305,11 @@ class ControllerState:
         """Initialize E-stop to released state and named gripper wrapper."""
         self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
         self.gripper_hw = GripperHWState(self.Gripper_data_out, self.Gripper_data_in)
+
+    def clear_collision(self) -> None:
+        """Drop any captured self-collision pairs (zero-alloc — interned ())."""
+        self.collision_active = False
+        self.collision_pairs = ()
 
     def reset(self) -> None:
         """
@@ -354,6 +365,7 @@ class ControllerState:
 
         # Error and pipeline depth
         self.error = None
+        self.clear_collision()
         self.queued_segments = 0
         self.queued_duration = 0.0
 

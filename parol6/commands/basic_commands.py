@@ -156,6 +156,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 )
         self.start_timer(self.p.duration)
         self._jog_initialized = False
+        state.clear_collision()
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of joint jogging via StreamingExecutor."""
@@ -198,6 +199,9 @@ class JogJCommand(MotionCommand[JogJCmd]):
         checker = PAROL6_ROBOT.collision
         if checker is not None and checker.in_collision(pos_rad):
             logger.warning("[JOGJ] self-collision predicted - stopping jog")
+            # Allocate only here (the rare stop), never on the clean per-tick path.
+            state.collision_pairs = tuple(checker.colliding_pairs(pos_rad))
+            state.collision_active = True
             se.active = False
             self.finish()
             return ExecutionStatusCode.COMPLETED
