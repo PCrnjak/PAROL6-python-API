@@ -780,33 +780,35 @@ class Robot(_RobotABC):
             result[i, 5] = rpy[2]
         return result
 
-    def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
-        """Return True iff `q_rad` is in self/world collision. False if disabled.
+    @property
+    def _collision_checker(self):
+        """The process-global checker, or None when collision checking is off.
 
-        Queries the process-global ``PAROL6_ROBOT.collision`` checker (shared by
-        all Robot methods here); its tool geometry reflects ``PAROL6_ROBOT
-        .apply_tool`` calls in this process (server / dry-run), not
-        :meth:`set_active_tool`, which only mutates this instance's pinokin Robot.
+        Shared by every collision method here; its tool geometry reflects
+        ``PAROL6_ROBOT.apply_tool`` calls in this process (server / dry-run),
+        not :meth:`set_active_tool`, which only mutates this instance's Robot.
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
-        if PAROL6_ROBOT.collision is None:
+        return PAROL6_ROBOT.collision
+
+    def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
+        """Return True iff `q_rad` is in self/world collision. False if disabled."""
+        c = self._collision_checker
+        if c is None:
             return False
         self._load_q_buf(q_rad)
-        return PAROL6_ROBOT.collision.in_collision(self._q_buf)
+        return c.in_collision(self._q_buf)
 
     def check_trajectory(self, q_path_rad: NDArray[np.float64]) -> int:
         """Returns first colliding row index in `q_path_rad`, or -1 if clear.
 
         `q_path_rad` is (N, nq) joint positions in radians.
         """
-        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-
-        if PAROL6_ROBOT.collision is None:
+        c = self._collision_checker
+        if c is None:
             return -1
-        return PAROL6_ROBOT.collision.check_path(
-            np.ascontiguousarray(q_path_rad, dtype=np.float64)
-        )
+        return c.check_path(np.ascontiguousarray(q_path_rad, dtype=np.float64))
 
     def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[str, str]]:
         """Return list of (name, name) geometry pairs in collision at `q_rad`.
@@ -817,12 +819,11 @@ class Robot(_RobotABC):
         geometry is present only when ``PAROL6_ROBOT.apply_tool`` attached it in
         this process (see :meth:`in_collision`).
         """
-        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-
-        if PAROL6_ROBOT.collision is None:
+        c = self._collision_checker
+        if c is None:
             return []
         self._load_q_buf(q_rad)
-        return PAROL6_ROBOT.collision.colliding_pairs(self._q_buf)
+        return c.colliding_pairs(self._q_buf)
 
     def min_distance(self, q_rad: NDArray[np.float64]) -> float:
         """Return the minimum clearance over all active pairs at `q_rad`.
@@ -830,12 +831,11 @@ class Robot(_RobotABC):
         Positive => separation; negative => penetration depth.
         Returns +inf when collision checking is disabled.
         """
-        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-
-        if PAROL6_ROBOT.collision is None:
+        c = self._collision_checker
+        if c is None:
             return float("inf")
         self._load_q_buf(q_rad)
-        return PAROL6_ROBOT.collision.min_distance(self._q_buf)
+        return c.min_distance(self._q_buf)
 
     def ik_batch(
         self,
