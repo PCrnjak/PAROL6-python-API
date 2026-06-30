@@ -30,7 +30,10 @@ from parol6.server.ik_layout import (
     SHM_EXTRA_KWARGS,
     unregister_shm,
 )
-from parol6.server.ik_worker import ik_enablement_worker_main
+from parol6.server.ik_worker import (
+    gate_joint_enable_collision,
+    ik_enablement_worker_main,
+)
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
 from parol6.tools import get_tool_transform
 from parol6 import config as _cfg
@@ -189,6 +192,7 @@ class StatusCache:
 
         # IK enablement results (pre-allocated for zero-alloc reads)
         self._joint_en = np.ones(12, dtype=np.uint8)
+        self._ik_gate_q_step = np.zeros(6, dtype=np.float64)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
         self._cart_en_trf = np.ones(12, dtype=np.uint8)
 
@@ -336,6 +340,16 @@ class StatusCache:
         )
         if new_version > 0:
             self._ik_last_version = new_version
+            # Gate joint enablement on the controller's FULL checker (links +
+            # tool + shapes) — the ik-worker only has the arm links.
+            import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+            gate_joint_enable_collision(
+                PAROL6_ROBOT.collision,
+                self._ik_last_q_rad,
+                self._joint_en,
+                self._ik_gate_q_step,
+            )
             return True
         return False
 

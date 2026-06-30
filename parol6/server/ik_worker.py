@@ -114,9 +114,8 @@ def ik_enablement_worker_main(
 
     response_version = 0
 
-    # Pre-allocate work arrays for cartesian targets + the enablement step.
+    # Pre-allocate work array for cartesian targets.
     cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
-    q_step = np.zeros(6, dtype=np.float64)
 
     logger.debug("IK worker subprocess started")
 
@@ -143,13 +142,8 @@ def ik_enablement_worker_main(
             if qlim is not None:
                 _compute_joint_enable(q_rad, qlim, joint_en)
             # else: joint_en stays all ones (pre-allocated default)
-
-            # Self-collision gate: grey a joint direction whose small step would
-            # collide. The ik-worker checker has the arm links (tool/shape greying
-            # needs geometry sync — a follow-up).
-            _gate_joint_enable_collision(
-                PAROL6_ROBOT.collision, q_rad, joint_en, q_step
-            )
+            # The collision gate runs in the controller (status_cache), whose
+            # checker has the tool + shapes; the ik-worker only has the links.
 
             # Compute cartesian enablement for both frames
             _compute_cart_enable(
@@ -220,7 +214,7 @@ def _compute_joint_enable(
         out[i * 2 + 1] = 1 if (q_rad[i] - delta_rad) >= qlim[0, i] else 0
 
 
-def _gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
+def gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
     """Clear a joint direction in ``joint_en`` whose ``_ENABLE_STEP_RAD`` step
     self-collides. Proximity-gated (skip the per-direction checks when the arm is
     farther than ``_ENABLE_NEAR_M`` from collision) so it stays cheap. Not njit —
