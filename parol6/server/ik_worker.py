@@ -29,6 +29,11 @@ from parol6.server.ik_layout import (
 
 logger = logging.getLogger(__name__)
 
+# Directional self-collision enablement: when the arm is within _ENABLE_NEAR_M of
+# self-collision, grey a joint direction whose _ENABLE_STEP_RAD step would collide.
+_ENABLE_STEP_RAD = np.radians(2.0)
+_ENABLE_NEAR_M = 0.05
+
 
 def ik_enablement_worker_main(
     input_shm_name: str,
@@ -109,8 +114,9 @@ def ik_enablement_worker_main(
 
     response_version = 0
 
-    # Pre-allocate work array for cartesian targets
+    # Pre-allocate work arrays for cartesian targets + the enablement step.
     cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
+    q_step = np.zeros(6, dtype=np.float64)
 
     logger.debug("IK worker subprocess started")
 
@@ -137,6 +143,13 @@ def ik_enablement_worker_main(
             if qlim is not None:
                 _compute_joint_enable(q_rad, qlim, joint_en)
             # else: joint_en stays all ones (pre-allocated default)
+
+            # Self-collision gate: grey a joint direction whose small step would
+            # collide. The ik-worker checker has the arm links (tool/shape greying
+            # needs geometry sync — a follow-up).
+            _gate_joint_enable_collision(
+                PAROL6_ROBOT.collision, q_rad, joint_en, q_step
+            )
 
             # Compute cartesian enablement for both frames
             _compute_cart_enable(
@@ -205,6 +218,23 @@ def _compute_joint_enable(
     for i in range(6):
         out[i * 2] = 1 if (q_rad[i] + delta_rad) <= qlim[1, i] else 0
         out[i * 2 + 1] = 1 if (q_rad[i] - delta_rad) >= qlim[0, i] else 0
+
+
+def _gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
+    """Clear a joint direction in ``joint_en`` whose ``_ENABLE_STEP_RAD`` step
+    self-collides. Proximity-gated (skip the per-direction checks when the arm is
+    farther than ``_ENABLE_NEAR_M`` from collision) so it stays cheap. Not njit —
+    it calls the C++ checker.
+    """
+    if checker is None or checker.min_distance(q_rad) >= _ENABLE_NEAR_M:
+        return
+    for j in range(6):
+        for slot, sign in ((2 * j, 1.0), (2 * j + 1, -1.0)):
+            if joint_en[slot]:
+                q_step[:] = q_rad
+                q_step[j] += sign * _ENABLE_STEP_RAD
+                if checker.in_collision(q_step):
+                    joint_en[slot] = 0
 
 
 # Axis directions: [dx, dy, dz, rx, ry, rz] for each of 12 axes

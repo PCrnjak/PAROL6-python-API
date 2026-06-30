@@ -8,6 +8,7 @@ from enum import Enum, auto
 import numpy as np
 
 from parol6.config import (
+    COLLISION_JOG_LOOKAHEAD_S,
     JOG_MIN_STEPS,
     LIMITS,
     rad_to_steps,
@@ -129,6 +130,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         "speeds_out",
         "_jog_initialized",
         "_jog_vel_rad",
+        "_lookahead_buf",
     )
 
     def __init__(self, p: JogJCmd):
@@ -136,6 +138,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         self.speeds_out = np.zeros(6, dtype=np.int32)
         self._jog_initialized = False
         self._jog_vel_rad = np.zeros(6, dtype=np.float64)
+        self._lookahead_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute step speeds and rad/s velocities for all 6 joints."""
@@ -197,14 +200,22 @@ class JogJCommand(MotionCommand[JogJCmd]):
         # alternative is driving the arm into itself. (The Cartesian jog uses a
         # graceful CSE-based stop; JogJ has no equivalent smoother, so it halts.)
         checker = PAROL6_ROBOT.collision
-        if checker is not None and checker.in_collision(pos_rad):
-            logger.warning("[JOGJ] self-collision predicted - stopping jog")
-            # Allocate only here (the rare stop), never on the clean per-tick path.
-            state.collision_pairs = tuple(checker.colliding_pairs(pos_rad))
-            state.collision_active = True
-            se.active = False
-            self.finish()
-            return ExecutionStatusCode.COMPLETED
+        if checker is not None:
+            # Look a velocity-scaled horizon ahead so faster jogs stop further
+            # from contact; composes with the checker's fixed clearance. In-place
+            # to keep the hot path allocation-free.
+            la = self._lookahead_buf
+            la[:] = self._jog_vel_rad
+            la *= COLLISION_JOG_LOOKAHEAD_S
+            la += pos_rad
+            if checker.in_collision(la):
+                logger.warning("[JOGJ] self-collision predicted - stopping jog")
+                # Allocate only here (the rare stop), never on the clean tick.
+                state.collision_pairs = tuple(checker.colliding_pairs(la))
+                state.collision_active = True
+                se.active = False
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
 
         self._q_rad_buf[:] = pos_rad
         rad_to_steps(self._q_rad_buf, self._steps_buf)

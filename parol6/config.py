@@ -589,8 +589,22 @@ COLLISION_SRDF_PATH: str = os.getenv(
     str(_default_srdf) if _default_srdf.exists() else "",
 )
 
+# Fixed clearance (m): geometry within this distance counts as colliding, so the
+# arm keeps a near-miss buffer from itself and from keep-out shapes (absorbs
+# calibration/model error). Applied uniformly to every collision query.
+COLLISION_CLEARANCE_M: float = float(os.getenv("PAROL6_COLLISION_CLEARANCE_M", "0.005"))
+
+# Velocity-scaled jog stopping buffer (s): a jog is stopped if the config this
+# many seconds ahead (at the current jog velocity) would collide — so faster
+# jogs stop further from contact. Composes with COLLISION_CLEARANCE_M.
+COLLISION_JOG_LOOKAHEAD_S: float = float(
+    os.getenv("PAROL6_COLLISION_JOG_LOOKAHEAD_S", "0.15")
+)
+
 # Populate PAROL6_ROBOT.collision now that the config knobs are defined.
-PAROL6_ROBOT._init_collision_checker(COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH)
+PAROL6_ROBOT._init_collision_checker(
+    COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH, COLLISION_CLEARANCE_M
+)
 
 
 # -----------------------------------------------------------------------------

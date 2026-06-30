@@ -108,7 +108,9 @@ def _resolved_urdf_for_collision() -> str:
     return tmp_path
 
 
-def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
+def _init_collision_checker(
+    enabled: bool, srdf_path: str, clearance_margin: float = 0.0
+) -> None:
     """Build the singleton CollisionChecker when *enabled*.
 
     Config values are passed in (by ``parol6.config`` after its knobs are
@@ -124,7 +126,9 @@ def _init_collision_checker(enabled: bool, srdf_path: str) -> None:
         # All package:// mesh URIs are rewritten to absolute file:// paths in
         # the temp URDF, so no package_dirs resolution is needed.
         urdf_for_collision = _resolved_urdf_for_collision()
-        c = CollisionChecker(robot, urdf_for_collision)
+        c = CollisionChecker(
+            robot, urdf_for_collision, clearance_margin=clearance_margin
+        )
         if srdf_path and os.path.exists(srdf_path):
             c.load_srdf(srdf_path)
         collision = c
