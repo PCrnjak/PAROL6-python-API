@@ -270,7 +270,12 @@ def apply_tool(
 
 
 def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
-    """[x, y, z, rx, ry, rz] (m, rad RPY) -> 4x4 world transform (R = Rz·Ry·Rx)."""
+    """[x, y, z, rx, ry, rz] (m, rad RPY) -> 4x4 world transform (R = Rz·Ry·Rx).
+
+    Rz·Ry·Rx matches the frontend's shape render rotation (NiceGUI ``rotate``,
+    XYZ order). Deliberately NOT ``pinokin.se3_from_rpy`` (Rx·Ry·Rz) — swapping
+    it in would mis-orient any multi-axis-tilted shape vs its rendered pose.
+    """
     x, y, z, rx, ry, rz = pose
     cx, sx = np.cos(rx), np.sin(rx)
     cy, sy = np.cos(ry), np.sin(ry)

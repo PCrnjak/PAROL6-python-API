@@ -686,6 +686,8 @@ class Controller:
         # Streaming commands: cancel segment playback + existing streamable handling
         if getattr(command, "streamable", False):
             self._segment_player.cancel(state)
+            # Unconditional: a jog self-collision sets the viz but no state.error.
+            state.clear_collision()
             if self.udp_transport:
                 drained = self.udp_transport.drain_buffer()
                 if drained > 0:

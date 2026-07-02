@@ -159,7 +159,6 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 )
         self.start_timer(self.p.duration)
         self._jog_initialized = False
-        state.clear_collision()
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of joint jogging via StreamingExecutor."""

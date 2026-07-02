@@ -115,7 +115,6 @@ class JogLCommand(MotionCommand[JogLCmd]):
         self._axis_sign = 1.0 if vels[max_idx] >= 0 else -1.0
         self.start_timer(self.p.duration)
         self._ik_stopping = False
-        state.clear_collision()
 
     def _track_and_send(self, state: "ControllerState", ik_q: np.ndarray) -> None:
         """Velocity-clamp IK result, update tracked position, send MOVE."""
