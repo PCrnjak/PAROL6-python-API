@@ -674,10 +674,9 @@ class Robot(_RobotABC):
         on top of the tool's registered transform.
         *variant_key*: optional variant whose TCP overrides the tool default.
 
-        Note: this mutates the per-instance pinokin Robot, not the global
-        `PAROL6_ROBOT.collision` scene. Server-side tool changes route
-        through `PAROL6_ROBOT.apply_tool`, which is where collision-mesh
-        attachment is wired.
+        Also syncs the tool's collision meshes onto this process's global
+        checker so client-side collision queries (preview / editing pose)
+        see the attached tool.
         """
         from parol6.tools import get_tool_transform
 
@@ -699,6 +698,11 @@ class Robot(_RobotABC):
             self._pinokin.set_tool_transform(T_tool)
         else:
             self._pinokin.clear_tool_transform()
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        # Registry-unknown (plugin) tools just clear the old geometry.
+        PAROL6_ROBOT._refresh_collision_tool_geometry(tool_key, variant_key=variant_key)
 
     def _plugin_tool_transform(
         self, tool_key: str, variant_key: str | None
@@ -784,9 +788,9 @@ class Robot(_RobotABC):
     def _collision_checker(self):
         """The process-global checker, or None when collision checking is off.
 
-        Shared by every collision method here; its tool geometry reflects
-        ``PAROL6_ROBOT.apply_tool`` calls in this process (server / dry-run),
-        not :meth:`set_active_tool`, which only mutates this instance's Robot.
+        Shared by every collision method here; its tool geometry follows
+        ``PAROL6_ROBOT.apply_tool`` (server / dry-run) and
+        :meth:`set_active_tool` (client) calls in this process.
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
@@ -815,9 +819,8 @@ class Robot(_RobotABC):
 
         Names are URDF link names for arm geometry (e.g. ``"L4_0"``) and
         the user-supplied name for runtime-attached geometry (e.g.
-        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh). Tool
-        geometry is present only when ``PAROL6_ROBOT.apply_tool`` attached it in
-        this process (see :meth:`in_collision`).
+        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh, or
+        ``"shape:<name>"`` for a workspace keep-out shape).
         """
         c = self._collision_checker
         if c is None:
@@ -836,6 +839,17 @@ class Robot(_RobotABC):
             return float("inf")
         self._load_q_buf(q_rad)
         return c.min_distance(self._q_buf)
+
+    def apply_shapes(self, shapes) -> None:
+        """Apply keep-out shapes to this process's checker (preview/editing viz).
+
+        Local-only twin of the client's ``set_shapes`` (which updates the
+        server's checkers). Accepts waldoctl ``Shape`` objects.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        from parol6.protocol.wire import ShapeWire
+
+        PAROL6_ROBOT.apply_shapes([ShapeWire(*s.to_wire()) for s in shapes])
 
     def ik_batch(
         self,
