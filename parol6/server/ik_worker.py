@@ -7,8 +7,11 @@ in a separate process, communicating with the main process via shared memory.
 
 import logging
 import signal
+from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
+from queue import Empty
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numba import njit
@@ -27,12 +30,46 @@ from parol6.server.ik_layout import (
     unregister_shm,
 )
 
+if TYPE_CHECKING:
+    import multiprocessing
+
 logger = logging.getLogger(__name__)
 
-# Directional self-collision enablement: when the arm is within _ENABLE_NEAR_M of
-# self-collision, grey a joint direction whose _ENABLE_STEP_RAD step would collide.
+# Directional collision enablement: when the arm is within _ENABLE_NEAR_M of
+# collision, grey a direction whose _ENABLE_STEP_RAD step would collide.
 _ENABLE_STEP_RAD = np.radians(2.0)
 _ENABLE_NEAR_M = 0.05
+
+
+@dataclass(frozen=True)
+class SyncTool:
+    """Sync the worker checker's tool geometry (mirrors the planner's SyncTool)."""
+
+    tool_name: str
+    variant_key: str = ""
+
+
+@dataclass(frozen=True)
+class SyncShapes:
+    """Sync the worker checker's workspace keep-out shapes (ShapeWire tuple)."""
+
+    shapes: tuple
+
+
+def _drain_sync(cmd_queue: "multiprocessing.Queue", robot_module) -> bool:
+    """Apply queued geometry syncs to this process's checker; True if any applied."""
+    applied = False
+    while True:
+        try:
+            msg = cmd_queue.get_nowait()
+        except Empty:
+            return applied
+        if isinstance(msg, SyncTool):
+            robot_module.apply_tool(msg.tool_name, variant_key=msg.variant_key)
+            applied = True
+        elif isinstance(msg, SyncShapes):
+            robot_module.apply_shapes(msg.shapes)
+            applied = True
 
 
 def ik_enablement_worker_main(
@@ -40,18 +77,23 @@ def ik_enablement_worker_main(
     output_shm_name: str,
     shutdown_event: Event,
     request_event: Event,
+    command_queue: "multiprocessing.Queue",
 ) -> None:
     """
     Main entry point for IK enablement worker subprocess.
 
     This worker waits for request signals, computes joint and cartesian
-    enablement, and writes results to the output shared memory.
+    enablement, and writes results to the output shared memory. Geometry
+    syncs (tool / keep-out shapes) arrive via ``command_queue`` and trigger
+    a recompute at the last requested pose so enablement never goes stale
+    while the arm is stationary.
 
     Args:
         input_shm_name: Name of input shared memory segment
         output_shm_name: Name of output shared memory segment
         shutdown_event: Event to signal shutdown
         request_event: Event signaled when new request is available
+        command_queue: SyncTool / SyncShapes geometry sync messages
     """
     # Ignore SIGINT in worker - main process handles shutdown via shutdown_event
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -107,25 +149,36 @@ def ik_enablement_worker_main(
 
     # Initialize robot model in this process
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+    from parol6.tools import register_plugin_tools
     from parol6.utils.ik import solve_ik
+
+    # Spawn-mode subprocess: the registry is freshly imported with only native
+    # tools; SyncTool of a plugin tool needs them registered here too.
+    register_plugin_tools()
 
     robot = PAROL6_ROBOT.robot
     qlim = robot.qlim
 
     response_version = 0
+    have_request = False
 
-    # Pre-allocate work array for cartesian targets.
+    # Pre-allocate work arrays for cartesian targets + the joint-gate step.
     cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
+    q_step = np.zeros(6, dtype=np.float64)
 
     logger.debug("IK worker subprocess started")
 
     try:
         while not shutdown_event.is_set():
-            # Wait for request signal or timeout for shutdown check
-            if not request_event.wait(timeout=0.1):
-                continue  # Timeout - loop back to check shutdown
-
-            request_event.clear()
+            signaled = request_event.wait(timeout=0.1)
+            # A geometry sync recomputes at the last requested pose so greying
+            # reflects a shape/tool change even while the arm is stationary.
+            synced = _drain_sync(command_queue, PAROL6_ROBOT)
+            if not signaled and not (synced and have_request):
+                continue
+            if signaled:
+                request_event.clear()
+                have_request = True
 
             # Apply tool transform if it changed since last request
             if not np.array_equal(tool_T, last_tool_T):
@@ -138,12 +191,13 @@ def ik_enablement_worker_main(
 
             # Input data is already available via views (q_rad, T_matrix)
 
-            # Compute joint enablement
+            # Compute joint enablement, then gate directions whose small step
+            # would collide (self + tool + shapes; geometry kept in sync above).
             if qlim is not None:
                 _compute_joint_enable(q_rad, qlim, joint_en)
             # else: joint_en stays all ones (pre-allocated default)
-            # The collision gate runs in the controller (status_cache), whose
-            # checker has the tool + shapes; the ik-worker only has the links.
+            checker = PAROL6_ROBOT.collision
+            gate_joint_enable_collision(checker, q_rad, joint_en, q_step)
 
             # Compute cartesian enablement for both frames
             _compute_cart_enable(
@@ -155,6 +209,7 @@ def ik_enablement_worker_main(
                 _AXIS_DIRS,
                 cart_targets,
                 cart_en_wrf,
+                checker=checker,
             )
             _compute_cart_enable(
                 T_matrix,
@@ -165,6 +220,7 @@ def ik_enablement_worker_main(
                 _AXIS_DIRS,
                 cart_targets,
                 cart_en_trf,
+                checker=checker,
             )
 
             # Output data written directly via views, just update version
@@ -216,9 +272,9 @@ def _compute_joint_enable(
 
 def gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
     """Clear a joint direction in ``joint_en`` whose ``_ENABLE_STEP_RAD`` step
-    self-collides. Proximity-gated (skip the per-direction checks when the arm is
-    farther than ``_ENABLE_NEAR_M`` from collision) so it stays cheap. Not njit —
-    it calls the C++ checker.
+    collides — self, tool, or keep-out shape. Proximity-gated (skip the
+    per-direction checks when the arm is farther than ``_ENABLE_NEAR_M`` from
+    collision) so it stays cheap. Not njit — it calls the C++ checker.
     """
     if checker is None or checker.min_distance(q_rad) >= _ENABLE_NEAR_M:
         return
@@ -307,9 +363,13 @@ def _compute_cart_enable(
     out: np.ndarray,
     delta_mm: float = 0.5,
     delta_deg: float = 0.5,
+    checker=None,
 ) -> None:
     """
     Compute per-axis +/- enable bits for the given frame via small-step IK.
+
+    A direction is disabled when IK fails or (near collision, like the joint
+    gate) its solved config would collide — self, tool, or keep-out shape.
 
     Writes to out array (12 elements) in axis order:
     X+, X-, Y+, Y-, Z+, Z-, RX+, RX-, RY+, RY-, RZ+, RZ-
@@ -320,10 +380,15 @@ def _compute_cart_enable(
     # Compute all 12 target poses in one numba call
     _compute_target_poses(T, t_step, r_step, is_wrf, axis_dirs, targets)
 
-    # Check IK for each target
+    near = checker is not None and checker.min_distance(q_rad) < _ENABLE_NEAR_M
+
+    # Check IK (and, when near collision, the solved config) for each target
     for i in range(12):
         try:
             ik = solve_ik(robot, targets[i], q_rad, quiet_logging=True)
-            out[i] = 1 if ik.success else 0
+            ok = bool(ik.success)
+            if ok and near and checker.in_collision(ik.q):
+                ok = False
+            out[i] = 1 if ok else 0
         except Exception:
             out[i] = 0

@@ -31,7 +31,8 @@ from parol6.server.ik_layout import (
     unregister_shm,
 )
 from parol6.server.ik_worker import (
-    gate_joint_enable_collision,
+    SyncShapes,
+    SyncTool,
     ik_enablement_worker_main,
 )
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
@@ -192,9 +193,11 @@ class StatusCache:
 
         # IK enablement results (pre-allocated for zero-alloc reads)
         self._joint_en = np.ones(12, dtype=np.uint8)
-        self._ik_gate_q_step = np.zeros(6, dtype=np.float64)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
         self._cart_en_trf = np.ones(12, dtype=np.uint8)
+
+        # Last shapes_version synced to the IK worker's checker
+        self._last_shapes_version: int = 0
 
         # IK worker subprocess state
         self._ik_stopped = False
@@ -256,6 +259,7 @@ class StatusCache:
         # Spawn subprocess
         self._ik_shutdown_event: Event = multiprocessing.Event()
         self._ik_request_event: Event = multiprocessing.Event()
+        self._ik_cmd_queue: multiprocessing.Queue = multiprocessing.Queue()
         self._ik_process: Process = Process(
             target=ik_enablement_worker_main,
             args=(
@@ -263,6 +267,7 @@ class StatusCache:
                 output_name,
                 self._ik_shutdown_event,
                 self._ik_request_event,
+                self._ik_cmd_queue,
             ),
             daemon=True,
             name="IKWorkerProcess",
@@ -278,6 +283,9 @@ class StatusCache:
 
         # Signal shutdown
         self._ik_shutdown_event.set()
+        # Don't block interpreter exit on the queue's feeder thread
+        self._ik_cmd_queue.close()
+        self._ik_cmd_queue.cancel_join_thread()
 
         # Wait for process to exit
         if self._ik_process.is_alive():
@@ -308,10 +316,19 @@ class StatusCache:
         except BufferError:
             pass
 
-        # Clean up shared memory
-        _cleanup_shm(self._ik_input_shm)
-        _cleanup_shm(self._ik_output_shm)
-        logger.debug("IK worker stopped")
+        # Clean up shared memory. When the __del__ safety net runs this during
+        # interpreter shutdown, module globals may already be nulled — the OS
+        # reclaims the segments anyway at that point.
+        if _cleanup_shm is not None:
+            _cleanup_shm(self._ik_input_shm)
+            _cleanup_shm(self._ik_output_shm)
+            logger.debug("IK worker stopped")
+
+    def _sync_ik_geometry(self, msg: SyncTool | SyncShapes) -> None:
+        """Push a geometry sync to the IK worker's checker (non-blocking)."""
+        if self._ik_stopped:
+            return
+        self._ik_cmd_queue.put_nowait(msg)
 
     def _submit_ik_request(self, q_rad: np.ndarray, T_matrix: np.ndarray) -> None:
         """Submit an IK enablement request (non-blocking, zero-alloc).
@@ -340,16 +357,6 @@ class StatusCache:
         )
         if new_version > 0:
             self._ik_last_version = new_version
-            # Gate joint enablement on the controller's FULL checker (links +
-            # tool + shapes) — the ik-worker only has the arm links.
-            import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-
-            gate_joint_enable_collision(
-                PAROL6_ROBOT.collision,
-                self._ik_last_q_rad,
-                self._joint_en,
-                self._ik_gate_q_step,
-            )
             return True
         return False
 
@@ -401,6 +408,17 @@ class StatusCache:
                 state.current_tool, variant_key=state.current_tool_variant
             )
             self._ik_input_tool_view.reshape(4, 4)[:] = T_tool
+            # Sync the tool's collision geometry to the IK worker's checker
+            self._sync_ik_geometry(
+                SyncTool(
+                    tool_name=state.current_tool,
+                    variant_key=state.current_tool_variant,
+                )
+            )
+
+        if state.shapes_version != self._last_shapes_version:
+            self._last_shapes_version = state.shapes_version
+            self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)

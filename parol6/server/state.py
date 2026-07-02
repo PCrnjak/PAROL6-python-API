@@ -257,6 +257,11 @@ class ControllerState:
     collision_active: bool = False
     collision_pairs: tuple[tuple[str, str], ...] = ()
 
+    # Workspace keep-out shapes (last applied), versioned so the status cache
+    # can mirror them to the IK worker's checker.
+    shapes: list = field(default_factory=list)
+    shapes_version: int = 0
+
     # Network setup and uptime
     ip: str = "127.0.0.1"
     port: int = 5001
@@ -407,8 +412,14 @@ class ControllerState:
             logger.info(f"Tool changed to {label}")
 
     def set_shapes(self, shapes: list) -> None:
-        """Apply the workspace collision-world shapes to the control-loop checker."""
+        """Apply the workspace collision-world shapes to the control-loop checker.
+
+        Also retained (with a version bump) so the status cache can mirror them
+        to the IK worker's checker for enablement greying.
+        """
         PAROL6_ROBOT.apply_shapes(shapes)
+        self.shapes = list(shapes)
+        self.shapes_version += 1
 
     @property
     def tcp_offset_m(self) -> tuple[float, float, float]:
