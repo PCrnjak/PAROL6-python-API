@@ -18,6 +18,7 @@ from numba import njit
 
 from pinokin import se3_from_trans, se3_mul, se3_rx, se3_ry, se3_rz
 
+from parol6.commands._collision_guard import _ESCAPE_TOL
 from parol6.server.ik_layout import (
     IK_INPUT_Q_OFFSET,
     IK_INPUT_T_OFFSET,
@@ -57,19 +58,27 @@ class SyncShapes:
 
 
 def _drain_sync(cmd_queue: "multiprocessing.Queue", robot_module) -> bool:
-    """Apply queued geometry syncs to this process's checker; True if any applied."""
+    """Apply queued geometry syncs to this process's checker; True if any applied.
+
+    A failing sync (missing tool mesh, plugin import quirk in this spawned
+    process) is logged and skipped — it must never kill the worker, which
+    would freeze enablement for the rest of the session.
+    """
     applied = False
     while True:
         try:
             msg = cmd_queue.get_nowait()
         except Empty:
             return applied
-        if isinstance(msg, SyncTool):
-            robot_module.apply_tool(msg.tool_name, variant_key=msg.variant_key)
-            applied = True
-        elif isinstance(msg, SyncShapes):
-            robot_module.apply_shapes(msg.shapes)
-            applied = True
+        try:
+            if isinstance(msg, SyncTool):
+                robot_module.apply_tool(msg.tool_name, variant_key=msg.variant_key)
+                applied = True
+            elif isinstance(msg, SyncShapes):
+                robot_module.apply_shapes(msg.shapes)
+                applied = True
+        except Exception:
+            logger.exception("IK worker geometry sync failed for %r", msg)
 
 
 def ik_enablement_worker_main(
@@ -274,16 +283,26 @@ def gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
     """Clear a joint direction in ``joint_en`` whose ``_ENABLE_STEP_RAD`` step
     collides — self, tool, or keep-out shape. Proximity-gated (skip the
     per-direction checks when the arm is farther than ``_ENABLE_NEAR_M`` from
-    collision) so it stays cheap. Not njit — it calls the C++ checker.
+    collision) so it stays cheap. When the arm is ALREADY colliding (a keep-out
+    placed over it), escaping directions stay enabled — grey only those that go
+    deeper — mirroring the jog/planner escape semantics; otherwise every button
+    would grey with no way out. Not njit — it calls the C++ checker.
     """
-    if checker is None or checker.min_distance(q_rad) >= _ENABLE_NEAR_M:
+    if checker is None:
         return
+    md_now = checker.min_distance(q_rad)
+    if md_now >= _ENABLE_NEAR_M:
+        return
+    inside = checker.in_collision(q_rad)
     for j in range(6):
         for slot, sign in ((2 * j, 1.0), (2 * j + 1, -1.0)):
             if joint_en[slot]:
                 q_step[:] = q_rad
                 q_step[j] += sign * _ENABLE_STEP_RAD
-                if checker.in_collision(q_step):
+                if inside:
+                    if checker.min_distance(q_step) < md_now - _ESCAPE_TOL:
+                        joint_en[slot] = 0
+                elif checker.in_collision(q_step):
                     joint_en[slot] = 0
 
 
@@ -380,15 +399,21 @@ def _compute_cart_enable(
     # Compute all 12 target poses in one numba call
     _compute_target_poses(T, t_step, r_step, is_wrf, axis_dirs, targets)
 
-    near = checker is not None and checker.min_distance(q_rad) < _ENABLE_NEAR_M
+    md_now = checker.min_distance(q_rad) if checker is not None else np.inf
+    near = md_now < _ENABLE_NEAR_M
+    # Already colliding: keep escaping directions enabled (see the joint gate).
+    inside = near and checker is not None and checker.in_collision(q_rad)
 
     # Check IK (and, when near collision, the solved config) for each target
     for i in range(12):
         try:
             ik = solve_ik(robot, targets[i], q_rad, quiet_logging=True)
             ok = bool(ik.success)
-            if ok and near and checker.in_collision(ik.q):
-                ok = False
+            if ok and near and checker is not None:
+                if inside:
+                    ok = checker.min_distance(ik.q) >= md_now - _ESCAPE_TOL
+                elif checker.in_collision(ik.q):
+                    ok = False
             out[i] = 1 if ok else 0
         except Exception:
             out[i] = 0

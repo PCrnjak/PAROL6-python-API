@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from parol6.commands._collision_guard import collision_blocked
 from parol6.server.ik_worker import (
     _AXIS_DIRS,
     _ENABLE_NEAR_M,
@@ -18,13 +19,15 @@ from parol6.server.ik_worker import (
 
 
 class _FakeChecker:
+    """``distance`` may be a float or a callable(q) for escape-semantics tests."""
+
     def __init__(self, distance, collides):
         self._distance = distance
         self._collides = collides
         self.queries = 0
 
     def min_distance(self, q):
-        return self._distance
+        return self._distance(q) if callable(self._distance) else self._distance
 
     def in_collision(self, q):
         self.queries += 1
@@ -47,6 +50,30 @@ def test_gate_greys_only_the_colliding_direction():
     assert joint_en[2] == 0  # J2+ greyed
     assert joint_en[3] == 1  # J2- still allowed
     assert joint_en[0] == 1 and joint_en[1] == 1  # J1 untouched
+
+
+def test_gate_keeps_escaping_directions_when_already_inside():
+    """Arm inside a keep-out: only deeper directions grey — never all of them."""
+    joint_en = np.ones(12, dtype=np.uint8)
+    # Penetrating (in_collision True at q); J1+ escapes (distance grows with
+    # q[0]), J1- digs deeper. Other joints don't change the distance.
+    checker = _FakeChecker(lambda q: -0.01 + q[0], lambda q: True)
+    gate_joint_enable_collision(checker, np.zeros(6), joint_en, np.zeros(6))
+    assert joint_en[0] == 1  # J1+ escapes -> enabled
+    assert joint_en[1] == 0  # J1- deeper -> greyed
+    assert joint_en[2] == 1 and joint_en[3] == 1  # no-change dirs stay enabled
+
+
+def test_collision_blocked_escape_semantics():
+    """Shared jog/guard decision: approach blocks, escape is allowed."""
+    # Approaching: current clear, target colliding -> blocked.
+    approaching = _FakeChecker(0.02, lambda q: bool(q[0] > 0.5))
+    assert collision_blocked(approaching, np.zeros(6), np.full(6, 1.0)) is True
+    assert collision_blocked(approaching, np.zeros(6), np.full(6, 0.1)) is False
+    # Already inside: escape (distance grows) allowed, deeper blocked.
+    inside = _FakeChecker(lambda q: -0.01 + q[0], lambda q: True)
+    assert collision_blocked(inside, np.zeros(6), np.full(6, 0.1)) is False
+    assert collision_blocked(inside, np.zeros(6), np.full(6, -0.1)) is True
 
 
 @dataclass
@@ -96,6 +123,18 @@ def test_cart_gate_skips_collision_checks_when_far():
     assert checker.queries == 0
 
 
+def test_cart_gate_keeps_escaping_directions_when_already_inside():
+    def solve_ik(robot, target, q_seed, quiet_logging=True):
+        return _FakeIK(True, target[:3, 3].repeat(2))
+
+    # Penetrating everywhere; solved configs with +x motion escape (distance
+    # grows with q[0]), -x digs deeper.
+    checker = _FakeChecker(lambda q: -0.01 + q[0], lambda q: True)
+    out = _cart_enable(checker, solve_ik)
+    assert out[0] == 1  # X+ escapes -> enabled
+    assert out[1] == 0  # X- deeper -> greyed
+
+
 def test_drain_sync_applies_tool_and_shapes():
     applied = []
 
@@ -118,5 +157,30 @@ def test_drain_sync_applies_tool_and_shapes():
     assert ("tool", "ssg48", "v1") in applied
     assert ("shapes", ("wire1", "wire2")) in applied
     assert _drain_sync(q, _FakeRobotModule) is False  # empty → no-op
+    q.close()
+    q.cancel_join_thread()
+
+
+def test_drain_sync_survives_a_failing_apply():
+    """A raising sync is logged + skipped — the worker must not die."""
+    applied = []
+
+    class _RaisingModule:
+        @staticmethod
+        def apply_tool(tool_name, variant_key=""):
+            raise RuntimeError("mesh missing")
+
+        @staticmethod
+        def apply_shapes(shapes):
+            applied.append(tuple(shapes))
+
+    q = multiprocessing.Queue()
+    q.put(SyncTool(tool_name="broken"))
+    q.put(SyncShapes(shapes=("w",)))
+    deadline = time.monotonic() + 5.0
+    while not applied and time.monotonic() < deadline:
+        _drain_sync(q, _RaisingModule)  # must not raise
+        time.sleep(0.005)
+    assert applied == [("w",)]
     q.close()
     q.cancel_join_thread()
