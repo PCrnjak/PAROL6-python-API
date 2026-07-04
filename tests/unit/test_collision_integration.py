@@ -193,3 +193,27 @@ def test_collision_check_speed_diagnostic(capsys):
             f" max={pct(t_pairs, 100):.1f}"
         )
         print("servo tick budget: 10000 us (100 Hz)")
+
+
+def test_apply_shapes_rejects_duplicate_names_without_mutation():
+    """Duplicate names fail fast — never a half-applied collision world."""
+    from parol6.protocol.wire import ShapeWire
+
+    def wire(name: str) -> ShapeWire:
+        return ShapeWire(
+            kind="box",
+            params=[0.1, 0.1, 0.1],
+            pose=[1.0, 1.0, 1.0, 0, 0, 0],
+            collision=True,
+            margin=None,
+            name=name,
+        )
+
+    try:
+        PAROL6_ROBOT.apply_shapes([wire("a")])
+        with pytest.raises(ValueError, match="Duplicate shape name"):
+            PAROL6_ROBOT.apply_shapes([wire("b"), wire("b")])
+        # The prior world is untouched by the rejected call.
+        assert PAROL6_ROBOT._active_shape_names == ["shape:a"]
+    finally:
+        PAROL6_ROBOT.apply_shapes([])

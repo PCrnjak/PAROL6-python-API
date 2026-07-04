@@ -26,7 +26,6 @@ import numpy as np
 from parol6.protocol.wire import (
     HomeCmd,
     SelectToolCmd,
-    SetShapesCmd,
     SetTcpOffsetCmd,
     ToolActionCmd,
 )
@@ -120,11 +119,20 @@ class SyncTool:
 
 
 @dataclass
+class SyncShapes:
+    """Replace the planner checker's workspace keep-out shapes (ShapeWire list)."""
+
+    shapes: list
+
+
+@dataclass
 class CancelAll:
     """Clear the planner's internal state and discard pending work."""
 
 
-PlannerMessage = Union[PlanCommand, SyncPosition, SyncProfile, SyncTool, CancelAll]
+PlannerMessage = Union[
+    PlanCommand, SyncPosition, SyncProfile, SyncTool, SyncShapes, CancelAll
+]
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +254,10 @@ class TrajectoryPlanner:
         self._robot_module.apply_tool(
             tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
         )
+
+    def sync_shapes(self, shapes: list) -> None:
+        """Replace this process checker's workspace keep-out shapes."""
+        self._robot_module.apply_shapes(shapes)
 
     # -- trajectory handling --
 
@@ -469,8 +481,6 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
-        elif isinstance(params, SetShapesCmd):
-            self._robot_module.apply_shapes(params.shapes)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +532,10 @@ class PlannerWorker:
         self._planner.sync_tool(
             tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
         )
+
+    def apply_shapes(self, shapes: list) -> None:
+        """Sync workspace keep-out shapes onto this process's checker."""
+        self._planner.sync_shapes(shapes)
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +619,10 @@ def motion_planner_main(
                     variant_key=msg.variant_key,
                     tcp_offset_m=msg.tcp_offset_m,
                 )
+                continue
+
+            if isinstance(msg, SyncShapes):
+                worker.apply_shapes(msg.shapes)
                 continue
 
             if isinstance(msg, PlanCommand):
@@ -755,6 +773,10 @@ class MotionPlanner:
                 tcp_offset_m=tcp_offset_m,
             )
         )
+
+    def sync_shapes(self, shapes: list) -> None:
+        """Replace the planner checker's workspace keep-out shapes."""
+        self.submit(SyncShapes(shapes=list(shapes)))
 
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""

@@ -304,12 +304,17 @@ def apply_shapes(shapes: "Iterable[Any]") -> None:
     global _active_shape_names
     if collision is None:
         return
+    # Validate before touching the checker: a duplicate name would raise from
+    # pinokin mid-add, leaving a half-applied collision world.
+    active = [s for s in shapes if s.collision]
+    names = [s.name for s in active]
+    if len(set(names)) != len(names):
+        dups = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(f"Duplicate shape name(s): {', '.join(dups)}")
     for name in _active_shape_names:
         collision.remove_geometry_by_name(name)
     _active_shape_names = []
-    for s in shapes:
-        if not s.collision:
-            continue
+    for s in active:
         name = f"shape:{s.name}"
         collision.add_obstacle(name, s.kind, list(s.params), _pose_to_matrix(s.pose))
         _active_shape_names.append(name)

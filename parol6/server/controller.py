@@ -22,6 +22,7 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
+from parol6.commands.shape_commands import SetShapesCommand
 from parol6.commands.system_commands import SelectProfileCommand
 from parol6.commands.utility_commands import ResetCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
@@ -360,6 +361,7 @@ class Controller:
                     variant_key=state.current_tool_variant,
                     tcp_offset_m=state.tcp_offset_m,
                 )
+                self._planner.sync_shapes(state.shapes)
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
                 self._executor.clear_queue("E-Stop activated")
@@ -807,6 +809,7 @@ class Controller:
                     variant_key=state.current_tool_variant,
                     tcp_offset_m=state.tcp_offset_m,
                 )
+                self._planner.sync_shapes(state.shapes)
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
@@ -828,6 +831,10 @@ class Controller:
             # Sync motion profile to planner (SelectProfile is a SystemCommand)
             if isinstance(command, SelectProfileCommand):
                 self._planner.sync_profile(state.motion_profile)
+
+            # Mirror applied keep-out shapes to the planner's checker
+            if isinstance(command, SetShapesCommand):
+                self._planner.sync_shapes(state.shapes)
 
             if code == ExecutionStatusCode.COMPLETED:
                 self._reply_ok(addr)

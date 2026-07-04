@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from parol6.commands.base import ExecutionStatusCode, MotionCommand
+from parol6.commands.base import ExecutionStatusCode, SystemCommand
 from parol6.protocol.wire import CmdType, SetShapesCmd
 from parol6.server.command_registry import register_command
 
@@ -13,12 +13,13 @@ if TYPE_CHECKING:
 
 
 @register_command(CmdType.SET_SHAPES)
-class SetShapesCommand(MotionCommand[SetShapesCmd]):
+class SetShapesCommand(SystemCommand[SetShapesCmd]):
     """Replace the workspace keep-out shapes on the collision checkers.
 
-    Routed through the planner (like SELECT_TOOL) so the planner subprocess
-    updates its own checker; this controller-side step updates the live
-    control-loop checker.
+    A SystemCommand (like SELECT_PROFILE): safety configuration applies
+    immediately at intake — never enabled-gated, never queued behind (or
+    dropped with) motion. The controller mirrors the applied shapes to the
+    planner subprocess via ``sync_shapes`` after this executes.
     """
 
     PARAMS_TYPE = SetShapesCmd
