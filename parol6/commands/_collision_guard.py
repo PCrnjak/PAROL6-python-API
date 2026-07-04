@@ -25,6 +25,22 @@ from parol6.utils.errors import TrajectoryPlanningError
 _ESCAPE_TOL = 1e-4
 
 
+def collision_blocked(checker, current_q, target_q) -> bool:
+    """Whether streaming toward ``target_q`` must stop.
+
+    Approaching: blocked when ``target_q`` collides. Already colliding (a
+    keep-out placed over the arm, or a tool-attach overlap): blocked only when
+    the motion goes *deeper* — escaping is allowed, mirroring
+    :func:`guard_joint_path`'s start-in-collision rule.
+    """
+    if checker.in_collision(current_q):
+        return bool(
+            checker.min_distance(target_q)
+            < checker.min_distance(current_q) - _ESCAPE_TOL
+        )
+    return bool(checker.in_collision(target_q))
+
+
 def _format_pairs(pairs: list[tuple[str, str]]) -> str:
     """Render colliding (name, name) pairs as a human-readable string.
 

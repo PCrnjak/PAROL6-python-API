@@ -25,6 +25,7 @@ from parol6.protocol.wire import (
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.commands._collision_guard import collision_blocked
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.config import deg_to_steps
@@ -131,6 +132,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         "_jog_initialized",
         "_jog_vel_rad",
         "_lookahead_buf",
+        "_qlim",
     )
 
     def __init__(self, p: JogJCmd):
@@ -139,6 +141,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         self._jog_initialized = False
         self._jog_vel_rad = np.zeros(6, dtype=np.float64)
         self._lookahead_buf = np.zeros(6, dtype=np.float64)
+        self._qlim: np.ndarray | None = None
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute step speeds and rad/s velocities for all 6 joints."""
@@ -159,6 +162,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 )
         self.start_timer(self.p.duration)
         self._jog_initialized = False
+        self._qlim = PAROL6_ROBOT.robot.qlim
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of joint jogging via StreamingExecutor."""
@@ -193,22 +197,27 @@ class JogJCommand(MotionCommand[JogJCmd]):
         se.set_jog_velocity(self._jog_vel_rad)
         pos_rad, _vel, _finished = se.tick()
 
-        # Don't stream a self-colliding configuration. This only fires in the
-        # collision case (in_collision is False during normal jogging), so it
-        # never affects ordinary motion; an abrupt stop is acceptable when the
-        # alternative is driving the arm into itself. (The Cartesian jog uses a
-        # graceful CSE-based stop; JogJ has no equivalent smoother, so it halts.)
+        # Never stream a config that collides or approaches collision: the
+        # streamed config itself is checked (catches anything inside the
+        # lookahead window at jog start) plus a velocity-scaled horizon so
+        # faster jogs stop further from contact — both compose with the
+        # checker's fixed clearance. Exception: when the arm is ALREADY inside
+        # (a keep-out placed over it), escaping motion is allowed, mirroring
+        # the planner guard's start-in-collision semantics. An abrupt stop is
+        # acceptable when the alternative is driving deeper. (The Cartesian jog
+        # uses a graceful CSE-based stop; JogJ has no smoother, so it halts.)
         checker = PAROL6_ROBOT.collision
         if checker is not None:
-            # Look a velocity-scaled horizon ahead so faster jogs stop further
-            # from contact; composes with the checker's fixed clearance. In-place
-            # to keep the hot path allocation-free.
+            # In-place to keep the hot path allocation-free; clamped to joint
+            # limits so a pose past the mechanical stop can't phantom-trip.
             la = self._lookahead_buf
             la[:] = self._jog_vel_rad
             la *= COLLISION_JOG_LOOKAHEAD_S
             la += pos_rad
-            if checker.in_collision(la):
-                logger.warning("[JOGJ] self-collision predicted - stopping jog")
+            if self._qlim is not None:
+                np.clip(la, self._qlim[0], self._qlim[1], out=la)
+            if collision_blocked(checker, pos_rad, la):
+                logger.warning("[JOGJ] collision predicted - stopping jog")
                 # Allocate only here (the rare stop), never on the clean tick.
                 state.collision_pairs = tuple(checker.colliding_pairs(la))
                 state.collision_active = True

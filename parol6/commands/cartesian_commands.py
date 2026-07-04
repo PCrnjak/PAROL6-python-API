@@ -9,7 +9,7 @@ from typing import cast
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands._collision_guard import guard_joint_path
+from parol6.commands._collision_guard import collision_blocked, guard_joint_path
 from parol6.config import (
     CART_ANG_JOG_MIN,
     CART_LIN_JOG_MIN,
@@ -226,21 +226,22 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
 
-        # Self-collision predicted at next streamed config? Mirror the
-        # IK-failure graceful-stop pathway: decelerate via cse.stop() rather
-        # than raising mid-jog. Operator regains control after smoothing.
-        if PAROL6_ROBOT.collision is not None and PAROL6_ROBOT.collision.in_collision(
-            ik_result.q
+        # Collision predicted at next streamed config? Mirror the IK-failure
+        # graceful-stop pathway: decelerate via cse.stop() rather than raising
+        # mid-jog. Operator regains control after smoothing. When the arm is
+        # ALREADY inside (a keep-out placed over it), escaping motion is
+        # allowed, mirroring the planner guard's start-in-collision semantics.
+        checker = PAROL6_ROBOT.collision
+        if checker is not None and collision_blocked(
+            checker, self._q_commanded, ik_result.q
         ):
             if not self._ik_stopping:
                 _ik_warn(
                     logger,
-                    "[CARTJOG] self-collision predicted - initiating stop",
+                    "[CARTJOG] collision predicted - initiating stop",
                 )
                 # Capture once on the stop transition (not every decel tick).
-                state.collision_pairs = tuple(
-                    PAROL6_ROBOT.collision.colliding_pairs(ik_result.q)
-                )
+                state.collision_pairs = tuple(checker.colliding_pairs(ik_result.q))
                 state.collision_active = True
                 cse.stop()
                 self._ik_stopping = True
