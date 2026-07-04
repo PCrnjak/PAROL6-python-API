@@ -26,6 +26,7 @@ import numpy as np
 from parol6.protocol.wire import (
     HomeCmd,
     SelectToolCmd,
+    SetShapesCmd,
     SetTcpOffsetCmd,
     ToolActionCmd,
 )
@@ -481,6 +482,11 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
+        elif isinstance(params, SetShapesCmd):
+            # Only reachable via the DRY-RUN planner: a script's set_shapes()
+            # must shape its preview world. The live path routes SET_SHAPES as
+            # a SystemCommand + SyncShapes, never through process().
+            self._robot_module.apply_shapes(params.shapes)
 
 
 # ---------------------------------------------------------------------------

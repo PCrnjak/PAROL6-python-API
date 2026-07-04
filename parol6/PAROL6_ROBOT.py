@@ -2,6 +2,7 @@
 
 import atexit
 import logging
+import math
 import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -293,28 +294,65 @@ def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
     return T
 
 
+# Mirrors pinokin add_obstacle's kind switch — validated here so a bad shape
+# raises BEFORE the old collision world is removed.
+_SHAPE_PARAM_COUNTS = {
+    "box": 3,
+    "sphere": 1,
+    "cylinder": 2,
+    "capsule": 2,
+    "cone": 2,
+    "ellipsoid": 3,
+    "plane": 4,
+}
+
+
+def _validate_shapes(shapes: "Iterable[Any]") -> "list[Any]":
+    """Raise ValueError on any invalid shape; return the materialized list.
+
+    Covers ALL shapes (visual-only included): a marker sharing a keep-out's
+    name would shadow it in the frontend's highlight mapping, and a malformed
+    wire must never reach the checker mid-apply.
+    """
+    shapes = list(shapes)
+    names = [s.name for s in shapes]
+    if len(set(names)) != len(names):
+        dups = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(f"Duplicate shape name(s): {', '.join(dups)}")
+    for s in shapes:
+        expected = _SHAPE_PARAM_COUNTS.get(s.kind)
+        if expected is None:
+            raise ValueError(f"Shape {s.name!r}: unknown kind {s.kind!r}")
+        if len(s.params) != expected:
+            raise ValueError(
+                f"Shape {s.name!r}: kind {s.kind!r} takes {expected} param(s), "
+                f"got {len(s.params)}"
+            )
+        if len(s.pose) != 6 or not all(math.isfinite(v) for v in s.pose):
+            raise ValueError(f"Shape {s.name!r}: pose must be 6 finite numbers")
+    return shapes
+
+
 def apply_shapes(shapes: "Iterable[Any]") -> None:
     """Replace the workspace collision-world shapes on this process's checker.
 
     Each shape exposes ``kind``/``params``/``pose``/``collision``/``name`` (a
     parol6 ``ShapeWire`` or any duck-typed equivalent). Only collision-enabled
     shapes are added — visual-only ones are skipped. Runs per-process; the
-    controller and planner each call it against their own checker.
+    controller and planner each call it against their own checker. Validation
+    runs even without a checker: checker-off frontends rely on it to reject a
+    shape set the backend would refuse.
     """
     global _active_shape_names
+    shapes = _validate_shapes(shapes)
     if collision is None:
         return
-    # Validate before touching the checker: a duplicate name would raise from
-    # pinokin mid-add, leaving a half-applied collision world.
-    active = [s for s in shapes if s.collision]
-    names = [s.name for s in active]
-    if len(set(names)) != len(names):
-        dups = sorted({n for n in names if names.count(n) > 1})
-        raise ValueError(f"Duplicate shape name(s): {', '.join(dups)}")
     for name in _active_shape_names:
         collision.remove_geometry_by_name(name)
     _active_shape_names = []
-    for s in active:
+    for s in shapes:
+        if not s.collision:
+            continue
         name = f"shape:{s.name}"
         collision.add_obstacle(name, s.kind, list(s.params), _pose_to_matrix(s.pose))
         _active_shape_names.append(name)

@@ -40,6 +40,24 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+_QLIM_ROWS: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def _qlim_rows() -> tuple[np.ndarray, np.ndarray]:
+    """Joint-limit rows, fetched once per process — ``robot.qlim`` allocates a
+    fresh matrix per access and this is consumed on the 100 Hz jog path."""
+    global _QLIM_ROWS
+    if _QLIM_ROWS is None:
+        qlim = PAROL6_ROBOT.robot.qlim
+        if qlim is None:
+            _QLIM_ROWS = (np.full(6, -np.inf), np.full(6, np.inf))
+        else:
+            _QLIM_ROWS = (
+                np.ascontiguousarray(qlim[0], dtype=np.float64),
+                np.ascontiguousarray(qlim[1], dtype=np.float64),
+            )
+    return _QLIM_ROWS
+
 
 def _limit_hit_mask(pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
     return ((speeds > 0) & (pos_steps >= LIMITS.joint.position.steps[:, 1])) | (
@@ -132,7 +150,6 @@ class JogJCommand(MotionCommand[JogJCmd]):
         "_jog_initialized",
         "_jog_vel_rad",
         "_lookahead_buf",
-        "_qlim",
     )
 
     def __init__(self, p: JogJCmd):
@@ -141,7 +158,6 @@ class JogJCommand(MotionCommand[JogJCmd]):
         self._jog_initialized = False
         self._jog_vel_rad = np.zeros(6, dtype=np.float64)
         self._lookahead_buf = np.zeros(6, dtype=np.float64)
-        self._qlim: np.ndarray | None = None
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute step speeds and rad/s velocities for all 6 joints."""
@@ -162,7 +178,6 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 )
         self.start_timer(self.p.duration)
         self._jog_initialized = False
-        self._qlim = PAROL6_ROBOT.robot.qlim
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of joint jogging via StreamingExecutor."""
@@ -214,8 +229,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
             la[:] = self._jog_vel_rad
             la *= COLLISION_JOG_LOOKAHEAD_S
             la += pos_rad
-            if self._qlim is not None:
-                np.clip(la, self._qlim[0], self._qlim[1], out=la)
+            lo, hi = _qlim_rows()
+            np.clip(la, lo, hi, out=la)
             if collision_blocked(checker, pos_rad, la):
                 logger.warning("[JOGJ] collision predicted - stopping jog")
                 # Allocate only here (the rare stop), never on the clean tick.

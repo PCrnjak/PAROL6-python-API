@@ -52,6 +52,23 @@ def test_gate_greys_only_the_colliding_direction():
     assert joint_en[0] == 1 and joint_en[1] == 1  # J1 untouched
 
 
+def test_gate_clamps_probe_to_joint_limits():
+    """Geometry just past a mechanical stop must not grey a direction the jog
+    (whose own lookahead clamps to qlim) would actually permit."""
+    joint_en = np.ones(12, dtype=np.uint8)
+    # Near collision; anything beyond J1's upper limit collides.
+    limit = np.radians(1.0)
+    checker = _FakeChecker(_ENABLE_NEAR_M - 0.01, lambda q: q[0] > limit)
+    qlim = (np.full(6, -np.pi), np.full(6, np.pi).copy())
+    qlim[1][0] = limit  # J1 upper limit right at the collision boundary
+    gate_joint_enable_collision(checker, np.zeros(6), joint_en, np.zeros(6), qlim=qlim)
+    assert joint_en[0] == 1  # J1+ clamped to the limit -> no phantom grey
+    # Without the clamp the unreachable probe greys the button.
+    joint_en[:] = 1
+    gate_joint_enable_collision(checker, np.zeros(6), joint_en, np.zeros(6))
+    assert joint_en[0] == 0
+
+
 def test_gate_keeps_escaping_directions_when_already_inside():
     """Arm inside a keep-out: only deeper directions grey — never all of them."""
     joint_en = np.ones(12, dtype=np.uint8)

@@ -195,25 +195,43 @@ def test_collision_check_speed_diagnostic(capsys):
         print("servo tick budget: 10000 us (100 Hz)")
 
 
-def test_apply_shapes_rejects_duplicate_names_without_mutation():
-    """Duplicate names fail fast — never a half-applied collision world."""
+def _shape_wire(name: str, **overrides):
     from parol6.protocol.wire import ShapeWire
 
-    def wire(name: str) -> ShapeWire:
-        return ShapeWire(
-            kind="box",
-            params=[0.1, 0.1, 0.1],
-            pose=[1.0, 1.0, 1.0, 0, 0, 0],
-            collision=True,
-            margin=None,
-            name=name,
-        )
+    fields = dict(
+        kind="box",
+        params=[0.1, 0.1, 0.1],
+        pose=[1.0, 1.0, 1.0, 0, 0, 0],
+        collision=True,
+        margin=None,
+        name=name,
+    )
+    fields.update(overrides)
+    return ShapeWire(**fields)
 
+
+def test_apply_shapes_rejects_invalid_input_without_mutation():
+    """Any invalid shape fails fast — never a half-applied collision world.
+
+    Critically, the OLD world must survive a rejected call: the remove-then-add
+    loop only runs after validation, so an error reply can't silently disarm
+    every barrier.
+    """
+    bad_sets = [
+        ("Duplicate shape name", [_shape_wire("b"), _shape_wire("b")]),
+        # A visual-only marker sharing a keep-out's name shadows it in the
+        # frontend's highlight mapping — rejected too.
+        ("Duplicate shape name", [_shape_wire("b"), _shape_wire("b", collision=False)]),
+        ("unknown kind", [_shape_wire("b", kind="torus")]),
+        ("takes 3 param", [_shape_wire("b", params=[0.1])]),
+        ("6 finite numbers", [_shape_wire("b", pose=[0, 0, 0, 0, 0])]),
+        ("6 finite numbers", [_shape_wire("b", pose=[0, 0, float("nan"), 0, 0, 0])]),
+    ]
     try:
-        PAROL6_ROBOT.apply_shapes([wire("a")])
-        with pytest.raises(ValueError, match="Duplicate shape name"):
-            PAROL6_ROBOT.apply_shapes([wire("b"), wire("b")])
-        # The prior world is untouched by the rejected call.
-        assert PAROL6_ROBOT._active_shape_names == ["shape:a"]
+        PAROL6_ROBOT.apply_shapes([_shape_wire("a")])
+        for match, shapes in bad_sets:
+            with pytest.raises(ValueError, match=match):
+                PAROL6_ROBOT.apply_shapes(shapes)
+            assert PAROL6_ROBOT._active_shape_names == ["shape:a"]
     finally:
         PAROL6_ROBOT.apply_shapes([])

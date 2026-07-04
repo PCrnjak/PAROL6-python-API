@@ -167,6 +167,14 @@ def ik_enablement_worker_main(
 
     robot = PAROL6_ROBOT.robot
     qlim = robot.qlim
+    qlim_rows = (
+        (
+            np.ascontiguousarray(qlim[0], dtype=np.float64),
+            np.ascontiguousarray(qlim[1], dtype=np.float64),
+        )
+        if qlim is not None
+        else None
+    )
 
     response_version = 0
     have_request = False
@@ -206,7 +214,9 @@ def ik_enablement_worker_main(
                 _compute_joint_enable(q_rad, qlim, joint_en)
             # else: joint_en stays all ones (pre-allocated default)
             checker = PAROL6_ROBOT.collision
-            gate_joint_enable_collision(checker, q_rad, joint_en, q_step)
+            gate_joint_enable_collision(
+                checker, q_rad, joint_en, q_step, qlim=qlim_rows
+            )
 
             # Compute cartesian enablement for both frames
             _compute_cart_enable(
@@ -279,14 +289,16 @@ def _compute_joint_enable(
         out[i * 2 + 1] = 1 if (q_rad[i] - delta_rad) >= qlim[0, i] else 0
 
 
-def gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
+def gate_joint_enable_collision(checker, q_rad, joint_en, q_step, qlim=None) -> None:
     """Clear a joint direction in ``joint_en`` whose ``_ENABLE_STEP_RAD`` step
     collides — self, tool, or keep-out shape. Proximity-gated (skip the
     per-direction checks when the arm is farther than ``_ENABLE_NEAR_M`` from
     collision) so it stays cheap. When the arm is ALREADY colliding (a keep-out
     placed over it), escaping directions stay enabled — grey only those that go
     deeper — mirroring the jog/planner escape semantics; otherwise every button
-    would grey with no way out. Not njit — it calls the C++ checker.
+    would grey with no way out. ``qlim`` is optional ``(low, high)`` rows: the
+    probe is clamped so a pose past the mechanical stop (which the jog itself
+    can never reach) can't grey the button. Not njit — it calls the C++ checker.
     """
     if checker is None:
         return
@@ -299,6 +311,11 @@ def gate_joint_enable_collision(checker, q_rad, joint_en, q_step) -> None:
             if joint_en[slot]:
                 q_step[:] = q_rad
                 q_step[j] += sign * _ENABLE_STEP_RAD
+                if qlim is not None:
+                    if q_step[j] < qlim[0][j]:
+                        q_step[j] = qlim[0][j]
+                    elif q_step[j] > qlim[1][j]:
+                        q_step[j] = qlim[1][j]
                 if inside:
                     if checker.min_distance(q_step) < md_now - _ESCAPE_TOL:
                         joint_en[slot] = 0

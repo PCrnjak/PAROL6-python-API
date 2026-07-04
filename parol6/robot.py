@@ -701,8 +701,18 @@ class Robot(_RobotABC):
 
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
-        # Registry-unknown (plugin) tools just clear the old geometry.
-        PAROL6_ROBOT._refresh_collision_tool_geometry(tool_key, variant_key=variant_key)
+        # Best-effort viz/preview parity: registry-unknown (plugin) tools just
+        # clear the old geometry, and a mesh-attach failure (e.g. a plugin tool
+        # whose mesh files live outside parol6's mesh root) must never break
+        # tool selection — the kinematic transform above is already applied.
+        try:
+            PAROL6_ROBOT._refresh_collision_tool_geometry(
+                tool_key, variant_key=variant_key
+            )
+        except Exception as e:
+            logger.warning(
+                "Tool collision geometry not attached for %r: %s", tool_key, e
+            )
 
     def _plugin_tool_transform(
         self, tool_key: str, variant_key: str | None
