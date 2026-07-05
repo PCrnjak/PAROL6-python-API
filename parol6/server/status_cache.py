@@ -419,6 +419,8 @@ class StatusCache:
         if state.shapes_version != self._last_shapes_version:
             self._last_shapes_version = state.shapes_version
             self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
+            # World changed → broadcast the new epoch so displays re-query.
+            self._binary_dirty = True
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
@@ -555,6 +557,7 @@ class StatusCache:
                 simulator_active=is_simulation_mode(),
                 collision_active=self._collision_active,
                 collision_pairs=self._collision_pairs,
+                scene_epoch=self._last_shapes_version,
             )
             self._binary_dirty = False
         return self._binary_cache

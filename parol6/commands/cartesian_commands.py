@@ -156,10 +156,15 @@ class JogLCommand(MotionCommand[JogLCmd]):
             if not finished and self._dot_buf > 1e-8:
                 ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
                 if ik_result.success and ik_result.q is not None:
-                    # Don't stream a self-colliding config during the release
-                    # deceleration; skip the send and let the CSE finish stopping.
+                    # Don't stream a colliding config during the release
+                    # deceleration — but keep streaming while ESCAPING from
+                    # inside a keep-out (same semantics as the held phase),
+                    # else the target freezes at the release point and the
+                    # arm jerks instead of coasting to a stop.
                     checker = PAROL6_ROBOT.collision
-                    if checker is None or not checker.in_collision(ik_result.q):
+                    if checker is None or not collision_blocked(
+                        checker, self._q_commanded, ik_result.q
+                    ):
                         self._track_and_send(state, ik_result.q)
                 return ExecutionStatusCode.EXECUTING
 
@@ -241,7 +246,9 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     "[CARTJOG] collision predicted - initiating stop",
                 )
                 # Capture once on the stop transition (not every decel tick).
-                state.collision_pairs = tuple(checker.colliding_pairs(ik_result.q))
+                state.collision_pairs = tuple(
+                    PAROL6_ROBOT.display_pairs(checker.colliding_pairs(ik_result.q))
+                )
                 state.collision_active = True
                 cse.stop()
                 self._ik_stopping = True

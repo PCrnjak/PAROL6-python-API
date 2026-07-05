@@ -121,7 +121,7 @@ class SyncTool:
 
 @dataclass
 class SyncShapes:
-    """Replace the planner checker's workspace keep-out shapes (ShapeWire list)."""
+    """Replace the planner checker's program-layer shapes (waldoctl Shape list)."""
 
     shapes: list
 
@@ -485,7 +485,9 @@ class TrajectoryPlanner:
         elif isinstance(params, SetShapesCmd):
             # Only reachable via the DRY-RUN planner: a script's set_shapes()
             # must shape its preview world. The live path routes SET_SHAPES as
-            # a SystemCommand + SyncShapes, never through process().
+            # a SystemCommand + SyncShapes, never through process(). Here the
+            # cmd carries raw waldoctl Shapes (the dry-run client never
+            # touches the wire form), which is exactly what apply_shapes takes.
             self._robot_module.apply_shapes(params.shapes)
 
 

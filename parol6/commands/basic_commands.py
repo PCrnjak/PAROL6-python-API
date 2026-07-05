@@ -234,7 +234,9 @@ class JogJCommand(MotionCommand[JogJCmd]):
             if collision_blocked(checker, pos_rad, la):
                 logger.warning("[JOGJ] collision predicted - stopping jog")
                 # Allocate only here (the rare stop), never on the clean tick.
-                state.collision_pairs = tuple(checker.colliding_pairs(la))
+                state.collision_pairs = tuple(
+                    PAROL6_ROBOT.display_pairs(checker.colliding_pairs(la))
+                )
                 state.collision_active = True
                 se.active = False
                 self.finish()

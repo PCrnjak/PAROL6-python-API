@@ -324,8 +324,17 @@ class RobotClient:
         return _run(self._inner.set_tcp_offset(x=x, y=y, z=z))
 
     def set_shapes(self, shapes: list) -> int:
-        """Replace the workspace collision-world shapes (keep-out barriers)."""
+        """Replace the program-layer collision-world shapes (keep-out barriers).
+
+        Acknowledged: 1 = confirmed applied, 0 = timeout; raises MotionError
+        on rejection. Installation-layer shapes are unaffected.
+        """
         return _run(self._inner.set_shapes(shapes))
+
+    def shapes(self):
+        """The collision world the controller is enforcing (ShapeWorld), by
+        layer; None if unreachable."""
+        return _run(self._inner.shapes())
 
     def tcp_offset(self) -> list[float]:
         """Query current TCP offset in mm [x, y, z]."""

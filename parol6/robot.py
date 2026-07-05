@@ -825,18 +825,20 @@ class Robot(_RobotABC):
         return c.check_path(np.ascontiguousarray(q_path_rad, dtype=np.float64))
 
     def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[str, str]]:
-        """Return list of (name, name) geometry pairs in collision at `q_rad`.
+        """Return list of (name, name) pairs in collision at `q_rad`.
 
-        Names are URDF link names for arm geometry (e.g. ``"L4_0"``) and
-        the user-supplied name for runtime-attached geometry (e.g.
-        ``"ssg48_body_simplified.stl"`` for the active tool's body mesh, or
-        ``"shape:<name>"`` for a workspace keep-out shape).
+        Names use the reporting vocabulary: URDF link names for arm geometry
+        (e.g. ``"L4"``), ``shape:<name>`` / ``install:<name>`` for keep-outs,
+        and ``tool:<key>:<part>`` for attached tool geometry — never
+        checker-internal identifiers.
         """
         c = self._collision_checker
         if c is None:
             return []
         self._load_q_buf(q_rad)
-        return c.colliding_pairs(self._q_buf)
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return PAROL6_ROBOT.display_pairs(c.colliding_pairs(self._q_buf))
 
     def min_distance(self, q_rad: NDArray[np.float64]) -> float:
         """Return the minimum clearance over all active pairs at `q_rad`.
@@ -854,12 +856,12 @@ class Robot(_RobotABC):
         """Apply keep-out shapes to this process's checker (preview/editing viz).
 
         Local-only twin of the client's ``set_shapes`` (which updates the
-        server's checkers). Accepts waldoctl ``Shape`` objects.
+        server's checkers). Accepts waldoctl ``Shape`` objects — the canonical
+        in-process type everywhere; no wire form is involved.
         """
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-        from parol6.protocol.wire import ShapeWire
 
-        PAROL6_ROBOT.apply_shapes([ShapeWire(*s.to_wire()) for s in shapes])
+        PAROL6_ROBOT.apply_shapes(list(shapes))
 
     def ik_batch(
         self,

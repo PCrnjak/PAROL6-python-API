@@ -52,7 +52,7 @@ class SyncTool:
 
 @dataclass(frozen=True)
 class SyncShapes:
-    """Sync the worker checker's workspace keep-out shapes (ShapeWire tuple)."""
+    """Sync the worker checker's program-layer shapes (waldoctl Shape tuple)."""
 
     shapes: tuple
 

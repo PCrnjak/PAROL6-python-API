@@ -2,7 +2,6 @@
 
 import atexit
 import logging
-import math
 import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -163,8 +162,15 @@ _active_tool_geom_names: list[str] = []
 _active_tool_geom_key: tuple[str, str | None] | None = None
 
 # Geometry-object names for user-placed workspace shapes (keep-out barriers)
-# currently on this process's collision checker.
+# currently on this process's collision checker, plus the applied Shape list
+# itself for readback.
 _active_shape_names: list[str] = []
+_program_shapes: list = []
+
+# Installation-layer shapes (from robot config) and their geometry names.
+# Every program inherits these; set_shapes cannot change them.
+_installation_shapes: list = []
+_installation_geom_names: list[str] = []
 
 
 def _refresh_collision_tool_geometry(
@@ -216,13 +222,17 @@ def _refresh_collision_tool_geometry(
                 # rotation branch here when a non-identity rpy appears.
                 T = np.eye(4, dtype=np.float64)
                 T[:3, 3] = spec.origin
+                # tool: namespace so colliding-pair reports speak the defined
+                # vocabulary (link names / shape: / install: / tool:) instead
+                # of raw mesh filenames.
+                geom_name = f"tool:{tool_key}:{spec.file}"
                 collision.attach_mesh_to_frame(
-                    spec.file,
+                    geom_name,
                     str(path),
                     parent_frame="L6",
                     placement=T,
                 )
-                _active_tool_geom_names.append(spec.file)
+                _active_tool_geom_names.append(geom_name)
         except Exception:
             # Roll back a partial attach so the checker never holds half a tool.
             for name in _active_tool_geom_names:
@@ -273,9 +283,10 @@ def apply_tool(
 def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
     """[x, y, z, rx, ry, rz] (m, rad RPY) -> 4x4 world transform (R = Rz·Ry·Rx).
 
-    Rz·Ry·Rx matches the frontend's shape render rotation (NiceGUI ``rotate``,
-    XYZ order). Deliberately NOT ``pinokin.se3_from_rpy`` (Rx·Ry·Rz) — swapping
-    it in would mis-orient any multi-axis-tilted shape vs its rendered pose.
+    Implements the waldoctl ``Shape.pose`` contract: extrinsic-XYZ RPY, i.e.
+    R = Rz·Ry·Rx. Deliberately NOT ``pinokin.se3_from_rpy`` (Rx·Ry·Rz) —
+    swapping it in would mis-orient any multi-axis-tilted shape versus every
+    other implementation of the contract (including the frontend's renderer).
     """
     x, y, z, rx, ry, rz = pose
     cx, sx = np.cos(rx), np.sin(rx)
@@ -294,25 +305,20 @@ def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
     return T
 
 
-# Mirrors pinokin add_obstacle's kind switch — validated here so a bad shape
-# raises BEFORE the old collision world is removed.
-_SHAPE_PARAM_COUNTS = {
-    "box": 3,
-    "sphere": 1,
-    "cylinder": 2,
-    "capsule": 2,
-    "cone": 2,
-    "ellipsoid": 3,
-    "plane": 4,
-}
+# Kinds pinokin's add_obstacle supports. Guards atomicity across a
+# waldoctl/pinokin version skew: a kind the checker would reject raises here,
+# BEFORE the old collision world is removed.
+_SHAPE_KINDS = frozenset(
+    {"box", "sphere", "cylinder", "capsule", "cone", "ellipsoid", "plane"}
+)
 
 
 def _validate_shapes(shapes: "Iterable[Any]") -> "list[Any]":
-    """Raise ValueError on any invalid shape; return the materialized list.
+    """Set-level validation; per-shape values are enforced at Shape construction.
 
     Covers ALL shapes (visual-only included): a marker sharing a keep-out's
-    name would shadow it in the frontend's highlight mapping, and a malformed
-    wire must never reach the checker mid-apply.
+    name would shadow it in the frontend's highlight mapping. Raises before
+    any mutation so an error can never leave a half-applied world.
     """
     shapes = list(shapes)
     names = [s.name for s in shapes]
@@ -320,31 +326,25 @@ def _validate_shapes(shapes: "Iterable[Any]") -> "list[Any]":
         dups = sorted({n for n in names if names.count(n) > 1})
         raise ValueError(f"Duplicate shape name(s): {', '.join(dups)}")
     for s in shapes:
-        expected = _SHAPE_PARAM_COUNTS.get(s.kind)
-        if expected is None:
+        if s.kind not in _SHAPE_KINDS:
             raise ValueError(f"Shape {s.name!r}: unknown kind {s.kind!r}")
-        if len(s.params) != expected:
-            raise ValueError(
-                f"Shape {s.name!r}: kind {s.kind!r} takes {expected} param(s), "
-                f"got {len(s.params)}"
-            )
-        if len(s.pose) != 6 or not all(math.isfinite(v) for v in s.pose):
-            raise ValueError(f"Shape {s.name!r}: pose must be 6 finite numbers")
     return shapes
 
 
 def apply_shapes(shapes: "Iterable[Any]") -> None:
-    """Replace the workspace collision-world shapes on this process's checker.
+    """Replace the program-layer collision-world shapes on this process's checker.
 
-    Each shape exposes ``kind``/``params``/``pose``/``collision``/``name`` (a
-    parol6 ``ShapeWire`` or any duck-typed equivalent). Only collision-enabled
-    shapes are added — visual-only ones are skipped. Runs per-process; the
-    controller and planner each call it against their own checker. Validation
-    runs even without a checker: checker-off frontends rely on it to reject a
-    shape set the backend would refuse.
+    Takes waldoctl ``Shape`` objects (the canonical in-process type — wire
+    conversion happens only at the protocol codec). Only collision-enabled
+    shapes are added — visual-only ones are skipped. Installation-layer shapes
+    (``install:`` names, from robot config) are never touched. Runs
+    per-process; the controller and planner each call it against their own
+    checker. Validation runs even without a checker: checker-off frontends
+    rely on it to reject a shape set the backend would refuse.
     """
-    global _active_shape_names
+    global _active_shape_names, _program_shapes
     shapes = _validate_shapes(shapes)
+    _program_shapes = shapes
     if collision is None:
         return
     for name in _active_shape_names:
@@ -354,8 +354,59 @@ def apply_shapes(shapes: "Iterable[Any]") -> None:
         if not s.collision:
             continue
         name = f"shape:{s.name}"
-        collision.add_obstacle(name, s.kind, list(s.params), _pose_to_matrix(s.pose))
+        collision.add_obstacle(
+            name, s.kind, s.params(), _pose_to_matrix(s.pose), margin=s.margin
+        )
         _active_shape_names.append(name)
+
+
+def apply_installation_shapes(shapes: "Iterable[Any]") -> None:
+    """Replace the installation-layer shapes (from robot config) on this
+    process's checker.
+
+    Applied at import via ``parol6.config.INSTALLATION_SHAPES``, so every
+    process (controller, planner, ik-worker, dry-run) inherits the same
+    installation world without any sync. ``set_shapes`` cannot touch these.
+    """
+    global _installation_shapes
+    shapes = _validate_shapes(shapes)
+    _installation_shapes = shapes
+    if collision is None:
+        return
+    for name in _installation_geom_names:
+        collision.remove_geometry_by_name(name)
+    _installation_geom_names.clear()
+    for s in shapes:
+        if not s.collision:
+            continue
+        name = f"install:{s.name}"
+        collision.add_obstacle(
+            name, s.kind, s.params(), _pose_to_matrix(s.pose), margin=s.margin
+        )
+        _installation_geom_names.append(name)
+
+
+def installation_shapes() -> "list[Any]":
+    """The installation-layer shapes (waldoctl ``Shape`` list) for readback."""
+    return list(_installation_shapes)
+
+
+def program_shapes() -> "list[Any]":
+    """The program-layer shapes last applied to this process (for readback)."""
+    return list(_program_shapes)
+
+
+def display_pairs(
+    pairs: "Iterable[tuple[str, str]]",
+) -> "list[tuple[str, str]]":
+    """Translate checker geometry names into the reporting vocabulary:
+    URDF link names for arm geometry; ``shape:``/``install:``/``tool:``
+    names keep their user-supplied form. Never leaks backend-internal
+    identifiers (e.g. Pinocchio's ``L4_0``) to clients."""
+    if collision is None:
+        return [tuple(p) for p in pairs]
+    m = dict(collision.geometry_link_names)
+    return [(m.get(a, a), m.get(b, b)) for a, b in pairs]
 
 
 # Initialize with no tool

@@ -16,6 +16,7 @@ import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import parol6.config  # noqa: F401 - imports trigger collision-checker init
 from parol6 import Robot
 from parol6.commands._collision_guard import guard_joint_path
+from parol6.commands.base import ExecutionStatusCode
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
 
@@ -57,29 +58,34 @@ def test_guard_joint_path_clear_returns_none():
     guard_joint_path(positions)
 
 
-def test_guard_joint_path_raises_on_explicit_collision(monkeypatch):
-    """Force a fake collision by patching the singleton checker temporarily.
-    monkeypatch auto-restores the real checker at teardown."""
+def test_guard_joint_path_raises_with_display_vocabulary():
+    """Drive the REAL checker into a real keep-out: the guard must raise and
+    report pairs in the display vocabulary (URDF link names + shape:<name>),
+    never checker-internal identifiers like ``L4_0``."""
+    from waldoctl import Box
 
-    class FakeChecker:
-        def in_collision(self, q):
-            return True
+    # At q=zeros the wrist sits at (0.16, 0, 0.324) — this box envelops it;
+    # with the base rotated 90° the arm swings to +Y and is clear.
+    PAROL6_ROBOT.apply_shapes(
+        [Box(name="block", x=0.25, y=0.25, z=0.25, pose=(0.16, 0.0, 0.324, 0, 0, 0))]
+    )
+    try:
+        q_clear = np.zeros(6)
+        q_clear[0] = np.pi / 2
+        assert PAROL6_ROBOT.collision.in_collision(q_clear) is False
+        assert PAROL6_ROBOT.collision.in_collision(np.zeros(6)) is True
 
-        def check_path(self, q):
-            return 2
-
-        def colliding_pairs(self, q):
-            return [("ssg48_body_simplified.stl", "L4_0")]
-
-    monkeypatch.setattr(PAROL6_ROBOT, "collision", FakeChecker())
-
-    positions = np.zeros((5, 6))
-    with pytest.raises(TrajectoryPlanningError) as exc_info:
-        guard_joint_path(positions)
-    err = exc_info.value.robot_error
-    assert err.code == int(ErrorCode.SYS_SELF_COLLISION)
-    # Cause string should embed the named pair, not raw int indices.
-    assert "ssg48_body_simplified.stl vs L4_0" in err.cause
+        positions = np.linspace(q_clear, np.zeros(6), 12)
+        with pytest.raises(TrajectoryPlanningError) as exc_info:
+            guard_joint_path(positions)
+        err = exc_info.value.robot_error
+        assert err.code == int(ErrorCode.SYS_SELF_COLLISION)
+        assert "shape:block" in err.cause
+        assert "_0" not in err.cause  # no Pinocchio geometry suffixes leak
+        pairs = exc_info.value.colliding_pairs
+        assert all("shape:block" in p or not p[0].endswith("_0") for p in pairs)
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
 
 
 def test_guard_disabled_when_checker_is_none(monkeypatch):
@@ -195,43 +201,206 @@ def test_collision_check_speed_diagnostic(capsys):
         print("servo tick budget: 10000 us (100 Hz)")
 
 
-def _shape_wire(name: str, **overrides):
-    from parol6.protocol.wire import ShapeWire
+def _box(name: str, **overrides):
+    from waldoctl import Box
 
-    fields = dict(
-        kind="box",
-        params=[0.1, 0.1, 0.1],
-        pose=[1.0, 1.0, 1.0, 0, 0, 0],
-        collision=True,
-        margin=None,
-        name=name,
-    )
-    fields.update(overrides)
-    return ShapeWire(**fields)
+    kwargs = dict(x=0.1, y=0.1, z=0.1, pose=(1.0, 1.0, 1.0, 0, 0, 0))
+    kwargs.update(overrides)
+    return Box(name=name, **kwargs)
 
 
-def test_apply_shapes_rejects_invalid_input_without_mutation():
-    """Any invalid shape fails fast — never a half-applied collision world.
+def test_apply_shapes_rejects_bad_sets_without_mutation():
+    """Set-level rejection fails fast — never a half-applied collision world.
 
-    Critically, the OLD world must survive a rejected call: the remove-then-add
-    loop only runs after validation, so an error reply can't silently disarm
-    every barrier.
+    The OLD world must survive a rejected call: the remove-then-add loop only
+    runs after validation, so an error reply can't silently disarm barriers.
+    (Per-shape value validation lives in Shape construction — the decode gate
+    below.)
     """
     bad_sets = [
-        ("Duplicate shape name", [_shape_wire("b"), _shape_wire("b")]),
+        ("Duplicate shape name", [_box("b"), _box("b")]),
         # A visual-only marker sharing a keep-out's name shadows it in the
         # frontend's highlight mapping — rejected too.
-        ("Duplicate shape name", [_shape_wire("b"), _shape_wire("b", collision=False)]),
-        ("unknown kind", [_shape_wire("b", kind="torus")]),
-        ("takes 3 param", [_shape_wire("b", params=[0.1])]),
-        ("6 finite numbers", [_shape_wire("b", pose=[0, 0, 0, 0, 0])]),
-        ("6 finite numbers", [_shape_wire("b", pose=[0, 0, float("nan"), 0, 0, 0])]),
+        ("Duplicate shape name", [_box("b"), _box("b", collision=False)]),
     ]
     try:
-        PAROL6_ROBOT.apply_shapes([_shape_wire("a")])
+        PAROL6_ROBOT.apply_shapes([_box("a")])
         for match, shapes in bad_sets:
             with pytest.raises(ValueError, match=match):
                 PAROL6_ROBOT.apply_shapes(shapes)
             assert PAROL6_ROBOT._active_shape_names == ["shape:a"]
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
+
+
+def test_decode_gate_rejects_malformed_wire():
+    """The server's codec boundary (shape_from_wire at SET_SHAPES intake)
+    rejects malformed and degenerate wire data — cases chosen from the
+    requirement (NaN/inf/negative/zero/count), not from what the code handles."""
+    from waldoctl import shape_from_wire
+
+    good = ("box", [0.1, 0.1, 0.1], [0, 0, 0, 0, 0, 0], True, None, "b")
+    assert shape_from_wire(*good).name == "b"
+    bad_wires = [
+        ("box", [0.1], [0, 0, 0, 0, 0, 0], True, None, "b"),  # wrong count
+        ("box", [float("nan"), 0.1, 0.1], [0, 0, 0, 0, 0, 0], True, None, "b"),
+        ("box", [float("inf"), 0.1, 0.1], [0, 0, 0, 0, 0, 0], True, None, "b"),
+        ("box", [-0.1, 0.1, 0.1], [0, 0, 0, 0, 0, 0], True, None, "b"),
+        ("sphere", [0.0], [0, 0, 0, 0, 0, 0], True, None, "b"),  # zero dim
+        ("box", [0.1] * 3, [0, 0, float("nan"), 0, 0, 0], True, None, "b"),
+        ("box", [0.1] * 3, [0, 0, 0, 0, 0], True, None, "b"),  # short pose
+        ("box", [0.1] * 3, [0, 0, 0, 0, 0, 0], True, -0.01, "b"),  # neg margin
+        ("plane", [0, 0, 0, 0.5], [0, 0, 0, 0, 0, 0], True, None, "b"),  # 0 normal
+    ]
+    for wire in bad_wires:
+        with pytest.raises(ValueError):
+            shape_from_wire(*wire)
+
+
+def test_per_shape_margin_blocks_at_standoff():
+    """A margined keep-out trips ``in_collision`` at its standoff distance,
+    not at contact. Real checker, real geometry: the sphere hovers ~8 cm off
+    the wrist — clear without a margin, colliding with a 15 cm one — and the
+    reported pair names the shape, proving the margin applied to ITS pairs."""
+    from waldoctl import Sphere
+
+    q = np.zeros(6)
+    checker = PAROL6_ROBOT.collision
+    above_wrist = (0.16, 0.0, 0.424, 0, 0, 0)
+    try:
+        PAROL6_ROBOT.apply_shapes([Sphere(name="s", radius=0.02, pose=above_wrist)])
+        assert checker.in_collision(q) is False
+
+        PAROL6_ROBOT.apply_shapes(
+            [Sphere(name="s", radius=0.02, pose=above_wrist, margin=0.15)]
+        )
+        assert checker.in_collision(q) is True  # margin closes the gap
+        pairs = PAROL6_ROBOT.display_pairs(checker.colliding_pairs(q))
+        assert any("shape:s" in p for p in pairs)
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
+    assert checker.in_collision(q) is False
+
+
+def test_installation_layer_survives_program_clear():
+    """Installation shapes (robot config) are enforced alongside the program
+    layer and are untouched by ``apply_shapes`` — including a full clear."""
+    from waldoctl import Box
+
+    q = np.zeros(6)
+    checker = PAROL6_ROBOT.collision
+    try:
+        PAROL6_ROBOT.apply_installation_shapes(
+            [Box(name="wall", x=0.25, y=0.25, z=0.25, pose=(0.16, 0.0, 0.324, 0, 0, 0))]
+        )
+        assert checker.in_collision(q) is True
+        assert [s.name for s in PAROL6_ROBOT.installation_shapes()] == ["wall"]
+
+        PAROL6_ROBOT.apply_shapes([])  # program clear must not disarm install
+        assert checker.in_collision(q) is True
+        assert PAROL6_ROBOT.display_pairs(checker.colliding_pairs(q))[0][1] == (
+            "install:wall"
+        )
+    finally:
+        PAROL6_ROBOT.apply_installation_shapes([])
+    assert checker.in_collision(q) is False
+
+
+def test_pose_to_matrix_is_extrinsic_xyz_rpy():
+    """The waldoctl Shape.pose contract is extrinsic-XYZ RPY (R = Rz·Ry·Rx).
+    Tripwire against swapping in ``pinokin.se3_from_rpy`` (Rx·Ry·Rz), which
+    would silently mis-orient every multi-axis-tilted shape versus its render."""
+    rx, ry, rz = 0.3, -0.5, 1.1
+    cx, sx = np.cos(rx), np.sin(rx)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cz, sz = np.cos(rz), np.sin(rz)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    T = PAROL6_ROBOT._pose_to_matrix([0.1, 0.2, 0.3, rx, ry, rz])
+    assert np.allclose(T[:3, :3], Rz @ Ry @ Rx)
+    assert not np.allclose(T[:3, :3], Rx @ Ry @ Rz)  # the tempting wrong order
+    assert np.allclose(T[:3, 3], [0.1, 0.2, 0.3])
+
+
+def test_jogl_release_decel_streams_while_escaping():
+    """Releasing a Cartesian jog while ESCAPING from inside a keep-out must
+    keep streaming the deceleration (escape-aware gate) — the pre-fix bare
+    ``in_collision`` skipped every decel send, freezing the target at the
+    release point. Real command, real state, real checker, real IK."""
+    import time as _time
+
+    from waldoctl import Box
+
+    from parol6.commands.cartesian_commands import JogLCommand
+    from parol6.protocol.wire import JogLCmd
+    from parol6.server.state import ControllerState
+
+    from parol6.config import deg_to_steps
+
+    state = ControllerState()
+    # IK-friendly physical home (wrist at ~(0.237, 0, 0.334)); q=zeros is an
+    # IK danger zone where the jog never streams.
+    q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
+    deg_to_steps(q_home_deg, state.Position_in)
+    try:
+        # Box centred 5 cm below the wrist: +Z is unambiguously the escape.
+        PAROL6_ROBOT.apply_shapes(
+            [
+                Box(
+                    name="cage",
+                    x=0.15,
+                    y=0.15,
+                    z=0.15,
+                    pose=(0.237, 0.0, 0.284, 0, 0, 0),
+                )
+            ]
+        )
+        assert PAROL6_ROBOT.collision.in_collision(np.radians(q_home_deg)) is True
+
+        cmd = JogLCommand(JogLCmd(velocities=[0.0, 0.0, 1.0, 0, 0, 0], duration=5.0))
+        cmd.setup(state)
+        for _ in range(30):  # held phase: build real velocity (CSE dt=0.01/tick)
+            cmd.execute_step(state)
+        assert state.Command_out != 0  # held phase streamed (escape allowed)
+        cmd._t_end = _time.perf_counter() - 1.0  # deterministic release
+
+        code = cmd.execute_step(state)
+        pos0 = state.Position_out.copy()
+        moved = False
+        for _ in range(500):
+            if code != ExecutionStatusCode.EXECUTING:
+                break
+            code = cmd.execute_step(state)
+            if not np.array_equal(state.Position_out, pos0):
+                moved = True
+        assert code == ExecutionStatusCode.COMPLETED
+        assert moved, "decel sends were skipped — target frozen at release point"
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
+
+
+def test_dry_run_script_set_shapes_applies_and_replays():
+    """A script's ``set_shapes`` through the REAL dry-run dispatch: applies the
+    world (raw waldoctl Shapes end-to-end — the pre-fix path crashed with
+    ``TypeError: object of type 'method' has no len()``), reads back via
+    ``shapes()``, and a subsequent world change replaces it."""
+    from waldoctl import Box
+
+    from parol6.client.dry_run_client import DryRunRobotClient
+
+    try:
+        c = DryRunRobotClient(initial_joints_deg=[0, -90, 180, 0, 0, 180])
+        c.set_shapes(
+            [Box(name="bar", x=0.1, y=0.1, z=0.1, pose=(0.9, 0.9, 0.9, 0, 0, 0))]
+        )
+        assert PAROL6_ROBOT._active_shape_names == ["shape:bar"]
+        world = c.shapes()
+        assert [s.name for s in world.program] == ["bar"]
+
+        c.set_shapes(
+            [Box(name="bar2", x=0.1, y=0.1, z=0.1, pose=(0.9, 0.9, 0.9, 0, 0, 0))]
+        )
+        assert PAROL6_ROBOT._active_shape_names == ["shape:bar2"]
     finally:
         PAROL6_ROBOT.apply_shapes([])

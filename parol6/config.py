@@ -601,10 +601,25 @@ COLLISION_JOG_LOOKAHEAD_S: float = float(
     os.getenv("PAROL6_COLLISION_JOG_LOOKAHEAD_S", "0.15")
 )
 
+# Installation-layer keep-out shapes: standing restrictions of this robot's
+# installation (walls, tables, fixtures), declared as waldoctl Shapes right
+# here in robot config alongside the other installation limits. Every program
+# inherits them; ``set_shapes`` (the program layer) cannot remove them. Loaded
+# at import in every process — controller, planner, IK worker, dry-run — so
+# no runtime sync is needed.
+#
+# Example:
+#   from waldoctl import Box
+#   INSTALLATION_SHAPES = [
+#       Box(name="table", x=0.8, y=0.8, z=0.02, pose=(0.3, 0, -0.01, 0, 0, 0)),
+#   ]
+INSTALLATION_SHAPES: list = []
+
 # Populate PAROL6_ROBOT.collision now that the config knobs are defined.
 PAROL6_ROBOT._init_collision_checker(
     COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH, COLLISION_CLEARANCE_M
 )
+PAROL6_ROBOT.apply_installation_shapes(INSTALLATION_SHAPES)
 
 
 # -----------------------------------------------------------------------------

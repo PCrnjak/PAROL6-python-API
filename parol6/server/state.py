@@ -412,10 +412,12 @@ class ControllerState:
             logger.info(f"Tool changed to {label}")
 
     def set_shapes(self, shapes: list) -> None:
-        """Apply the workspace collision-world shapes to the control-loop checker.
+        """Apply the program-layer shapes (waldoctl ``Shape`` list) to the
+        control-loop checker.
 
         Also retained (with a version bump) so the status cache can mirror them
-        to the IK worker's checker for enablement greying.
+        to the IK worker's checker for enablement greying; the version doubles
+        as the ``scene_epoch`` broadcast in status so displays re-query.
         """
         PAROL6_ROBOT.apply_shapes(shapes)
         self.shapes = list(shapes)

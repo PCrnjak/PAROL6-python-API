@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -90,6 +90,7 @@ class QueryType(IntEnum):
     TCP_SPEED = auto()
     IS_SIMULATOR = auto()
     TCP_OFFSET = auto()
+    SHAPES = auto()
 
 
 class CmdType(IntEnum):
@@ -154,6 +155,8 @@ class CmdType(IntEnum):
     IS_SIMULATOR = auto()
     # Workspace collision-world shapes (keep-out geometry)
     SET_SHAPES = auto()
+    # Collision-world readback query (installation + program layers)
+    SHAPES = auto()
 
 
 # =============================================================================
@@ -749,6 +752,18 @@ class TcpOffsetCmd(
     pass
 
 
+class ShapesCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SHAPES: query the applied collision world (readback)."""
+
+    pass
+
+
 # Query commands (no params, just the tag)
 class PingCmd(
     msgspec.Struct, tag=int(CmdType.PING), array_like=True, frozen=True, gc=False
@@ -1154,6 +1169,20 @@ class TcpOffsetResultStruct(
     z: float
 
 
+class ShapesResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """The applied collision world by layer, plus the epoch it represents."""
+
+    installation: list[ShapeWire]
+    program: list[ShapeWire]
+    epoch: int
+
+
 # Tagged Union for responses
 Response = (
     StatusResultStruct
@@ -1173,6 +1202,7 @@ Response = (
     | TcpSpeedResultStruct
     | IsSimulatorResultStruct
     | TcpOffsetResultStruct
+    | ShapesResultStruct
 )
 
 
@@ -1306,6 +1336,7 @@ def pack_status(
     simulator_active: bool = False,
     collision_active: bool = False,
     collision_pairs: tuple[tuple[str, str], ...] = (),
+    scene_epoch: int = 0,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1347,6 +1378,7 @@ def pack_status(
             simulator_active,
             collision_active,
             collision_pairs,
+            scene_epoch,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1386,6 +1418,7 @@ class StatusBuffer:
     simulator_active: bool = False
     collision_active: bool = False
     collision_pairs: list[tuple[str, str]] = field(default_factory=list)
+    scene_epoch: int = 0
 
     def __post_init__(self) -> None:
         self._cart_en_dict: dict[str, np.ndarray] = {
@@ -1431,6 +1464,7 @@ class StatusBuffer:
             simulator_active=self.simulator_active,
             collision_active=self.collision_active,
             collision_pairs=list(self.collision_pairs),
+            scene_epoch=self.scene_epoch,
         )
 
 
@@ -1442,7 +1476,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      executing_index, completed_index, last_checkpoint,
                      error, queued_segments, queued_duration, action_params,
                      tool_status_tuple, tcp_speed, simulator_active,
-                     collision_active, collision_pairs]
+                     collision_active, collision_pairs, scene_epoch]
 
     Args:
         data: Raw msgpack bytes
@@ -1510,6 +1544,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
             if raw_pairs:
                 for p in raw_pairs:
                     cp.append((p[0], p[1]))
+        if len(msg) > 22:
+            buf.scene_epoch = int(msg[22])
 
         return True
     except Exception as e:
@@ -1773,6 +1809,7 @@ __all__ = [
     "ErrorCmd",
     "TcpSpeedCmd",
     "TcpOffsetCmd",
+    "ShapesCmd",
     "PingCmd",
     "StatusCmd",
     "AnglesCmd",
@@ -1805,6 +1842,7 @@ __all__ = [
     "TcpSpeedResultStruct",
     "IsSimulatorResultStruct",
     "TcpOffsetResultStruct",
+    "ShapesResultStruct",
     "Response",
     # Message types
     "OkMsg",

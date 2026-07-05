@@ -92,6 +92,9 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
         sub = pos[idx]  # fancy indexing yields a fresh contiguous float64 array
 
     def _raise(sample: int, pairs: list[tuple[str, str]]) -> None:
+        # Reporting vocabulary (URDF link names / shape: / install: / tool:),
+        # never checker-internal geometry identifiers.
+        pairs = PAROL6_ROBOT.display_pairs(pairs)
         exc = TrajectoryPlanningError(
             make_error(
                 ErrorCode.SYS_SELF_COLLISION,
