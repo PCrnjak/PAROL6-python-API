@@ -294,11 +294,12 @@ def gate_joint_enable_collision(checker, q_rad, joint_en, q_step, qlim=None) -> 
     collides — self, tool, or keep-out shape. Proximity-gated (skip the
     per-direction checks when the arm is farther than ``_ENABLE_NEAR_M`` from
     collision) so it stays cheap. When the arm is ALREADY colliding (a keep-out
-    placed over it), escaping directions stay enabled — grey only those that go
-    deeper — mirroring the jog/planner escape semantics; otherwise every button
-    would grey with no way out. ``qlim`` is optional ``(low, high)`` rows: the
-    probe is clamped so a pose past the mechanical stop (which the jog itself
-    can never reach) can't grey the button. Not njit — it calls the C++ checker.
+    placed over it), escaping directions stay enabled — grey those that go
+    deeper or contact anything new — mirroring the jog/planner escape
+    semantics; otherwise every button would grey with no way out. ``qlim`` is
+    optional ``(low, high)`` rows: the probe is clamped so a pose past the
+    mechanical stop (which the jog itself can never reach) can't grey the
+    button. Not njit — it calls the C++ checker.
     """
     if checker is None:
         return
@@ -306,6 +307,7 @@ def gate_joint_enable_collision(checker, q_rad, joint_en, q_step, qlim=None) -> 
     if md_now >= _ENABLE_NEAR_M:
         return
     inside = checker.in_collision(q_rad)
+    pairs_now = set(checker.colliding_pairs(q_rad)) if inside else None
     for j in range(6):
         for slot, sign in ((2 * j, 1.0), (2 * j + 1, -1.0)):
             if joint_en[slot]:
@@ -316,8 +318,10 @@ def gate_joint_enable_collision(checker, q_rad, joint_en, q_step, qlim=None) -> 
                         q_step[j] = qlim[0][j]
                     elif q_step[j] > qlim[1][j]:
                         q_step[j] = qlim[1][j]
-                if inside:
-                    if checker.min_distance(q_step) < md_now - _ESCAPE_TOL:
+                if pairs_now is not None:
+                    if set(checker.colliding_pairs(q_step)) - pairs_now or (
+                        checker.min_distance(q_step) < md_now - _ESCAPE_TOL
+                    ):
                         joint_en[slot] = 0
                 elif checker.in_collision(q_step):
                     joint_en[slot] = 0
@@ -420,6 +424,7 @@ def _compute_cart_enable(
     near = md_now < _ENABLE_NEAR_M
     # Already colliding: keep escaping directions enabled (see the joint gate).
     inside = near and checker is not None and checker.in_collision(q_rad)
+    pairs_now = set(checker.colliding_pairs(q_rad)) if inside else None
 
     # Check IK (and, when near collision, the solved config) for each target
     for i in range(12):
@@ -427,8 +432,10 @@ def _compute_cart_enable(
             ik = solve_ik(robot, targets[i], q_rad, quiet_logging=True)
             ok = bool(ik.success)
             if ok and near and checker is not None:
-                if inside:
-                    ok = checker.min_distance(ik.q) >= md_now - _ESCAPE_TOL
+                if pairs_now is not None:
+                    ok = checker.min_distance(ik.q) >= md_now - _ESCAPE_TOL and not (
+                        set(checker.colliding_pairs(ik.q)) - pairs_now
+                    )
                 elif checker.in_collision(ik.q):
                     ok = False
             out[i] = 1 if ok else 0

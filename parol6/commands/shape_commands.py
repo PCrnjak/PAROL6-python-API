@@ -23,6 +23,12 @@ class SetShapesCommand(SystemCommand[SetShapesCmd]):
     dropped with) motion. The controller mirrors the applied shapes to the
     planner subprocess via ``sync_shapes`` after this executes.
 
+    A world change also invalidates committed motion that now violates it
+    (MoveIt-style): the segment player re-guards the streaming trajectory's
+    remaining waypoints on the version bump, and every trajectory again at
+    activation, halting with the collision error instead of driving into the
+    new keep-out.
+
     This is the codec boundary: the wire form is rebuilt into waldoctl
     ``Shape`` objects here (running their construction-time validation), and
     everything downstream — state, checkers, subprocess syncs, readback —

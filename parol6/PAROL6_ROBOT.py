@@ -214,6 +214,7 @@ def _refresh_collision_tool_geometry(
                     meshes = v.meshes
                     break
         mesh_root = Path(_mesh_dir) / "meshes"
+        role_counts: dict[str, int] = {}
         try:
             for spec in meshes:
                 path = mesh_root / spec.file
@@ -222,10 +223,14 @@ def _refresh_collision_tool_geometry(
                 # rotation branch here when a non-identity rpy appears.
                 T = np.eye(4, dtype=np.float64)
                 T[:3, 3] = spec.origin
-                # tool: namespace so colliding-pair reports speak the defined
-                # vocabulary (link names / shape: / install: / tool:) instead
-                # of raw mesh filenames.
-                geom_name = f"tool:{tool_key}:{spec.file}"
+                # tool: namespace with the mesh's semantic role so colliding-
+                # pair reports speak the defined vocabulary (link names /
+                # shape: / install: / tool:), never raw mesh filenames.
+                # Repeated roles (two jaws) get a positional suffix for the
+                # attach/detach bookkeeping's name uniqueness.
+                role = spec.role.name.lower()
+                n = role_counts[role] = role_counts.get(role, 0) + 1
+                geom_name = f"tool:{tool_key}:{role}" + (f"_{n}" if n > 1 else "")
                 collision.attach_mesh_to_frame(
                     geom_name,
                     str(path),

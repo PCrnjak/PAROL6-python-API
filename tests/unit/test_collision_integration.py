@@ -380,6 +380,87 @@ def test_jogl_release_decel_streams_while_escaping():
         PAROL6_ROBOT.apply_shapes([])
 
 
+def test_jogl_escape_never_streams_into_a_second_keepout():
+    """Escaping keep-out A (jog +Z out of a cage around the wrist) must not
+    stream configs into a DIFFERENT keep-out B above: pre-fix the escape gate
+    compared only the global min-distance — still dominated by A — so the new
+    contact with B never registered. Real command, real CSE, real IK, real
+    checker."""
+    from waldoctl import Box
+
+    from parol6.commands.cartesian_commands import JogLCommand
+    from parol6.config import deg_to_steps, steps_to_rad
+    from parol6.protocol.wire import JogLCmd
+    from parol6.server.state import ControllerState
+
+    state = ControllerState()
+    q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
+    deg_to_steps(q_home_deg, state.Position_in)
+    state.Position_out[:] = state.Position_in
+    checker = PAROL6_ROBOT.collision
+    q0 = np.radians(q_home_deg)
+    try:
+        # A is tall enough that the wrist is still inside it when it reaches
+        # B's underside — the block must come from the pair diff, not from the
+        # (clear-of-A) plain approach gate.
+        PAROL6_ROBOT.apply_shapes(
+            [
+                Box(name="A", x=0.15, y=0.15, z=0.25, pose=(0.237, 0.0, 0.30, 0, 0, 0)),
+                Box(name="B", x=0.10, y=0.10, z=0.04, pose=(0.237, 0.0, 0.43, 0, 0, 0)),
+            ]
+        )
+        start = {n for pair in checker.colliding_pairs(q0) for n in pair}
+        assert "shape:A" in start and "shape:B" not in start
+
+        cmd = JogLCommand(JogLCmd(velocities=[0.0, 0.0, 1.0, 0, 0, 0], duration=5.0))
+        cmd.setup(state)
+        q_buf = np.zeros(6)
+        hit_b_streamed = False
+        for _ in range(500):
+            code = cmd.execute_step(state)
+            steps_to_rad(state.Position_out, q_buf)
+            streamed = {n for pair in checker.colliding_pairs(q_buf) for n in pair}
+            if "shape:B" in streamed:
+                hit_b_streamed = True
+                break
+            if code != ExecutionStatusCode.EXECUTING:
+                break
+        assert not hit_b_streamed, (
+            "jog streamed the arm into keep-out B while escaping A"
+        )
+        assert state.collision_active is True
+        assert any("shape:B" in name for pair in state.collision_pairs for name in pair)
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
+
+
+def test_tool_pair_names_use_role_vocabulary_not_stl_basenames():
+    """Attached-tool collision geometry reports ``tool:<key>:<role>`` — never
+    a raw mesh filename. A keep-out enveloping the wrist+tool forces real
+    tool pairs through display_pairs."""
+    from waldoctl import Box
+
+    q = np.radians(np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0]))
+    checker = PAROL6_ROBOT.collision
+    try:
+        PAROL6_ROBOT.apply_tool("SSG-48")
+        assert PAROL6_ROBOT._active_tool_geom_names == [
+            "tool:SSG-48:body",
+            "tool:SSG-48:jaw",
+            "tool:SSG-48:jaw_2",
+        ]
+        PAROL6_ROBOT.apply_shapes(
+            [Box(name="blk", x=0.3, y=0.3, z=0.3, pose=(0.237, 0.0, 0.334, 0, 0, 0))]
+        )
+        pairs = PAROL6_ROBOT.display_pairs(checker.colliding_pairs(q))
+        flat = [name for pair in pairs for name in pair]
+        assert any(n.startswith("tool:SSG-48:") for n in flat)
+        assert not any(".stl" in n for n in flat)
+    finally:
+        PAROL6_ROBOT.apply_shapes([])
+        PAROL6_ROBOT.apply_tool("NONE")
+
+
 def test_dry_run_script_set_shapes_applies_and_replays():
     """A script's ``set_shapes`` through the REAL dry-run dispatch: applies the
     world (raw waldoctl Shapes end-to-end — the pre-fix path crashed with

@@ -29,12 +29,18 @@ def collision_blocked(checker, current_q, target_q) -> bool:
     """Whether streaming toward ``target_q`` must stop.
 
     Approaching: blocked when ``target_q`` collides. Already colliding (a
-    keep-out placed over the arm, or a tool-attach overlap): blocked only when
-    the motion goes *deeper* — escaping is allowed, mirroring
-    :func:`guard_joint_path`'s start-in-collision rule.
+    keep-out placed over the arm, or a tool-attach overlap): blocked when the
+    motion contacts anything *new* or goes *deeper* — escaping is allowed,
+    mirroring :func:`guard_joint_path`'s start-in-collision rule (a global
+    min-distance trend alone can't tell an improving start-collision from a
+    new shallower one, so pairs are checked too). The pair sets allocate, but
+    only in this already-colliding branch — never in the steady-state path.
     """
     if checker.in_collision(current_q):
-        return bool(
+        new_pairs = set(checker.colliding_pairs(target_q)) - set(
+            checker.colliding_pairs(current_q)
+        )
+        return bool(new_pairs) or bool(
             checker.min_distance(target_q)
             < checker.min_distance(current_q) - _ESCAPE_TOL
         )

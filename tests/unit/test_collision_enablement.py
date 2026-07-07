@@ -19,11 +19,14 @@ from parol6.server.ik_worker import (
 
 
 class _FakeChecker:
-    """``distance`` may be a float or a callable(q) for escape-semantics tests."""
+    """``distance``/``pairs`` may be values or callables(q) for escape-semantics
+    tests. ``pairs`` feeds the new-contact half of the escape rule; the default
+    (no pairs anywhere) leaves the distance-trend half in charge."""
 
-    def __init__(self, distance, collides):
+    def __init__(self, distance, collides, pairs=()):
         self._distance = distance
         self._collides = collides
+        self._pairs = pairs
         self.queries = 0
 
     def min_distance(self, q):
@@ -32,6 +35,9 @@ class _FakeChecker:
     def in_collision(self, q):
         self.queries += 1
         return self._collides(q)
+
+    def colliding_pairs(self, q):
+        return list(self._pairs(q)) if callable(self._pairs) else list(self._pairs)
 
 
 def test_gate_skips_per_direction_checks_when_far():
@@ -81,6 +87,22 @@ def test_gate_keeps_escaping_directions_when_already_inside():
     assert joint_en[2] == 1 and joint_en[3] == 1  # no-change dirs stay enabled
 
 
+def test_gate_greys_direction_entering_new_pair_while_inside():
+    """Inside keep-out A, a step that leaves the global min improving but
+    contacts a NEW pair must grey — parity with the jog guard's pair diff."""
+    joint_en = np.ones(12, dtype=np.uint8)
+    checker = _FakeChecker(
+        lambda q: -0.01 + q[0],  # A dominates; J1+ improves, J1- deepens
+        lambda q: True,
+        pairs=lambda q: [("L6", "shape:A")]
+        + ([("L4", "shape:B")] if q[1] > 0.001 else []),
+    )
+    gate_joint_enable_collision(checker, np.zeros(6), joint_en, np.zeros(6))
+    assert joint_en[0] == 1  # J1+ pure escape -> enabled
+    assert joint_en[2] == 0  # J2+ min unchanged but contacts B -> greyed
+    assert joint_en[3] == 1  # J2- no new contact, min unchanged -> enabled
+
+
 def test_collision_blocked_escape_semantics():
     """Shared jog/guard decision: approach blocks, escape is allowed."""
     # Approaching: current clear, target colliding -> blocked.
@@ -91,6 +113,22 @@ def test_collision_blocked_escape_semantics():
     inside = _FakeChecker(lambda q: -0.01 + q[0], lambda q: True)
     assert collision_blocked(inside, np.zeros(6), np.full(6, 0.1)) is False
     assert collision_blocked(inside, np.zeros(6), np.full(6, -0.1)) is True
+
+
+def test_collision_blocked_new_pair_blocks_even_when_global_min_improves():
+    """Escaping keep-out A while contacting a NEW pair B must block: the pair
+    diff catches what the global min-distance trend (still dominated by the
+    deeper A) cannot — the exact rule guard_joint_path already applies."""
+    inside = _FakeChecker(
+        lambda q: -0.05 + q[0],  # A dominates the global min; +x improves it
+        lambda q: True,
+        pairs=lambda q: [("L6", "shape:A")]
+        + ([("L5", "shape:B")] if q[0] > 0.05 else []),
+    )
+    # Pure escape (no new contact) stays allowed…
+    assert collision_blocked(inside, np.zeros(6), np.full(6, 0.01)) is False
+    # …but the same improving trend with a new pair at the target blocks.
+    assert collision_blocked(inside, np.zeros(6), np.full(6, 0.1)) is True
 
 
 @dataclass
@@ -150,6 +188,24 @@ def test_cart_gate_keeps_escaping_directions_when_already_inside():
     out = _cart_enable(checker, solve_ik)
     assert out[0] == 1  # X+ escapes -> enabled
     assert out[1] == 0  # X- deeper -> greyed
+
+
+def test_cart_gate_greys_direction_entering_new_pair_while_inside():
+    """Inside keep-out A, a Cartesian direction whose solved config contacts a
+    NEW pair greys even though the global min-distance holds steady."""
+
+    def solve_ik(robot, target, q_seed, quiet_logging=True):
+        return _FakeIK(True, target[:3, 3].repeat(2))  # q = [x, x, y, y, z, z]
+
+    checker = _FakeChecker(
+        lambda q: -0.01 + q[0],  # A dominates; only x motion changes it
+        lambda q: True,
+        pairs=lambda q: [("L6", "shape:A")] + ([("L4", "shape:B")] if q[2] > 0 else []),
+    )
+    out = _cart_enable(checker, solve_ik)
+    assert out[0] == 1  # X+ pure escape -> enabled
+    assert out[2] == 0  # Y+ min unchanged but contacts B -> greyed
+    assert out[3] == 1  # Y- no new contact -> enabled
 
 
 def test_drain_sync_applies_tool_and_shapes():
