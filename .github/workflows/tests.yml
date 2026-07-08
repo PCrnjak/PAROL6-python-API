@@ -2,12 +2,12 @@ name: tests
 
 on:
   workflow_dispatch:
+  # Scope push to main only — PR branches are covered by pull_request, so this
+  # avoids a redundant second run (and the "re-ran one, the twin still red" trap)
+  # on every push to a PR branch.
   push:
-    paths:
-      - '**'
+    branches: [main]
   pull_request:
-    paths:
-      - '**'
 
 jobs:
   lint:
