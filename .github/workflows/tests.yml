@@ -24,10 +24,8 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # ruckig 0.17.3 (sdist-only) fails to build under scikit-build-core
-          # 1.0 (cmake.targets was renamed to build.targets); pre-install the
-          # fixed upstream commit until a release lands.
-          # https://github.com/pantor/ruckig/pull/262
+          # ruckig 0.17.3 sdist doesn't build under scikit-build-core 1.0;
+          # pre-install the fixed commit until a release lands (pantor/ruckig#262).
           pip install "ruckig @ git+https://github.com/pantor/ruckig@2249d57ffaa19ecdadeaab62daf97857813629ff"
           pip install -e ".[dev]"
           # Override the pinned waldoctl with the matching feature branch if one
@@ -111,10 +109,8 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          # ruckig 0.17.3 (sdist-only) fails to build under scikit-build-core
-          # 1.0 (cmake.targets was renamed to build.targets); pre-install the
-          # fixed upstream commit until a release lands.
-          # https://github.com/pantor/ruckig/pull/262
+          # ruckig 0.17.3 sdist doesn't build under scikit-build-core 1.0;
+          # pre-install the fixed commit until a release lands (pantor/ruckig#262).
           pip install "ruckig @ git+https://github.com/pantor/ruckig@2249d57ffaa19ecdadeaab62daf97857813629ff"
           pip install -e ".[dev]" pytest-timeout
           # Override the pinned waldoctl with the matching feature branch if one

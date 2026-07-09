@@ -19,9 +19,8 @@ from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
 
-# Penetration-depth tolerance (metres) for the start-in-collision escape check:
-# a move whose min-distance drops by no more than this counts as "not deeper",
-# absorbing numerical jitter in the signed-distance query.
+# Escape-check tolerance (m): min-distance drops within this count as "not
+# deeper" (absorbs signed-distance jitter).
 _ESCAPE_TOL = 1e-4
 
 
@@ -86,9 +85,8 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
     if n == 0:
         return
 
-    # Subsample at COLLISION_PATH_SAMPLES interior points. np.linspace includes
-    # both endpoints, and n > target guarantees spacing > 1 so the rounded
-    # indices are strictly increasing; np.unique stays as cheap insurance.
+    # n > target guarantees linspace spacing > 1, so rounded indices are
+    # strictly increasing; np.unique is cheap insurance.
     target = max(2, COLLISION_PATH_SAMPLES + 2)
     if n <= target:
         idx = None
@@ -98,8 +96,7 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
         sub = pos[idx]  # fancy indexing yields a fresh contiguous float64 array
 
     def _raise(sample: int, pairs: list[tuple[str, str]]) -> None:
-        # Reporting vocabulary (URDF link names / shape: / install: / tool:),
-        # never checker-internal geometry identifiers.
+        # Reporting vocabulary, never checker-internal geometry identifiers.
         pairs = PAROL6_ROBOT.display_pairs(pairs)
         exc = TrajectoryPlanningError(
             make_error(
@@ -121,10 +118,8 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
         sample = hit if idx is None else int(idx[hit])
         _raise(sample, checker.colliding_pairs(pos[sample]))
 
-    # hit == 0: already in collision at the start. Permit an escaping move — one
-    # that introduces no new colliding pair and goes no deeper than the start —
-    # so the arm isn't trapped. (A global min-distance trend alone can't tell an
-    # improving start-collision from a new shallower one, so we check pairs too.)
+    # Already in collision at the start: permit an escaping move (no new
+    # colliding pair, no deeper than the start) so the arm isn't trapped.
     d0 = checker.min_distance(pos[0])
     start_pairs = set(checker.colliding_pairs(pos[0]))
     for j in range(1, sub.shape[0]):

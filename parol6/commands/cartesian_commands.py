@@ -156,11 +156,8 @@ class JogLCommand(MotionCommand[JogLCmd]):
             if not finished and self._dot_buf > 1e-8:
                 ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
                 if ik_result.success and ik_result.q is not None:
-                    # Don't stream a colliding config during the release
-                    # deceleration — but keep streaming while ESCAPING from
-                    # inside a keep-out (same semantics as the held phase),
-                    # else the target freezes at the release point and the
-                    # arm jerks instead of coasting to a stop.
+                    # Keep streaming while escaping from inside a keep-out,
+                    # else the target freezes at release and the arm jerks.
                     checker = PAROL6_ROBOT.collision
                     if checker is None or not collision_blocked(
                         checker, self._q_commanded, ik_result.q
@@ -192,11 +189,8 @@ class JogLCommand(MotionCommand[JogLCmd]):
         if self._vel_ratio > 1.0:
             velocity /= self._vel_ratio
 
-        # Set target velocity (WRF transforms to body frame, TRF uses body
-        # directly). While stopping (IK failure or predicted self-collision)
-        # leave the CSE target at zero so cse.stop()'s deceleration actually
-        # takes effect — re-commanding full velocity every tick would overwrite
-        # it and the arm would never decelerate (nor reach the vel<1e-6 exit).
+        # While stopping, leave the CSE target at zero — re-commanding full
+        # velocity every tick would defeat cse.stop()'s deceleration.
         if not self._ik_stopping:
             if self.p.frame == "WRF":
                 cse.set_jog_velocity_1dof_wrf(
@@ -231,11 +225,9 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
 
-        # Collision predicted at next streamed config? Mirror the IK-failure
-        # graceful-stop pathway: decelerate via cse.stop() rather than raising
-        # mid-jog. Operator regains control after smoothing. When the arm is
-        # ALREADY inside (a keep-out placed over it), escaping motion is
-        # allowed, mirroring the planner guard's start-in-collision semantics.
+        # Predicted collision decelerates like an IK failure (no mid-jog
+        # raise); escaping from inside a keep-out stays allowed, mirroring the
+        # planner guard.
         checker = PAROL6_ROBOT.collision
         if checker is not None and collision_blocked(
             checker, self._q_commanded, ik_result.q
@@ -254,8 +246,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
                 self._ik_stopping = True
             return ExecutionStatusCode.EXECUTING
 
-        # Reachable + collision-free again — if we were stopping (IK failure or
-        # predicted self-collision), recover by resuming jogging.
+        # Reachable + collision-free again — resume jogging.
         if self._ik_stopping:
             logger.info("[CARTJOG] constraint cleared - resuming jog")
             state.clear_collision()

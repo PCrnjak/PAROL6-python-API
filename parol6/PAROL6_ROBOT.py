@@ -63,18 +63,13 @@ _mesh_dir = str(Path(_urdf_path).resolve().parent.parent)
 # Current robot instance (tool transform applied in-place)
 robot: Robot = Robot(_urdf_path)
 
-# Self-collision checker bound to the same pinokin Robot. Built eagerly when
-# ``parol6.config`` is imported (config.py calls ``_init_collision_checker``),
-# i.e. on any ``import parol6``; stays None when collision checking is disabled
-# or geometry fails to load. Treat None as "checks disabled" everywhere.
-# TODO: defer construction to a server-side ``ensure_collision_checker()`` so
-# pure RobotClient script subprocesses don't pay the URDF-rewrite + BVH build.
+# Built at import via config._init_collision_checker; None means checks disabled.
 collision: CollisionChecker | None = None
 
 
 def _resolved_urdf_for_collision() -> str:
     """Return a path to a URDF with `package://parol6/...` rewritten to
-    absolute `file://` paths so pinokin's mesh loader can resolve them.
+    absolute paths so pinokin's mesh loader can resolve them.
 
     The PAROL6 URDF was authored for a ROS package layout (meshes at
     `parol6/meshes/`) but the Python package places them at
@@ -88,11 +83,8 @@ def _resolved_urdf_for_collision() -> str:
     src = Path(_urdf_path)
     text = src.read_text()
     mesh_root = Path(_mesh_dir) / "meshes"
-    # `package://parol6/meshes/foo.STL` -> a plain absolute path coal/assimp can
-    # open. Use a POSIX-style path, NOT a `file://` URI: coal strips the scheme
-    # naively, which on Windows leaves an invalid `/D:/...` (leading slash before
-    # the drive letter). `as_posix()` gives `/abs/...` on POSIX and `D:/abs/...`
-    # on Windows — both openable directly.
+    # Plain absolute path, not file://: coal strips the scheme naively, which
+    # on Windows yields an invalid `/D:/...`.
     rewritten = text.replace("package://parol6/meshes/", mesh_root.as_posix() + "/")
     fd, tmp_path = tempfile.mkstemp(prefix="parol6_collision_", suffix=".urdf")
     with os.fdopen(fd, "w") as f:
@@ -123,8 +115,6 @@ def _init_collision_checker(
         return
 
     try:
-        # All package:// mesh URIs are rewritten to absolute file:// paths in
-        # the temp URDF, so no package_dirs resolution is needed.
         urdf_for_collision = _resolved_urdf_for_collision()
         c = CollisionChecker(
             robot, urdf_for_collision, clearance_margin=clearance_margin
@@ -138,8 +128,8 @@ def _init_collision_checker(
             c.num_geometry_objects,
         )
     except Exception as e:  # noqa: BLE001
-        # Enabled but failed to build: fail loud. Silently running the arm with
-        # no collision checking is unsafe; require an explicit opt-out.
+        # Silently running with no collision checking is unsafe; require an
+        # explicit opt-out.
         if os.getenv("PAROL6_ALLOW_NO_COLLISION"):
             logger.warning(
                 "Collision checker init failed; continuing without it because "
@@ -155,20 +145,15 @@ def _init_collision_checker(
         ) from e
 
 
-# Geometry-object names for meshes attached to the collision checker on
-# behalf of the currently-active tool, plus the (tool, variant) they were
-# attached for so an unchanged re-apply can skip the disk reload.
+# Active tool's checker geometry; the key lets an unchanged re-apply skip reload.
 _active_tool_geom_names: list[str] = []
 _active_tool_geom_key: tuple[str, str | None] | None = None
 
-# Geometry-object names for user-placed workspace shapes (keep-out barriers)
-# currently on this process's collision checker, plus the applied Shape list
-# itself for readback.
+# Program-layer keep-out shapes on this process's checker (+ list for readback).
 _active_shape_names: list[str] = []
 _program_shapes: list = []
 
-# Installation-layer shapes (from robot config) and their geometry names.
-# Every program inherits these; set_shapes cannot change them.
+# Installation-layer shapes; every program inherits these, set_shapes can't touch.
 _installation_shapes: list = []
 _installation_geom_names: list[str] = []
 
@@ -192,9 +177,8 @@ def _refresh_collision_tool_geometry(
     key = (tool_key, variant_key)
     if key == _active_tool_geom_key:
         return
-    # Clear the previous tool's geometry. Mark the key inconsistent until the
-    # new attaches finish, so a mid-loop failure self-repairs on the next call
-    # (otherwise the early-return above would skip a partial attach forever).
+    # Key stays unset until the attaches finish so a mid-loop failure
+    # self-repairs on the next call.
     for name in _active_tool_geom_names:
         collision.remove_geometry_by_name(name)
     _active_tool_geom_names.clear()
@@ -204,9 +188,8 @@ def _refresh_collision_tool_geometry(
 
     cfg = None if tool_key == "NONE" else get_registry().get(tool_key)
     if cfg is not None:
-        # A variant with non-empty meshes wholesale replaces cfg.meshes; an
-        # empty variant falls back to cfg.meshes (deliberately — unlike WC's
-        # swap_tool_mesh, which renders nothing for a mesh-less variant).
+        # An empty variant deliberately falls back to cfg.meshes (unlike WC's
+        # swap_tool_mesh).
         meshes = cfg.meshes
         if variant_key:
             for v in cfg.variants:
@@ -218,16 +201,12 @@ def _refresh_collision_tool_geometry(
         try:
             for spec in meshes:
                 path = mesh_root / spec.file
-                # All current MeshSpecs use rpy=(0,0,0); rotation is baked into
-                # the STL geometry (see _MESH_RPY comment in tools.py). Add a
-                # rotation branch here when a non-identity rpy appears.
+                # rpy is (0,0,0) for all current MeshSpecs — rotation is baked
+                # into the STL (see _MESH_RPY in tools.py).
                 T = np.eye(4, dtype=np.float64)
                 T[:3, 3] = spec.origin
-                # tool: namespace with the mesh's semantic role so colliding-
-                # pair reports speak the defined vocabulary (link names /
-                # shape: / install: / tool:), never raw mesh filenames.
-                # Repeated roles (two jaws) get a positional suffix for the
-                # attach/detach bookkeeping's name uniqueness.
+                # Pair reports speak the tool:{key}:{role} vocabulary, never
+                # raw mesh filenames; repeated roles get a positional suffix.
                 role = spec.role.name.lower()
                 n = role_counts[role] = role_counts.get(role, 0) + 1
                 geom_name = f"tool:{tool_key}:{role}" + (f"_{n}" if n > 1 else "")
@@ -310,9 +289,8 @@ def _pose_to_matrix(pose: "Sequence[float]") -> np.ndarray:
     return T
 
 
-# Kinds pinokin's add_obstacle supports. Guards atomicity across a
-# waldoctl/pinokin version skew: a kind the checker would reject raises here,
-# BEFORE the old collision world is removed.
+# Kinds pinokin's add_obstacle supports; unknown kinds raise BEFORE the old
+# collision world is removed.
 _SHAPE_KINDS = frozenset(
     {"box", "sphere", "cylinder", "capsule", "cone", "ellipsoid", "plane"}
 )

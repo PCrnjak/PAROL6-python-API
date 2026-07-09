@@ -1419,10 +1419,8 @@ class StatusBuffer:
     collision_active: bool = False
     collision_pairs: list[tuple[str, str]] = field(default_factory=list)
     scene_epoch: int = 0
-    # Frame name → (12,) int32 Cartesian enable envelope. A plain attribute
-    # (not a property) because waldoctl's StatusBuffer protocol declares it
-    # as one; built once in __post_init__ aliasing the two arrays, which are
-    # mutated in place by the decoder — never rebuilt per tick.
+    # Built once in __post_init__, aliasing the two enable arrays the decoder
+    # mutates in place.
     cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
