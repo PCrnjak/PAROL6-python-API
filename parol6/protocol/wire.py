@@ -1419,17 +1419,17 @@ class StatusBuffer:
     collision_active: bool = False
     collision_pairs: list[tuple[str, str]] = field(default_factory=list)
     scene_epoch: int = 0
+    # Frame name → (12,) int32 Cartesian enable envelope. A plain attribute
+    # (not a property) because waldoctl's StatusBuffer protocol declares it
+    # as one; built once in __post_init__ aliasing the two arrays, which are
+    # mutated in place by the decoder — never rebuilt per tick.
+    cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self._cart_en_dict: dict[str, np.ndarray] = {
+        self.cart_en = {
             "WRF": self.cart_en_wrf,
             "TRF": self.cart_en_trf,
         }
-
-    @property
-    def cart_en(self) -> dict[str, np.ndarray]:
-        """Frame name → (12,) int32 Cartesian enable envelope."""
-        return self._cart_en_dict
 
     def copy(self) -> "StatusBuffer":
         """Return a deep copy with all arrays copied."""
