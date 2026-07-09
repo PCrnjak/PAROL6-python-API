@@ -169,6 +169,10 @@ def solve_ik(
     _ensure_cache(robot)
     assert _cached_solver is not None
     assert _cached_result is not None
+    assert _cached_buffered_min is not None
+    assert _cached_buffered_max is not None
+    assert _cached_qlim_min is not None
+    assert _cached_qlim_max is not None
     solver = _cached_solver
     result = _cached_result
 

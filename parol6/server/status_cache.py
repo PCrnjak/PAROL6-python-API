@@ -30,7 +30,11 @@ from parol6.server.ik_layout import (
     SHM_EXTRA_KWARGS,
     unregister_shm,
 )
-from parol6.server.ik_worker import ik_enablement_worker_main
+from parol6.server.ik_worker import (
+    SyncShapes,
+    SyncTool,
+    ik_enablement_worker_main,
+)
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
 from parol6.tools import get_tool_transform
 from parol6 import config as _cfg
@@ -159,6 +163,10 @@ class StatusCache:
         # Error tracking field
         self._error: RobotError | None = None
 
+        # Self-collision viz tracking
+        self._collision_active: bool = False
+        self._collision_pairs: tuple[tuple[str, str], ...] = ()
+
         # Pipeline depth fields
         self._queued_segments: int = 0
         self._queued_duration: float = 0.0
@@ -187,6 +195,9 @@ class StatusCache:
         self._joint_en = np.ones(12, dtype=np.uint8)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
         self._cart_en_trf = np.ones(12, dtype=np.uint8)
+
+        # Last shapes_version synced to the IK worker's checker
+        self._last_shapes_version: int = 0
 
         # IK worker subprocess state
         self._ik_stopped = False
@@ -248,6 +259,7 @@ class StatusCache:
         # Spawn subprocess
         self._ik_shutdown_event: Event = multiprocessing.Event()
         self._ik_request_event: Event = multiprocessing.Event()
+        self._ik_cmd_queue: multiprocessing.Queue = multiprocessing.Queue()
         self._ik_process: Process = Process(
             target=ik_enablement_worker_main,
             args=(
@@ -255,6 +267,7 @@ class StatusCache:
                 output_name,
                 self._ik_shutdown_event,
                 self._ik_request_event,
+                self._ik_cmd_queue,
             ),
             daemon=True,
             name="IKWorkerProcess",
@@ -270,6 +283,9 @@ class StatusCache:
 
         # Signal shutdown
         self._ik_shutdown_event.set()
+        # Don't block interpreter exit on the queue's feeder thread
+        self._ik_cmd_queue.close()
+        self._ik_cmd_queue.cancel_join_thread()
 
         # Wait for process to exit
         if self._ik_process.is_alive():
@@ -300,10 +316,19 @@ class StatusCache:
         except BufferError:
             pass
 
-        # Clean up shared memory
-        _cleanup_shm(self._ik_input_shm)
-        _cleanup_shm(self._ik_output_shm)
-        logger.debug("IK worker stopped")
+        # Clean up shared memory. When the __del__ safety net runs this during
+        # interpreter shutdown, module globals may already be nulled — the OS
+        # reclaims the segments anyway at that point.
+        if _cleanup_shm is not None:
+            _cleanup_shm(self._ik_input_shm)
+            _cleanup_shm(self._ik_output_shm)
+            logger.debug("IK worker stopped")
+
+    def _sync_ik_geometry(self, msg: SyncTool | SyncShapes) -> None:
+        """Push a geometry sync to the IK worker's checker (non-blocking)."""
+        if self._ik_stopped:
+            return
+        self._ik_cmd_queue.put_nowait(msg)
 
     def _submit_ik_request(self, q_rad: np.ndarray, T_matrix: np.ndarray) -> None:
         """Submit an IK enablement request (non-blocking, zero-alloc).
@@ -383,6 +408,19 @@ class StatusCache:
                 state.current_tool, variant_key=state.current_tool_variant
             )
             self._ik_input_tool_view.reshape(4, 4)[:] = T_tool
+            # Sync the tool's collision geometry to the IK worker's checker
+            self._sync_ik_geometry(
+                SyncTool(
+                    tool_name=state.current_tool,
+                    variant_key=state.current_tool_variant,
+                )
+            )
+
+        if state.shapes_version != self._last_shapes_version:
+            self._last_shapes_version = state.shapes_version
+            self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
+            # World changed → broadcast the new epoch so displays re-query.
+            self._binary_dirty = True
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
@@ -460,6 +498,14 @@ class StatusCache:
         if error_changed:
             self._error = state.error
 
+        collision_changed = (
+            self._collision_active != state.collision_active
+            or self._collision_pairs != state.collision_pairs
+        )
+        if collision_changed:
+            self._collision_active = state.collision_active
+            self._collision_pairs = state.collision_pairs
+
         depth_changed = (
             self._queued_segments != state.queued_segments
             or self._queued_duration != state.queued_duration
@@ -479,6 +525,7 @@ class StatusCache:
             or action_changed
             or queue_changed
             or error_changed
+            or collision_changed
             or depth_changed
         ):
             self._binary_dirty = True
@@ -508,6 +555,9 @@ class StatusCache:
                 self.tool_status,
                 self.tcp_speed,
                 simulator_active=is_simulation_mode(),
+                collision_active=self._collision_active,
+                collision_pairs=self._collision_pairs,
+                scene_epoch=self._last_shapes_version,
             )
             self._binary_dirty = False
         return self._binary_cache

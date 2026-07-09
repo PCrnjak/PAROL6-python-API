@@ -24,6 +24,8 @@ class TrajectoryPlanningError(RuntimeError):
 
     def __init__(self, robot_error: RobotError):
         self.robot_error = robot_error
+        # Structured self-collision pairs for the viz, set by the collision guard.
+        self.colliding_pairs: list[tuple[str, str]] | None = None
         super().__init__(str(robot_error))
 
 

@@ -34,6 +34,9 @@ from parol6.protocol.wire import (
     ReachableCmd,
     IsSimulatorCmd,
     IsSimulatorResultStruct,
+    ShapesCmd,
+    ShapesResultStruct,
+    ShapeWire,
     SpeedsResultStruct,
     TcpOffsetCmd,
     TcpOffsetResultStruct,
@@ -354,6 +357,33 @@ class IsSimulatorCommand(QueryCommand[IsSimulatorCmd]):
         from parol6.server.transports.transport_factory import is_simulation_mode
 
         return pack_response(IsSimulatorResultStruct(active=is_simulation_mode()))
+
+
+@register_command(CmdType.SHAPES)
+class ShapesCommand(QueryCommand[ShapesCmd]):
+    """Query the applied collision world by layer (readback truth).
+
+    The codec boundary in the reply direction: state holds waldoctl Shapes;
+    they are flattened to the wire form only here.
+    """
+
+    PARAMS_TYPE = ShapesCmd
+    QUERY_TYPE = QueryType.SHAPES
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return pack_response(
+            ShapesResultStruct(
+                installation=[
+                    ShapeWire(*s.to_wire()) for s in PAROL6_ROBOT.installation_shapes()
+                ],
+                program=[ShapeWire(*s.to_wire()) for s in state.shapes],
+                epoch=state.shapes_version,
+            )
+        )
 
 
 @register_command(CmdType.TCP_OFFSET)
