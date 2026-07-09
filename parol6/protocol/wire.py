@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -90,6 +90,7 @@ class QueryType(IntEnum):
     TCP_SPEED = auto()
     IS_SIMULATOR = auto()
     TCP_OFFSET = auto()
+    SHAPES = auto()
 
 
 class CmdType(IntEnum):
@@ -152,6 +153,10 @@ class CmdType(IntEnum):
 
     # Simulator state query
     IS_SIMULATOR = auto()
+    # Workspace collision-world shapes (keep-out geometry)
+    SET_SHAPES = auto()
+    # Collision-world readback query (installation + program layers)
+    SHAPES = auto()
 
 
 # =============================================================================
@@ -616,6 +621,29 @@ class SetTcpOffsetCmd(
     z: float = 0.0
 
 
+class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
+    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``."""
+
+    kind: str
+    params: list[float]
+    pose: list[float]
+    collision: bool
+    margin: float | None
+    name: str
+
+
+class SetShapesCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SET_SHAPES: replace the workspace collision-world shapes."""
+
+    shapes: list[ShapeWire]
+
+
 class SelectProfileCmd(
     msgspec.Struct,
     tag=int(CmdType.SELECT_PROFILE),
@@ -720,6 +748,18 @@ class TcpOffsetCmd(
     gc=False,
 ):
     """TCP_OFFSET: query current TCP offset."""
+
+    pass
+
+
+class ShapesCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SHAPES: query the applied collision world (readback)."""
 
     pass
 
@@ -1128,6 +1168,20 @@ class TcpOffsetResultStruct(
     z: float
 
 
+class ShapesResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.SHAPES),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """The applied collision world by layer, plus the epoch it represents."""
+
+    installation: list[ShapeWire]
+    program: list[ShapeWire]
+    epoch: int
+
+
 # Tagged Union for responses
 Response = (
     StatusResultStruct
@@ -1147,6 +1201,7 @@ Response = (
     | TcpSpeedResultStruct
     | IsSimulatorResultStruct
     | TcpOffsetResultStruct
+    | ShapesResultStruct
 )
 
 
@@ -1278,6 +1333,9 @@ def pack_status(
     tool_status: ToolStatus | None = None,
     tcp_speed: float = 0.0,
     simulator_active: bool = False,
+    collision_active: bool = False,
+    collision_pairs: tuple[tuple[str, str], ...] = (),
+    scene_epoch: int = 0,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1317,6 +1375,9 @@ def pack_status(
             else None,
             tcp_speed,
             simulator_active,
+            collision_active,
+            collision_pairs,
+            scene_epoch,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1354,17 +1415,18 @@ class StatusBuffer:
     queued_duration: float = 0.0
     tcp_speed: float = 0.0
     simulator_active: bool = False
+    collision_active: bool = False
+    collision_pairs: list[tuple[str, str]] = field(default_factory=list)
+    scene_epoch: int = 0
+    # Built once in __post_init__, aliasing the two enable arrays the decoder
+    # mutates in place.
+    cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self._cart_en_dict: dict[str, np.ndarray] = {
+        self.cart_en = {
             "WRF": self.cart_en_wrf,
             "TRF": self.cart_en_trf,
         }
-
-    @property
-    def cart_en(self) -> dict[str, np.ndarray]:
-        """Frame name → (12,) int32 Cartesian enable envelope."""
-        return self._cart_en_dict
 
     def copy(self) -> "StatusBuffer":
         """Return a deep copy with all arrays copied."""
@@ -1397,6 +1459,9 @@ class StatusBuffer:
             queued_duration=self.queued_duration,
             tcp_speed=self.tcp_speed,
             simulator_active=self.simulator_active,
+            collision_active=self.collision_active,
+            collision_pairs=list(self.collision_pairs),
+            scene_epoch=self.scene_epoch,
         )
 
 
@@ -1407,7 +1472,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
                      executing_index, completed_index, last_checkpoint,
                      error, queued_segments, queued_duration, action_params,
-                     tool_status_tuple, tcp_speed, simulator_active]
+                     tool_status_tuple, tcp_speed, simulator_active,
+                     collision_active, collision_pairs, scene_epoch]
 
     Args:
         data: Raw msgpack bytes
@@ -1463,6 +1529,20 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
         if len(msg) > 19:
             buf.simulator_active = bool(msg[19])
+
+        # Collision viz (appended after simulator_active; len-guarded for
+        # backward-compat with pre-collision status producers).
+        if len(msg) > 20:
+            buf.collision_active = bool(msg[20])
+        if len(msg) > 21:
+            raw_pairs = msg[21]
+            cp = buf.collision_pairs
+            cp.clear()
+            if raw_pairs:
+                for p in raw_pairs:
+                    cp.append((p[0], p[1]))
+        if len(msg) > 22:
+            buf.scene_epoch = int(msg[22])
 
         return True
     except Exception as e:
@@ -1722,6 +1802,7 @@ __all__ = [
     "ErrorCmd",
     "TcpSpeedCmd",
     "TcpOffsetCmd",
+    "ShapesCmd",
     "PingCmd",
     "StatusCmd",
     "AnglesCmd",
@@ -1754,6 +1835,7 @@ __all__ = [
     "TcpSpeedResultStruct",
     "IsSimulatorResultStruct",
     "TcpOffsetResultStruct",
+    "ShapesResultStruct",
     "Response",
     # Message types
     "OkMsg",

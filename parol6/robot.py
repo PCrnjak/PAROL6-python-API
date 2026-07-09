@@ -1,4 +1,4 @@
-"""Unified PAROL6 robot — lifecycle, configuration, kinematics, and factories.
+"""Unified PAROL6 robot - lifecycle, configuration, kinematics, and factories.
 
 Inherits from ``waldoctl.Robot`` ABC.
 All parol6-specific details (subprocess management, pinokin, IK solver, etc.)
@@ -489,7 +489,7 @@ def _resolve_mesh_dir() -> str:
 
 @dataclass
 class Parol6IKResult:
-    """IK result — structurally compatible with the web commander's IKResult Protocol."""
+    """IK result - structurally compatible with the web commander's IKResult Protocol."""
 
     q: NDArray[np.float64]  # radians
     success: bool
@@ -504,7 +504,7 @@ class Parol6IKResult:
 
 
 class Robot(_RobotABC):
-    """Unified PAROL6 robot — inherits from waldoctl.Robot ABC.
+    """Unified PAROL6 robot - inherits from waldoctl.Robot ABC.
 
     Combines identity, configuration, FK/IK kinematics, controller lifecycle,
     and client factories. Supports both sync and async context managers::
@@ -601,6 +601,12 @@ class Robot(_RobotABC):
         return False
 
     @property
+    def has_collision_checking(self) -> bool:
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return PAROL6_ROBOT.collision is not None
+
+    @property
     def digital_outputs(self) -> int:
         return 2
 
@@ -667,6 +673,10 @@ class Robot(_RobotABC):
         *tcp_offset_m*: optional (x, y, z) user offset in meters, composed
         on top of the tool's registered transform.
         *variant_key*: optional variant whose TCP overrides the tool default.
+
+        Also syncs the tool's collision meshes onto this process's global
+        checker so client-side collision queries (preview / editing pose)
+        see the attached tool.
         """
         from parol6.tools import get_tool_transform
 
@@ -688,6 +698,21 @@ class Robot(_RobotABC):
             self._pinokin.set_tool_transform(T_tool)
         else:
             self._pinokin.clear_tool_transform()
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        # Best-effort viz/preview parity: registry-unknown (plugin) tools just
+        # clear the old geometry, and a mesh-attach failure (e.g. a plugin tool
+        # whose mesh files live outside parol6's mesh root) must never break
+        # tool selection — the kinematic transform above is already applied.
+        try:
+            PAROL6_ROBOT._refresh_collision_tool_geometry(
+                tool_key, variant_key=variant_key
+            )
+        except Exception as e:
+            logger.warning(
+                "Tool collision geometry not attached for %r: %s", tool_key, e
+            )
 
     def _plugin_tool_transform(
         self, tool_key: str, variant_key: str | None
@@ -768,6 +793,75 @@ class Robot(_RobotABC):
             result[i, 4] = rpy[1]
             result[i, 5] = rpy[2]
         return result
+
+    @property
+    def _collision_checker(self):
+        """The process-global checker, or None when collision checking is off.
+
+        Shared by every collision method here; its tool geometry follows
+        ``PAROL6_ROBOT.apply_tool`` (server / dry-run) and
+        :meth:`set_active_tool` (client) calls in this process.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return PAROL6_ROBOT.collision
+
+    def in_collision(self, q_rad: NDArray[np.float64]) -> bool:
+        """Return True iff `q_rad` is in self/world collision. False if disabled."""
+        c = self._collision_checker
+        if c is None:
+            return False
+        self._load_q_buf(q_rad)
+        return c.in_collision(self._q_buf)
+
+    def check_trajectory(self, q_path_rad: NDArray[np.float64]) -> int:
+        """Returns first colliding row index in `q_path_rad`, or -1 if clear.
+
+        `q_path_rad` is (N, nq) joint positions in radians.
+        """
+        c = self._collision_checker
+        if c is None:
+            return -1
+        return c.check_path(np.ascontiguousarray(q_path_rad, dtype=np.float64))
+
+    def colliding_pairs(self, q_rad: NDArray[np.float64]) -> list[tuple[str, str]]:
+        """Return list of (name, name) pairs in collision at `q_rad`.
+
+        Names use the reporting vocabulary: URDF link names for arm geometry
+        (e.g. ``"L4"``), ``shape:<name>`` / ``install:<name>`` for keep-outs,
+        and ``tool:<key>:<part>`` for attached tool geometry — never
+        checker-internal identifiers.
+        """
+        c = self._collision_checker
+        if c is None:
+            return []
+        self._load_q_buf(q_rad)
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        return PAROL6_ROBOT.display_pairs(c.colliding_pairs(self._q_buf))
+
+    def min_distance(self, q_rad: NDArray[np.float64]) -> float:
+        """Return the minimum clearance over all active pairs at `q_rad`.
+
+        Positive => separation; negative => penetration depth.
+        Returns +inf when collision checking is disabled.
+        """
+        c = self._collision_checker
+        if c is None:
+            return float("inf")
+        self._load_q_buf(q_rad)
+        return c.min_distance(self._q_buf)
+
+    def apply_shapes(self, shapes) -> None:
+        """Apply keep-out shapes to this process's checker (preview/editing viz).
+
+        Local-only twin of the client's ``set_shapes`` (which updates the
+        server's checkers). Accepts waldoctl ``Shape`` objects — the canonical
+        in-process type everywhere; no wire form is involved.
+        """
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        PAROL6_ROBOT.apply_shapes(list(shapes))
 
     def ik_batch(
         self,

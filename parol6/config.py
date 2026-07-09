@@ -563,6 +563,63 @@ IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
     dtype=np.float64,
 )
 
+# -----------------------------------------------------------------------------
+# Self-collision checking (pinokin CollisionChecker)
+# -----------------------------------------------------------------------------
+# Pre-flight collision checks reject motion commands whose interpolated
+# joint path enters a self-colliding (or world-colliding) configuration.
+# Disable via env: PAROL6_COLLISION_CHECK=0
+COLLISION_CHECK_ENABLED: bool = os.getenv(
+    "PAROL6_COLLISION_CHECK", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Number of interior joint-space samples checked along an interpolated path.
+# Endpoints are always checked. 0 => endpoints only.
+# At ~38 us p99 per check on the bundled simplified meshes (see the speed
+# diagnostic), 16 samples is ~0.7 ms per command; world geometry attached at
+# runtime may raise the per-check cost.
+COLLISION_PATH_SAMPLES: int = int(os.getenv("PAROL6_COLLISION_PATH_SAMPLES", "16"))
+
+# Optional SRDF file with disabled-pair info. Defaults to the bundled
+# parol6/urdf_model/srdf/PAROL6.srdf when present.
+_default_srdf = Path(__file__).resolve().parent / "urdf_model" / "srdf" / "PAROL6.srdf"
+COLLISION_SRDF_PATH: str = os.getenv(
+    "PAROL6_COLLISION_SRDF",
+    str(_default_srdf) if _default_srdf.exists() else "",
+)
+
+# Fixed clearance (m): geometry within this distance counts as colliding, so the
+# arm keeps a near-miss buffer from itself and from keep-out shapes (absorbs
+# calibration/model error). Applied uniformly to every collision query.
+COLLISION_CLEARANCE_M: float = float(os.getenv("PAROL6_COLLISION_CLEARANCE_M", "0.005"))
+
+# Velocity-scaled jog stopping buffer (s): a jog is stopped if the config this
+# many seconds ahead (at the current jog velocity) would collide — so faster
+# jogs stop further from contact. Composes with COLLISION_CLEARANCE_M.
+COLLISION_JOG_LOOKAHEAD_S: float = float(
+    os.getenv("PAROL6_COLLISION_JOG_LOOKAHEAD_S", "0.15")
+)
+
+# Installation-layer keep-out shapes: standing restrictions of this robot's
+# installation (walls, tables, fixtures), declared as waldoctl Shapes right
+# here in robot config alongside the other installation limits. Every program
+# inherits them; ``set_shapes`` (the program layer) cannot remove them. Loaded
+# at import in every process — controller, planner, IK worker, dry-run — so
+# no runtime sync is needed.
+#
+# Example:
+#   from waldoctl import Box
+#   INSTALLATION_SHAPES = [
+#       Box(name="table", x=0.8, y=0.8, z=0.02, pose=(0.3, 0, -0.01, 0, 0, 0)),
+#   ]
+INSTALLATION_SHAPES: list = []
+
+# Populate PAROL6_ROBOT.collision now that the config knobs are defined.
+PAROL6_ROBOT._init_collision_checker(
+    COLLISION_CHECK_ENABLED, COLLISION_SRDF_PATH, COLLISION_CLEARANCE_M
+)
+PAROL6_ROBOT.apply_installation_shapes(INSTALLATION_SHAPES)
+
 
 # -----------------------------------------------------------------------------
 # Utility Functions

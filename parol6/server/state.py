@@ -249,6 +249,17 @@ class ControllerState:
     queued_segments: int = 0
     queued_duration: float = 0.0
 
+    # Self-collision viz: colliding pairs captured at the predicted colliding
+    # config when a move is blocked or a jog is stopped; cleared when a
+    # subsequent motion proceeds without collision.
+    collision_active: bool = False
+    collision_pairs: tuple[tuple[str, str], ...] = ()
+
+    # Workspace keep-out shapes (last applied), versioned so the status cache
+    # can mirror them to the IK worker's checker.
+    shapes: list = field(default_factory=list)
+    shapes_version: int = 0
+
     # Network setup and uptime
     ip: str = "127.0.0.1"
     port: int = 5001
@@ -297,6 +308,11 @@ class ControllerState:
         """Initialize E-stop to released state and named gripper wrapper."""
         self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
         self.gripper_hw = GripperHWState(self.Gripper_data_out, self.Gripper_data_in)
+
+    def clear_collision(self) -> None:
+        """Drop any captured self-collision pairs (zero-alloc — interned ())."""
+        self.collision_active = False
+        self.collision_pairs = ()
 
     def reset(self) -> None:
         """
@@ -352,6 +368,7 @@ class ControllerState:
 
         # Error and pipeline depth
         self.error = None
+        self.clear_collision()
         self.queued_segments = 0
         self.queued_duration = 0.0
 
@@ -391,6 +408,18 @@ class ControllerState:
             PAROL6_ROBOT.apply_tool(tool_name, variant_key=variant_key)
             label = f"{tool_name}:{variant_key}" if variant_key else tool_name
             logger.info(f"Tool changed to {label}")
+
+    def set_shapes(self, shapes: list) -> None:
+        """Apply the program-layer shapes (waldoctl ``Shape`` list) to the
+        control-loop checker.
+
+        Also retained (with a version bump) so the status cache can mirror them
+        to the IK worker's checker for enablement greying; the version doubles
+        as the ``scene_epoch`` broadcast in status so displays re-query.
+        """
+        PAROL6_ROBOT.apply_shapes(shapes)
+        self.shapes = list(shapes)
+        self.shapes_version += 1
 
     @property
     def tcp_offset_m(self) -> tuple[float, float, float]:

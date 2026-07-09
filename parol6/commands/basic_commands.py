@@ -8,6 +8,7 @@ from enum import Enum, auto
 import numpy as np
 
 from parol6.config import (
+    COLLISION_JOG_LOOKAHEAD_S,
     JOG_MIN_STEPS,
     LIMITS,
     rad_to_steps,
@@ -24,10 +25,13 @@ from parol6.protocol.wire import (
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.commands._collision_guard import collision_blocked
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.config import deg_to_steps
 from parol6.server.transports.transport_factory import is_simulation_mode
+
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT  # noqa: N811
 
 from .base import (
     ExecutionStatusCode,
@@ -35,6 +39,24 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+_QLIM_ROWS: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def _qlim_rows() -> tuple[np.ndarray, np.ndarray]:
+    """Joint-limit rows, fetched once per process — ``robot.qlim`` allocates a
+    fresh matrix per access and this is consumed on the 100 Hz jog path."""
+    global _QLIM_ROWS
+    if _QLIM_ROWS is None:
+        qlim = PAROL6_ROBOT.robot.qlim
+        if qlim is None:
+            _QLIM_ROWS = (np.full(6, -np.inf), np.full(6, np.inf))
+        else:
+            _QLIM_ROWS = (
+                np.ascontiguousarray(qlim[0], dtype=np.float64),
+                np.ascontiguousarray(qlim[1], dtype=np.float64),
+            )
+    return _QLIM_ROWS
 
 
 def _limit_hit_mask(pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
@@ -127,6 +149,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         "speeds_out",
         "_jog_initialized",
         "_jog_vel_rad",
+        "_lookahead_buf",
     )
 
     def __init__(self, p: JogJCmd):
@@ -134,6 +157,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         self.speeds_out = np.zeros(6, dtype=np.int32)
         self._jog_initialized = False
         self._jog_vel_rad = np.zeros(6, dtype=np.float64)
+        self._lookahead_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute step speeds and rad/s velocities for all 6 joints."""
@@ -187,6 +211,37 @@ class JogJCommand(MotionCommand[JogJCmd]):
 
         se.set_jog_velocity(self._jog_vel_rad)
         pos_rad, _vel, _finished = se.tick()
+
+        # Never stream a config that collides or approaches collision: the
+        # streamed config itself is checked (catches anything inside the
+        # lookahead window at jog start) plus a velocity-scaled horizon so
+        # faster jogs stop further from contact — both compose with the
+        # checker's fixed clearance. Exception: when the arm is ALREADY inside
+        # (a keep-out placed over it), escaping motion is allowed, mirroring
+        # the planner guard's start-in-collision semantics. An abrupt stop is
+        # acceptable when the alternative is driving deeper. (The Cartesian jog
+        # uses a graceful CSE-based stop; JogJ has no smoother, so it halts.)
+        checker = PAROL6_ROBOT.collision
+        if checker is not None:
+            # In-place to keep the hot path allocation-free; clamped to joint
+            # limits so a pose past the mechanical stop can't phantom-trip.
+            la = self._lookahead_buf
+            la[:] = self._jog_vel_rad
+            la *= COLLISION_JOG_LOOKAHEAD_S
+            la += pos_rad
+            lo, hi = _qlim_rows()
+            np.clip(la, lo, hi, out=la)
+            if collision_blocked(checker, pos_rad, la):
+                logger.warning("[JOGJ] collision predicted - stopping jog")
+                # Allocate only here (the rare stop), never on the clean tick.
+                state.collision_pairs = tuple(
+                    PAROL6_ROBOT.display_pairs(checker.colliding_pairs(la))
+                )
+                state.collision_active = True
+                se.active = False
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
+
         self._q_rad_buf[:] = pos_rad
         rad_to_steps(self._q_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)

@@ -132,6 +132,7 @@ For streamable commands (`streamable = True`), `do_setup()` also runs at high fr
 ## Code Style
 
 - **Comments**: Describe the final code state, not what changed. Avoid "changed X to Y" or "added this because..." comments.
+- **Never ship declared-but-unimplemented API surface.** No "reserved" fields or params, no docstrings saying "not yet applied" — implement it or don't declare it.
 - **Type annotations**: Fix type errors properly instead of using `# type: ignore`. Prefer:
   - `@overload` decorators for functions with different return types based on input
   - `assert` statements to narrow types after None checks
@@ -148,3 +149,13 @@ Prefer fewer, comprehensive integration tests that mimic manual testing over a l
 - **Test results are in `test-results.xml`.** Pytest writes JUnit XML to `test-results.xml` automatically. When diagnosing failures, read this file — it contains test names, durations, failure messages, and captured output. This is more reliable than parsing console output.
 - **NEVER run parol6 and web commander test suites in parallel** — no proper isolation, they share resources and have timing issues when resource-constrained. Always run sequentially.
 - **NEVER allow subagents to run tests.** Many tests are timing-sensitive and the system doesn't have enough resources for agents and tests to run simultaneously. Only the main conversation should run tests, and only after all agents have completed.
+
+### No testing theatre
+
+- Default to real components (fake-serial controller, simulator). A hand-rolled fake is a last resort.
+- Never fake a contract you haven't read — match the real code's raise-vs-return behavior, return types/codes, and signatures.
+- If a fake must mimic protocol behavior (acks, return codes, ordering, lifecycle), the test is at the wrong layer — use the real path. Fakes are for one-line oracles only (e.g. a distance function feeding gate-logic tests).
+- Enter through the real path (command dispatch / client call), not internal helpers fed hand-built inputs.
+- Derive cases from the requirement, not the code under test — "rejects invalid input" means NaN/inf/negative/zero, not the cases the code already handles.
+- Assert outcomes, not interactions — "the fake was called" proves nothing.
+- A regression test must fail against the bug before the fix. Born-green regression tests are theatre.

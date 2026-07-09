@@ -504,6 +504,19 @@ class DryRunRobotClient:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
         return np.degrees(self._q_rad_buf).tolist()
 
+    def shapes(self):
+        """The preview's collision world by layer (mirrors the live query).
+
+        Explicit so a script's readback never falls into the generic command
+        dispatch, which has no query path.
+        """
+        from waldoctl import ShapeWorld
+
+        return ShapeWorld(
+            installation=tuple(PAROL6_ROBOT.installation_shapes()),
+            program=tuple(PAROL6_ROBOT.program_shapes()),
+        )
+
     def pose(self) -> list[float]:
         """Return [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
         se3 = get_fkine_se3(self._state)

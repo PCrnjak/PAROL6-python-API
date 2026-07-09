@@ -23,7 +23,13 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
-from parol6.protocol.wire import HomeCmd, SelectToolCmd, SetTcpOffsetCmd, ToolActionCmd
+from parol6.protocol.wire import (
+    HomeCmd,
+    SelectToolCmd,
+    SetShapesCmd,
+    SetTcpOffsetCmd,
+    ToolActionCmd,
+)
 from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
@@ -69,6 +75,7 @@ class ErrorSegment:
     error: RobotError
     cartesian_path: np.ndarray | None = None  # (N, 6) full TCP path
     ik_valid: np.ndarray | None = None  # (N,) per-pose bool
+    colliding_pairs: list[tuple[str, str]] | None = None  # self-collision viz
 
 
 Segment = Union[TrajectorySegment, InlineSegment, ErrorSegment]
@@ -113,11 +120,20 @@ class SyncTool:
 
 
 @dataclass
+class SyncShapes:
+    """Replace the planner checker's program-layer shapes (waldoctl Shape list)."""
+
+    shapes: list
+
+
+@dataclass
 class CancelAll:
     """Clear the planner's internal state and discard pending work."""
 
 
-PlannerMessage = Union[PlanCommand, SyncPosition, SyncProfile, SyncTool, CancelAll]
+PlannerMessage = Union[
+    PlanCommand, SyncPosition, SyncProfile, SyncTool, SyncShapes, CancelAll
+]
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +255,10 @@ class TrajectoryPlanner:
         self._robot_module.apply_tool(
             tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
         )
+
+    def sync_shapes(self, shapes: list) -> None:
+        """Replace this process checker's workspace keep-out shapes."""
+        self._robot_module.apply_shapes(shapes)
 
     # -- trajectory handling --
 
@@ -386,6 +406,7 @@ class TrajectoryPlanner:
                 error=robot_error,
                 cartesian_path=cartesian_path,
                 ik_valid=ik_valid,
+                colliding_pairs=getattr(exc, "colliding_pairs", None),
             )
         )
 
@@ -461,6 +482,13 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
+        elif isinstance(params, SetShapesCmd):
+            # Only reachable via the DRY-RUN planner: a script's set_shapes()
+            # must shape its preview world. The live path routes SET_SHAPES as
+            # a SystemCommand + SyncShapes, never through process(). Here the
+            # cmd carries raw waldoctl Shapes (the dry-run client never
+            # touches the wire form), which is exactly what apply_shapes takes.
+            self._robot_module.apply_shapes(params.shapes)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +540,10 @@ class PlannerWorker:
         self._planner.sync_tool(
             tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
         )
+
+    def apply_shapes(self, shapes: list) -> None:
+        """Sync workspace keep-out shapes onto this process's checker."""
+        self._planner.sync_shapes(shapes)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +627,10 @@ def motion_planner_main(
                     variant_key=msg.variant_key,
                     tcp_offset_m=msg.tcp_offset_m,
                 )
+                continue
+
+            if isinstance(msg, SyncShapes):
+                worker.apply_shapes(msg.shapes)
                 continue
 
             if isinstance(msg, PlanCommand):
@@ -745,6 +781,10 @@ class MotionPlanner:
                 tcp_offset_m=tcp_offset_m,
             )
         )
+
+    def sync_shapes(self, shapes: list) -> None:
+        """Replace the planner checker's workspace keep-out shapes."""
+        self.submit(SyncShapes(shapes=list(shapes)))
 
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""

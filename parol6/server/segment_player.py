@@ -16,10 +16,12 @@ import logging
 from collections import deque
 from typing import TYPE_CHECKING
 
+import numpy as np
 from pinokin import arrays_equal_n
 
+from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import CommandBase, ExecutionStatusCode
-from parol6.config import SETTLE_MAX_TICKS
+from parol6.config import COLLISION_PATH_SAMPLES, SETTLE_MAX_TICKS, steps_to_rad
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
@@ -32,6 +34,7 @@ from parol6.server.motion_planner import (
 )
 from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import TrajectoryPlanningError
 from waldoctl import ActionState
 
 if TYPE_CHECKING:
@@ -57,6 +60,7 @@ class SegmentPlayer:
         "_inline_activated",
         "_settling",
         "_settle_ticks",
+        "_last_shapes_version",
     )
 
     def __init__(self, planner: MotionPlanner) -> None:
@@ -68,6 +72,7 @@ class SegmentPlayer:
         self._inline_activated: bool = False
         self._settling: bool = False
         self._settle_ticks: int = 0
+        self._last_shapes_version: int = 0
 
     @property
     def active(self) -> bool:
@@ -89,15 +94,32 @@ class SegmentPlayer:
                 state.queued_duration += seg.duration
             seg = self._planner.poll_segment()
 
+        # MoveIt-style invalidation: a world change (SET_SHAPES bumps
+        # shapes_version) re-guards the streaming trajectory's remaining
+        # waypoints. The unchanged path pays only this int compare.
+        if state.shapes_version != self._last_shapes_version:
+            self._last_shapes_version = state.shapes_version
+            if isinstance(self._active, TrajectorySegment):
+                start = self._step - 1 if self._step > 0 else 0
+                if not self._world_guard(
+                    self._active, self._active.trajectory_steps[start:], state
+                ):
+                    return False
+
+        # Process active segment or activate next
         max_immediate = 8  # prevent infinite recursion on back-to-back instant commands
         for _ in range(max_immediate):
+            # Activate next segment if idle
             if self._active is None:
                 if not self._buffer:
                     return False
                 self._activate_next(state)
+                if self._active is None:
+                    continue  # activation-time world guard rejected the segment
 
             active = self._active
 
+            # --- Trajectory segment: index into waypoints ---
             if isinstance(active, TrajectorySegment):
                 if self._step < len(active.trajectory_steps):
                     state.Position_out[:] = active.trajectory_steps[self._step]
@@ -123,6 +145,7 @@ class SegmentPlayer:
                 state.Command_out = CommandCode.MOVE
                 return True
 
+            # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
                 result = self._tick_inline(active, state)
                 if result is None:
@@ -130,20 +153,26 @@ class SegmentPlayer:
                     continue
                 return result
 
+            # --- Error segment: halt advance run ---
             if isinstance(active, ErrorSegment):
                 logger.error(
                     "Command %d failed: %s", active.command_index, active.error
                 )
                 state.error = active.error
+                pairs = active.colliding_pairs
+                state.collision_active = bool(pairs)
+                state.collision_pairs = tuple(pairs) if pairs else ()
                 state.action_state = ActionState.ERROR
                 state.action_current = ""
                 state.action_params = ""
                 self._active = None
+                # Halt: cancel all remaining planned work
                 self._buffer.clear()
                 self._planner.cancel()
                 self._drain_planner_queue(state)
                 return False
 
+            # Unknown segment type
             logger.error("Unknown segment type: %s", type(active).__name__)
             self._active = None
             continue
@@ -152,8 +181,19 @@ class SegmentPlayer:
         return self._active is not None
 
     def _activate_next(self, state: ControllerState) -> None:
-        """Promote next buffered segment to active."""
-        self._active = self._buffer.popleft()
+        """Promote next buffered segment to active.
+
+        Trajectory segments are re-guarded against the *current* world first:
+        their plan-time guard may predate a world change — the planner FIFO
+        orders plans and shape syncs by submission, so a segment planned
+        against the old world can arrive here after SET_SHAPES applied.
+        """
+        seg = self._buffer.popleft()
+        if isinstance(seg, TrajectorySegment) and not self._world_guard(
+            seg, seg.trajectory_steps, state
+        ):
+            return
+        self._active = seg
         self._step = 0
         self._inline_cmd = None
         self._inline_activated = False
@@ -235,6 +275,51 @@ class SegmentPlayer:
         self._planner.cancel()
         self._drain_planner_queue(state)
 
+    def _world_guard(
+        self, seg: Segment, steps: np.ndarray, state: ControllerState
+    ) -> bool:
+        """Validate trajectory waypoints (motor steps) against the current
+        collision world; on violation, halt playback like an ErrorSegment.
+
+        Runs only at segment activation and on a world change, never per-tick;
+        rows are subsampled *before* the steps→rad conversion so the cost stays
+        ~COLLISION_PATH_SAMPLES checker calls regardless of trajectory length.
+        ``guard_joint_path`` keeps the escape semantics — a keep-out dropped
+        onto the arm still permits the escaping remainder. Inline segments
+        (Home/Gripper) are not trajectory playback and are not re-guarded.
+        """
+        n = len(steps)
+        if n == 0:
+            return True
+        target = max(2, COLLISION_PATH_SAMPLES + 2)
+        if n > target:
+            idx = np.unique(np.linspace(0, n - 1, target).round().astype(int))
+            steps = steps[idx]
+        q = np.empty((len(steps), 6), dtype=np.float64)
+        for i in range(len(steps)):
+            steps_to_rad(steps[i], q[i])
+        try:
+            guard_joint_path(q)
+        except TrajectoryPlanningError as exc:
+            logger.error(
+                "Command %d invalidated by world change: %s",
+                seg.command_index,
+                exc.robot_error,
+            )
+            state.error = exc.robot_error
+            pairs = exc.colliding_pairs
+            state.collision_active = bool(pairs)
+            state.collision_pairs = tuple(pairs) if pairs else ()
+            state.action_state = ActionState.ERROR
+            state.action_current = ""
+            state.action_params = ""
+            self._active = None
+            self._buffer.clear()
+            self._planner.cancel()
+            self._drain_planner_queue(state)
+            return False
+        return True
+
     def cancel(self, state: ControllerState) -> None:
         """Clear buffer, drain stale segments, and stop playback."""
         self._active = None
@@ -243,6 +328,7 @@ class SegmentPlayer:
         self._inline_activated = False
         self._buffer.clear()
         self._planner.cancel()
+        # Drain stale segments from planner output queue
         self._drain_planner_queue(state)
 
     def _drain_planner_queue(self, state: ControllerState) -> None:
