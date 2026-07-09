@@ -43,7 +43,7 @@ class UDPTransport:
         self._running = False
         self._rx = bytearray(self.buffer_size)
         self._rxv = memoryview(self._rx)
-        # Pre-allocated buffer for poll_receive_all (avoids list allocation per call)
+        # Reused by poll_receive_all to avoid a list allocation per call.
         self._recv_all_buf: list[tuple[bytes, tuple[str, int]]] = []
 
     def create_socket(self) -> bool:
@@ -54,10 +54,9 @@ class UDPTransport:
             True if successful, False otherwise
         """
         try:
-            # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            # Non-blocking mode for polling
+            # Non-blocking so the control loop can poll instead of blocking.
             self.socket.setblocking(False)
 
             # Allow address/port reuse for fast restarts

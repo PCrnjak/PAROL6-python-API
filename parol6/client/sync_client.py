@@ -49,11 +49,9 @@ def _stop_sync_loop() -> None:
     loop = _SYNC_LOOP
 
     async def _shutdown():
-        # Cancel all pending tasks
         tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
         for task in tasks:
             task.cancel()
-        # Let cancelled tasks finalize
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         loop.stop()

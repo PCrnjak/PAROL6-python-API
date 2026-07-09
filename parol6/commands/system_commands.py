@@ -43,7 +43,6 @@ class ResumeCommand(SystemCommand[ResumeCmd]):
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Execute resume - set controller to enabled state."""
         logger.info("RESUME command executed")
         state.enabled = True
         state.disabled_reason = ""
@@ -62,7 +61,6 @@ class HaltCommand(SystemCommand[HaltCmd]):
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Execute halt - zero speeds and set controller to disabled state."""
         logger.info("HALT command executed")
         state.Speed_out.fill(0)
         state.enabled = False
@@ -82,7 +80,6 @@ class WriteIOCommand(SystemCommand[WriteIOCmd]):
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Execute set port - update I/O port state."""
         logger.info(f"WRITE_IO: Setting port {self.p.port_index} to {self.p.value}")
 
         state.InOut_out[self.p.port_index] = self.p.value
@@ -120,7 +117,7 @@ class SimulatorCommand(SystemCommand[SimulatorCmd]):
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Execute simulator toggle by setting env var and signaling reconfiguration."""
+        """Toggle the env var; controller picks it up and reinitializes transport."""
         os.environ["PAROL6_FAKE_SERIAL"] = "1" if self.p.on else "0"
         logger.info(f"SIMULATOR command executed: {'ON' if self.p.on else 'OFF'}")
 
@@ -129,7 +126,6 @@ class SimulatorCommand(SystemCommand[SimulatorCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-# Valid motion profile types
 VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
 
 
@@ -166,7 +162,6 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
             raise err
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Execute profile change."""
         profile = self.p.profile.upper()
 
         old_profile = state.motion_profile
@@ -194,7 +189,6 @@ class SetTcpOffsetCommand(MotionCommand[SetTcpOffsetCmd]):
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        """Convert mm to meters and apply TCP offset."""
         offset_m = (self.p.x / 1000.0, self.p.y / 1000.0, self.p.z / 1000.0)
         state.set_tcp_offset(offset_m)
 

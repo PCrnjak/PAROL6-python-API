@@ -43,12 +43,9 @@ logger = logging.getLogger(__name__)
 class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
     """Base class for joint-space trajectory commands.
 
-    Subclasses must implement:
-    - _get_target_rad(): Return target joint positions in radians
-
-    This base class provides:
-    - do_setup(): Builds trajectory via JointPath.interpolate + TrajectoryBuilder
-    - execute_step(): Inherited from TrajectoryMoveCommandBase (uses MotionExecutor)
+    Subclasses supply the target via _get_target_rad(); this class builds the
+    trajectory (JointPath.interpolate + TrajectoryBuilder) and inherits
+    execute_step() from TrajectoryMoveCommandBase.
     """
 
     __slots__ = (

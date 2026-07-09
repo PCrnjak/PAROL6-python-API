@@ -84,7 +84,7 @@ def _tangent_to_pose_jit(
     se3_mul(ref_pose, delta, out)
 
 
-# Module-level constant for error checking (avoids tuple creation per check)
+# Module-level constant avoids tuple creation per error check.
 _RUCKIG_ERRORS = (Result.Error, Result.ErrorInvalidInput)
 
 
@@ -119,7 +119,7 @@ class RuckigExecutorBase(ABC):
         self._vel_scale: float = 1.0
         self._acc_scale: float = 1.0
 
-        # Pre-allocated output buffers (reused every tick to avoid allocations)
+        # Reused every tick to avoid allocations.
         self._pos_out = np.zeros(num_dofs)
         self._vel_out = np.zeros(num_dofs)
         self._zeros_np = np.zeros(num_dofs)
@@ -162,7 +162,7 @@ class RuckigExecutorBase(ABC):
             self.active = False
         else:
             self.out.pass_to_input(self.inp)
-        # Copy into pre-allocated buffers (avoids list() allocation per tick)
+        # Copy into pre-allocated buffers to avoid a list() allocation per tick.
         self._pos_out[:] = self.out.new_position
         self._vel_out[:] = self.out.new_velocity
         return result, self._pos_out, self._vel_out
@@ -203,24 +203,21 @@ class StreamingExecutor(RuckigExecutorBase):
             num_dofs: Number of degrees of freedom (joints)
             dt: Control cycle time in seconds
         """
-        # Cartesian velocity limit (mm/s), None = no cart limiting
-        # Must be set before super().__init__ calls _init_limits/_init_state
+        # Cartesian velocity limit (mm/s), None = no cart limiting.
+        # Must be set before super().__init__ calls _init_limits/_init_state.
         self._cart_vel_limit: float | None = None
 
-        # Pre-allocated buffers for cart velocity limit calculations (avoids per-call allocations)
+        # Pre-allocated buffers for cart velocity limit calculations (avoids per-call allocations).
         self._q_current_buf = np.zeros(num_dofs, dtype=np.float64)
         self._q_target_buf = np.zeros(num_dofs, dtype=np.float64)
         self._dq_buf = np.zeros(num_dofs, dtype=np.float64)
         self._jacob0_buf = np.zeros((6, num_dofs), dtype=np.float64, order="F")
 
-        # Pre-allocated buffers for Ruckig parameters - each has ONE semantic purpose
-        # Position sync (current/target position share same values)
+        # Each Ruckig-parameter buffer below has ONE semantic purpose, never reused across roles.
         self._sync_pos_buf: list[float] = [0.0] * num_dofs
-        # Limit parameters (max_velocity, max_acceleration, max_jerk)
         self._max_vel_buf: list[float] = [0.0] * num_dofs
         self._max_acc_buf: list[float] = [0.0] * num_dofs
         self._max_jerk_buf: list[float] = [0.0] * num_dofs
-        # Target velocity for jogging
         self._target_vel_buf: list[float] = [0.0] * num_dofs
 
         super().__init__(num_dofs, dt)
@@ -293,11 +290,9 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             q_target: Target joint positions in radians
         """
-        # Apply Cartesian velocity limiting if enabled
         if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
             self._apply_cart_velocity_limit(q_target)
         else:
-            # Reset to hardware limits (reuse buffer)
             self._max_vel_buf[:] = self._hardware_v_max
             self.inp.max_velocity = self._max_vel_buf
 
@@ -317,7 +312,7 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             joint_velocities: Desired velocity for each joint in rad/s (signed)
         """
-        # Use jog-specific velocity limits (~80% of hardware limits) - reuse buffers
+        # Jog uses its own velocity limits (~80% of hardware) rather than the hardware caps.
         for i in range(self.num_dofs):
             self._max_vel_buf[i] = self._jog_v_max[i] * self._vel_scale
             self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
@@ -338,16 +333,15 @@ class StreamingExecutor(RuckigExecutorBase):
         ensure TCP velocity along the direction to target stays within the
         Cartesian velocity limit.
         """
-        # Use pre-allocated buffers to avoid allocations
         self._q_current_buf[:] = self.inp.current_position
         self._q_target_buf[:] = q_target
         np.subtract(self._q_target_buf, self._q_current_buf, out=self._dq_buf)
 
-        # Get the linear part of the Jacobian (first 3 rows)
+        # Linear part of the Jacobian is the first 3 rows.
         PAROL6_ROBOT.robot.jacob0_into(self._q_current_buf, self._jacob0_buf)
         J_lin = self._jacob0_buf[:3, :]
 
-        # Compute Cartesian velocity per unit "scale" along dq direction
+        # Cartesian velocity per unit "scale" along the dq direction.
         cart_vel_per_scale = np.linalg.norm(J_lin @ self._dq_buf)
 
         if cart_vel_per_scale > 1e-6:
@@ -356,18 +350,17 @@ class StreamingExecutor(RuckigExecutorBase):
             )  # mm/s to m/s
             max_scale = v_max_m_s / cart_vel_per_scale
 
-            # Reuse pre-allocated buffer for velocity limits
             for j in range(self.num_dofs):
-                # Joint velocity = dq[j] * scale, so max joint vel = |dq[j]| * max_scale
+                # Joint velocity = dq[j] * scale, so max joint vel = |dq[j]| * max_scale.
                 q_dot_max = min(
                     abs(self._dq_buf[j]) * max_scale, self._hardware_v_max[j]
                 )
-                # Ensure non-zero minimum to avoid Ruckig issues
+                # Non-zero minimum avoids Ruckig issues with zero limits.
                 self._max_vel_buf[j] = max(q_dot_max, 1e-6)
 
             self.inp.max_velocity = self._max_vel_buf
         else:
-            # Near-zero motion, use hardware limits (reuse buffer)
+            # Near-zero motion: fall back to hardware limits.
             self._max_vel_buf[:] = self._hardware_v_max
             self.inp.max_velocity = self._max_vel_buf
 
@@ -384,7 +377,6 @@ class StreamingExecutor(RuckigExecutorBase):
             - finished: True if target reached (position mode) or velocity reached (velocity mode)
         """
         if not self.active:
-            # Sync _pos_out with current position for inactive state
             self._pos_out[:] = self.inp.current_position
             return self._pos_out, self._zeros_np, True
 
@@ -393,7 +385,6 @@ class StreamingExecutor(RuckigExecutorBase):
         if result in _RUCKIG_ERRORS:
             return self._pos_out, self._zeros_np, True
 
-        # pos/vel are pre-allocated buffers from _tick_ruckig
         return pos, vel, result == Result.Finished
 
     def reset_limits(self) -> None:
@@ -446,13 +437,12 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         Args:
             dt: Control cycle time in seconds
         """
-        # Reference pose for tangent space computations
-        # Must be set before super().__init__ calls _init_limits/_init_state
+        # Reference pose for tangent space computations.
+        # Must be set before super().__init__ calls _init_limits/_init_state.
         self.reference_pose: np.ndarray | None = None
 
-        # Pre-allocated arrays for Ruckig parameters (reused to avoid per-tick allocations)
-        # Ruckig copies values on assignment, so we update in-place then assign same array
-        # Must be created before super().__init__() since _apply_limits() is called during init
+        # Ruckig copies values on assignment, so these are updated in-place then re-assigned.
+        # Must exist before super().__init__(), which calls _apply_limits() during init.
         self._max_velocity_arr = np.zeros(6, dtype=np.float64)
         self._max_acceleration_arr = np.zeros(6, dtype=np.float64)
         self._max_jerk_arr = np.zeros(6, dtype=np.float64)
@@ -461,16 +451,14 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
         super().__init__(num_dofs=6, dt=dt)  # 6-DOF: [x, y, z, wx, wy, wz]
 
-        # Pre-allocated numpy arrays for hot path (avoids allocations per tick)
         self._tangent_buf = np.zeros(6, dtype=np.float64)
         self._vel_np_buf = np.zeros(6, dtype=np.float64)
         self._world_vel_buf = np.zeros(6, dtype=np.float64)
 
-        # SE3 workspace buffers for JIT functions (avoids allocations in pose conversions)
+        # SE3 workspace buffers let the JIT pose conversions run with zero allocation.
         self._ref_inv_buf = np.zeros((4, 4), dtype=np.float64)
         self._delta_buf = np.zeros((4, 4), dtype=np.float64)
         self._result_pose_buf = np.zeros((4, 4), dtype=np.float64)
-        # Additional workspace for se3_log_ws/se3_exp_ws (zero internal allocation)
         self._omega_ws = np.zeros(3, dtype=np.float64)
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
         self._V_ws = np.zeros((3, 3), dtype=np.float64)  # Reused for V and V_inv
@@ -502,17 +490,14 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
         Uses pre-allocated numpy arrays to avoid per-tick allocations.
         """
-        # Update velocity limits in-place
         self._max_velocity_arr[:3] = self._v_lin_max * self._vel_scale
         self._max_velocity_arr[3:] = self._v_ang_max * self._vel_scale
         self.inp.max_velocity = self._max_velocity_arr
 
-        # Update acceleration limits in-place
         self._max_acceleration_arr[:3] = self._a_lin_max * self._acc_scale
         self._max_acceleration_arr[3:] = self._a_ang_max * self._acc_scale
         self.inp.max_acceleration = self._max_acceleration_arr
 
-        # Update jerk limits in-place
         self._max_jerk_arr[:3] = self._j_lin_max
         self._max_jerk_arr[3:] = self._j_ang_max
         self.inp.max_jerk = self._max_jerk_arr
@@ -551,7 +536,6 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         if self.reference_pose is None:
             self._tangent_buf.fill(0.0)
             return self._tangent_buf
-        # Use JIT function with pre-allocated workspace buffers (zero allocation)
         _pose_to_tangent_jit(
             self.reference_pose,
             pose,
@@ -576,7 +560,6 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         """
         if self.reference_pose is None:
             return np.eye(4, dtype=np.float64)
-        # Copy tangent to buffer and use JIT function with pre-allocated workspace
         self._tangent_buf[:] = tangent
         _tangent_to_pose_jit(
             self.reference_pose,
@@ -625,7 +608,6 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             velocity: Target velocity (m/s for linear, rad/s for rotation)
             is_rotation: True for rotation axes (RX, RY, RZ)
         """
-        # Update target velocity in-place (zero allocation)
         self._target_velocity_arr.fill(0.0)
         if is_rotation:
             self._target_velocity_arr[3 + axis] = velocity
@@ -661,18 +643,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             logger.warning("set_jog_velocity_1dof_wrf called without reference_pose")
             return
 
-        # Reuse pre-allocated buffer for world velocity
         self._world_vel_buf.fill(0.0)
         if is_rotation:
             self._world_vel_buf[3 + axis] = velocity
         else:
             self._world_vel_buf[axis] = velocity
 
-        # Transform from world frame to body frame (tangent space)
-        # Body velocity = R^T @ world velocity
+        # Transform world frame to body frame (tangent space): body velocity = R^T @ world velocity.
         R = self.reference_pose[:3, :3]
 
-        # JIT-compiled transform into target buffer (zero allocation)
         np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
         np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
 
@@ -720,9 +699,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
                 True,
             )
 
-        # Convert tangent back to pose
         smoothed_pose = self._tangent_to_pose(pos)
-        # Copy velocity into pre-allocated buffer
         self._vel_np_buf[:] = vel
 
         # Don't auto-deactivate in velocity mode - caller controls via set_jog_velocity(0)

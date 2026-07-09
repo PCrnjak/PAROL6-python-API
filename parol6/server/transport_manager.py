@@ -60,7 +60,6 @@ class TransportManager:
         except Exception as e:
             logger.debug("Failed to load persisted COM port: %s", e)
 
-        # Create transport
         if self.serial_port or is_simulation_mode():
             self.transport = create_and_connect_transport(
                 port=self.serial_port,
@@ -166,21 +165,18 @@ class TransportManager:
             # Update env to drive transport_factory.is_simulation_mode()
             os.environ["PAROL6_FAKE_SERIAL"] = "1" if enable else "0"
 
-            # Disconnect existing transport
             if self.transport:
                 try:
                     self.transport.disconnect()
                 except Exception as e:
                     logger.debug("Transport disconnect: %s", e)
 
-            # Recreate transport according to new mode
             self.transport = create_and_connect_transport(
                 port=self.serial_port,
                 baudrate=self.serial_baudrate,
                 auto_find_port=True,
             )
 
-            # If enabling simulator, sync to last known controller state
             if (
                 enable
                 and sync_state is not None
@@ -197,7 +193,6 @@ class TransportManager:
                 self.first_frame_received = False
                 logger.info("Simulator mode toggled to %s", "on" if enable else "off")
 
-                # Wait for first frame with timeout
                 if not self._wait_for_first_frame(timeout=0.5):
                     logger.warning(
                         "Timeout waiting for first frame after SIMULATOR toggle"

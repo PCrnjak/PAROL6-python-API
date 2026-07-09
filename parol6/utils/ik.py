@@ -186,7 +186,6 @@ def solve_ik(
     result.violations = None
 
     if result.success:
-        # JIT-compiled safety validation
         ok, is_recovery, idx = _ik_safety_check(
             result.q,
             current_q,
@@ -220,9 +219,6 @@ def solve_ik(
     return result
 
 
-# -----------------------------
-# Fast, vectorized limit checking with edge-triggered logging
-# -----------------------------
 # Pre-allocated buffers for check_limits (avoid per-call allocation)
 _cl_viol = np.zeros(6, dtype=np.bool_)
 _cl_below = np.zeros(6, dtype=np.bool_)
@@ -332,7 +328,6 @@ def check_limits(
     if log:
         any_viol = not all_ok
 
-        # Edge-triggered violation logs
         if any_viol and (
             np.any(_cl_viol != _last_violation_mask) or not _last_any_violation
         ):

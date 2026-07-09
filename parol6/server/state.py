@@ -141,8 +141,8 @@ class GripperHWState:
 class GripperModeResetTracker:
     """Tracks gripper mode for auto-reset functionality."""
 
-    calibration_sent: bool = False  # Flag for calibration mode
-    error_clear_sent: bool = False  # Flag for error clear mode
+    calibration_sent: bool = False
+    error_clear_sent: bool = False
 
 
 @dataclass
@@ -184,7 +184,6 @@ class ControllerState:
     # Robot telemetry and command buffers - using ndarray for efficiency
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
 
-    # int32 joint buffers
     Position_out: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
@@ -209,7 +208,6 @@ class ControllerState:
     # Tool teleport: when >= 0, snap gripper to this position (0-255) on next tick
     tool_teleport_pos: float = -1.0
 
-    # uint8 flag/bitfield buffers
     Affected_joint_out: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
     )

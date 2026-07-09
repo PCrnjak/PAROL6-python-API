@@ -265,7 +265,6 @@ class DryRunRobotClient:
         # to the planner which handles them as inline segments.
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if cmd_cls is not None and issubclass(cmd_cls, (JogJCommand, JogLCommand)):
-            # Flush blend buffer, sync state, simulate jog
             self._planner.flush()
             self._state.Position_in[:] = self._planner.state.Position_in
             cmd = cmd_cls(params)
@@ -434,7 +433,6 @@ class DryRunRobotClient:
             max(2, int(duration * CONTROL_RATE_HZ)),
         )
 
-        # Current pose via FK
         current_se3 = get_fkine_se3(self._state)
         se3_rpy(current_se3, self._rpy_buf)
         # pose = [x_m, y_m, z_m, rx_rad, ry_rad, rz_rad]
@@ -495,7 +493,6 @@ class DryRunRobotClient:
 
             radians[i] = last_valid_q
 
-        # Update state to final position
         rad_to_steps(last_valid_q, steps_buf)
         self._state.Position_in[:] = steps_buf
 
