@@ -1310,18 +1310,31 @@ class AsyncRobotClient(_RobotClientABC):
             MotionError: If the pipeline errored at or before command_index.
         """
 
+        def _blocking_error(s: StatusBuffer) -> RobotError | None:
+            # A standing error fails this wait only when the frame proves it
+            # postdates this command's acceptance (acceptance clears any
+            # stale error server-side, and accepted_index is monotonic).
+            # Without that ordering, a frame generated before acceptance can
+            # replay a minutes-old rejection against an unrelated command.
+            # accepted_index < 0 means a pre-field status producer — keep the
+            # legacy (unordered) behavior for it.
+            err = s.error
+            if err is None or err.command_index > command_index:
+                return None
+            if s.accepted_index < 0 or s.accepted_index >= command_index:
+                return err
+            return None
+
         def _done(s: StatusBuffer) -> bool:
             if s.completed_index >= command_index:
                 return True
-            if s.error is not None and s.error.command_index <= command_index:
-                return True
-            return False
+            return _blocking_error(s) is not None
 
         ok = await self.wait_status(_done, timeout=timeout)
         if ok:
-            s = self._shared_status
-            if s.error is not None and s.error.command_index <= command_index:
-                raise MotionError(s.error)
+            err = _blocking_error(self._shared_status)
+            if err is not None:
+                raise MotionError(err)
         return ok
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
