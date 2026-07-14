@@ -687,6 +687,13 @@ class Controller:
                 logger.log(TRACE, "queued_streamables_removed count=%d", removed)
             try:
                 cmd_index = self._executor.queue_command(addr, command, None)
+                # Acceptance clears the standing error, like every other
+                # command path — otherwise a rejection keeps broadcasting
+                # across minutes of streaming-only activity and poisons a
+                # later wait_command with a stale error.
+                if state.error is not None:
+                    state.error = None
+                    state.action_state = ActionState.IDLE
                 logger.log(TRACE, "Command %s queued (index=%d)", cmd_name, cmd_index)
                 if cmd_type and self._ack_policy.requires_ack(cmd_type):
                     self._reply_ok_index(addr, cmd_index)

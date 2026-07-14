@@ -158,6 +158,7 @@ class StatusCache:
         # Queue tracking fields
         self._executing_index: int = -1
         self._completed_index: int = -1
+        self._accepted_index: int = -1
         self._last_checkpoint: str = ""
 
         # Error tracking field
@@ -487,11 +488,13 @@ class StatusCache:
         queue_changed = (
             self._executing_index != state.executing_command_index
             or self._completed_index != state.completed_command_index
+            or self._accepted_index != state.next_command_index - 1
             or self._last_checkpoint != state.last_checkpoint
         )
         if queue_changed:
             self._executing_index = state.executing_command_index
             self._completed_index = state.completed_command_index
+            self._accepted_index = state.next_command_index - 1
             self._last_checkpoint = state.last_checkpoint
 
         error_changed = self._error is not state.error
@@ -558,6 +561,7 @@ class StatusCache:
                 collision_active=self._collision_active,
                 collision_pairs=self._collision_pairs,
                 scene_epoch=self._last_shapes_version,
+                accepted_index=self._accepted_index,
             )
             self._binary_dirty = False
         return self._binary_cache
