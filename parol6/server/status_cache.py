@@ -164,6 +164,9 @@ class StatusCache:
         # Error tracking field
         self._error: RobotError | None = None
 
+        # All-joints-homed tracking field
+        self._homed: bool = False
+
         # Self-collision viz tracking
         self._collision_active: bool = False
         self._collision_pairs: tuple[tuple[str, str], ...] = ()
@@ -501,6 +504,16 @@ class StatusCache:
         if error_changed:
             self._error = state.error
 
+        # Scalar loop keeps the 100Hz path allocation-free (no slice/temporary).
+        homed = True
+        for i in range(6):
+            if not state.Homed_in[i]:
+                homed = False
+                break
+        homed_changed = self._homed != homed
+        if homed_changed:
+            self._homed = homed
+
         collision_changed = (
             self._collision_active != state.collision_active
             or self._collision_pairs != state.collision_pairs
@@ -528,6 +541,7 @@ class StatusCache:
             or action_changed
             or queue_changed
             or error_changed
+            or homed_changed
             or collision_changed
             or depth_changed
         ):
@@ -562,6 +576,7 @@ class StatusCache:
                 collision_pairs=self._collision_pairs,
                 scene_epoch=self._last_shapes_version,
                 accepted_index=self._accepted_index,
+                homed=self._homed,
             )
             self._binary_dirty = False
         return self._binary_cache

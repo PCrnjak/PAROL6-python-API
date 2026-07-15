@@ -115,6 +115,15 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Command aborted. Robot stopped.",
         remedy="Check robot state. May need to re-home.",
     ),
+    ErrorCode.MOTN_NOT_HOMED: _ErrorTemplate(
+        title="Robot not homed",
+        cause=(
+            "Planned motion requested while the robot is not homed — "
+            "reported joint positions are unreferenced until homing."
+        ),
+        effect="Motion command rejected before dispatch.",
+        remedy="Run home() first. Jogging remains available.",
+    ),
     # -- Communication --
     ErrorCode.COMM_QUEUE_FULL: _ErrorTemplate(
         title="Command queue full",

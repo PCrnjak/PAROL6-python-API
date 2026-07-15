@@ -17,7 +17,7 @@ import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.commands._collision_guard import guard_joint_path
-from parol6.commands.base import TrajectoryMoveCommandBase
+from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
 from parol6.config import (
     INTERVAL_S,
     MAX_BLEND_LOOKAHEAD,
@@ -79,6 +79,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
     def do_setup(self, state: ControllerState) -> None:
         """Build trajectory from current position to target using unified motion pipeline."""
+        guard_homed(state)
         steps_to_rad(state.Position_in, self._q_rad_buf)
         target_rad = self._get_target_rad(state, self._q_rad_buf)
         current_rad = self._q_rad_buf
@@ -116,6 +117,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         next_cmds: "list[TrajectoryMoveCommandBase]",
     ) -> int:
         """Build composite joint-space trajectory with blend zones."""
+        guard_homed(state)
         if self.blend_radius <= 0 or not next_cmds:
             self.do_setup(state)
             return 0

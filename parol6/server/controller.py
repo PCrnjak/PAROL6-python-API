@@ -745,16 +745,25 @@ class Controller:
         state.clear_collision()
 
         cmd_index = self._assign_command_index(state)
-        # Only sync Position_in when segment player is idle — if segments are
-        # active/queued (e.g. homing), the planner's internal tracking is correct
-        # and Position_in may reflect a mid-motion position.
+        # Only sync Position_in / homed when segment player is idle — if
+        # segments are active/queued (e.g. homing), the planner's internal
+        # tracking is correct: Position_in may reflect a mid-motion position
+        # and the planner has already predicted a queued HOME's homed flags.
         segment_idle = not self._segment_player.active
         pos_snapshot = state.Position_in.copy() if segment_idle else None
+        homed_snapshot: bool | None = None
+        if segment_idle:
+            homed_snapshot = True
+            for i in range(6):
+                if not state.Homed_in[i]:
+                    homed_snapshot = False
+                    break
         self._planner.submit(
             PlanCommand(
                 command_index=cmd_index,
                 params=command.p,
                 position_in=pos_snapshot,
+                homed=homed_snapshot,
             )
         )
         if cmd_type and self._ack_policy.requires_ack(cmd_type):

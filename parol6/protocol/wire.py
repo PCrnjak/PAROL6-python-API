@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -1337,6 +1337,7 @@ def pack_status(
     collision_pairs: tuple[tuple[str, str], ...] = (),
     scene_epoch: int = 0,
     accepted_index: int = -1,
+    homed: bool = True,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1380,6 +1381,7 @@ def pack_status(
             collision_pairs,
             scene_epoch,
             accepted_index,
+            homed,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1424,6 +1426,9 @@ class StatusBuffer:
     # the field. Lets waiters order a standing error against their own
     # command's acceptance (acceptance clears stale errors server-side).
     accepted_index: int = -1
+    # All joints homed. True from producers that predate the field (permissive:
+    # old servers gate nothing, so claiming unhomed would be a false alarm).
+    homed: bool = True
     # Built once in __post_init__, aliasing the two enable arrays the decoder
     # mutates in place.
     cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
@@ -1469,6 +1474,7 @@ class StatusBuffer:
             collision_pairs=list(self.collision_pairs),
             scene_epoch=self.scene_epoch,
             accepted_index=self.accepted_index,
+            homed=self.homed,
         )
 
 
@@ -1481,7 +1487,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      error, queued_segments, queued_duration, action_params,
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
-                     accepted_index]
+                     accepted_index, homed]
 
     Args:
         data: Raw msgpack bytes
@@ -1552,6 +1558,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         if len(msg) > 22:
             buf.scene_epoch = int(msg[22])
         buf.accepted_index = int(msg[23]) if len(msg) > 23 else -1
+        buf.homed = bool(msg[24]) if len(msg) > 24 else True
 
         return True
     except Exception as e:

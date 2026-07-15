@@ -94,6 +94,7 @@ class PlanCommand:
     position_in: np.ndarray | None = (
         None  # current Position_in (None = use planner internal)
     )
+    homed: bool | None = None  # all joints homed (None = use planner internal)
 
 
 @dataclass
@@ -151,6 +152,11 @@ class PlannerState:
     """
 
     Position_in: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    # Same shape/dtype as ControllerState.Homed_in so guard_homed reads both.
+    # Defaults to homed: the planner is fed real flags at dispatch (PlanCommand
+    # snapshot) and predicts a queued HOME; a pessimistic default would refuse
+    # dry runs that were seeded from an already-homed robot.
+    Homed_in: np.ndarray = field(default_factory=lambda: np.ones(8, dtype=np.uint8))
     motion_profile: str = "TOPPRA"
     current_tool: str = "NONE"
     current_tool_variant: str = ""
@@ -482,6 +488,7 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
+            self.state.Homed_in.fill(1)
         elif isinstance(params, SetShapesCmd):
             # Only reachable via the DRY-RUN planner: a script's set_shapes()
             # must shape its preview world. The live path routes SET_SHAPES as
@@ -515,6 +522,8 @@ class PlannerWorker:
         """Route a PlanCommand through the planner and emit segments."""
         if msg.position_in is not None:
             self._planner.state.Position_in[:] = msg.position_in
+        if msg.homed is not None:
+            self._planner.state.Homed_in.fill(1 if msg.homed else 0)
 
         segments = self._planner.process(msg.params, msg.command_index)
         for seg in segments:

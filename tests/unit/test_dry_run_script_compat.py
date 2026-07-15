@@ -118,3 +118,29 @@ class TestDryRunScriptCompat:
     def test_wait_motion(self, client):
         client.move_j(ANGLES_A, speed=0.5)
         client.wait_motion()
+
+
+class TestDryRunHomedGate:
+    """The dry run mirrors the live unhomed-motion gate: seeded from an
+    unhomed robot, planned moves are refused with the actionable not-homed
+    error (not a garbage collision prediction from unreferenced positions);
+    a home() in the script establishes references and later moves plan
+    cleanly."""
+
+    def test_unhomed_seed_gates_planned_moves_until_home(self):
+        client = DryRunRobotClient(initial_joints_deg=[0.0] * 6, initial_homed=False)
+
+        result = client.move_j(ANGLES_A, speed=0.5)
+        assert result is not None and result.error is not None
+        assert "not homed" in str(result.error)
+
+        # home() snaps to the home pose and establishes references —
+        # the first move after it must NOT error.
+        assert client.home().error is None
+        result = client.move_j(ANGLES_A, speed=0.5)
+        assert result is not None and result.error is None
+
+    def test_homed_seed_plans_immediately(self):
+        client = DryRunRobotClient(initial_joints_deg=HOME, initial_homed=True)
+        result = client.move_j(ANGLES_A, speed=0.5)
+        assert result is not None and result.error is None

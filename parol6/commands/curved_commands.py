@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TypeVar
 import numpy as np
 
 from parol6.commands._collision_guard import guard_joint_path
-from parol6.commands.base import TrajectoryMoveCommandBase
+from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
 from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import CircularMotion, JointPath, SplineMotion, TrajectoryBuilder
 from parol6.protocol.wire import (
@@ -115,6 +115,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute trajectory from current position."""
+        guard_homed(state)
         self.log_debug("  -> Preparing %s...", self.name)
 
         current_pose = self.get_current_pose(state)
