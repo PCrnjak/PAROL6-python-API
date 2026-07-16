@@ -104,21 +104,28 @@ class TestPlannerDirect:
         assert seg.command_index == 0
         assert isinstance(seg.params, SelectToolCmd)
 
-    def test_home_produces_inline_and_updates_position(self, worker, segment_queue):
-        """Home command should produce InlineSegment and update planner position."""
-        # Start from non-home position
-        worker.state.Position_in[:] = _deg_to_steps(W1)
+    def test_home_routes_by_referenced_state(self, worker, segment_queue):
+        """Unhomed HOME passes through as an InlineSegment (firmware
+        sequence); already-homed HOME fast-paths to a planned return
+        trajectory. Both leave the planner's predicted position at home."""
         home_steps = _home_steps()
 
-        params = HomeCmd()
-        msg = PlanCommand(command_index=0, params=params)
-
-        worker.process_command(msg)
-
+        worker.state.Position_in[:] = _deg_to_steps(W1)
+        worker.process_command(
+            PlanCommand(command_index=0, params=HomeCmd(), homed=False)
+        )
         seg = segment_queue.get(timeout=1.0)
         assert isinstance(seg, InlineSegment)
-        # Planner's position should now be home
         np.testing.assert_array_equal(worker.state.Position_in, home_steps)
+
+        worker.state.Position_in[:] = _deg_to_steps(W1)
+        worker.process_command(
+            PlanCommand(command_index=1, params=HomeCmd(), homed=True)
+        )
+        seg = segment_queue.get(timeout=1.0)
+        assert isinstance(seg, TrajectorySegment)
+        np.testing.assert_allclose(seg.trajectory_steps[-1], home_steps, atol=2)
+        np.testing.assert_allclose(worker.state.Position_in, home_steps, atol=2)
 
     def test_checkpoint_produces_inline_segment(self, worker, segment_queue):
         """Checkpoint should produce an InlineSegment."""

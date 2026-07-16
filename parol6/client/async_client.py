@@ -660,6 +660,10 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Home the robot to its home position.
 
+        Unhomed, this runs the full referencing sequence (each joint seeks
+        its limit switch, then moves to standby). Already homed, it returns
+        to standby with a normal planned, collision-checked joint move.
+
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Category: Motion

@@ -178,6 +178,10 @@ class RobotClient:
     def home(self, wait: bool = False, timeout: float = 60.0) -> int:
         """Home the robot to its home position.
 
+        Unhomed, this runs the full referencing sequence (each joint seeks
+        its limit switch, then moves to standby). Already homed, it returns
+        to standby with a normal planned, collision-checked joint move.
+
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:

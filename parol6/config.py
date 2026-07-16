@@ -201,6 +201,10 @@ _joint_ratio = PAROL6_ROBOT.joint.ratio
 STANDBY_ANGLES_DEG: list[float] = list(PAROL6_ROBOT.joint.standby_deg)
 HOME_ANGLES_DEG: list[float] = STANDBY_ANGLES_DEG
 
+# Velocity fraction for the fast-path home return (an already-referenced
+# robot returns to standby with a planned move instead of the switch-seek).
+HOME_RETURN_SPEED_FRAC: float = 0.5
+
 
 # JIT helper for rad_to_steps (needs wrapper because of thread-local scratch buffer)
 @njit(cache=True)

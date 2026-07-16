@@ -144,3 +144,20 @@ class TestDryRunHomedGate:
         client = DryRunRobotClient(initial_joints_deg=HOME, initial_homed=True)
         result = client.move_j(ANGLES_A, speed=0.5)
         assert result is not None and result.error is None
+
+    def test_referenced_home_previews_as_return_move(self):
+        import numpy as np
+
+        client = DryRunRobotClient(initial_joints_deg=ANGLES_A, initial_homed=True)
+        result = client.home()
+        assert result is not None and result.error is None
+        assert result.duration > 0.0
+        assert len(result.joint_trajectory_rad) > 1
+        assert np.allclose(np.degrees(result.end_joints_rad), HOME, atol=0.5)
+
+        # Unreferenced seed keeps the instant snap — the switch-seek can't
+        # be previewed from unreferenced positions.
+        client = DryRunRobotClient(initial_joints_deg=[0.0] * 6, initial_homed=False)
+        result = client.home()
+        assert result is not None and result.error is None
+        assert result.duration == 0.0
