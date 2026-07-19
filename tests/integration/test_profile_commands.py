@@ -17,7 +17,7 @@ class TestProfileCommands:
 
     def test_profile_returns_default(self, client, server_proc):
         """Test GETPROFILE returns default profile (TOPPRA) after reset."""
-        client.reset()
+        client.reset_state()
         result = client.profile()
         assert result is not None
         assert result == "TOPPRA"

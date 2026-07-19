@@ -16,11 +16,12 @@ from parol6.config import save_com_port
 from parol6.protocol.wire import (
     CmdType,
     ConnectHardwareCmd,
-    HaltCmd,
-    ResumeCmd,
+    EstopCmd,
+    ResetCmd,
     SelectProfileCmd,
     SetTcpOffsetCmd,
     SimulatorCmd,
+    StopCmd,
     WriteIOCmd,
 )
 from parol6.protocol.wire import CommandCode
@@ -34,16 +35,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@register_command(CmdType.RESUME)
-class ResumeCommand(SystemCommand[ResumeCmd]):
-    """Re-enable the robot controller, allowing motion commands."""
+@register_command(CmdType.RESET)
+class ResetCommand(SystemCommand[ResetCmd]):
+    """Clear a latched protective stop, re-enabling motion commands."""
 
-    PARAMS_TYPE = ResumeCmd
+    PARAMS_TYPE = ResetCmd
 
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        logger.info("RESUME command executed")
+        logger.info("RESET command executed")
         state.enabled = True
         state.disabled_reason = ""
         state.Command_out = CommandCode.ENABLE
@@ -52,20 +53,45 @@ class ResumeCommand(SystemCommand[ResumeCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-@register_command(CmdType.HALT)
-class HaltCommand(SystemCommand[HaltCmd]):
-    """Halt the robot — stop all motion and disable."""
+@register_command(CmdType.ESTOP)
+class EstopCommand(SystemCommand[EstopCmd]):
+    """Protective stop: stop all motion and latch the controller disabled
+    until RESET.
 
-    PARAMS_TYPE = HaltCmd
+    Motors stay energized (zero speed, holding position) — PAROL6 steppers
+    have no brakes, so de-energizing would let the arm sag. The protective
+    stop is the software latch, not motor power.
+    """
+
+    PARAMS_TYPE = EstopCmd
 
     __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        logger.info("HALT command executed")
+        logger.info("ESTOP command executed")
         state.Speed_out.fill(0)
         state.enabled = False
-        state.disabled_reason = "User requested halt"
-        state.Command_out = CommandCode.DISABLE
+        state.disabled_reason = "Protective stop (estop)"
+        state.Command_out = CommandCode.IDLE
+
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.STOP)
+class StopCommand(SystemCommand[StopCmd]):
+    """Stop all motion — the controller stays enabled and accepts the next
+    command immediately. The motion pipeline (active trajectory + queue) is
+    canceled controller-side."""
+
+    PARAMS_TYPE = StopCmd
+
+    __slots__ = ()
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        logger.info("STOP command executed")
+        state.Speed_out.fill(0)
+        state.Command_out = CommandCode.IDLE
 
         self.finish()
         return ExecutionStatusCode.COMPLETED

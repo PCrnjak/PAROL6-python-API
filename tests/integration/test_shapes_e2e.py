@@ -112,7 +112,7 @@ def test_set_shapes_mid_flight_halts_streaming_move(client: RobotClient, server_
         time.sleep(0.3)
         assert abs(_j1(client) - j1_stop) < 0.5, "arm kept moving after the halt"
     finally:
-        client.reset()
+        client.reset_state()
         assert client.set_shapes([]) == 1
 
 
@@ -150,7 +150,7 @@ def test_set_shapes_mid_flight_rejects_queued_move_at_activation(
         time.sleep(0.3)
         assert abs(_j1(client) - 60.0) < 2.0, "second move streamed despite the wall"
     finally:
-        client.reset()
+        client.reset_state()
         assert client.set_shapes([]) == 1
 
 

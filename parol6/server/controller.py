@@ -23,8 +23,12 @@ from parol6.commands.base import (
     SystemCommand,
 )
 from parol6.commands.shape_commands import SetShapesCommand
-from parol6.commands.system_commands import SelectProfileCommand
-from parol6.commands.utility_commands import ResetCommand
+from parol6.commands.system_commands import (
+    EstopCommand,
+    SelectProfileCommand,
+    StopCommand,
+)
+from parol6.commands.utility_commands import ResetStateCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
@@ -798,10 +802,23 @@ class Controller:
             command.setup(state)
             code = command.tick(state)
 
-            # Reset: cancel motion pipeline so stale segments don't play.
+            # Stop/estop: cancel the motion pipeline, or the segment player
+            # keeps playing the active trajectory (rewriting Command_out and
+            # fresh speeds every tick) and the "stopped" robot drives on.
+            if isinstance(command, (StopCommand, EstopCommand)):
+                reason = (
+                    "Protective stop"
+                    if isinstance(command, EstopCommand)
+                    else "User requested stop"
+                )
+                self._segment_player.cancel(state)
+                self._executor.cancel_active_command(reason)
+                self._executor.clear_queue(reason)
+
+            # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
             # so its PAROL6_ROBOT singleton matches the controller's.
-            if isinstance(command, ResetCommand):
+            if isinstance(command, ResetStateCommand):
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")

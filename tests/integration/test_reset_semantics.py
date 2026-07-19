@@ -29,7 +29,7 @@ def test_wait_command_ignores_pre_reset_frames(client: RobotClient, server_proc)
     # — the stale high-water mark that used to alias recycled indices.
     assert client.wait_status(_capture, timeout=5.0)
 
-    client.reset()
+    client.reset_state()
     idx = client.delay(1.0)
     assert idx > seen["completed"], (
         f"index {idx} recycled across reset (pre-reset completed_index was "

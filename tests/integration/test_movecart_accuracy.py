@@ -14,7 +14,7 @@ class TestMoveLAccuracy:
     def test_move_l_from_home(self, client, server_proc):
         """Test move_l accuracy starting from home position."""
         # Ensure controller is enabled before motion
-        assert client.resume() > 0
+        assert client.reset() > 0
         # Home the robot first
         assert client.home() >= 0
         assert client.wait_motion(timeout=15.0)
@@ -65,7 +65,7 @@ class TestMoveLAccuracy:
     def test_move_l_multiple_targets(self, client, server_proc):
         """Test move_l accuracy with multiple sequential targets."""
         # Ensure controller is enabled before motion
-        assert client.resume() > 0
+        assert client.reset() > 0
         # Home first
         assert client.home() >= 0
         assert client.wait_motion(timeout=15.0)

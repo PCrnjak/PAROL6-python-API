@@ -117,13 +117,14 @@ class CmdType(IntEnum):
     TCP_OFFSET = auto()
 
     # System commands (execute regardless of enable state)
-    RESUME = auto()
-    HALT = auto()
+    RESET = auto()
+    ESTOP = auto()
+    STOP = auto()
     WRITE_IO = auto()
     CONNECT_HARDWARE = auto()
     SIMULATOR = auto()
     SELECT_PROFILE = auto()
-    RESET = auto()
+    RESET_STATE = auto()
     RESET_LOOP_STATS = auto()
 
     # Motion commands — queued, pre-computed trajectory
@@ -504,26 +505,34 @@ class HomeCmd(
     pass
 
 
-class ResumeCmd(
-    msgspec.Struct, tag=int(CmdType.RESUME), array_like=True, frozen=True, gc=False
-):
-    """RESUME: [CmdType.RESUME] — re-enable the controller."""
-
-    pass
-
-
-class HaltCmd(
-    msgspec.Struct, tag=int(CmdType.HALT), array_like=True, frozen=True, gc=False
-):
-    """HALT: [CmdType.HALT] — stop all motion and disable."""
-
-    pass
-
-
 class ResetCmd(
     msgspec.Struct, tag=int(CmdType.RESET), array_like=True, frozen=True, gc=False
 ):
-    """RESET: [CmdType.RESET]"""
+    """RESET: [CmdType.RESET] — clear a latched protective stop, re-enabling motion."""
+
+    pass
+
+
+class EstopCmd(
+    msgspec.Struct, tag=int(CmdType.ESTOP), array_like=True, frozen=True, gc=False
+):
+    """ESTOP: [CmdType.ESTOP] — protective stop: stop all motion and latch disabled until RESET."""
+
+    pass
+
+
+class StopCmd(
+    msgspec.Struct, tag=int(CmdType.STOP), array_like=True, frozen=True, gc=False
+):
+    """STOP: [CmdType.STOP] — cancel active motion and queue; controller stays enabled."""
+
+    pass
+
+
+class ResetStateCmd(
+    msgspec.Struct, tag=int(CmdType.RESET_STATE), array_like=True, frozen=True, gc=False
+):
+    """RESET_STATE: [CmdType.RESET_STATE] — reset controller state (shapes, tool, errors)."""
 
     pass
 
@@ -1798,9 +1807,10 @@ __all__ = [
     "JogJCmd",
     "JogLCmd",
     # Command structs — system/control
-    "ResumeCmd",
-    "HaltCmd",
     "ResetCmd",
+    "EstopCmd",
+    "StopCmd",
+    "ResetStateCmd",
     "ResetLoopStatsCmd",
     "WriteIOCmd",
     "ConnectHardwareCmd",

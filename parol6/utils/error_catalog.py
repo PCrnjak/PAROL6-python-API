@@ -154,13 +154,13 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         title="Controller disabled",
         cause="Motion command sent while controller is disabled. {detail}",
         effect="Command rejected.",
-        remedy="Call resume() to re-enable the controller.",
+        remedy="Call reset() to re-enable the controller.",
     ),
     ErrorCode.SYS_ESTOP_ACTIVE: _ErrorTemplate(
         title="E-stop active",
         cause="Emergency stop is currently engaged.",
-        effect="All motion halted. Queue cleared.",
-        remedy="Release the E-stop button and call resume().",
+        effect="All motion stopped. Queue cleared.",
+        remedy="Release the E-stop button and call reset().",
     ),
     ErrorCode.SYS_PORT_SAVE_FAILED: _ErrorTemplate(
         title="Serial port save failed",

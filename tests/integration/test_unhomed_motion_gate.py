@@ -26,7 +26,7 @@ def test_planned_motion_refused_until_homed(client: RobotClient, server_proc):
 
     # The autouse fixture homes; reset back to the unhomed boot state
     # (Homed_in and Position_in zeroed — exactly how a controller starts).
-    client.reset()
+    client.reset_state()
 
     # The STATUS stream reports the unhomed state (WC feeds it to dry runs).
     assert client.wait_status(lambda s: not s.homed, timeout=2.0)

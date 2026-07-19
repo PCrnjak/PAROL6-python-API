@@ -112,7 +112,7 @@ class RobotClient:
     Can be used as a context manager to ensure proper cleanup:
 
         with RobotClient() as client:
-            client.resume()
+            client.home()
             ...
     """
 
@@ -198,21 +198,33 @@ class RobotClient:
         """Instantly set joint angles and optional tool positions (simulator only)."""
         return _run(self._inner.teleport(angles_deg, tool_positions=tool_positions))
 
-    def resume(self) -> int:
-        """Re-enable the robot controller, allowing motion commands.
+    def stop(self) -> int:
+        """Stop all motion — cancel the active move and clear the queue.
+
+        The controller stays enabled and holding position; the next motion
+        command is accepted immediately.
 
         Returns:
             1 if acknowledged, 0 on failure.
         """
-        return _run(self._inner.resume())
+        return _run(self._inner.stop())
 
-    def halt(self) -> int:
-        """Halt the robot — stop all motion and disable.
+    def estop(self) -> int:
+        """Protective stop: stop all motion and latch the controller
+        disabled until ``reset()``.
 
         Returns:
             1 if acknowledged, 0 on failure.
         """
-        return _run(self._inner.halt())
+        return _run(self._inner.estop())
+
+    def reset(self) -> int:
+        """Clear a latched protective stop, re-enabling motion.
+
+        Returns:
+            1 if acknowledged, 0 on failure.
+        """
+        return _run(self._inner.reset())
 
     def simulator(self, enabled: bool) -> int:
         """Enable or disable simulator mode."""
@@ -233,9 +245,9 @@ class RobotClient:
         """
         return _run(self._inner.connect_hardware(port_str))
 
-    def reset(self) -> int:
+    def reset_state(self) -> int:
         """Reset controller state to initial values."""
-        return _run(self._inner.reset())
+        return _run(self._inner.reset_state())
 
     # ---------- status / queries ----------
     def ping(self) -> PingResult | None:

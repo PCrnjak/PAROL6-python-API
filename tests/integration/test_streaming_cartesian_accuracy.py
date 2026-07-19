@@ -48,7 +48,7 @@ class TestServoCartesianAccuracy:
 
         Tests the servo Cartesian path (replaces old stream_on + move_cartesian).
         """
-        assert client.resume() > 0
+        assert client.reset() > 0
         assert client.home() >= 0
         assert client.wait_motion(timeout=15.0)
 
@@ -81,7 +81,7 @@ class TestServoCartesianAccuracy:
         Simulates TCP dragging behavior where multiple servo_l commands
         are sent in sequence.
         """
-        assert client.resume() > 0
+        assert client.reset() > 0
         assert client.home() >= 0
         assert client.wait_motion(timeout=15.0)
 

@@ -12,7 +12,7 @@ def clean_state(server_proc, client):
     Sets LINEAR motion profile for faster test execution.
     Depends on server_proc to ensure server is ready before resetting.
     """
-    client.reset()
+    client.reset_state()
     client.select_profile("LINEAR")
     idx = client.home()
     assert idx >= 0, "Home command failed to send"
