@@ -342,6 +342,10 @@ def client(ports: TestPorts):
     return RobotClient(
         host=ports.server_ip,
         port=ports.server_port,
+        # Overloaded CI runners (macOS especially) can hold an ack past the
+        # default 2s window; the retry then lapses too and system commands
+        # spuriously report failure.
+        timeout=5.0,
     )
 
 
