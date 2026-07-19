@@ -43,11 +43,17 @@ class TestProfileMotionBehavior:
 
     def test_joint_move_reaches_target_all_profiles(self, client, server_proc):
         """Test that joint moves reach target position with all profiles."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
         target_angles = [10, -50, 190, 5, 10, 15]
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
         for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Reset to home first
-            client.home(wait=True)
+            # Teleport to the standby pose: each profile starts from the same
+            # spot without paying for five planned home moves (home() on a
+            # referenced robot is a real planned move now, not a firmware
+            # re-home — slow CI runners blew the per-test timeout on it).
+            assert client.teleport(standby) == 1
 
             # Set profile and execute move
             assert client.select_profile(p) > 0
@@ -84,11 +90,16 @@ class TestProfileMotionBehavior:
             start_pose[5],
         ]
 
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+
         # All profiles should work for Cartesian moves
         # RUCKIG falls back to TOPPRA automatically
         for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Reset to home first
-            client.home(wait=True)
+            # Teleport, don't drive: five planned home moves blow the
+            # per-test timeout on slow runners.
+            assert client.teleport(standby) == 1
 
             # Set profile and execute move
             assert client.select_profile(p) > 0
