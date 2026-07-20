@@ -4,12 +4,13 @@ from parol6.protocol.wire import CmdType
 
 # System command types (always require ACK)
 SYSTEM_CMD_TYPES: set[CmdType] = {
-    CmdType.RESUME,
-    CmdType.HALT,
+    CmdType.RESET,
+    CmdType.ESTOP,
+    CmdType.STOP,
     CmdType.CONNECT_HARDWARE,
     CmdType.SIMULATOR,
     CmdType.SELECT_PROFILE,
-    CmdType.RESET,
+    CmdType.RESET_STATE,
     CmdType.WRITE_IO,
     CmdType.SET_TCP_OFFSET,
     CmdType.SET_SHAPES,

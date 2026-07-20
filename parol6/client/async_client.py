@@ -41,7 +41,7 @@ from ..protocol.wire import (
     IOResultStruct,
     JointSpeedsCmd,
     LoopStatsCmd,
-    HaltCmd,
+    EstopCmd,
     HomeCmd,
     JogJCmd,
     JogLCmd,
@@ -64,8 +64,9 @@ from ..protocol.wire import (
     ReachableCmd,
     ResetCmd,
     ResetLoopStatsCmd,
-    ResumeCmd,
+    ResetStateCmd,
     Response,
+    StopCmd,
     ResponseMsg,
     SelectProfileCmd,
     SelectToolCmd,
@@ -660,6 +661,10 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Home the robot to its home position.
 
+        Unhomed, this runs the full referencing sequence (each joint seeks
+        its limit switch, then moves to standby). Already homed, it returns
+        to standby with a normal planned, collision-checked joint move.
+
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Category: Motion
@@ -679,31 +684,48 @@ class AsyncRobotClient(_RobotClientABC):
                 raise TimeoutError(f"home() timed out after {timeout}s")
         return index
 
-    async def resume(self) -> int:
-        """Re-enable the robot controller, allowing motion commands.
+    async def stop(self) -> int:
+        """Stop all motion — cancel the active move and clear the queue.
+
+        The controller stays enabled and holding position; the next motion
+        command is accepted immediately.
 
         Category: Control
 
         Example:
-            rbt.resume()
+            rbt.stop()
 
         Returns:
             1 if acknowledged, 0 on failure.
         """
-        return await self._send(ResumeCmd())
+        return await self._send(StopCmd())
 
-    async def halt(self) -> int:
-        """Halt the robot — stop all motion and disable.
+    async def estop(self) -> int:
+        """Protective stop: stop all motion and latch the controller
+        disabled until ``reset()``.
 
         Category: Control
 
         Example:
-            rbt.halt()
+            rbt.estop()
 
         Returns:
             1 if acknowledged, 0 on failure.
         """
-        return await self._send(HaltCmd())
+        return await self._send(EstopCmd())
+
+    async def reset(self) -> int:
+        """Clear a latched protective stop, re-enabling motion.
+
+        Category: Control
+
+        Example:
+            rbt.reset()
+
+        Returns:
+            1 if acknowledged, 0 on failure.
+        """
+        return await self._send(ResetCmd())
 
     async def simulator(self, enabled: bool) -> int:
         """Enable or disable simulator mode.
@@ -764,7 +786,7 @@ class AsyncRobotClient(_RobotClientABC):
             raise ValueError("No port provided")
         return await self._send(ConnectHardwareCmd(port_str=port_str))
 
-    async def reset(self) -> int:
+    async def reset_state(self) -> int:
         """Reset controller state to initial values.
 
         Instantly resets positions to home, clears queues, resets tool/errors.
@@ -773,9 +795,9 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Control
 
         Example:
-            rbt.reset()
+            rbt.reset_state()
         """
-        return await self._send(ResetCmd())
+        return await self._send(ResetStateCmd())
 
     # --------------- Status / Queries ---------------
     async def ping(self) -> PingResult | None:

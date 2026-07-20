@@ -70,11 +70,11 @@ class TestSystemCommandSideEffects:
         assert cmd._switch_port is None
 
     def test_reset_command_sets_sync_mock(self):
-        """Verify RESET command sets _sync_mock attribute."""
-        from parol6.commands.utility_commands import ResetCommand
-        from parol6.protocol.wire import ResetCmd
+        """Verify RESET_STATE command sets _sync_mock attribute."""
+        from parol6.commands.utility_commands import ResetStateCommand
+        from parol6.protocol.wire import ResetStateCmd
 
-        cmd = ResetCommand(ResetCmd())
+        cmd = ResetStateCommand(ResetStateCmd())
         state = ControllerState()
 
         code = cmd.execute_step(state)

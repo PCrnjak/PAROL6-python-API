@@ -28,6 +28,8 @@ class MockState:
         self.Speed_out = np.zeros(6, dtype=np.int32)
         self.Command_out = 0
         self.motion_profile = "TOPPRA"
+        # Sitting at the home position — a homed robot (planned moves gate on it).
+        self.Homed_in = np.ones(8, dtype=np.uint8)
 
 
 class TestPrecomputedTrajectories:

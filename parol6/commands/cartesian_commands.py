@@ -38,6 +38,7 @@ from .base import (
     ExecutionStatusCode,
     MotionCommand,
     TrajectoryMoveCommandBase,
+    guard_homed,
 )
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
 
     def do_setup(self, state: "ControllerState") -> None:
         """Set up the move - compute target pose and pre-compute trajectory."""
+        guard_homed(state)
         self.initial_pose = get_fkine_se3(state)
         self._compute_target_pose(state)
         self._precompute_trajectory(state)
@@ -408,6 +410,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
         next_cmds: "list[TrajectoryMoveCommandBase]",
     ) -> int:
         """Build composite Cartesian trajectory with blend zones."""
+        guard_homed(state)
         if self.blend_radius <= 0 or not next_cmds:
             self.do_setup(state)
             return 0

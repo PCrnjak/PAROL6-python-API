@@ -195,18 +195,19 @@ class TestErrorHandling:
         client = RobotClient(ports.server_ip, ports.server_port)
         assert client.ping() is not None
 
-    def test_halted_motion_raises_motion_error(self, client, server_proc):
-        """Motion commands on a halted controller raise MotionError, not -1."""
+    def test_estopped_motion_raises_motion_error(self, client, server_proc):
+        """Motion commands on an estopped controller raise MotionError until
+        reset() clears the latch."""
         from parol6.utils.errors import MotionError
 
-        client.halt()
+        client.estop()
         try:
             with pytest.raises(MotionError) as exc_info:
                 client.home()
             assert exc_info.value.robot_error.code > 0
             assert exc_info.value.robot_error.title
         finally:
-            client.resume()
+            client.reset()
 
     def test_rapid_command_sequence(self, server_proc, ports):
         """Test server stability under rapid command sequence."""

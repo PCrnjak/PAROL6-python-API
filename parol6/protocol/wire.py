@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -117,13 +117,14 @@ class CmdType(IntEnum):
     TCP_OFFSET = auto()
 
     # System commands (execute regardless of enable state)
-    RESUME = auto()
-    HALT = auto()
+    RESET = auto()
+    ESTOP = auto()
+    STOP = auto()
     WRITE_IO = auto()
     CONNECT_HARDWARE = auto()
     SIMULATOR = auto()
     SELECT_PROFILE = auto()
-    RESET = auto()
+    RESET_STATE = auto()
     RESET_LOOP_STATS = auto()
 
     # Motion commands — queued, pre-computed trajectory
@@ -504,26 +505,34 @@ class HomeCmd(
     pass
 
 
-class ResumeCmd(
-    msgspec.Struct, tag=int(CmdType.RESUME), array_like=True, frozen=True, gc=False
-):
-    """RESUME: [CmdType.RESUME] — re-enable the controller."""
-
-    pass
-
-
-class HaltCmd(
-    msgspec.Struct, tag=int(CmdType.HALT), array_like=True, frozen=True, gc=False
-):
-    """HALT: [CmdType.HALT] — stop all motion and disable."""
-
-    pass
-
-
 class ResetCmd(
     msgspec.Struct, tag=int(CmdType.RESET), array_like=True, frozen=True, gc=False
 ):
-    """RESET: [CmdType.RESET]"""
+    """RESET: [CmdType.RESET] — clear a latched protective stop, re-enabling motion."""
+
+    pass
+
+
+class EstopCmd(
+    msgspec.Struct, tag=int(CmdType.ESTOP), array_like=True, frozen=True, gc=False
+):
+    """ESTOP: [CmdType.ESTOP] — protective stop: stop all motion and latch disabled until RESET."""
+
+    pass
+
+
+class StopCmd(
+    msgspec.Struct, tag=int(CmdType.STOP), array_like=True, frozen=True, gc=False
+):
+    """STOP: [CmdType.STOP] — cancel active motion and queue; controller stays enabled."""
+
+    pass
+
+
+class ResetStateCmd(
+    msgspec.Struct, tag=int(CmdType.RESET_STATE), array_like=True, frozen=True, gc=False
+):
+    """RESET_STATE: [CmdType.RESET_STATE] — reset controller state (shapes, tool, errors)."""
 
     pass
 
@@ -1337,6 +1346,7 @@ def pack_status(
     collision_pairs: tuple[tuple[str, str], ...] = (),
     scene_epoch: int = 0,
     accepted_index: int = -1,
+    homed: bool = True,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1380,6 +1390,7 @@ def pack_status(
             collision_pairs,
             scene_epoch,
             accepted_index,
+            homed,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1424,6 +1435,9 @@ class StatusBuffer:
     # the field. Lets waiters order a standing error against their own
     # command's acceptance (acceptance clears stale errors server-side).
     accepted_index: int = -1
+    # All joints homed. True from producers that predate the field (permissive:
+    # old servers gate nothing, so claiming unhomed would be a false alarm).
+    homed: bool = True
     # Built once in __post_init__, aliasing the two enable arrays the decoder
     # mutates in place.
     cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
@@ -1469,6 +1483,7 @@ class StatusBuffer:
             collision_pairs=list(self.collision_pairs),
             scene_epoch=self.scene_epoch,
             accepted_index=self.accepted_index,
+            homed=self.homed,
         )
 
 
@@ -1481,7 +1496,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      error, queued_segments, queued_duration, action_params,
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
-                     accepted_index]
+                     accepted_index, homed]
 
     Args:
         data: Raw msgpack bytes
@@ -1552,6 +1567,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         if len(msg) > 22:
             buf.scene_epoch = int(msg[22])
         buf.accepted_index = int(msg[23]) if len(msg) > 23 else -1
+        buf.homed = bool(msg[24]) if len(msg) > 24 else True
 
         return True
     except Exception as e:
@@ -1791,9 +1807,10 @@ __all__ = [
     "JogJCmd",
     "JogLCmd",
     # Command structs — system/control
-    "ResumeCmd",
-    "HaltCmd",
     "ResetCmd",
+    "EstopCmd",
+    "StopCmd",
+    "ResetStateCmd",
     "ResetLoopStatsCmd",
     "WriteIOCmd",
     "ConnectHardwareCmd",

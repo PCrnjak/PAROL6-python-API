@@ -115,6 +115,15 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Command aborted. Robot stopped.",
         remedy="Check robot state. May need to re-home.",
     ),
+    ErrorCode.MOTN_NOT_HOMED: _ErrorTemplate(
+        title="Robot not homed",
+        cause=(
+            "Planned motion requested while the robot is not homed — "
+            "reported joint positions are unreferenced until homing."
+        ),
+        effect="Motion command rejected before dispatch.",
+        remedy="Run home() first. Jogging remains available.",
+    ),
     # -- Communication --
     ErrorCode.COMM_QUEUE_FULL: _ErrorTemplate(
         title="Command queue full",
@@ -145,13 +154,13 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         title="Controller disabled",
         cause="Motion command sent while controller is disabled. {detail}",
         effect="Command rejected.",
-        remedy="Call resume() to re-enable the controller.",
+        remedy="Call reset() to re-enable the controller.",
     ),
     ErrorCode.SYS_ESTOP_ACTIVE: _ErrorTemplate(
         title="E-stop active",
         cause="Emergency stop is currently engaged.",
-        effect="All motion halted. Queue cleared.",
-        remedy="Release the E-stop button and call resume().",
+        effect="All motion stopped. Queue cleared.",
+        remedy="Release the E-stop button and call reset().",
     ),
     ErrorCode.SYS_PORT_SAVE_FAILED: _ErrorTemplate(
         title="Serial port save failed",

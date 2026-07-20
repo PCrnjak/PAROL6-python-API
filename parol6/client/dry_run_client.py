@@ -167,6 +167,7 @@ class DryRunRobotClient:
         self,
         initial_joints_deg: list[float] | None = None,
         max_snapshot_points: int = 200,
+        initial_homed: bool = True,
     ) -> None:
         # Reset tool transform — process pool workers persist across
         # invocations, so a previous run's select_tool() leaves a stale
@@ -190,6 +191,10 @@ class DryRunRobotClient:
 
         self._planner = TrajectoryPlanner(diagnostic=True)
         self._planner.state.Position_in[:] = self._state.Position_in
+        # Mirror the live gate: seeded from an unhomed robot, planned moves
+        # are refused until the script homes (home()/teleport() establish
+        # references — see _snap_to_angles).
+        self._planner.state.Homed_in.fill(1 if initial_homed else 0)
 
         self._registry = CommandRegistry()
         self._q_rad_buf = np.zeros(6, dtype=np.float64)
@@ -230,18 +235,25 @@ class DryRunRobotClient:
         return results
 
     def _snap_to_angles(self, angles_deg: list[float]) -> DryRunResult:
-        """Snap to angles instantly (no trajectory) — used by Home and Teleport."""
+        """Snap to angles instantly (no trajectory) — used by Home and Teleport.
+
+        Both establish position references, so subsequent planned moves pass
+        the homed gate."""
         self._planner.flush()
         deg = np.asarray(angles_deg, dtype=np.float64)
         deg_to_steps(deg, self._state.Position_in)
         self._planner.state.Position_in[:] = self._state.Position_in
+        self._planner.state.Homed_in.fill(1)
         rad = np.radians(deg).reshape(1, -1)
         return _build_result(rad, duration=0.0)
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
         if isinstance(params, HomeCmd):
-            return self._snap_to_angles(HOME_ANGLES_DEG)
+            if not self._planner.state.Homed_in[:6].all():
+                return self._snap_to_angles(HOME_ANGLES_DEG)
+            # Already referenced → fall through: the planner fast-paths HOME
+            # into a planned return move, so the preview renders the path.
         if isinstance(params, TeleportCmd):
             return self._snap_to_angles(params.angles)
         if isinstance(params, SelectToolCmd):

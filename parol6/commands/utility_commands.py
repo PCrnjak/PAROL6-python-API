@@ -15,8 +15,8 @@ from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
     DelayCmd,
-    ResetCmd,
     ResetLoopStatsCmd,
+    ResetStateCmd,
 )
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
@@ -52,13 +52,13 @@ class DelayCommand(CommandBase[DelayCmd]):
         return ExecutionStatusCode.EXECUTING
 
 
-@register_command(CmdType.RESET)
-class ResetCommand(SystemCommand[ResetCmd]):
+@register_command(CmdType.RESET_STATE)
+class ResetStateCommand(SystemCommand[ResetStateCmd]):
     """
     Instantly reset controller state to initial values.
     """
 
-    PARAMS_TYPE = ResetCmd
+    PARAMS_TYPE = ResetStateCmd
 
     __slots__ = ()
 

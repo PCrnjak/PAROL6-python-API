@@ -23,8 +23,12 @@ from parol6.commands.base import (
     SystemCommand,
 )
 from parol6.commands.shape_commands import SetShapesCommand
-from parol6.commands.system_commands import SelectProfileCommand
-from parol6.commands.utility_commands import ResetCommand
+from parol6.commands.system_commands import (
+    EstopCommand,
+    SelectProfileCommand,
+    StopCommand,
+)
+from parol6.commands.utility_commands import ResetStateCommand
 from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
@@ -745,16 +749,25 @@ class Controller:
         state.clear_collision()
 
         cmd_index = self._assign_command_index(state)
-        # Only sync Position_in when segment player is idle — if segments are
-        # active/queued (e.g. homing), the planner's internal tracking is correct
-        # and Position_in may reflect a mid-motion position.
+        # Only sync Position_in / homed when segment player is idle — if
+        # segments are active/queued (e.g. homing), the planner's internal
+        # tracking is correct: Position_in may reflect a mid-motion position
+        # and the planner has already predicted a queued HOME's homed flags.
         segment_idle = not self._segment_player.active
         pos_snapshot = state.Position_in.copy() if segment_idle else None
+        homed_snapshot: bool | None = None
+        if segment_idle:
+            homed_snapshot = True
+            for i in range(6):
+                if not state.Homed_in[i]:
+                    homed_snapshot = False
+                    break
         self._planner.submit(
             PlanCommand(
                 command_index=cmd_index,
                 params=command.p,
                 position_in=pos_snapshot,
+                homed=homed_snapshot,
             )
         )
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
@@ -789,10 +802,23 @@ class Controller:
             command.setup(state)
             code = command.tick(state)
 
-            # Reset: cancel motion pipeline so stale segments don't play.
+            # Stop/estop: cancel the motion pipeline, or the segment player
+            # keeps playing the active trajectory (rewriting Command_out and
+            # fresh speeds every tick) and the "stopped" robot drives on.
+            if isinstance(command, (StopCommand, EstopCommand)):
+                reason = (
+                    "Protective stop"
+                    if isinstance(command, EstopCommand)
+                    else "User requested stop"
+                )
+                self._segment_player.cancel(state)
+                self._executor.cancel_active_command(reason)
+                self._executor.clear_queue(reason)
+
+            # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
             # so its PAROL6_ROBOT singleton matches the controller's.
-            if isinstance(command, ResetCommand):
+            if isinstance(command, ResetStateCommand):
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")

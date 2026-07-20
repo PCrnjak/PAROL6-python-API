@@ -77,7 +77,8 @@ class HomeState(Enum):
 class HomeCommand(MotionCommand[HomeCmd]):
     """
     A non-blocking command that tells the robot to perform its internal homing sequence.
-    This version uses a state machine to allow re-homing even if the robot is already homed.
+    Reached only while the robot is unhomed — the planner routes HOME from an
+    already-referenced robot to a planned return move instead.
     """
 
     PARAMS_TYPE = HomeCmd

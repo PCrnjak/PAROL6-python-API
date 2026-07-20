@@ -25,6 +25,7 @@ import numpy as np
 
 from parol6.protocol.wire import (
     HomeCmd,
+    MoveJCmd,
     SelectToolCmd,
     SetShapesCmd,
     SetTcpOffsetCmd,
@@ -94,6 +95,7 @@ class PlanCommand:
     position_in: np.ndarray | None = (
         None  # current Position_in (None = use planner internal)
     )
+    homed: bool | None = None  # all joints homed (None = use planner internal)
 
 
 @dataclass
@@ -151,6 +153,11 @@ class PlannerState:
     """
 
     Position_in: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    # Same shape/dtype as ControllerState.Homed_in so guard_homed reads both.
+    # Defaults to homed: the planner is fed real flags at dispatch (PlanCommand
+    # snapshot) and predicts a queued HOME; a pessimistic default would refuse
+    # dry runs that were seeded from an already-homed robot.
+    Homed_in: np.ndarray = field(default_factory=lambda: np.ones(8, dtype=np.uint8))
     motion_profile: str = "TOPPRA"
     current_tool: str = "NONE"
     current_tool_variant: str = ""
@@ -195,7 +202,11 @@ class TrajectoryPlanner:
     def __init__(self, diagnostic: bool = False) -> None:
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT  # noqa: N811
         from parol6.commands.base import TrajectoryMoveCommandBase
-        from parol6.config import MAX_BLEND_LOOKAHEAD, deg_to_steps
+        from parol6.config import (
+            HOME_RETURN_SPEED_FRAC,
+            MAX_BLEND_LOOKAHEAD,
+            deg_to_steps,
+        )
         from parol6.server.command_registry import CommandRegistry
 
         self.state = PlannerState()
@@ -215,10 +226,18 @@ class TrajectoryPlanner:
         self._home_steps = np.zeros(6, dtype=np.int32)
         _home_deg = np.array(PAROL6_ROBOT.joint.standby_deg, dtype=np.float64)
         deg_to_steps(_home_deg, self._home_steps)
+        self._home_deg: list[float] = [float(v) for v in _home_deg]
+        self._home_return_speed = HOME_RETURN_SPEED_FRAC
 
     def process(self, params: object, command_index: int = 0) -> list[Segment]:
         """Plan a single command. Returns list of resulting segments."""
         self._output.clear()
+
+        # Fast-path home: an already-referenced robot returns to the standby
+        # pose with a normal planned (collision-checked) joint move instead
+        # of re-running the firmware switch-seek.
+        if isinstance(params, HomeCmd) and bool(self.state.Homed_in[:6].all()):
+            params = MoveJCmd(angles=self._home_deg, speed=self._home_return_speed)
 
         cmd_class = self._registry.get_command_for_struct(type(params))
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
@@ -482,6 +501,7 @@ class TrajectoryPlanner:
             )
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
+            self.state.Homed_in.fill(1)
         elif isinstance(params, SetShapesCmd):
             # Only reachable via the DRY-RUN planner: a script's set_shapes()
             # must shape its preview world. The live path routes SET_SHAPES as
@@ -515,6 +535,8 @@ class PlannerWorker:
         """Route a PlanCommand through the planner and emit segments."""
         if msg.position_in is not None:
             self._planner.state.Position_in[:] = msg.position_in
+        if msg.homed is not None:
+            self._planner.state.Homed_in.fill(1 if msg.homed else 0)
 
         segments = self._planner.process(msg.params, msg.command_index)
         for seg in segments:

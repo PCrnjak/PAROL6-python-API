@@ -26,6 +26,7 @@ class ErrorCode(IntEnum):
     MOTN_GRIPPER_UNKNOWN = 32
     MOTN_SETUP_FAILED = 33
     MOTN_TICK_FAILED = 34
+    MOTN_NOT_HOMED = 35
 
     # Communication / protocol
     COMM_QUEUE_FULL = 40

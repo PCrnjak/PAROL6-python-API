@@ -13,10 +13,26 @@ import numpy as np
 from parol6.config import TRACE
 from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType
 from parol6.server.state import ControllerState
-from parol6.utils.error_catalog import RobotError, extract_robot_error
+from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
 from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import TrajectoryPlanningError
 
 logger = logging.getLogger(__name__)
+
+
+def guard_homed(state: ControllerState) -> None:
+    """Refuse planned motion while the robot is not homed.
+
+    Reported joint positions are unreferenced until homing (the boot state is
+    all-zeros steps — outside J2/J3's limits), so building or collision-checking
+    a trajectory from them is meaningless. Called at the top of every planned
+    command's ``do_setup``, like ``guard_joint_path``. Jog/servo/home are
+    deliberately not gated: they don't plan a path from the reported pose, and
+    an unhomed arm may need to be jogged clear of an obstruction before homing.
+    """
+    for i in range(6):
+        if not state.Homed_in[i]:
+            raise TrajectoryPlanningError(make_error(ErrorCode.MOTN_NOT_HOMED))
 
 
 class ExecutionStatusCode(Enum):

@@ -318,7 +318,7 @@ class ControllerState:
         """
         Reset robot state to initial values without losing connection state.
 
-        Preserves: ser, ip, port, start_time
+        Preserves: ser, ip, port, start_time, next_command_index
         Resets: positions, speeds, I/O, queues, tool, errors, etc.
         """
         # Safety and control flags
@@ -360,8 +360,10 @@ class ControllerState:
         self.action_next = ""
         self.queue_nonstreamable.clear()
 
-        # Queue progress tracking
-        self.next_command_index = 0
+        # Queue progress tracking. next_command_index is deliberately NOT
+        # reset: indices must stay monotonic across reset so a stale
+        # pre-reset status frame (its completed_index is a high-water mark)
+        # can never satisfy a wait on a post-reset command.
         self.executing_command_index = -1
         self.completed_command_index = -1
         self.last_checkpoint = ""
