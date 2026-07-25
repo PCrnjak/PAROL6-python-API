@@ -677,6 +677,9 @@ register_tool(
         transform=_make_tcp_transform(x=-0.029, z=-0.103),
         meshes=_MSG_100_MESHES,
         motions=_MSG_100_JAW_MOTION,
+        # The MSG carries a built-in camera mount; the video device is
+        # per-machine, supplied at runtime via the tool's camera override.
+        camera_spec=CameraSpec(),
         variants=(
             ToolVariant(
                 key="100mm",
