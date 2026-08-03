@@ -184,6 +184,18 @@ class ControllerState:
     # Robot telemetry and command buffers - using ndarray for efficiency
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
 
+    # True for the remainder of the tick in which a SystemCommand (RESET's
+    # ENABLE, ESTOP/STOP's IDLE, etc.) explicitly set Command_out to a
+    # meaningful value during poll_cmd. Without this, _execute_commands()'s
+    # "nothing active" fallback (which also runs every tick, after poll_cmd)
+    # unconditionally overwrites Command_out back to IDLE before
+    # _write_to_firmware() ever sees the SystemCommand's signal -- so e.g.
+    # RESET's ENABLE(101) never actually reaches the firmware, leaving
+    # PAROL6.disabled latched from an earlier ESTOP forever. Reset to False
+    # at the top of every _poll_commands() call; consumed (and cleared) by
+    # _execute_commands()'s fallback the same tick it's set.
+    command_out_locked: bool = False
+
     Position_out: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
