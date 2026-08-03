@@ -385,6 +385,11 @@ class Controller:
         # Streaming command executor (jog/servo)
         if self._executor.active_command or self._executor.command_queue:
             self._executor.execute_active_command()
+        elif state.command_out_locked:
+            # A SystemCommand (e.g. RESET) set Command_out earlier this same
+            # tick during poll_cmd -- consume the lock instead of stomping
+            # it back to IDLE before _write_to_firmware() sees it.
+            state.command_out_locked = False
         else:
             state.Command_out = CommandCode.IDLE
             state.Speed_out.fill(0)
@@ -591,6 +596,7 @@ class Controller:
         """Poll and process UDP commands (non-blocking)."""
         assert self.udp_transport is not None
 
+        state.command_out_locked = False
         msgs = self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT)
         for data, addr in msgs:
             self._process_command(data, addr, state)
@@ -801,6 +807,13 @@ class Controller:
         try:
             command.setup(state)
             code = command.tick(state)
+
+            # This SystemCommand set a real signal (e.g. RESET's ENABLE) for
+            # firmware to see on this tick's write phase -- don't let
+            # _execute_commands()'s later "nothing active" fallback stomp it
+            # back to IDLE before _write_to_firmware() runs.
+            if state.Command_out != CommandCode.IDLE:
+                state.command_out_locked = True
 
             # Stop/estop: cancel the motion pipeline, or the segment player
             # keeps playing the active trajectory (rewriting Command_out and
