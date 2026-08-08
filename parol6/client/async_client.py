@@ -657,7 +657,7 @@ class AsyncRobotClient(_RobotClientABC):
     # --------------- Motion / Control ---------------
 
     async def home(
-        self, wait: bool = False, timeout: float = 60.0, **wait_kwargs: Any
+        self, wait: bool = False, timeout: float = 60.0, force: bool = False, **wait_kwargs: Any
     ) -> int:
         """Home the robot to its home position.
 
@@ -675,8 +675,10 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             wait: If True, block until motion completes
             timeout: Maximum time to wait in seconds (only used when wait=True)
+            force: If True, always run the real switch-seeking referencing
+                sequence, even if the robot already believes it's homed.
         """
-        index = await self._send(HomeCmd())
+        index = await self._send(HomeCmd(force=force))
         assert isinstance(index, int)
         if wait and index >= 0:
             ok = await self.wait_command(index, timeout=timeout)

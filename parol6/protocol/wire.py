@@ -500,9 +500,18 @@ class JogLCmd(
 class HomeCmd(
     msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True, gc=False
 ):
-    """HOME: [CmdType.HOME]"""
+    """HOME: [CmdType.HOME, force]
 
-    pass
+    force: if True, always run the firmware's real switch-seeking
+    referencing sequence, bypassing TrajectoryPlanner.process()'s
+    fast-path substitution (HomeCmd -> MoveJCmd) when Homed_in is
+    already all-true. The firmware's own HOME opcode (PAROL6.command
+    == 100) always runs the real sequence unconditionally -- the fast
+    path is purely a host-side planner decision, not anything the
+    firmware itself gates.
+    """
+
+    force: bool = False
 
 
 class ResetCmd(

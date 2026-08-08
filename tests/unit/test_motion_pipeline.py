@@ -127,6 +127,21 @@ class TestPlannerDirect:
         np.testing.assert_allclose(seg.trajectory_steps[-1], home_steps, atol=2)
         np.testing.assert_allclose(worker.state.Position_in, home_steps, atol=2)
 
+    def test_home_force_bypasses_referenced_fastpath(self, worker, segment_queue):
+        """HomeCmd(force=True) always produces an InlineSegment (the real
+        firmware referencing sequence), even when already homed -- unlike
+        the plain HomeCmd() case in test_home_routes_by_referenced_state,
+        which fast-paths to a TrajectorySegment once referenced."""
+        home_steps = _home_steps()
+
+        worker.state.Position_in[:] = _deg_to_steps(W1)
+        worker.process_command(
+            PlanCommand(command_index=0, params=HomeCmd(force=True), homed=True)
+        )
+        seg = segment_queue.get(timeout=1.0)
+        assert isinstance(seg, InlineSegment)
+        np.testing.assert_array_equal(worker.state.Position_in, home_steps)
+
     def test_checkpoint_produces_inline_segment(self, worker, segment_queue):
         """Checkpoint should produce an InlineSegment."""
         params = CheckpointCmd(label="step1")

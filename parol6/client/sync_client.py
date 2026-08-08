@@ -175,7 +175,7 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def home(self, wait: bool = False, timeout: float = 60.0) -> int:
+    def home(self, wait: bool = False, timeout: float = 60.0, force: bool = False) -> int:
         """Home the robot to its home position.
 
         Unhomed, this runs the full referencing sequence (each joint seeks
@@ -187,8 +187,10 @@ class RobotClient:
         Args:
             wait: If True, block until motion completes.
             timeout: Maximum time to wait in seconds (only used when wait=True).
+            force: If True, always run the real switch-seeking referencing
+                sequence, even if the robot already believes it's homed.
         """
-        return _run(self._inner.home(wait=wait, timeout=timeout))
+        return _run(self._inner.home(wait=wait, timeout=timeout, force=force))
 
     def teleport(
         self,
