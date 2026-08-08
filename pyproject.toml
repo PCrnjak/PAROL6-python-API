@@ -63,7 +63,7 @@ dev = [
     "trimesh",
     "fast-simplification",
     "rtree",
-    "scipy-stubs",
+    "scipy-stubs==1.18.0.1",
     "types-pyserial",
 ]
 
