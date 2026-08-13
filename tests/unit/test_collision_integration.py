@@ -9,8 +9,11 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+import trimesh
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 import parol6.config  # noqa: F401 - imports trigger collision-checker init
@@ -485,3 +488,36 @@ def test_dry_run_script_set_shapes_applies_and_replays():
         assert PAROL6_ROBOT._active_shape_names == ["shape:bar2"]
     finally:
         PAROL6_ROBOT.apply_shapes([])
+
+
+def test_msg_mounts_on_the_flange_not_inside_the_wrist():
+    """The MSG STLs are exported 6.5 mm proud of their mounting face, so the
+    assembly needs a matching origin offset to seat on the flange. Without it
+    the gripper is sunk into L5 — a pair no check covers, tool geometry being
+    attached to L6 — and what little clearance is left to L4 falls inside the
+    buffer, so every pose reads as colliding and the arm can never plan its
+    way back to standby.
+    """
+    standby = np.radians(PAROL6_ROBOT.joint.standby_deg)
+    checker = PAROL6_ROBOT.collision
+    mesh_dir = Path(PAROL6_ROBOT._mesh_dir) / "meshes"
+    try:
+        PAROL6_ROBOT.apply_tool("MSG")
+        checker.update_placements(standby)
+
+        # Seated on the flange: no part of the body lies inside the wrist link.
+        body = trimesh.load_mesh(str(mesh_dir / "msg_ai_100_body.stl"))
+        body.apply_transform(checker.geometry_world_pose("tool:MSG:body"))
+        l5 = trimesh.load_mesh(str(mesh_dir / "L5.STL"))
+        l5.apply_transform(checker.geometry_world_pose("L5_0"))
+        assert not l5.contains(body.vertices).any(), "gripper seated inside L5"
+
+        # With the tool clear of the wrist, standby is outside the buffer and
+        # the return path the controller plans for HOME is accepted.
+        assert checker.in_collision(standby) is False
+        away = np.radians([90.0, -95.0, 187.0, 0.0, 6.0, 165.0])
+        guard_joint_path(
+            np.vstack([np.linspace(a, s, 25) for a, s in zip(away, standby)]).T
+        )
+    finally:
+        PAROL6_ROBOT.apply_tool("NONE")
