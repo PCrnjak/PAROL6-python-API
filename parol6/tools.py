@@ -651,22 +651,68 @@ _MSG_200_JAW_MOTION = (
     ),
 )
 
+# The MSG STLs were exported 6.5 mm proud of their mounting face: every body
+# mesh ends at z = +6.500 in the flange frame, where the SSG-48 body ends at
+# exactly 0.000. Left uncorrected the gripper is seated 6.5 mm into the wrist
+# — it interpenetrates L5, which no pair check catches because tool geometry
+# is attached to L6 and the neighbouring pairs are dropped as adjacent — and
+# what clearance remains to L4 is an artifact of that. Shifting the whole
+# assembly back puts the mounting face on the flange plane, matching every
+# other tool.
+_MSG_MOUNT_ORIGIN = (0.0, 0.0, -0.0065)
+
 _MSG_100_MESHES = (
-    MeshSpec(file="msg_ai_100_body_simplified.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_100_right_jaw_simplified.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_100_left_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(
+        file="msg_ai_100_body_simplified.stl",
+        role=MeshRole.BODY,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_100_right_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_100_left_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
 )
 
 _MSG_150_MESHES = (
-    MeshSpec(file="msg_ai_150_body_simplified.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_150_right_jaw_simplified.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_150_left_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(
+        file="msg_ai_150_body_simplified.stl",
+        role=MeshRole.BODY,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_150_right_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_150_left_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
 )
 
 _MSG_200_MESHES = (
-    MeshSpec(file="msg_ai_200_body_simplified.stl", role=MeshRole.BODY),
-    MeshSpec(file="msg_ai_200_right_jaw_simplified.stl", role=MeshRole.JAW),
-    MeshSpec(file="msg_ai_200_left_jaw_simplified.stl", role=MeshRole.JAW),
+    MeshSpec(
+        file="msg_ai_200_body_simplified.stl",
+        role=MeshRole.BODY,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_200_right_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
+    MeshSpec(
+        file="msg_ai_200_left_jaw_simplified.stl",
+        role=MeshRole.JAW,
+        origin=_MSG_MOUNT_ORIGIN,
+    ),
 )
 
 register_tool(
@@ -674,16 +720,19 @@ register_tool(
     ElectricGripperConfig(
         name="MSG AI Stepper Gripper",
         description="MSG compliant AI stepper gripper (StepFOC)",
-        transform=_make_tcp_transform(x=-0.029, z=-0.103),
+        transform=_make_tcp_transform(x=-0.029, z=-0.1095),
         meshes=_MSG_100_MESHES,
         motions=_MSG_100_JAW_MOTION,
+        # The MSG carries a built-in camera mount; the video device is
+        # per-machine, supplied at runtime via the tool's camera override.
+        camera_spec=CameraSpec(),
         variants=(
             ToolVariant(
                 key="100mm",
                 display_name="100mm Rail",
                 meshes=_MSG_100_MESHES,
                 motions=_MSG_100_JAW_MOTION,
-                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_origin=(-0.029, 0.0, -0.1095),
                 tcp_rpy=_TCP_RPY,
             ),
             ToolVariant(
@@ -691,7 +740,7 @@ register_tool(
                 display_name="150mm Rail",
                 meshes=_MSG_150_MESHES,
                 motions=_MSG_150_JAW_MOTION,
-                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_origin=(-0.029, 0.0, -0.1095),
                 tcp_rpy=_TCP_RPY,
             ),
             ToolVariant(
@@ -699,7 +748,7 @@ register_tool(
                 display_name="200mm Rail",
                 meshes=_MSG_200_MESHES,
                 motions=_MSG_200_JAW_MOTION,
-                tcp_origin=(-0.029, 0.0, -0.103),
+                tcp_origin=(-0.029, 0.0, -0.1095),
                 tcp_rpy=_TCP_RPY,
             ),
         ),

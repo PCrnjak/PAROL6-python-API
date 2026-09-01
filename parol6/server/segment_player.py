@@ -17,7 +17,6 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 import numpy as np
-from pinokin import arrays_equal_n
 
 from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import CommandBase, ExecutionStatusCode
@@ -60,6 +59,7 @@ class SegmentPlayer:
         "_inline_activated",
         "_settling",
         "_settle_ticks",
+        "_settle_err",
         "_last_shapes_version",
     )
 
@@ -72,6 +72,7 @@ class SegmentPlayer:
         self._inline_activated: bool = False
         self._settling: bool = False
         self._settle_ticks: int = 0
+        self._settle_err: int = -1
         self._last_shapes_version: int = 0
 
     @property
@@ -127,16 +128,36 @@ class SegmentPlayer:
                     self._step += 1
                     self._settling = False
                     return True
-                # All waypoints sent — hold MOVE at target until Position_in converges
+                # All waypoints sent — hold MOVE at target until Position_in
+                # converges. The tick cap gates on stall, not elapsed time:
+                # while the firmware is still closing on the target (e.g. it
+                # fell behind the waypoint stream under CPU starvation) the
+                # segment stays active, so completion is never reported with
+                # the robot still in motion.
                 target = active.trajectory_steps[-1]
                 if not self._settling:
                     self._settling = True
                     self._settle_ticks = 0
+                    self._settle_err = -1
+                err = 0
+                for i in range(6):
+                    d = int(state.Position_in[i]) - int(target[i])
+                    if d < 0:
+                        d = -d
+                    if d > err:
+                        err = d
+                if self._settle_err < 0 or err < self._settle_err:
+                    self._settle_err = err
+                    self._settle_ticks = 0
                 self._settle_ticks += 1
-                if (
-                    arrays_equal_n(state.Position_in[:6], target[:6])
-                    or self._settle_ticks > SETTLE_MAX_TICKS
-                ):
+                if err == 0 or self._settle_ticks > SETTLE_MAX_TICKS:
+                    if err != 0:
+                        logger.warning(
+                            "Segment completed %d steps short of target "
+                            "(no settle progress for %d ticks)",
+                            err,
+                            SETTLE_MAX_TICKS,
+                        )
                     self._settling = False
                     self._complete_segment(active, state)
                     continue

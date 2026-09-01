@@ -192,9 +192,10 @@ class SplineMotion(_ShapeGenerator):
 
         pos_splines = []
         for i in range(3):
-            bc: Any
+            # Annotated assignment keeps bc as Any: scipy-stubs' bc_type rejects
+            # the scalar derivative values scipy requires for 1-D y
             if velocity_start is not None and velocity_end is not None:
-                bc = ((1, float(velocity_start[i])), (1, float(velocity_end[i])))
+                bc: Any = ((1, float(velocity_start[i])), (1, float(velocity_end[i])))
             else:
                 bc = "not-a-knot"
             spline = CubicSpline(timestamps_arr, waypoints_arr[:, i], bc_type=bc)
