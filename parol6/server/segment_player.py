@@ -61,6 +61,7 @@ class SegmentPlayer:
         "_settle_ticks",
         "_settle_err",
         "_last_shapes_version",
+        "_pending_planned",
     )
 
     def __init__(self, planner: MotionPlanner) -> None:
@@ -74,11 +75,20 @@ class SegmentPlayer:
         self._settle_ticks: int = 0
         self._settle_err: int = -1
         self._last_shapes_version: int = 0
+        self._pending_planned: int = 0
+
+    def notify_planned(self) -> None:
+        """Called when a non-streaming command is submitted to the planner."""
+        self._pending_planned += 1
 
     @property
     def active(self) -> bool:
-        """True if playing a segment or has buffered segments."""
-        return self._active is not None or bool(self._buffer)
+        """True if playing/buffered segments or awaiting planner output."""
+        return (
+            self._active is not None
+            or bool(self._buffer)
+            or self._pending_planned > 0
+        )
 
     def tick(self, state: ControllerState) -> bool:
         """Execute one tick. Returns True if actively playing/executing.
@@ -90,6 +100,8 @@ class SegmentPlayer:
         seg = self._planner.poll_segment()
         while seg is not None:
             self._buffer.append(seg)
+            if self._pending_planned > 0:
+                self._pending_planned -= 1
             state.queued_segments += 1
             if isinstance(seg, TrajectorySegment):
                 state.queued_duration += seg.duration
@@ -189,6 +201,7 @@ class SegmentPlayer:
                 self._active = None
                 # Halt: cancel all remaining planned work
                 self._buffer.clear()
+                self._pending_planned = 0
                 self._planner.cancel()
                 self._drain_planner_queue(state)
                 return False
@@ -293,6 +306,7 @@ class SegmentPlayer:
         state.action_state = ActionState.ERROR
         self._active = None
         self._buffer.clear()
+        self._pending_planned = 0
         self._planner.cancel()
         self._drain_planner_queue(state)
 
@@ -336,10 +350,28 @@ class SegmentPlayer:
             state.action_params = ""
             self._active = None
             self._buffer.clear()
+            self._pending_planned = 0
             self._planner.cancel()
             self._drain_planner_queue(state)
             return False
         return True
+
+    def cancel_playback(self, state: ControllerState) -> None:
+        """Stop active playback without draining the planner queue.
+
+        Used by the streaming command path: a jog/servo takes over from any
+        in-progress trajectory, but planned commands (like HOME) that are
+        still in-flight in the planner subprocess must survive so they can
+        be picked up once streaming stops.
+        """
+        self._active = None
+        self._step = 0
+        self._inline_cmd = None
+        self._inline_activated = False
+        self._settling = False
+        self._buffer.clear()
+        state.queued_segments = 0
+        state.queued_duration = 0.0
 
     def cancel(self, state: ControllerState) -> None:
         """Clear buffer, drain stale segments, and stop playback."""
@@ -348,6 +380,7 @@ class SegmentPlayer:
         self._inline_cmd = None
         self._inline_activated = False
         self._buffer.clear()
+        self._pending_planned = 0
         self._planner.cancel()
         # Drain stale segments from planner output queue
         self._drain_planner_queue(state)

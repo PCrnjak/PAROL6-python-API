@@ -680,9 +680,14 @@ class Controller:
             )
             return
 
-        # Streaming commands: cancel segment playback + existing streamable handling
+        # Streaming commands: cancel segment playback + existing streamable handling.
+        # If the segment player has pending or active work (e.g. a HOME inline
+        # command), drop the streaming command — the bridge will send another
+        # one next tick, and the segment player's work takes priority.
         if getattr(command, "streamable", False):
-            self._segment_player.cancel(state)
+            if self._segment_player.active:
+                return
+            self._segment_player.cancel_playback(state)
             # Unconditional: a jog self-collision sets the viz but no state.error.
             state.clear_collision()
             if self.udp_transport:
@@ -768,6 +773,7 @@ class Controller:
                 if not state.Homed_in[i]:
                     homed_snapshot = False
                     break
+        self._segment_player.notify_planned()
         self._planner.submit(
             PlanCommand(
                 command_index=cmd_index,
