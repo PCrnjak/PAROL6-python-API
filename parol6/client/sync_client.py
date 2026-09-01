@@ -190,6 +190,19 @@ class RobotClient:
         """
         return _run(self._inner.home(wait=wait, timeout=timeout))
 
+    def calibrate(self, wait: bool = False, timeout: float = 60.0) -> int:
+        """Run the end-stop referencing sequence, even if already referenced.
+
+        Each joint seeks its limit switch to re-derive joint zero, then the
+        robot moves to standby. Use home() to return to standby without
+        re-referencing.
+
+        Args:
+            wait: If True, block until the sequence completes.
+            timeout: Maximum time to wait in seconds (only used when wait=True).
+        """
+        return _run(self._inner.calibrate(wait=wait, timeout=timeout))
+
     def teleport(
         self,
         angles_deg: list[float],

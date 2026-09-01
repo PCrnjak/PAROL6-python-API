@@ -17,6 +17,7 @@ from parol6.config import (
 )
 from parol6.protocol.wire import (
     CmdType,
+    CalibrateCmd,
     HomeCmd,
     JogJCmd,
     SelectToolCmd,
@@ -134,6 +135,14 @@ class HomeCommand(MotionCommand[HomeCmd]):
                 return ExecutionStatusCode.FAILED
 
         return ExecutionStatusCode.EXECUTING
+
+
+@register_command(CmdType.CALIBRATE)
+class CalibrateCommand(HomeCommand):
+    """Runs the firmware referencing sequence unconditionally — the planner
+    never substitutes a planned return move for CALIBRATE."""
+
+    PARAMS_TYPE = CalibrateCmd
 
 
 @register_command(CmdType.JOGJ)

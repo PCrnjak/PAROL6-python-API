@@ -14,6 +14,7 @@ from parol6.config import deg_to_steps
 from parol6.protocol.wire import (
     CheckpointCmd,
     DelayCmd,
+    CalibrateCmd,
     HomeCmd,
     MoveJCmd,
     SelectToolCmd,
@@ -126,6 +127,18 @@ class TestPlannerDirect:
         assert isinstance(seg, TrajectorySegment)
         np.testing.assert_allclose(seg.trajectory_steps[-1], home_steps, atol=2)
         np.testing.assert_allclose(worker.state.Position_in, home_steps, atol=2)
+
+    def test_calibrate_always_runs_referencing(self, worker, segment_queue):
+        """CALIBRATE produces an InlineSegment (the firmware referencing
+        sequence) even when already referenced — unlike HOME, which
+        fast-paths to a planned return trajectory once referenced."""
+        worker.state.Position_in[:] = _deg_to_steps(W1)
+        worker.process_command(
+            PlanCommand(command_index=0, params=CalibrateCmd(), homed=True)
+        )
+        seg = segment_queue.get(timeout=1.0)
+        assert isinstance(seg, InlineSegment)
+        np.testing.assert_array_equal(worker.state.Position_in, _home_steps())
 
     def test_checkpoint_produces_inline_segment(self, worker, segment_queue):
         """Checkpoint should produce an InlineSegment."""

@@ -42,3 +42,12 @@ def test_planned_motion_refused_until_homed(client: RobotClient, server_proc):
     assert client.home(wait=True, timeout=30.0) >= 0
     assert client.wait_status(lambda s: s.homed, timeout=2.0)
     assert client.move_j(target, duration=1.5, wait=True) >= 0
+
+
+def test_calibrate_rereferences_homed_robot(client: RobotClient, server_proc):
+    """calibrate() runs the real referencing sequence even when the robot is
+    already homed (home() substitutes a planned return move), and leaves the
+    robot referenced at standby."""
+    assert client.wait_status(lambda s: s.homed, timeout=5.0)
+    assert client.calibrate(wait=True, timeout=30.0) >= 0
+    assert client.wait_status(lambda s: s.homed, timeout=2.0)

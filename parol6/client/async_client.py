@@ -42,6 +42,7 @@ from ..protocol.wire import (
     JointSpeedsCmd,
     LoopStatsCmd,
     EstopCmd,
+    CalibrateCmd,
     HomeCmd,
     JogJCmd,
     JogLCmd,
@@ -682,6 +683,32 @@ class AsyncRobotClient(_RobotClientABC):
             ok = await self.wait_command(index, timeout=timeout)
             if not ok:
                 raise TimeoutError(f"home() timed out after {timeout}s")
+        return index
+
+    async def calibrate(self, wait: bool = False, timeout: float = 60.0) -> int:
+        """Run the end-stop referencing sequence, even if already referenced.
+
+        Each joint seeks its limit switch to re-derive joint zero, then the
+        robot moves to standby. Use home() to return to standby without
+        re-referencing.
+
+        Returns the command index (≥ 0) on success, -1 on failure.
+
+        Category: Motion
+
+        Example:
+            rbt.calibrate(wait=True)
+
+        Args:
+            wait: If True, block until the sequence completes
+            timeout: Maximum time to wait in seconds (only used when wait=True)
+        """
+        index = await self._send(CalibrateCmd())
+        assert isinstance(index, int)
+        if wait and index >= 0:
+            ok = await self.wait_command(index, timeout=timeout)
+            if not ok:
+                raise TimeoutError(f"calibrate() timed out after {timeout}s")
         return index
 
     async def stop(self) -> int:

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Union, cast
 import numpy as np
 
 from parol6.protocol.wire import (
+    CalibrateCmd,
     HomeCmd,
     MoveJCmd,
     SelectToolCmd,
@@ -499,7 +500,7 @@ class TrajectoryPlanner:
                 variant_key=self.state.current_tool_variant,
                 tcp_offset_m=offset_m,
             )
-        elif isinstance(params, HomeCmd):
+        elif isinstance(params, (HomeCmd, CalibrateCmd)):
             self.state.Position_in[:] = self._home_steps
             self.state.Homed_in.fill(1)
         elif isinstance(params, SetShapesCmd):

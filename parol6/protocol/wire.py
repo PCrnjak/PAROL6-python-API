@@ -158,6 +158,8 @@ class CmdType(IntEnum):
     SET_SHAPES = auto()
     # Collision-world readback query (installation + program layers)
     SHAPES = auto()
+    # Forced end-stop referencing (appended last: values are wire tags)
+    CALIBRATE = auto()
 
 
 # =============================================================================
@@ -501,6 +503,19 @@ class HomeCmd(
     msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True, gc=False
 ):
     """HOME: [CmdType.HOME]"""
+
+    pass
+
+
+class CalibrateCmd(
+    msgspec.Struct, tag=int(CmdType.CALIBRATE), array_like=True, frozen=True, gc=False
+):
+    """CALIBRATE: [CmdType.CALIBRATE]
+
+    Always runs the firmware's end-stop referencing sequence, even when the
+    robot already reports itself referenced. HOME on a referenced robot is a
+    planned return move instead.
+    """
 
     pass
 
@@ -1799,6 +1814,7 @@ __all__ = [
     "MoveSCmd",
     "MovePCmd",
     "HomeCmd",
+    "CalibrateCmd",
     "CheckpointCmd",
     # Command structs — streaming (servo/jog)
     "ServoJCmd",
