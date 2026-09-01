@@ -176,6 +176,8 @@ class LoopStatsCommand(QueryCommand[LoopStatsCmd]):
                 p95_period_s=state.p95_period_s,
                 p99_period_s=state.p99_period_s,
                 mean_hz=mean_hz,
+                p50_period_s=state.p50_period_s,
+                p90_period_s=state.p90_period_s,
             )
         )
 

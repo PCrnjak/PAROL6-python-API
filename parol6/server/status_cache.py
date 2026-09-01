@@ -166,6 +166,9 @@ class StatusCache:
 
         # All-joints-homed tracking field
         self._homed: bool = False
+        self._enabled: bool = True
+        self._homing_step: int = 0
+        self._joints_homed: np.ndarray = np.zeros(6, dtype=np.int32)
 
         # Self-collision viz tracking
         self._collision_active: bool = False
@@ -514,6 +517,19 @@ class StatusCache:
         if homed_changed:
             self._homed = homed
 
+        enabled_changed = self._enabled != state.enabled
+        if enabled_changed:
+            self._enabled = state.enabled
+
+        homing_changed = self._homing_step != state.homing_step
+        if homing_changed:
+            self._homing_step = state.homing_step
+        for i in range(6):
+            bit = 1 if state.Homed_in[i] else 0
+            if self._joints_homed[i] != bit:
+                self._joints_homed[i] = bit
+                homing_changed = True
+
         collision_changed = (
             self._collision_active != state.collision_active
             or self._collision_pairs != state.collision_pairs
@@ -542,6 +558,8 @@ class StatusCache:
             or queue_changed
             or error_changed
             or homed_changed
+            or enabled_changed
+            or homing_changed
             or collision_changed
             or depth_changed
         ):
@@ -577,6 +595,9 @@ class StatusCache:
                 scene_epoch=self._last_shapes_version,
                 accepted_index=self._accepted_index,
                 homed=self._homed,
+                enabled=self._enabled,
+                homing_step=self._homing_step,
+                joints_homed=self._joints_homed,
             )
             self._binary_dirty = False
         return self._binary_cache

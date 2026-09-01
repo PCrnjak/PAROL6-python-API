@@ -80,14 +80,15 @@ def _compute_phase_stats(
 @njit(cache=True)
 def _compute_loop_stats(
     samples: np.ndarray, scratch: np.ndarray, n: int
-) -> tuple[float, float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, float, float, float]:
     """Compute loop stats via single-pass Welford for mean+std.
 
     Uses the pre-allocated scratch buffer for percentiles (no hot-path alloc):
-    one copy to scratch, p99 first then p95 on the same data.
+    one copy to scratch, then p99, p95, p90, p50 in descending order on the
+    same data.
     """
     if n == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     mean = 0.0
     m2 = 0.0  # sum of squared differences
@@ -117,11 +118,19 @@ def _compute_loop_stats(
 
         k95 = int(n * 0.95)
         p95 = _quickselect(scratch[:n], k95)
+
+        k90 = int(n * 0.90)
+        p90 = _quickselect(scratch[:n], k90)
+
+        k50 = int(n * 0.50)
+        p50 = _quickselect(scratch[:n], k50)
     else:
         p95 = max_val
         p99 = max_val
+        p90 = max_val
+        p50 = max_val
 
-    return mean, std, min_val, max_val, p95, p99
+    return mean, std, min_val, max_val, p95, p99, p90, p50
 
 
 @njit(cache=True)
@@ -514,6 +523,8 @@ class LoopMetrics:
         "max_period_s",
         "p95_period_s",
         "p99_period_s",
+        "p90_period_s",
+        "p50_period_s",
         # Overshoot tracking (how much we miss the deadline by)
         "mean_overshoot_s",
         "max_overshoot_s",
@@ -543,6 +554,8 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
+        self.p90_period_s = 0.0
+        self.p50_period_s = 0.0
         self.mean_overshoot_s = 0.0
         self.max_overshoot_s = 0.0
         self.p99_overshoot_s = 0.0
@@ -634,7 +647,7 @@ class LoopMetrics:
     def compute_stats(self) -> None:
         """Compute statistics from buffers."""
         if self._buffer_count > 0:
-            mean, std, min_val, max_val, p95, p99 = _compute_loop_stats(
+            mean, std, min_val, max_val, p95, p99, p90, p50 = _compute_loop_stats(
                 self._buffer, self._scratch, self._buffer_count
             )
             self.mean_period_s = mean
@@ -643,6 +656,8 @@ class LoopMetrics:
             self.max_period_s = max_val
             self.p95_period_s = p95
             self.p99_period_s = p99
+            self.p90_period_s = p90
+            self.p50_period_s = p50
 
         # overshoot only needs mean/max/p99, so reuse the simpler phase stats
         if self._overshoot_count > 0:
@@ -668,6 +683,8 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
+        self.p90_period_s = 0.0
+        self.p50_period_s = 0.0
         self._overshoot_buffer.fill(0.0)
         self._overshoot_idx = 0
         self._overshoot_count = 0

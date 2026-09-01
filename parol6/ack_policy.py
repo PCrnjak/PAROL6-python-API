@@ -52,7 +52,6 @@ FIRE_AND_FORGET: set[CmdType] = {
 # Queued motion commands that return a command index in their ACK
 QUEUED_CMD_TYPES: set[CmdType] = {
     CmdType.HOME,
-    CmdType.CALIBRATE,
     CmdType.MOVEJ,
     CmdType.MOVEJ_POSE,
     CmdType.MOVEL,

@@ -39,7 +39,6 @@ import re as _re
 
 import parol6.protocol.wire as _wire
 from ..protocol.wire import (
-    CalibrateCmd,
     HomeCmd,
     SelectToolCmd,
     SetTcpOffsetCmd,
@@ -250,10 +249,8 @@ class DryRunRobotClient:
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
-        if isinstance(params, CalibrateCmd):
-            return self._snap_to_angles(HOME_ANGLES_DEG)
         if isinstance(params, HomeCmd):
-            if not self._planner.state.Homed_in[:6].all():
+            if params.calibrate or not self._planner.state.Homed_in[:6].all():
                 return self._snap_to_angles(HOME_ANGLES_DEG)
             # Already referenced → fall through: the planner fast-paths HOME
             # into a planned return move, so the preview renders the path.

@@ -241,6 +241,9 @@ class ControllerState:
     # Action tracking for status broadcast and queries
     action_current: str = ""
     action_params: str = ""
+    # Firmware referencing progress: 0 idle, 1 signalling, 2 waiting for the
+    # firmware to clear the homed bits, 3 waiting for every joint to re-home.
+    homing_step: int = 0
     action_state: ActionState = ActionState.IDLE  # IDLE, EXECUTING, ERROR
     action_next: str = ""
     queue_nonstreamable: list[str] = field(default_factory=list)
@@ -292,6 +295,8 @@ class ControllerState:
     max_period_s: float = 0.0
     p95_period_s: float = 0.0
     p99_period_s: float = 0.0
+    p90_period_s: float = 0.0
+    p50_period_s: float = 0.0
 
     # Flag to signal loop stats reset (picked up by controller)
     loop_stats_reset_pending: bool = False
@@ -368,6 +373,7 @@ class ControllerState:
         # Action tracking
         self.action_current = ""
         self.action_params = ""
+        self.homing_step = 0
         self.action_state = ActionState.IDLE
         self.action_next = ""
         self.queue_nonstreamable.clear()
