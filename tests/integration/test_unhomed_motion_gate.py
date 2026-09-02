@@ -42,3 +42,23 @@ def test_planned_motion_refused_until_homed(client: RobotClient, server_proc):
     assert client.home(wait=True, timeout=30.0) >= 0
     assert client.wait_status(lambda s: s.homed, timeout=2.0)
     assert client.move_j(target, duration=1.5, wait=True) >= 0
+
+
+def test_home_calibrate_rereferences_homed_robot(client: RobotClient, server_proc):
+    """home(calibrate=True) runs the real referencing sequence even when the
+    robot is already homed — the firmware drops the homed bits while it seeks
+    the end stops, which a substituted planned return move never does — and
+    leaves the robot referenced at standby."""
+    idx = client.home(calibrate=True)
+    assert idx >= 0
+    assert client.wait_status(lambda s: not s.homed, timeout=5.0)
+    # Progress is published while the firmware seeks the end stops...
+    assert client.wait_status(
+        lambda s: bool(s.homing.get("active"))
+        and any(state.name == "SEEKING" for state, _ in s.homing["joints"]),
+        timeout=5.0,
+    )
+    assert client.wait_command(idx, timeout=30.0)
+    assert client.wait_status(lambda s: s.homed, timeout=2.0)
+    # ...and the view is empty again once referencing completes.
+    assert client.wait_status(lambda s: not s.homing, timeout=2.0)

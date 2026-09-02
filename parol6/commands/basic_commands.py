@@ -77,8 +77,10 @@ class HomeState(Enum):
 class HomeCommand(MotionCommand[HomeCmd]):
     """
     A non-blocking command that tells the robot to perform its internal homing sequence.
-    Reached only while the robot is unhomed — the planner routes HOME from an
-    already-referenced robot to a planned return move instead.
+    Reached while the robot is unhomed, or on HOME(calibrate=True) from a
+    referenced robot — the planner routes plain HOME from an already-referenced
+    robot to a planned return move instead. The firmware clears the homed bits
+    when the sequence starts, which WAITING_FOR_UNHOMED relies on.
     """
 
     PARAMS_TYPE = HomeCmd
@@ -97,6 +99,7 @@ class HomeCommand(MotionCommand[HomeCmd]):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Manages the homing command and monitors for completion using a state machine."""
+        state.homing_step = self.state.value
         if self.state == HomeState.START:
             logger.debug(
                 "  -> Sending home signal (100)... Countdown: %d",

@@ -166,6 +166,9 @@ class StatusCache:
 
         # All-joints-homed tracking field
         self._homed: bool = False
+        self._enabled: bool = True
+        self._homing_step: int = 0
+        self._joints_homed: list[int] = [0] * 6
 
         # Self-collision viz tracking
         self._collision_active: bool = False
@@ -504,15 +507,32 @@ class StatusCache:
         if error_changed:
             self._error = state.error
 
-        # Scalar loop keeps the 100Hz path allocation-free (no slice/temporary).
+        # One scalar pass keeps the 100Hz path allocation-free; the per-joint
+        # bits feed both the aggregate `homed` and the homing-progress view.
         homed = True
+        homing_changed = False
+        joints_homed = self._joints_homed
         for i in range(6):
-            if not state.Homed_in[i]:
+            bit = 1 if state.Homed_in[i] else 0
+            if not bit:
                 homed = False
-                break
+            if joints_homed[i] != bit:
+                joints_homed[i] = bit
+                homing_changed = True
         homed_changed = self._homed != homed
         if homed_changed:
             self._homed = homed
+
+        enabled_changed = self._enabled != state.enabled
+        if enabled_changed:
+            self._enabled = state.enabled
+
+        # Only a live HomeCommand owns homing_step; any cancel path that drops
+        # the command clears action_current, so derive "idle" from that.
+        step = state.homing_step if state.action_current == "HomeCommand" else 0
+        if self._homing_step != step:
+            self._homing_step = step
+            homing_changed = True
 
         collision_changed = (
             self._collision_active != state.collision_active
@@ -542,6 +562,8 @@ class StatusCache:
             or queue_changed
             or error_changed
             or homed_changed
+            or enabled_changed
+            or homing_changed
             or collision_changed
             or depth_changed
         ):
@@ -577,6 +599,9 @@ class StatusCache:
                 scene_epoch=self._last_shapes_version,
                 accepted_index=self._accepted_index,
                 homed=self._homed,
+                enabled=self._enabled,
+                homing_step=self._homing_step,
+                joints_homed=self._joints_homed,
             )
             self._binary_dirty = False
         return self._binary_cache

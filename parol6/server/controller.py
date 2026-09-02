@@ -358,6 +358,8 @@ class Controller:
                 self._executor.clear_queue("E-Stop activated")
                 state.Command_out = CommandCode.DISABLE
                 state.Speed_out.fill(0)
+                state.enabled = False
+                state.disabled_reason = "E-STOP pressed"
                 state.error = make_error(ErrorCode.SYS_ESTOP_ACTIVE)
         elif state.InOut_in[4] == 1:  # E-stop released
             if self.estop_active:
@@ -464,6 +466,8 @@ class Controller:
             state.max_period_s = m.max_period_s
             state.p95_period_s = m.p95_period_s
             state.p99_period_s = m.p99_period_s
+            state.p90_period_s = m.p90_period_s
+            state.p50_period_s = m.p50_period_s
 
     def _log_periodic_status(self, state: ControllerState) -> None:
         """Log performance metrics every 3 seconds."""

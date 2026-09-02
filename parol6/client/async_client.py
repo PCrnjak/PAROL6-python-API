@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, Shape, ShapeWorld, ToolStatus
+from msgspec.structs import asdict
 from waldoctl.shapes import shape_from_wire
-from waldoctl.status import ActionState, ActivityResult, ToolResult
+from waldoctl.status import ActionState, ActivityResult, LoopStatsResult, ToolResult
 from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
@@ -657,13 +658,21 @@ class AsyncRobotClient(_RobotClientABC):
     # --------------- Motion / Control ---------------
 
     async def home(
-        self, wait: bool = False, timeout: float = 60.0, **wait_kwargs: Any
+        self,
+        wait: bool = False,
+        calibrate: bool = False,
+        timeout: float = 60.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Home the robot to its home position.
 
-        Unhomed, this runs the full referencing sequence (each joint seeks
-        its limit switch, then moves to standby). Already homed, it returns
-        to standby with a normal planned, collision-checked joint move.
+        Uncalibrated (first home after power-on), this runs the full
+        referencing sequence: each joint seeks its limit switch, then the
+        robot moves to standby. Calibrated, it returns to standby with a
+        normal planned, collision-checked joint move — unless
+        ``calibrate=True``, which re-runs the referencing sequence. The
+        referencing sequence is firmware-driven and ignores the collision
+        world, so clear keep-out geometry from the joints' sweep first.
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
@@ -674,9 +683,10 @@ class AsyncRobotClient(_RobotClientABC):
 
         Args:
             wait: If True, block until motion completes
+            calibrate: If True, always run the referencing sequence
             timeout: Maximum time to wait in seconds (only used when wait=True)
         """
-        index = await self._send(HomeCmd())
+        index = await self._send(HomeCmd(calibrate=calibrate))
         assert isinstance(index, int)
         if wait and index >= 0:
             ok = await self.wait_command(index, timeout=timeout)
@@ -891,7 +901,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(StatusCmd())
         return resp if isinstance(resp, StatusResultStruct) else None
 
-    async def loop_stats(self) -> LoopStatsResultStruct | None:
+    async def loop_stats(self) -> LoopStatsResult | None:
         """Fetch control-loop runtime metrics.
 
         Category: Query
@@ -900,7 +910,16 @@ class AsyncRobotClient(_RobotClientABC):
             stats = rbt.loop_stats()
         """
         resp = await self._request(LoopStatsCmd())
-        return resp if isinstance(resp, LoopStatsResultStruct) else None
+        if not isinstance(resp, LoopStatsResultStruct):
+            return None
+        # No fieldbus and no real-time scheduling on this backend.
+        return LoopStatsResult(
+            **asdict(resp),
+            can_frame_age_min_ticks=0,
+            can_frame_age_max_ticks=0,
+            rt_fifo=False,
+            rt_pinned=False,
+        )
 
     async def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count.

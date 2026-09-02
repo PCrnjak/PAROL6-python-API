@@ -16,6 +16,7 @@ Wire format uses msgpack arrays with integer type codes:
 
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from enum import IntEnum, auto
 from typing import Annotated, TypeAlias, Union, cast
 
@@ -500,9 +501,15 @@ class JogLCmd(
 class HomeCmd(
     msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True, gc=False
 ):
-    """HOME: [CmdType.HOME]"""
+    """HOME: [CmdType.HOME, calibrate]
 
-    pass
+    calibrate=True always runs the firmware's end-stop referencing sequence
+    to re-derive joint zero. Otherwise an already-referenced robot gets a
+    planned, collision-checked return move instead; the referencing sequence
+    itself is firmware-driven and ignores the collision world.
+    """
+
+    calibrate: bool = False
 
 
 class ResetCmd(
@@ -1009,6 +1016,8 @@ class LoopStatsResultStruct(
     p95_period_s: float
     p99_period_s: float
     mean_hz: float
+    p50_period_s: float = 0.0
+    p90_period_s: float = 0.0
 
 
 class ToolResultStruct(
@@ -1322,6 +1331,9 @@ def pack_response(result: Response) -> bytes:
     return _encoder.encode(ResponseMsg(result))
 
 
+_NO_JOINTS_HOMED: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
+
+
 def pack_status(
     pose: np.ndarray,
     angles: np.ndarray,
@@ -1347,6 +1359,9 @@ def pack_status(
     scene_epoch: int = 0,
     accepted_index: int = -1,
     homed: bool = True,
+    enabled: bool = True,
+    homing_step: int = 0,
+    joints_homed: Sequence[int] = _NO_JOINTS_HOMED,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1391,6 +1406,9 @@ def pack_status(
             scene_epoch,
             accepted_index,
             homed,
+            enabled,
+            homing_step,
+            joints_homed,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1438,6 +1456,25 @@ class StatusBuffer:
     # All joints homed. True from producers that predate the field (permissive:
     # old servers gate nothing, so claiming unhomed would be a false alarm).
     homed: bool = True
+    # Whether the controller accepts motion (False while disabled, e.g. the
+    # e-stop latch). True from producers that predate the field.
+    enabled: bool = True
+    # Remaining waldoctl StatusBuffer Protocol members. parol6 has no torque
+    # sensing, fieldbus, or warning source, so these hold their empty values.
+    torques: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
+    torques_ext: np.ndarray = field(
+        default_factory=lambda: np.zeros(6, dtype=np.float64)
+    )
+    warnings: list[tuple] = field(default_factory=list)
+    link_health: dict = field(default_factory=dict)
+    # Firmware referencing progress in waldoctl's shape: active, sequence_step,
+    # and one (HomingJointState, HomingPhase) pair per joint; empty while idle.
+    homing: dict = field(default_factory=dict)
+    # Last decoded (step, per-joint bits) so the view is rebuilt only on change.
+    _homing_step: int = field(default=0, init=False, repr=False, compare=False)
+    _homing_bits: list[int] = field(
+        default_factory=lambda: [0] * 6, init=False, repr=False, compare=False
+    )
     # Built once in __post_init__, aliasing the two enable arrays the decoder
     # mutates in place.
     cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
@@ -1447,6 +1484,15 @@ class StatusBuffer:
             "WRF": self.cart_en_wrf,
             "TRF": self.cart_en_trf,
         }
+
+    @property
+    def freedrive(self) -> bool:
+        """PAROL6 steppers cannot be back-driven."""
+        return False
+
+    @property
+    def mode(self) -> ActionState:
+        return self.action_state
 
     def copy(self) -> "StatusBuffer":
         """Return a deep copy with all arrays copied."""
@@ -1484,7 +1530,46 @@ class StatusBuffer:
             scene_epoch=self.scene_epoch,
             accepted_index=self.accepted_index,
             homed=self.homed,
+            enabled=self.enabled,
+            torques=self.torques.copy(),
+            torques_ext=self.torques_ext.copy(),
+            warnings=list(self.warnings),
+            link_health=dict(self.link_health),
+            homing=dict(self.homing),
         )
+
+
+class HomingJointState(IntEnum):
+    """Per-joint firmware referencing state (StatusBuffer.homing["joints"])."""
+
+    SEEKING = 0
+    HOMED = 1
+
+
+class HomingPhase(IntEnum):
+    """PAROL6 firmware exposes no sub-phase; kept for the (state, phase) shape."""
+
+    NONE = 0
+
+
+_HOMING_JOINT_VIEW = (
+    (HomingJointState.SEEKING, HomingPhase.NONE),
+    (HomingJointState.HOMED, HomingPhase.NONE),
+)
+
+
+def _apply_homing_progress(buf: StatusBuffer, step: int, bits: list[int]) -> None:
+    """Rebuild the homing view only when the step or per-joint bits change."""
+    if step == buf._homing_step and bits == buf._homing_bits:
+        return
+    buf._homing_step = step
+    buf._homing_bits[:] = bits
+    if step == 0:
+        buf.homing.clear()
+        return
+    buf.homing["active"] = True
+    buf.homing["sequence_step"] = step
+    buf.homing["joints"] = [_HOMING_JOINT_VIEW[b] for b in bits]
 
 
 def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
@@ -1496,7 +1581,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      error, queued_segments, queued_duration, action_params,
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
-                     accepted_index, homed]
+                     accepted_index, homed, enabled, homing_step, joints_homed]
 
     Args:
         data: Raw msgpack bytes
@@ -1568,6 +1653,9 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
             buf.scene_epoch = int(msg[22])
         buf.accepted_index = int(msg[23]) if len(msg) > 23 else -1
         buf.homed = bool(msg[24]) if len(msg) > 24 else True
+        buf.enabled = bool(msg[25]) if len(msg) > 25 else True
+        if len(msg) > 27:
+            _apply_homing_progress(buf, int(msg[26]), msg[27])
 
         return True
     except Exception as e:
@@ -1799,6 +1887,8 @@ __all__ = [
     "MoveSCmd",
     "MovePCmd",
     "HomeCmd",
+    "HomingJointState",
+    "HomingPhase",
     "CheckpointCmd",
     # Command structs — streaming (servo/jog)
     "ServoJCmd",
