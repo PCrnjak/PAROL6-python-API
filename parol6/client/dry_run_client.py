@@ -238,14 +238,22 @@ class DryRunRobotClient:
         """Snap to angles instantly (no trajectory) — used by Home and Teleport.
 
         Both establish position references, so subsequent planned moves pass
-        the homed gate."""
-        self._planner.flush()
+        the homed gate. Blended moves still buffered in the planner are
+        planned first and lead the returned result, so their paths — and any
+        refusal — reach the caller exactly as the live controller would run
+        them before the snap."""
+        pending = [
+            r
+            for seg in self._planner.flush()
+            if (r := self._segment_to_result(seg)) is not None
+        ]
         deg = np.asarray(angles_deg, dtype=np.float64)
         deg_to_steps(deg, self._state.Position_in)
         self._planner.state.Position_in[:] = self._state.Position_in
         self._planner.state.Homed_in.fill(1)
         rad = np.radians(deg).reshape(1, -1)
-        return _build_result(rad, duration=0.0)
+        snap = _build_result(rad, duration=0.0)
+        return self._merge_results([*pending, snap]) if pending else snap
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
