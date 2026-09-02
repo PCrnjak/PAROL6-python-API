@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, Shape, ShapeWorld, ToolStatus
+from msgspec.structs import asdict
 from waldoctl.shapes import shape_from_wire
 from waldoctl.status import ActionState, ActivityResult, LoopStatsResult, ToolResult
 from waldoctl.tools import ToolSpec
@@ -913,18 +914,7 @@ class AsyncRobotClient(_RobotClientABC):
             return None
         # No fieldbus and no real-time scheduling on this backend.
         return LoopStatsResult(
-            target_hz=resp.target_hz,
-            loop_count=resp.loop_count,
-            overrun_count=resp.overrun_count,
-            mean_period_s=resp.mean_period_s,
-            std_period_s=resp.std_period_s,
-            min_period_s=resp.min_period_s,
-            max_period_s=resp.max_period_s,
-            p95_period_s=resp.p95_period_s,
-            p99_period_s=resp.p99_period_s,
-            mean_hz=resp.mean_hz,
-            p50_period_s=resp.p50_period_s,
-            p90_period_s=resp.p90_period_s,
+            **asdict(resp),
             can_frame_age_min_ticks=0,
             can_frame_age_max_ticks=0,
             rt_fifo=False,

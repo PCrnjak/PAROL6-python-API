@@ -125,10 +125,7 @@ def _compute_loop_stats(
         k50 = int(n * 0.50)
         p50 = _quickselect(scratch[:n], k50)
     else:
-        p95 = max_val
-        p99 = max_val
-        p90 = max_val
-        p50 = max_val
+        p95 = p99 = p90 = p50 = max_val
 
     return mean, std, min_val, max_val, p95, p99, p90, p50
 

@@ -99,12 +99,12 @@ class HomeCommand(MotionCommand[HomeCmd]):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Manages the homing command and monitors for completion using a state machine."""
+        state.homing_step = self.state.value
         if self.state == HomeState.START:
             logger.debug(
                 "  -> Sending home signal (100)... Countdown: %d",
                 self.start_cmd_counter,
             )
-            state.homing_step = 1
             state.Command_out = CommandCode.HOME
             self.start_cmd_counter -= 1
             if self.start_cmd_counter <= 0:
@@ -112,31 +112,26 @@ class HomeCommand(MotionCommand[HomeCmd]):
             return ExecutionStatusCode.EXECUTING
 
         if self.state == HomeState.WAITING_FOR_UNHOMED:
-            state.homing_step = 2
             state.Command_out = CommandCode.IDLE
             if np.any(state.Homed_in[:6] == 0):
                 logger.info("  -> Homing sequence initiated by robot.")
                 self.state = HomeState.WAITING_FOR_HOMED
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                state.homing_step = 0
                 self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.FAILED
             return ExecutionStatusCode.EXECUTING
 
         if self.state == HomeState.WAITING_FOR_HOMED:
-            state.homing_step = 3
             state.Command_out = CommandCode.IDLE
             if np.all(state.Homed_in[:6] == 1):
                 self.log_info("Homing sequence complete. All joints reported home.")
-                state.homing_step = 0
                 self.finish()
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.COMPLETED
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
-                state.homing_step = 0
                 self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.FAILED

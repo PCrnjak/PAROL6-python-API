@@ -16,11 +16,11 @@ Wire format uses msgpack arrays with integer type codes:
 
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from enum import IntEnum, auto
 from typing import Annotated, TypeAlias, Union, cast
 
 import msgspec
-from collections.abc import Sequence
 import numpy as np
 import ormsgpack
 from numba import njit
@@ -1361,7 +1361,7 @@ def pack_status(
     homed: bool = True,
     enabled: bool = True,
     homing_step: int = 0,
-    joints_homed: "np.ndarray | Sequence[int]" = _NO_JOINTS_HOMED,
+    joints_homed: Sequence[int] = _NO_JOINTS_HOMED,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1460,22 +1460,21 @@ class StatusBuffer:
     # e-stop latch). True from producers that predate the field.
     enabled: bool = True
     # Remaining waldoctl StatusBuffer Protocol members. parol6 has no torque
-    # sensing, fieldbus, warning source, or homing-progress reporting, so
-    # these hold their empty values.
+    # sensing, fieldbus, or warning source, so these hold their empty values.
     torques: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     torques_ext: np.ndarray = field(
         default_factory=lambda: np.zeros(6, dtype=np.float64)
     )
     warnings: list[tuple] = field(default_factory=list)
     link_health: dict = field(default_factory=dict)
-    # Firmware referencing progress (see ControllerState.homing_step) and the
-    # per-joint homed bits; `homing` is the waldoctl-shaped view of the two,
-    # rebuilt only when they change and empty while idle.
-    homing_step: int = 0
-    joints_homed: np.ndarray = field(
-        default_factory=lambda: np.zeros(6, dtype=np.int32)
-    )
+    # Firmware referencing progress in waldoctl's shape: active, sequence_step,
+    # and one (HomingJointState, HomingPhase) pair per joint; empty while idle.
     homing: dict = field(default_factory=dict)
+    # Last decoded (step, per-joint bits) so the view is rebuilt only on change.
+    _homing_step: int = field(default=0, init=False, repr=False, compare=False)
+    _homing_bits: list[int] = field(
+        default_factory=lambda: [0] * 6, init=False, repr=False, compare=False
+    )
     # Built once in __post_init__, aliasing the two enable arrays the decoder
     # mutates in place.
     cart_en: dict[str, np.ndarray] = field(init=False, repr=False, compare=False)
@@ -1532,8 +1531,6 @@ class StatusBuffer:
             accepted_index=self.accepted_index,
             homed=self.homed,
             enabled=self.enabled,
-            homing_step=self.homing_step,
-            joints_homed=self.joints_homed.copy(),
             torques=self.torques.copy(),
             torques_ext=self.torques_ext.copy(),
             warnings=list(self.warnings),
@@ -1555,24 +1552,24 @@ class HomingPhase(IntEnum):
     NONE = 0
 
 
-def _apply_homing_progress(buf: StatusBuffer, step: int, bits: "Sequence[int]") -> None:
-    """Update the homing fields in place; rebuild the dict view only on change."""
-    changed = buf.homing_step != step
-    buf.homing_step = step
-    jh = buf.joints_homed
-    for i in range(6):
-        bit = 1 if bits[i] else 0
-        if jh[i] != bit:
-            jh[i] = bit
-            changed = True
-    if not changed:
+_HOMING_JOINT_VIEW = (
+    (HomingJointState.SEEKING, HomingPhase.NONE),
+    (HomingJointState.HOMED, HomingPhase.NONE),
+)
+
+
+def _apply_homing_progress(buf: StatusBuffer, step: int, bits: list[int]) -> None:
+    """Rebuild the homing view only when the step or per-joint bits change."""
+    if step == buf._homing_step and bits == buf._homing_bits:
         return
+    buf._homing_step = step
+    buf._homing_bits[:] = bits
     if step == 0:
         buf.homing.clear()
         return
     buf.homing["active"] = True
     buf.homing["sequence_step"] = step
-    buf.homing["joints"] = [(HomingJointState(int(b)), HomingPhase.NONE) for b in jh]
+    buf.homing["joints"] = [_HOMING_JOINT_VIEW[b] for b in bits]
 
 
 def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:

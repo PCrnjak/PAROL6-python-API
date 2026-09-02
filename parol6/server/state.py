@@ -241,8 +241,9 @@ class ControllerState:
     # Action tracking for status broadcast and queries
     action_current: str = ""
     action_params: str = ""
-    # Firmware referencing progress: 0 idle, 1 signalling, 2 waiting for the
-    # firmware to clear the homed bits, 3 waiting for every joint to re-home.
+    # HomeState value of the live HomeCommand (1 signalling, 2 waiting for the
+    # firmware to clear the homed bits, 3 waiting for every joint); meaningful
+    # only while action_current is "HomeCommand".
     homing_step: int = 0
     action_state: ActionState = ActionState.IDLE  # IDLE, EXECUTING, ERROR
     action_next: str = ""

@@ -358,6 +358,8 @@ class Controller:
                 self._executor.clear_queue("E-Stop activated")
                 state.Command_out = CommandCode.DISABLE
                 state.Speed_out.fill(0)
+                state.enabled = False
+                state.disabled_reason = "E-STOP pressed"
                 state.error = make_error(ErrorCode.SYS_ESTOP_ACTIVE)
         elif state.InOut_in[4] == 1:  # E-stop released
             if self.estop_active:
