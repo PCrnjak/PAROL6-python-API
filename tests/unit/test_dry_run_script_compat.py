@@ -9,6 +9,7 @@ in the docs / editor auto-complete, ensuring the dry run path doesn't diverge
 from the real client.
 """
 
+import numpy as np
 import pytest
 
 from parol6.client.dry_run_client import DryRunRobotClient
@@ -161,3 +162,17 @@ class TestDryRunHomedGate:
         result = client.home()
         assert result is not None and result.error is None
         assert result.duration == 0.0
+
+    def test_snap_carries_the_pending_blend_chain(self):
+        """A blended move still buffered when the script homes with calibrate
+        (or teleports) is planned and leads the returned result — the live
+        controller runs it before the snap, so the preview must show it."""
+        client = DryRunRobotClient(initial_joints_deg=HOME, initial_homed=True)
+        assert client.move_j(ANGLES_A, speed=0.5, r=10) is None  # buffered
+
+        result = client.home(calibrate=True)
+        assert result is not None and result.error is None
+        assert result.duration > 0.0
+        assert len(result.joint_trajectory_rad) > 1
+        assert np.allclose(np.degrees(result.end_joints_rad), HOME, atol=0.5)
+        assert client.flush() == []
