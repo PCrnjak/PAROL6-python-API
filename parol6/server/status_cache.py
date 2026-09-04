@@ -166,6 +166,8 @@ class StatusCache:
 
         # All-joints-homed tracking field
         self._homed: bool = False
+        self._p99_period_s: float = 0.0
+        self._overruns: int = 0
         self._enabled: bool = True
         self._homing_step: int = 0
         self._joints_homed: list[int] = [0] * 6
@@ -550,6 +552,17 @@ class StatusCache:
             self._queued_segments = state.queued_segments
             self._queued_duration = state.queued_duration
 
+        # The percentile is recomputed once per stats window and overruns
+        # are rare, so this re-encodes the cached payload about as often as
+        # the window turns rather than on every tick.
+        loop_changed = (
+            self._p99_period_s != state.p99_period_s
+            or self._overruns != state.overrun_count
+        )
+        if loop_changed:
+            self._p99_period_s = state.p99_period_s
+            self._overruns = state.overrun_count
+
         # Mark binary cache dirty if anything changed
         if (
             pos_changed
@@ -566,6 +579,7 @@ class StatusCache:
             or homing_changed
             or collision_changed
             or depth_changed
+            or loop_changed
         ):
             self._binary_dirty = True
 
@@ -602,6 +616,8 @@ class StatusCache:
                 enabled=self._enabled,
                 homing_step=self._homing_step,
                 joints_homed=self._joints_homed,
+                p99_period_s=self._p99_period_s,
+                overruns=self._overruns,
             )
             self._binary_dirty = False
         return self._binary_cache
