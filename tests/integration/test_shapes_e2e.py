@@ -17,6 +17,8 @@ import numpy as np
 import pytest
 
 from parol6 import MotionError, RobotClient
+
+from tests.conftest import free_udp_port
 from waldoctl import Box
 
 pytestmark = pytest.mark.integration
@@ -75,9 +77,10 @@ def test_set_shapes_ack_readback_rejection_and_timeout(
         assert tuple(s.name for s in world.program) == ("table",)
 
         # Unreachable controller → unconfirmed (0), never a fake success.
-        dead = RobotClient(
-            host=ports.server_ip, port=ports.server_port + 91, timeout=0.3
-        )
+        # A port the kernel just handed out and nothing bound: arithmetic on
+        # the live port runs past 65535 whenever the ephemeral range hands
+        # out a high one, which is a connect() overflow, not a dead server.
+        dead = RobotClient(host=ports.server_ip, port=free_udp_port(), timeout=0.3)
         assert dead.set_shapes([box]) == 0
         assert dead.shapes() is None
     finally:
