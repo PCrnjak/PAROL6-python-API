@@ -29,6 +29,14 @@ class TrajectoryPlanningError(RuntimeError):
         super().__init__(str(robot_error))
 
 
+class ConfigurationError(RuntimeError):
+    """A configuration command the controller cannot honour."""
+
+    def __init__(self, robot_error: RobotError):
+        self.robot_error = robot_error
+        super().__init__(str(robot_error))
+
+
 class MotionError(RuntimeError):
     """Pipeline planning/execution error detected via status broadcast."""
 

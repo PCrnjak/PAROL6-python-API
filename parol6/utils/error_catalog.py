@@ -121,6 +121,13 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         remedy="Check parameter ranges and types.",
     ),
     # -- System / safety --
+    ErrorCode.SYS_STATUS_RATE_INVALID: _ErrorTemplate(
+        title="Status rate not achievable",
+        cause="Status is broadcast every Nth control tick, so {requested} Hz "
+        "does not divide the {control} Hz control loop evenly.",
+        effect="Broadcast rate unchanged.",
+        remedy="Pick a rate that divides {control} Hz: {allowed}.",
+    ),
     ErrorCode.SYS_CONTROLLER_DISABLED: _ErrorTemplate(
         title="Controller disabled",
         cause="Motion command sent while controller is disabled. {detail}",

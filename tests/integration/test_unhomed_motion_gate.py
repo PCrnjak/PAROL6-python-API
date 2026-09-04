@@ -54,8 +54,10 @@ def test_home_calibrate_rereferences_homed_robot(client: RobotClient, server_pro
     assert client.wait_status(lambda s: not s.homed, timeout=5.0)
     # Progress is published while the firmware seeks the end stops...
     assert client.wait_status(
-        lambda s: bool(s.homing.get("active"))
-        and any(state.name == "SEEKING" for state, _ in s.homing["joints"]),
+        lambda s: (
+            bool(s.homing.get("active"))
+            and any(state.name == "SEEKING" for state, _ in s.homing["joints"])
+        ),
         timeout=5.0,
     )
     assert client.wait_command(idx, timeout=30.0)

@@ -200,6 +200,16 @@ class StatusCache:
 
         self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
 
+        # Per-joint drive faults. The firmware reports two bitfields; the
+        # label view is rebuilt only when a bit moves, so the 100 Hz path
+        # allocates nothing while the drives are healthy. One entry per
+        # joint always — an all-clear list of empty tuples is how a consumer
+        # tells "this backend reports faults, none active" from "this
+        # backend has no fault reporting", which is an empty list.
+        self._temp_fault_bits = np.zeros(6, dtype=np.uint8)
+        self._poserr_fault_bits = np.zeros(6, dtype=np.uint8)
+        self._drive_faults: list[tuple[str, ...]] = [() for _ in range(6)]
+
         # IK enablement results (pre-allocated for zero-alloc reads)
         self._joint_en = np.ones(12, dtype=np.uint8)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
@@ -529,6 +539,25 @@ class StatusCache:
         if enabled_changed:
             self._enabled = state.enabled
 
+        faults_changed = False
+        for i in range(6):
+            temp_bit = 1 if state.Temperature_error_in[i] else 0
+            pos_bit = 1 if state.Position_error_in[i] else 0
+            if self._temp_fault_bits[i] != temp_bit:
+                self._temp_fault_bits[i] = temp_bit
+                faults_changed = True
+            if self._poserr_fault_bits[i] != pos_bit:
+                self._poserr_fault_bits[i] = pos_bit
+                faults_changed = True
+        if faults_changed:
+            for i in range(6):
+                labels = []
+                if self._temp_fault_bits[i]:
+                    labels.append("overtemperature")
+                if self._poserr_fault_bits[i]:
+                    labels.append("following_error")
+                self._drive_faults[i] = tuple(labels)
+
         # Only a live HomeCommand owns homing_step; any cancel path that drops
         # the command clears action_current, so derive "idle" from that.
         step = state.homing_step if state.action_current == "HomeCommand" else 0
@@ -580,6 +609,7 @@ class StatusCache:
             or collision_changed
             or depth_changed
             or loop_changed
+            or faults_changed
         ):
             self._binary_dirty = True
 
@@ -618,9 +648,22 @@ class StatusCache:
                 joints_homed=self._joints_homed,
                 p99_period_s=self._p99_period_s,
                 overruns=self._overruns,
+                drive_faults=self._drive_faults,
             )
             self._binary_dirty = False
         return self._binary_cache
+
+    def set_status_rate(self, hz: float) -> None:
+        """Adopt a new broadcast rate.
+
+        The cache differentiates TCP position against the broadcast period,
+        so a rate change that missed this would scale every reported speed.
+        """
+        self._status_rate_hz = hz
+
+    @property
+    def status_rate_hz(self) -> float:
+        return self._status_rate_hz
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""

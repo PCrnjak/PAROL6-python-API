@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6 import config as _cfg
 from pinokin import arrays_equal_6
 from parol6.config import CONTROL_RATE_HZ, steps_to_rad
 from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
@@ -245,6 +246,12 @@ class ControllerState:
     # firmware to clear the homed bits, 3 waiting for every joint); meaningful
     # only while action_current is "HomeCommand".
     homing_step: int = 0
+    # Status broadcast rate for this session. Mutable so SET_STATUS_RATE can
+    # raise it for a capture or a tuning run and drop it back without a
+    # restart; the control loop re-derives its broadcast interval when this
+    # moves. Constrained to divisors of CONTROL_RATE_HZ, since status is
+    # emitted every Nth tick.
+    status_rate_hz: float = _cfg.STATUS_RATE_HZ
     action_state: ActionState = ActionState.IDLE  # IDLE, EXECUTING, ERROR
     action_next: str = ""
     queue_nonstreamable: list[str] = field(default_factory=list)

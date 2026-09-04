@@ -73,6 +73,7 @@ from parol6.config import (
     MCAST_TTL,
     STATUS_RATE_HZ,
     STATUS_STALE_S,
+    CONTROL_RATE_HZ,
     STATUS_BROADCAST_INTERVAL,
 )
 
@@ -538,6 +539,10 @@ class Controller:
         self._timer.start()
         pt = self._phase_timer
         tick_count = 0
+        # Re-derived rather than captured once: SET_STATUS_RATE moves the rate
+        # mid-session, and a local snapshot would keep broadcasting at whatever
+        # the rate was at boot.
+        broadcast_rate_hz = 0.0
         broadcast_interval = STATUS_BROADCAST_INTERVAL
 
         while self.running:
@@ -557,6 +562,12 @@ class Controller:
                 if not self.estop_active:
                     with pt.phase("execute"):
                         self._execute_commands(state)
+
+                if state.status_rate_hz != broadcast_rate_hz:
+                    broadcast_rate_hz = state.status_rate_hz
+                    broadcast_interval = max(
+                        1, int(CONTROL_RATE_HZ) // int(broadcast_rate_hz)
+                    )
 
                 if tick_count % broadcast_interval == 0:
                     with pt.phase("status"):

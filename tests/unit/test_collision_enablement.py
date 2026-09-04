@@ -94,8 +94,9 @@ def test_gate_greys_direction_entering_new_pair_while_inside():
     checker = _FakeChecker(
         lambda q: -0.01 + q[0],  # A dominates; J1+ improves, J1- deepens
         lambda q: True,
-        pairs=lambda q: [("L6", "shape:A")]
-        + ([("L4", "shape:B")] if q[1] > 0.001 else []),
+        pairs=lambda q: (
+            [("L6", "shape:A")] + ([("L4", "shape:B")] if q[1] > 0.001 else [])
+        ),
     )
     gate_joint_enable_collision(checker, np.zeros(6), joint_en, np.zeros(6))
     assert joint_en[0] == 1  # J1+ pure escape -> enabled
@@ -122,8 +123,9 @@ def test_collision_blocked_new_pair_blocks_even_when_global_min_improves():
     inside = _FakeChecker(
         lambda q: -0.05 + q[0],  # A dominates the global min; +x improves it
         lambda q: True,
-        pairs=lambda q: [("L6", "shape:A")]
-        + ([("L5", "shape:B")] if q[0] > 0.05 else []),
+        pairs=lambda q: (
+            [("L6", "shape:A")] + ([("L5", "shape:B")] if q[0] > 0.05 else [])
+        ),
     )
     # Pure escape (no new contact) stays allowed…
     assert collision_blocked(inside, np.zeros(6), np.full(6, 0.01)) is False

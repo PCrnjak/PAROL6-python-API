@@ -17,7 +17,13 @@ import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, Shape, ShapeWorld, ToolStatus
 from msgspec.structs import asdict
 from waldoctl.shapes import shape_from_wire
-from waldoctl.status import ActionState, ActivityResult, LoopStatsResult, ToolResult
+from waldoctl.status import (
+    ActionState,
+    ActivityResult,
+    LoopStatsResult,
+    StatusRate,
+    ToolResult,
+)
 from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
@@ -65,6 +71,9 @@ from ..protocol.wire import (
     ReachableCmd,
     ResetCmd,
     ResetLoopStatsCmd,
+    SetStatusRateCmd,
+    StatusRateCmd,
+    StatusRateResultStruct,
     ResetStateCmd,
     Response,
     StopCmd,
@@ -930,6 +939,29 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.reset_loop_stats()
         """
         return await self._send(ResetLoopStatsCmd())
+
+    async def set_status_rate(self, hz: float) -> int:
+        """Set the rate the controller broadcasts status at.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_status_rate(100)
+        """
+        return await self._send(SetStatusRateCmd(hz=float(hz)))
+
+    async def status_rate(self) -> StatusRate | None:
+        """Current broadcast rate and the control rate it divides.
+
+        Category: Query
+
+        Example:
+            rate = rbt.status_rate()
+        """
+        resp = await self._request(StatusRateCmd())
+        if not isinstance(resp, StatusRateResultStruct):
+            return None
+        return StatusRate(hz=resp.hz, control_hz=resp.control_hz)
 
     async def select_tool(self, tool_name: str, variant_key: str = "") -> int:
         """Set the active end-effector tool on the controller.
