@@ -21,6 +21,13 @@ async def test_status_carries_the_loops_own_health(server_proc, ports):
     async with AsyncRobotClient(port=ports.server_port) as client:
         assert await client.wait_ready(timeout=10.0)
 
+        # The overrun count only ever climbs, so the broadcast sample is
+        # bracketed by a query on either side of it rather than compared
+        # to one taken later: a loaded runner misses a deadline or two in
+        # between, and that is the loop being honest, not a disagreement.
+        before = await client.loop_stats()
+        assert before is not None
+
         seen: dict = {}
 
         async def collect() -> None:
@@ -38,10 +45,14 @@ async def test_status_carries_the_loops_own_health(server_proc, ports):
         except asyncio.TimeoutError:
             pytest.fail("no loop health ever arrived on STATUS")
 
-        stats = await client.loop_stats()
-        assert stats is not None
-        assert abs(seen["p99_period_s"] - stats.p99_period_s) < 5e-3, (
+        after = await client.loop_stats()
+        assert after is not None
+        assert abs(seen["p99_period_s"] - after.p99_period_s) < 5e-3, (
             f"STATUS says p99 {seen['p99_period_s']}, "
-            f"the query says {stats.p99_period_s}"
+            f"the query says {after.p99_period_s}"
         )
-        assert seen["overruns"] == stats.overrun_count
+        assert before.overrun_count <= seen["overruns"] <= after.overrun_count, (
+            f"STATUS says {seen['overruns']} overruns, outside the "
+            f"{before.overrun_count}..{after.overrun_count} the query "
+            "bracketed it with — the broadcast is not reading the same counter"
+        )
