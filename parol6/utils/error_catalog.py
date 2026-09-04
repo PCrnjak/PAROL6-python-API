@@ -1,4 +1,4 @@
-"""Structured robot error types and error catalog.
+"""The error catalog: waldoctl's RobotError plus this backend's templates.
 
 RobotError carries KUKA-style structured fields: code, title, cause, effect, remedy.
 The catalog maps ErrorCode → template; make_error() instantiates with runtime params.
@@ -8,45 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from waldoctl.errors import RobotError as _RobotError
+
 from .error_codes import ErrorCode
 
 
-@dataclass(frozen=True)
-class RobotError:
-    """Structured error with code, title, cause, effect, and remedy."""
-
-    command_index: int
-    code: int
-    title: str
-    cause: str
-    effect: str
-    remedy: str
-
-    def to_wire(self) -> list:
-        """Serialize to a list for ormsgpack packing."""
-        return [
-            self.command_index,
-            self.code,
-            self.title,
-            self.cause,
-            self.effect,
-            self.remedy,
-        ]
-
-    @staticmethod
-    def from_wire(data: list) -> RobotError:
-        """Reconstruct from a wire-format list."""
-        return RobotError(
-            command_index=data[0],
-            code=data[1],
-            title=data[2],
-            cause=data[3],
-            effect=data[4],
-            remedy=data[5],
-        )
-
-    def __str__(self) -> str:
-        return f"[{self.code}] {self.title}: {self.cause}"
+# The refusal type is the contract's, not this backend's: a frontend
+# represents a refused command the same way whichever arm raised it, and
+# the six fields and the wire list are identical in both directions. An
+# exception rather than a dataclass, so a client can raise it as-is.
+RobotError = _RobotError
 
 
 @dataclass(frozen=True)
