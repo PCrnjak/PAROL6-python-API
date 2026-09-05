@@ -20,10 +20,8 @@ from parol6.protocol.wire import (
     ResetStateCmd,
     SetStatusRateCmd,
 )
-from parol6.server.status_cache import get_cache
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.errors import ConfigurationError
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
@@ -112,11 +110,15 @@ class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         hz = float(self.p.hz)
         control = int(CONTROL_RATE_HZ)
-        if hz <= 0.0 or hz > control or control % int(hz) != 0 or hz != int(hz):
+        # Ordered so the modulo only ever sees a finite, in-range, integral
+        # divisor: int(0.5) is 0 and int(nan) raises, and either would leave
+        # as a generic tick failure instead of the refusal that names the
+        # rates this controller can serve.
+        if not (1.0 <= hz <= control) or not hz.is_integer() or control % int(hz) != 0:
             allowed = ", ".join(
                 str(control // n) for n in range(1, control + 1) if control % n == 0
             )
-            raise ConfigurationError(
+            self.fail(
                 make_error(
                     ErrorCode.SYS_STATUS_RATE_INVALID,
                     requested=hz,
@@ -124,8 +126,8 @@ class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
                     allowed=allowed,
                 )
             )
+            return ExecutionStatusCode.FAILED
         state.status_rate_hz = hz
-        get_cache().set_status_rate(hz)
         logger.info("Status broadcast rate set to %g Hz", hz)
         self.finish()
         return ExecutionStatusCode.COMPLETED

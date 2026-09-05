@@ -39,6 +39,16 @@ from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se
 from parol6.tools import get_tool_transform
 from parol6 import config as _cfg
 
+# Drive-fault labels indexed by (overtemperature | following-error << 1).
+# Built once: the bits are read every control tick, and the repo's hot path
+# does not allocate.
+_DRIVE_FAULT_LABELS: tuple[tuple[str, ...], ...] = (
+    (),
+    ("overtemperature",),
+    ("following_error",),
+    ("overtemperature", "following_error"),
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,16 +208,19 @@ class StatusCache:
         self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_pos_initialized: bool = False
 
-        self._status_rate_hz: float = _cfg.STATUS_RATE_HZ
+        # Broadcast period the last TCP sample was taken at. The rate is a
+        # session knob, and the gap being differentiated was governed by the
+        # period in force when the earlier sample was taken, not by the one
+        # that has just replaced it.
+        self._tcp_sample_period_s: float = (
+            _cfg.INTERVAL_S * _cfg.status_broadcast_interval(_cfg.STATUS_RATE_HZ)
+        )
 
-        # Per-joint drive faults. The firmware reports two bitfields; the
-        # label view is rebuilt only when a bit moves, so the 100 Hz path
-        # allocates nothing while the drives are healthy. One entry per
-        # joint always — an all-clear list of empty tuples is how a consumer
-        # tells "this backend reports faults, none active" from "this
-        # backend has no fault reporting", which is an empty list.
-        self._temp_fault_bits = np.zeros(6, dtype=np.uint8)
-        self._poserr_fault_bits = np.zeros(6, dtype=np.uint8)
+        # Per-joint drive faults, one bit per condition. One entry per joint
+        # always — an all-clear list of empty tuples is how a consumer tells
+        # "this backend reports faults, none active" from "this backend has
+        # no fault reporting", which is an empty list.
+        self._drive_fault_bits = np.zeros(6, dtype=np.uint8)
         self._drive_faults: list[tuple[str, ...]] = [() for _ in range(6)]
 
         # IK enablement results (pre-allocated for zero-alloc reads)
@@ -450,7 +463,7 @@ class StatusCache:
             self._tcp_pos_buf[1] = self.pose[7]
             self._tcp_pos_buf[2] = self.pose[11]
             if self._tcp_pos_initialized:
-                dt = 1.0 / self._status_rate_hz
+                dt = self._tcp_sample_period_s
                 dx = self._tcp_pos_buf[0] - self._prev_tcp_pos[0]
                 dy = self._tcp_pos_buf[1] - self._prev_tcp_pos[1]
                 dz = self._tcp_pos_buf[2] - self._prev_tcp_pos[2]
@@ -458,6 +471,9 @@ class StatusCache:
             else:
                 self._tcp_pos_initialized = True
             self._prev_tcp_pos[:] = self._tcp_pos_buf
+            self._tcp_sample_period_s = (
+                _cfg.INTERVAL_S * _cfg.status_broadcast_interval(state.status_rate_hz)
+            )
         else:
             # Robot not moving — reset TCP speed to zero
             self.tcp_speed = 0.0
@@ -541,22 +557,13 @@ class StatusCache:
 
         faults_changed = False
         for i in range(6):
-            temp_bit = 1 if state.Temperature_error_in[i] else 0
-            pos_bit = 1 if state.Position_error_in[i] else 0
-            if self._temp_fault_bits[i] != temp_bit:
-                self._temp_fault_bits[i] = temp_bit
+            bits = (1 if state.Temperature_error_in[i] else 0) | (
+                2 if state.Position_error_in[i] else 0
+            )
+            if self._drive_fault_bits[i] != bits:
+                self._drive_fault_bits[i] = bits
+                self._drive_faults[i] = _DRIVE_FAULT_LABELS[bits]
                 faults_changed = True
-            if self._poserr_fault_bits[i] != pos_bit:
-                self._poserr_fault_bits[i] = pos_bit
-                faults_changed = True
-        if faults_changed:
-            for i in range(6):
-                labels = []
-                if self._temp_fault_bits[i]:
-                    labels.append("overtemperature")
-                if self._poserr_fault_bits[i]:
-                    labels.append("following_error")
-                self._drive_faults[i] = tuple(labels)
 
         # Only a live HomeCommand owns homing_step; any cancel path that drops
         # the command clears action_current, so derive "idle" from that.
@@ -652,18 +659,6 @@ class StatusCache:
             )
             self._binary_dirty = False
         return self._binary_cache
-
-    def set_status_rate(self, hz: float) -> None:
-        """Adopt a new broadcast rate.
-
-        The cache differentiates TCP position against the broadcast period,
-        so a rate change that missed this would scale every reported speed.
-        """
-        self._status_rate_hz = hz
-
-    @property
-    def status_rate_hz(self) -> float:
-        return self._status_rate_hz
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""

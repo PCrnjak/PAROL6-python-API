@@ -164,15 +164,21 @@ _CATALOG: dict[int, _ErrorTemplate] = {
 def make_error(
     code: ErrorCode, command_index: int = -1, **params: object
 ) -> RobotError:
-    """Create a RobotError from the catalog, formatting placeholders in title/cause."""
+    """Create a RobotError from the catalog, formatting its placeholders.
+
+    Every field is formatted, not just the ones that usually carry a
+    placeholder: a remedy is where a refusal says what would have worked, so
+    a template that puts its parameter there must not reach the client with
+    the placeholder still in it.
+    """
     tmpl = _CATALOG[code]
     return RobotError(
         command_index=command_index,
         code=int(code),
         title=tmpl.title.format_map(params) if params else tmpl.title,
         cause=tmpl.cause.format_map(params) if params else tmpl.cause,
-        effect=tmpl.effect,
-        remedy=tmpl.remedy,
+        effect=tmpl.effect.format_map(params) if params else tmpl.effect,
+        remedy=tmpl.remedy.format_map(params) if params else tmpl.remedy,
     )
 
 

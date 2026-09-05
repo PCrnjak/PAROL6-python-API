@@ -13,6 +13,10 @@ import time
 import pytest
 
 from parol6 import AsyncRobotClient
+from parol6.server.state import ControllerState
+from parol6.server.status_cache import StatusCache
+from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import MotionError
 
 
 async def _observed_hz(client: AsyncRobotClient, frames: int = 40) -> float:
@@ -88,24 +92,77 @@ async def test_raising_the_rate_delivers_more_frames(server_proc, ports):
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_an_unachievable_rate_is_refused_with_the_rule(server_proc, ports):
-    """Refused, never rounded to a neighbour: a capture taken at a rate
-    nobody asked for is wrong in a way nothing reports. The refusal has to
-    carry what the legal rates are, since that is all the operator needs."""
+    """Refused, never rounded to a neighbour: a capture taken at a rate nobody
+    asked for is wrong in a way nothing reports. The refusal has to reach the
+    caller carrying the rates that would have worked, since that is the whole
+    of what an operator needs — including for the rates whose arithmetic the
+    check itself cannot survive: 0.5 Hz floors to a zero divisor, and NaN
+    cannot be made an int at all, so a validator that divides before it
+    screens turns a refusal into a crash.
+    """
     async with AsyncRobotClient(port=ports.server_port) as client:
         assert await client.wait_ready(timeout=10.0)
         before = await client.status_rate()
         assert before is not None
+        achievable = before.achievable()
 
-        bogus = before.control_hz / 3 + 0.5
-        assert bogus not in before.achievable()
+        for bogus in (0.0, -50.0, 0.5, 62.5, float("nan"), float("inf")):
+            assert bogus not in achievable
+            with pytest.raises(MotionError) as caught:
+                await client.set_status_rate(bogus)
 
-        with pytest.raises(Exception) as caught:
-            await client.set_status_rate(bogus)
-        message = str(caught.value)
-        assert str(int(before.control_hz)) in message, message
-        assert "divide" in message.lower(), message
+            refusal = caught.value.robot_error
+            assert refusal.code == ErrorCode.SYS_STATUS_RATE_INVALID, (
+                f"{bogus} Hz came back as {refusal.title!r} rather than as an "
+                f"unservable rate: {refusal.cause}"
+            )
+            unnamed = [hz for hz in achievable if str(int(hz)) not in refusal.remedy]
+            assert not unnamed, (
+                f"refusing {bogus} Hz has to say what would work instead, but "
+                f"{unnamed} are missing from {refusal.remedy!r}"
+            )
 
         after = await client.status_rate()
         assert after is not None and after.hz == before.hz, (
             "a refused rate must leave the broadcast alone"
         )
+
+
+@pytest.mark.integration
+def test_the_speed_derivative_follows_the_rate_it_was_sampled_at():
+    """TCP speed is a difference over the broadcast period, so the period the
+    cache divides by has to be the one the controller is actually broadcasting
+    at — and the sample that straddles a rate change spans the period it was
+    taken at, not the one that has just replaced it. Get either wrong and a
+    steady arm appears to change speed the moment somebody changes the rate.
+
+    Only J1 moves, so equal step increments are equal chords of one circle
+    about the base axis: the displacement is the same every sample, and any
+    change in the reported speed is the period alone.
+    """
+    cache = StatusCache()
+    try:
+        state = ControllerState()
+
+        def advance() -> float:
+            state.Position_in[0] += 200
+            cache.update_from_state(state)
+            return cache.tcp_speed
+
+        advance()  # first difference has nothing to difference against
+        at_50 = advance()
+        assert at_50 > 0.0, "a moving arm has to report a speed"
+
+        state.status_rate_hz = 25.0
+        straddling = advance()
+        settled = advance()
+
+        assert straddling == pytest.approx(at_50, rel=1e-3), (
+            "the sample taken before the rate changed spans the old period"
+        )
+        assert settled == pytest.approx(at_50 / 2, rel=1e-3), (
+            "half the broadcast rate is twice the period, so the same "
+            f"movement per frame is half the speed: {settled} vs {at_50}"
+        )
+    finally:
+        cache.close()
