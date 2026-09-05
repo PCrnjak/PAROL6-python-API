@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from parol6 import MotionError, RobotClient
-from waldoctl import Box
+from waldoctl import Box, Physical
 
 pytestmark = pytest.mark.integration
 
@@ -70,6 +70,19 @@ def test_set_shapes_ack_readback_rejection_and_timeout(
         # previously-applied world must survive the rejected call.
         with pytest.raises(MotionError, match="Duplicate"):
             client.set_shapes([box, Box(name="table", x=0.1, y=0.1, z=0.1)])
+        world = client.shapes()
+        assert world is not None
+        assert tuple(s.name for s in world.program) == ("table",)
+
+        # No contact simulation here: a shape declaring physics is refused
+        # by name, never silently flattened to its geometry.
+        with pytest.raises(MotionError, match="physics"):
+            client.set_shapes(
+                [
+                    box,
+                    Box(name="brick", x=0.1, y=0.1, z=0.1, physics=Physical(mass=0.2)),
+                ]
+            )
         world = client.shapes()
         assert world is not None
         assert tuple(s.name for s in world.program) == ("table",)

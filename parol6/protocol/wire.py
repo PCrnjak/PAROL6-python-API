@@ -638,7 +638,13 @@ class SetTcpOffsetCmd(
 
 
 class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
-    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``."""
+    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``.
+
+    ``physics`` (``[mass | None, [slide, spin, roll]]``) is carried so the
+    codec matches waldoctl's, and refused at apply: this backend has no
+    contact simulation. Pre-physics peers send six elements; the default
+    fills the seventh.
+    """
 
     kind: str
     params: list[float]
@@ -646,6 +652,7 @@ class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
     collision: bool
     margin: float | None
     name: str
+    physics: tuple[float | None, list[float]] | None = None
 
 
 class SetShapesCmd(

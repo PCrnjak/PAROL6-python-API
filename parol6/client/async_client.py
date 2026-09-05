@@ -1003,11 +1003,15 @@ class AsyncRobotClient(_RobotClientABC):
             return None
         return ShapeWorld(
             installation=tuple(
-                shape_from_wire(w.kind, w.params, w.pose, w.collision, w.margin, w.name)
+                shape_from_wire(
+                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                )
                 for w in resp.installation
             ),
             program=tuple(
-                shape_from_wire(w.kind, w.params, w.pose, w.collision, w.margin, w.name)
+                shape_from_wire(
+                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                )
                 for w in resp.program
             ),
         )
