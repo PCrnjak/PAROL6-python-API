@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health, drive_faults]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -92,6 +92,7 @@ class QueryType(IntEnum):
     IS_SIMULATOR = auto()
     TCP_OFFSET = auto()
     SHAPES = auto()
+    STATUS_RATE = auto()
 
 
 class CmdType(IntEnum):
@@ -159,6 +160,10 @@ class CmdType(IntEnum):
     SET_SHAPES = auto()
     # Collision-world readback query (installation + program layers)
     SHAPES = auto()
+    # Status broadcast rate: set it for a session, read it back with the
+    # control rate it divides.
+    SET_STATUS_RATE = auto()
+    STATUS_RATE = auto()
 
 
 # =============================================================================
@@ -861,6 +866,30 @@ class ActivityCmd(
     pass
 
 
+class StatusRateCmd(
+    msgspec.Struct,
+    tag=int(CmdType.STATUS_RATE),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """STATUS_RATE: [CmdType.STATUS_RATE] — read the broadcast rate."""
+
+    pass
+
+
+class SetStatusRateCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_STATUS_RATE),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """SET_STATUS_RATE: [CmdType.SET_STATUS_RATE, hz]"""
+
+    hz: float
+
+
 class LoopStatsCmd(
     msgspec.Struct,
     tag=int(CmdType.LOOP_STATS),
@@ -995,6 +1024,19 @@ class StatusResultStruct(
     speeds: list[float]
     io: list[int]
     tool_status: list
+
+
+class StatusRateResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.STATUS_RATE),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Broadcast rate, and the control rate it divides."""
+
+    hz: float
+    control_hz: float
 
 
 class LoopStatsResultStruct(
@@ -1204,6 +1246,7 @@ class ShapesResultStruct(
 Response = (
     StatusResultStruct
     | LoopStatsResultStruct
+    | StatusRateResultStruct
     | ToolResultStruct
     | CurrentActionResultStruct
     | PingResultStruct
@@ -1364,6 +1407,7 @@ def pack_status(
     joints_homed: Sequence[int] = _NO_JOINTS_HOMED,
     p99_period_s: float = 0.0,
     overruns: int = 0,
+    drive_faults: Sequence[Sequence[str]] = (),
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1412,6 +1456,7 @@ def pack_status(
             homing_step,
             joints_homed,
             (p99_period_s, overruns),
+            drive_faults,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1471,9 +1516,10 @@ class StatusBuffer:
     warnings: list[tuple] = field(default_factory=list)
     link_health: dict = field(default_factory=dict)
     # The drives report per-joint error FLAGS over the serial link, not
-    # analog temperature or current registers, so there is nothing to put
-    # here: empty is what tells a consumer "no such sensor" rather than
-    # "all zero". Flags surface as faults, not as a trend.
+    # analog temperature or current registers, so this carries "faults"
+    # (one label tuple per joint) and no temperature/current series: empty
+    # lists are what tell a consumer "no such sensor" rather than "all
+    # zero", and a list of empty tuples is an all-clear.
     drive_health: dict = field(default_factory=dict)
     # The control loop's own health: p99_period_s and overruns. Empty from
     # producers that predate the field, which is how a consumer tells
@@ -1596,7 +1642,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
                      accepted_index, homed, enabled, homing_step, joints_homed,
-                     loop_health]
+                     loop_health, drive_faults]
 
     Args:
         data: Raw msgpack bytes
@@ -1677,6 +1723,16 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                 "p99_period_s": float(lh[0]),
                 "overruns": int(lh[1]),
             }
+        if len(msg) > 29:
+            # One label tuple per joint, empty when that drive is healthy.
+            # Absent entirely from producers that predate the field, which is
+            # what tells a consumer this backend reports no drive faults at
+            # all rather than reporting all-clear. Replaced wholesale only on
+            # change, so a snapshot's shallow dict copy keeps the labels that
+            # were current when it was taken.
+            faults = [tuple(f) for f in msg[29]]
+            if buf.drive_health.get("faults") != faults:
+                buf.drive_health["faults"] = faults
 
         return True
     except Exception as e:
@@ -1950,6 +2006,8 @@ __all__ = [
     "QueueCmd",
     "ActivityCmd",
     "LoopStatsCmd",
+    "StatusRateCmd",
+    "SetStatusRateCmd",
     "ProfileCmd",
     "Command",
     # Mixin
@@ -1957,6 +2015,7 @@ __all__ = [
     # Response structs
     "StatusResultStruct",
     "LoopStatsResultStruct",
+    "StatusRateResultStruct",
     "ToolResultStruct",
     "CurrentActionResultStruct",
     "PingResultStruct",
