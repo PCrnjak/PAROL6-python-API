@@ -967,7 +967,7 @@ class Robot(_RobotABC):
         import copy
 
         from parol6.client.sync_client import _run
-        from waldoctl.sync_tools import make_sync_tool
+        from waldoctl.sync_tools import SyncTool, make_sync_tool
 
         host: str = kwargs.get("host", self._host)
         port: int = kwargs.get("port", self._port)
@@ -980,7 +980,7 @@ class Robot(_RobotABC):
             bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
-        bound: dict[str, ToolSpec] = {}
+        bound: dict[str, SyncTool] = {}
         for key, async_tool in async_bound.items():
             bound[key] = make_sync_tool(async_tool, _run)
         client._bound_tools = bound

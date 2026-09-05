@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -422,7 +422,12 @@ class Controller:
             raw_error = self._tool_cmd.robot_error or make_error(
                 ErrorCode.MOTN_TICK_FAILED, detail=type(self._tool_cmd).__name__
             )
-            state.error = replace(raw_error, command_index=self._tool_cmd_index)
+            # Rebuilt from the wire, not `replace`d: the refusal is an
+            # exception now, and a dataclass replace on one does not
+            # survive the copy the state makes of it.
+            attributed = raw_error.to_wire()
+            attributed[0] = self._tool_cmd_index
+            state.error = RobotError.from_wire(attributed)
             state.action_state = ActionState.ERROR
             state.completed_command_index = max(
                 state.completed_command_index, self._tool_cmd_index

@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, overload
 
-from waldoctl.tools import ToolSpec
+from waldoctl.sync_tools import SyncTool
 
 from waldoctl import PingResult, ToolStatus
 from waldoctl.status import ActivityResult, LoopStatsResult, ToolResult
@@ -131,7 +131,7 @@ class RobotClient:
         # `from parol6 import RobotClient; rbt = RobotClient(...)` works without
         # going through Robot.create_sync_client(). The Robot factory rebinds
         # these afterwards from the same registry.
-        self._bound_tools: dict[str, ToolSpec] = {}
+        self._bound_tools: dict[str, SyncTool] = {}
         self._bind_default_tools()
 
     def _bind_default_tools(self) -> None:
@@ -146,7 +146,7 @@ class RobotClient:
     # ---------- tool access ----------
 
     @property
-    def tool(self) -> ToolSpec:
+    def tool(self) -> SyncTool:
         """Active bound tool. Raises if no tool has been set."""
         key = (self._inner._active_tool_key or "").upper()
         if not key:

@@ -9,7 +9,7 @@ This module contains all protocol definitions:
 Wire format uses msgpack arrays with integer type codes:
 - OK:       MsgType.OK (just the integer)
 - ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed]
+- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health]
 - RESPONSE: [MsgType.RESPONSE, query_type, value]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -1369,6 +1369,8 @@ def pack_status(
     enabled: bool = True,
     homing_step: int = 0,
     joints_homed: Sequence[int] = _NO_JOINTS_HOMED,
+    p99_period_s: float = 0.0,
+    overruns: int = 0,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1416,6 +1418,7 @@ def pack_status(
             enabled,
             homing_step,
             joints_homed,
+            (p99_period_s, overruns),
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1474,6 +1477,15 @@ class StatusBuffer:
     )
     warnings: list[tuple] = field(default_factory=list)
     link_health: dict = field(default_factory=dict)
+    # The drives report per-joint error FLAGS over the serial link, not
+    # analog temperature or current registers, so there is nothing to put
+    # here: empty is what tells a consumer "no such sensor" rather than
+    # "all zero". Flags surface as faults, not as a trend.
+    drive_health: dict = field(default_factory=dict)
+    # The control loop's own health: p99_period_s and overruns. Empty from
+    # producers that predate the field, which is how a consumer tells
+    # "loop healthy" from "loop not reported".
+    loop_health: dict = field(default_factory=dict)
     # Firmware referencing progress in waldoctl's shape: active, sequence_step,
     # and one (HomingJointState, HomingPhase) pair per joint; empty while idle.
     homing: dict = field(default_factory=dict)
@@ -1542,6 +1554,8 @@ class StatusBuffer:
             torques_ext=self.torques_ext.copy(),
             warnings=list(self.warnings),
             link_health=dict(self.link_health),
+            drive_health=dict(self.drive_health),
+            loop_health=dict(self.loop_health),
             homing=dict(self.homing),
         )
 
@@ -1588,7 +1602,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      error, queued_segments, queued_duration, action_params,
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
-                     accepted_index, homed, enabled, homing_step, joints_homed]
+                     accepted_index, homed, enabled, homing_step, joints_homed,
+                     loop_health]
 
     Args:
         data: Raw msgpack bytes
@@ -1663,6 +1678,12 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         buf.enabled = bool(msg[25]) if len(msg) > 25 else True
         if len(msg) > 27:
             _apply_homing_progress(buf, int(msg[26]), msg[27])
+        if len(msg) > 28:
+            lh = msg[28]
+            buf.loop_health = {
+                "p99_period_s": float(lh[0]),
+                "overruns": int(lh[1]),
+            }
 
         return True
     except Exception as e:
