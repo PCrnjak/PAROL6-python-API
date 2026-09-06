@@ -134,7 +134,10 @@ with Robot(host=HOST, port=PORT, normalize_logs=True) as robot:
     rbt.move_l([0, 60, 0, 0, 0, 0], speed=0.3, frame="TRF", rel=True, wait=True)
 
     # Precision TRF rotations — pencil tip stays stationary while wrist rotates
-    SWEEP = 20
+    # 10 degrees, not more: at this pose a wider sweep takes the wrist out of
+    # the reachable set part-way through and the move is refused with
+    # "IK: partial path failure".
+    SWEEP = 10
     for axis in range(3):
         delta = [0, 0, 0, 0, 0, 0]
         delta[3 + axis] = -SWEEP

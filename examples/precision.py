@@ -14,22 +14,19 @@ HOST = "127.0.0.1"
 PORT = 5001
 
 HOME_ANGLES = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
-HOME_TOLERANCE_DEG = 2.0
 
 with Robot(host=HOST, port=PORT, normalize_logs=True) as robot:
     rbt = robot.create_sync_client(timeout=2.0)
     rbt.wait_ready(timeout=5.0)
     rbt.simulator(True)
 
-    # Select tool, and home only if not already near the home pose
     rbt.select_tool("SSG-48")
     rbt.tool.calibrate()
-    current = rbt.angles()
-    if (
-        current is None
-        or max(abs(a - h) for a, h in zip(current, HOME_ANGLES)) > HOME_TOLERANCE_DEG
-    ):
-        rbt.home(wait=True)
+    # Home unconditionally. Being NEAR the home angles is not the same as
+    # being referenced: a freshly started robot reports positions it has not
+    # homed to, so a proximity check skips the homing the moves below require
+    # and they are refused with "Robot not homed".
+    rbt.home(wait=True)
 
     PRECISION_POSE = [0, -250, 350, -90, 0, -90]
     rbt.move_j(pose=PRECISION_POSE, speed=0.5, wait=True)
