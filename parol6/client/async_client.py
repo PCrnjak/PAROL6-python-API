@@ -254,7 +254,7 @@ class AsyncRobotClient(_RobotClientABC):
 
     @property
     def skill_capabilities(self) -> frozenset[str]:
-        return super().skill_capabilities | {"backend.parol6"}
+        return super().skill_capabilities | {"backend.parol6", "tool.gripper"}
 
     def __init__(
         self,
