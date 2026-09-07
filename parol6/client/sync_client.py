@@ -145,6 +145,16 @@ class RobotClient:
 
     # ---------- tool access ----------
 
+    def run_skill(
+        self, invoke: Callable[[AsyncRobotClient], Coroutine[Any, Any, T]]
+    ) -> T:
+        """Execute a Python skill using this connection and its existing loop."""
+        return _run(invoke(self._inner))
+
+    @property
+    def skill_capabilities(self) -> frozenset[str]:
+        return self._inner.skill_capabilities
+
     @property
     def tool(self) -> SyncTool:
         """Active bound tool. Raises if no tool has been set."""

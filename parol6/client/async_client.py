@@ -243,6 +243,10 @@ class AsyncRobotClient(_RobotClientABC):
     Query commands: request/response with timeout and simple retry
     """
 
+    @property
+    def skill_capabilities(self) -> frozenset[str]:
+        return super().skill_capabilities | {"backend.parol6"}
+
     def __init__(
         self,
         host: str = "127.0.0.1",
