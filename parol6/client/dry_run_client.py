@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from waldoctl.execution import ExecutionSpeed, validate_execution_scale
+from waldoctl.skills import UnresolvedPreview
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from ..commands.base import MotionCommand
@@ -177,8 +179,7 @@ class DryRunRobotClient:
     simulated separately since the planner doesn't handle streaming.
 
     Most methods are auto-dispatched via __getattr__ using CMD_MAP.
-    Explicit methods exist only for angles/pose (read from state)
-    and delay (no-op).
+    Execution controls change the planning clock; observations read local state.
     """
 
     def __init__(
@@ -247,6 +248,8 @@ class DryRunRobotClient:
 
     def flush(self) -> list[DryRunResult]:
         """Flush pending blend buffer. Call after script completion."""
+        if self._planner._blend_buffer:
+            self._require_running()
         segments = self._planner.flush()
         self._state.Position_in[:] = self._planner.state.Position_in
         results: list[DryRunResult] = []
@@ -279,6 +282,13 @@ class DryRunRobotClient:
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
+        cmd_cls = self._registry.get_command_for_struct(type(params))
+        if (
+            cmd_cls is not None
+            and issubclass(cmd_cls, MotionCommand)
+            and not cmd_cls.streamable
+        ):
+            self._require_running()
         if isinstance(params, HomeCmd):
             if params.calibrate or not self._planner.state.Homed_in[:6].all():
                 return self._snap_to_angles(HOME_ANGLES_DEG)
@@ -308,7 +318,6 @@ class DryRunRobotClient:
         # Detect jog/servo commands — planner doesn't handle streaming.
         # Other non-trajectory MotionCommands (SelectTool, Home) fall through
         # to the planner which handles them as inline segments.
-        cmd_cls = self._registry.get_command_for_struct(type(params))
         if cmd_cls is not None and issubclass(cmd_cls, (JogJCommand, JogLCommand)):
             self._planner.flush()
             self._state.Position_in[:] = self._planner.state.Position_in
@@ -356,7 +365,7 @@ class DryRunRobotClient:
         for i in range(len(sampled)):
             steps_to_rad(sampled[i], radians[i])
 
-        return _build_result(radians, seg.duration)
+        return _build_result(radians, seg.duration / self._state.execution_speed)
 
     def _error_segment_to_result(self, seg: ErrorSegment) -> DryRunResult:
         """Convert an ErrorSegment to a DryRunResult with per-pose validity."""
@@ -554,6 +563,7 @@ class DryRunRobotClient:
                 "backend.parol6",
                 "io.digital",
                 "execution.preview",
+                "execution.speed",
             }
         )
 
@@ -619,8 +629,32 @@ class DryRunRobotClient:
             raise RuntimeError(str(result.error))
         return 0
 
+    def _require_running(self) -> None:
+        if self._state.execution_paused:
+            raise UnresolvedPreview(
+                "Queued execution is paused; preview needs an explicit resume "
+                "before it can predict completion"
+            )
+
+    def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
+        self._state.execution_speed = validate_execution_scale(scale)
+        return 1
+
+    def execution_speed(self, *, timeout: float = 3.0) -> ExecutionSpeed:
+        scale = self._state.execution_speed
+        applied = 0.0 if self._state.execution_paused else scale
+        return ExecutionSpeed(applied, applied, scale)
+
+    def pause(self, *, timeout: float = 3.0) -> int:
+        self._state.execution_paused = True
+        return 1
+
+    def resume(self, *, timeout: float = 3.0) -> int:
+        self._state.execution_paused = False
+        return 1
+
     def delay(self, seconds: float = 0.0) -> None:
-        pass
+        self._require_running()
 
     def wait_motion(self, **kwargs: Any) -> None:
         self.flush()

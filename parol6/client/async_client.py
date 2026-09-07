@@ -27,6 +27,8 @@ from waldoctl.status import (
 )
 from waldoctl.tools import ToolSpec
 
+from waldoctl.execution import ExecutionSpeed, validate_execution_scale
+
 from .. import config as cfg
 from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
 from ..utils.error_catalog import RobotError
@@ -43,6 +45,10 @@ from ..protocol.wire import (
     DelayCmd,
     EnablementResultStruct,
     ErrorCmd,
+    ExecutionSpeedCmd,
+    ExecutionSpeedResultStruct,
+    SetExecutionSpeedCmd,
+    PauseCmd,
     ErrorResultStruct,
     ErrorMsg,
     IOCmd,
@@ -260,6 +266,7 @@ class AsyncRobotClient(_RobotClientABC):
     def skill_capabilities(self) -> frozenset[str]:
         return super().skill_capabilities | {
             "backend.parol6",
+            "execution.speed",
             "tool.gripper",
             "io.digital",
         }
@@ -962,6 +969,89 @@ class AsyncRobotClient(_RobotClientABC):
         """
         return await self._send(ResetLoopStatsCmd())
 
+    async def execution_speed(self, *, timeout: float = 3.0) -> ExecutionSpeed:
+        """Read fresh requested, applied, and retained execution scales.
+
+        Category: Query
+
+        Example:
+            speed = rbt.execution_speed()
+        """
+        self._validate_execution_timeout(timeout)
+        async with asyncio.timeout(timeout):
+            response = await self._request(ExecutionSpeedCmd())
+            if not isinstance(response, ExecutionSpeedResultStruct):
+                raise ConnectionError("Controller execution speed is unavailable")
+            return ExecutionSpeed(
+                response.target_scale, response.applied_scale, response.resume_scale
+            )
+
+    @staticmethod
+    def _validate_execution_timeout(timeout: float) -> None:
+        if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Execution control timeout must be positive and finite")
+
+    async def _request_execution_state(
+        self, *, timeout: float, scale: float | None = None, paused: bool = False
+    ) -> int:
+        self._validate_execution_timeout(timeout)
+        try:
+            async with asyncio.timeout(timeout):
+                command = (
+                    SetExecutionSpeedCmd(scale)
+                    if scale is not None
+                    else PauseCmd(paused)
+                )
+                if await self._send(command) <= 0:
+                    return 0
+                while True:
+                    state = await self.execution_speed(timeout=timeout)
+                    confirmed = (
+                        state.resume_scale == scale
+                        if scale is not None
+                        else (state.target_scale == 0) == paused
+                    )
+                    if confirmed:
+                        return 1
+                    await asyncio.sleep(0.01)
+        except TimeoutError:
+            return 0
+
+    async def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
+        """Select 10–100% of planned queued-motion speed, preserving pause.
+
+        Category: Control
+
+        Example:
+            rbt.set_execution_speed(0.5)
+        """
+        return await self._request_execution_state(
+            scale=validate_execution_scale(scale), timeout=timeout
+        )
+
+    async def pause(self, *, timeout: float = 3.0) -> int:
+        """Request a controlled hold, retaining queued trajectory progress.
+
+        A confirmed request returns 1. Read ``execution_speed().paused``
+        to confirm the hold. Standalone Python completion timeouts continue.
+
+        Category: Control
+
+        Example:
+            rbt.pause()
+        """
+        return await self._request_execution_state(paused=True, timeout=timeout)
+
+    async def resume(self, *, timeout: float = 3.0) -> int:
+        """Resume the retained queue at its selected positive speed.
+
+        Category: Control
+
+        Example:
+            rbt.resume()
+        """
+        return await self._request_execution_state(paused=False, timeout=timeout)
+
     async def set_status_rate(self, hz: float) -> int:
         """Set the rate the controller broadcasts status at.
 
@@ -1515,8 +1605,8 @@ class AsyncRobotClient(_RobotClientABC):
                     rel=rel,
                 )
             )
-        if wait and index >= 0:
-            await self.wait_command(index, timeout=timeout)
+        if wait and index >= 0 and not await self.wait_command(index, timeout=timeout):
+            raise TimeoutError(f"Command {index} did not complete within {timeout}s")
         return index
 
     async def move_l(
@@ -1562,8 +1652,8 @@ class AsyncRobotClient(_RobotClientABC):
             rel=rel,
         )
         index = await self._send(cmd)
-        if wait and index >= 0:
-            await self.wait_command(index, timeout=timeout)
+        if wait and index >= 0 and not await self.wait_command(index, timeout=timeout):
+            raise TimeoutError(f"Command {index} did not complete within {timeout}s")
         return index
 
     async def move_c(
@@ -1609,8 +1699,8 @@ class AsyncRobotClient(_RobotClientABC):
             r=r,
         )
         index = await self._send(cmd)
-        if wait and index >= 0:
-            await self.wait_command(index, timeout=timeout)
+        if wait and index >= 0 and not await self.wait_command(index, timeout=timeout):
+            raise TimeoutError(f"Command {index} did not complete within {timeout}s")
         return index
 
     async def move_s(
@@ -1650,8 +1740,8 @@ class AsyncRobotClient(_RobotClientABC):
             accel=accel,
         )
         index = await self._send(cmd)
-        if wait and index >= 0:
-            await self.wait_command(index, timeout=timeout)
+        if wait and index >= 0 and not await self.wait_command(index, timeout=timeout):
+            raise TimeoutError(f"Command {index} did not complete within {timeout}s")
         return index
 
     async def move_p(
@@ -1691,8 +1781,8 @@ class AsyncRobotClient(_RobotClientABC):
             accel=accel,
         )
         index = await self._send(cmd)
-        if wait and index >= 0:
-            await self.wait_command(index, timeout=timeout)
+        if wait and index >= 0 and not await self.wait_command(index, timeout=timeout):
+            raise TimeoutError(f"Command {index} did not complete within {timeout}s")
         return index
 
     async def checkpoint(self, label: str) -> int:
@@ -1942,6 +2032,10 @@ class AsyncRobotClient(_RobotClientABC):
             params=params or [],
         )
         result = await self._send(cmd)
-        if wait and result >= 0:
-            await self.wait_command(result, timeout=timeout)
+        if (
+            wait
+            and result >= 0
+            and not await self.wait_command(result, timeout=timeout)
+        ):
+            raise TimeoutError(f"Command {result} did not complete within {timeout}s")
         return result

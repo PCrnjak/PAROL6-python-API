@@ -11,6 +11,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, overload
 
+from waldoctl.execution import ExecutionSpeed
 from waldoctl.sync_tools import SyncTool
 
 from waldoctl import PingResult, ToolStatus
@@ -333,6 +334,22 @@ class RobotClient:
     def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count."""
         return _run(self._inner.reset_loop_stats())
+
+    def execution_speed(self, *, timeout: float = 3.0) -> ExecutionSpeed:
+        """Read fresh controller execution timing."""
+        return _run(self._inner.execution_speed(timeout=timeout))
+
+    def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
+        """Select queued-motion speed without releasing pause."""
+        return _run(self._inner.set_execution_speed(scale, timeout=timeout))
+
+    def pause(self, *, timeout: float = 3.0) -> int:
+        """Request a controlled hold of the retained queue."""
+        return _run(self._inner.pause(timeout=timeout))
+
+    def resume(self, *, timeout: float = 3.0) -> int:
+        """Resume the retained queue at its selected speed."""
+        return _run(self._inner.resume(timeout=timeout))
 
     def set_status_rate(self, hz: float) -> int:
         """Set the rate the controller broadcasts status at."""

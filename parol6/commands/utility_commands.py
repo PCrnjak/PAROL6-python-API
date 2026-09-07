@@ -11,7 +11,7 @@ from parol6.commands.base import (
     MotionCommand,
     SystemCommand,
 )
-from parol6.config import CONTROL_RATE_HZ
+from parol6.config import CONTROL_RATE_HZ, INTERVAL_S
 from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
@@ -37,10 +37,10 @@ class DelayCommand(CommandBase[DelayCmd]):
 
     PARAMS_TYPE = DelayCmd
 
-    __slots__ = ()
+    __slots__ = ("_remaining_s",)
 
     def do_setup(self, state: "ControllerState") -> None:
-        self.start_timer(self.p.seconds)
+        self._remaining_s = self.p.seconds
         logger.info(f"  -> Delay starting for {self.p.seconds} seconds...")
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
@@ -48,7 +48,8 @@ class DelayCommand(CommandBase[DelayCmd]):
         state.Command_out = CommandCode.IDLE
         state.Speed_out.fill(0)
 
-        if self.timer_expired():
+        self._remaining_s -= INTERVAL_S
+        if self._remaining_s <= 0:
             logger.info(f"Delay finished after {self.p.seconds} seconds.")
             self.finish()
             return ExecutionStatusCode.COMPLETED

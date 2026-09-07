@@ -55,10 +55,25 @@ class TrajectorySegment:
 
     command_index: int
     trajectory_steps: np.ndarray  # (M, 6) int32
+    trajectory_rad: np.ndarray  # (M, 6) float64, before motor-step quantization
     duration: float
     command_name: str = ""
     action_params: str = ""
     blend_consumed_indices: list[int] = field(default_factory=list)
+    velocity_rad_s: np.ndarray = field(init=False)
+    acceleration_rad_s2: np.ndarray = field(init=False)
+
+    def __post_init__(self) -> None:
+        from parol6.config import INTERVAL_S
+
+        if len(self.trajectory_rad) < 2:
+            self.velocity_rad_s = np.zeros_like(self.trajectory_rad)
+            self.acceleration_rad_s2 = np.zeros_like(self.trajectory_rad)
+        else:
+            self.velocity_rad_s = np.gradient(self.trajectory_rad, INTERVAL_S, axis=0)
+            self.acceleration_rad_s2 = np.gradient(
+                self.velocity_rad_s, INTERVAL_S, axis=0
+            )
 
 
 @dataclass
@@ -376,6 +391,7 @@ class TrajectoryPlanner:
                 TrajectorySegment(
                     command_index=head_idx,
                     trajectory_steps=head_cmd.trajectory_steps.copy(),
+                    trajectory_rad=head_cmd.trajectory_rad.copy(),
                     duration=head_cmd._duration,
                     command_name=type(head_cmd).__name__,
                     action_params=_format_cmd_params(head_cmd.p),
@@ -411,6 +427,7 @@ class TrajectoryPlanner:
             TrajectorySegment(
                 command_index=command_index,
                 trajectory_steps=cmd.trajectory_steps.copy(),
+                trajectory_rad=cmd.trajectory_rad.copy(),
                 duration=cmd._duration,
                 command_name=type(cmd).__name__,
                 action_params=_format_cmd_params(params) if params is not None else "",
