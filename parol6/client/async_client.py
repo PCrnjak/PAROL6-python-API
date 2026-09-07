@@ -84,6 +84,7 @@ from ..protocol.wire import (
     ShapesCmd,
     ShapesResultStruct,
     SetTcpOffsetCmd,
+    SetTcpTransformCmd,
     ShapeWire,
     ServoJCmd,
     ServoJPoseCmd,
@@ -94,6 +95,8 @@ from ..protocol.wire import (
     StatusCmd,
     TcpOffsetCmd,
     TcpOffsetResultStruct,
+    TcpTransformCmd,
+    TcpTransformResultStruct,
     TcpSpeedCmd,
     TeleportCmd,
     SpeedsResultStruct,
@@ -993,6 +996,8 @@ class AsyncRobotClient(_RobotClientABC):
 
         The offset shifts the effective TCP point in the tool's local frame.
         Subsequent motion (especially TRF relative moves) will use the new TCP.
+        Returns the queued index; await ``wait_command(index)`` to confirm
+        application. This translation-only setter clears user TCP rotation.
         Call with (0, 0, 0) to reset. Changing tools resets the offset.
 
         Category: Configuration
@@ -1001,6 +1006,30 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.set_tcp_offset(0, 0, -190)  # pencil tip 190mm from gripper
         """
         return await self._send(SetTcpOffsetCmd(x=x, y=y, z=z))
+
+    async def set_tcp_transform(
+        self,
+        x: float = 0,
+        y: float = 0,
+        z: float = 0,
+        roll: float = 0,
+        pitch: float = 0,
+        yaw: float = 0,
+    ) -> int:
+        return await self._send(
+            SetTcpTransformCmd(x=x, y=y, z=z, roll=roll, pitch=pitch, yaw=yaw)
+        )
+
+    async def tcp_transform(self) -> list[float]:
+        from math import isfinite
+
+        resp = await self._request(TcpTransformCmd())
+        if not isinstance(resp, TcpTransformResultStruct):
+            raise TimeoutError("Controller did not return a TCP transform")
+        values = [resp.x, resp.y, resp.z, resp.roll, resp.pitch, resp.yaw]
+        if not all(isfinite(value) for value in values):
+            raise ValueError("Controller returned a non-finite TCP transform")
+        return values
 
     async def set_shapes(self, shapes: list[Shape]) -> int:
         """Replace the program-layer collision-world shapes (keep-out barriers).
@@ -1063,7 +1092,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(TcpOffsetCmd())
         if isinstance(resp, TcpOffsetResultStruct):
             return [resp.x, resp.y, resp.z]
-        return [0.0, 0.0, 0.0]
+        raise TimeoutError("Controller did not return a TCP offset")
 
     async def select_profile(self, profile: str) -> int:
         """Set the motion profile (e.g. ``"TOPPRA"``).
@@ -1152,6 +1181,7 @@ class AsyncRobotClient(_RobotClientABC):
             fault_code=resp.fault_code,
             positions=tuple(resp.positions),
             channels=tuple(resp.channels),
+            variant_key=resp.variant_key,
         )
 
     async def reachable(self) -> EnablementResultStruct | None:

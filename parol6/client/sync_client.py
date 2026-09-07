@@ -366,6 +366,20 @@ class RobotClient:
         """Set TCP offset in mm, composed on top of the current tool transform."""
         return _run(self._inner.set_tcp_offset(x=x, y=y, z=z))
 
+    def set_tcp_transform(
+        self,
+        x: float = 0,
+        y: float = 0,
+        z: float = 0,
+        roll: float = 0,
+        pitch: float = 0,
+        yaw: float = 0,
+    ) -> int:
+        return _run(self._inner.set_tcp_transform(x, y, z, roll, pitch, yaw))
+
+    def tcp_transform(self) -> list[float]:
+        return _run(self._inner.tcp_transform())
+
     def set_shapes(self, shapes: list) -> int:
         """Replace the program-layer collision-world shapes (keep-out barriers).
 

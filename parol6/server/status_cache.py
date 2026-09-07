@@ -36,7 +36,7 @@ from parol6.server.ik_worker import (
     ik_enablement_worker_main,
 )
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
-from parol6.tools import get_tool_transform
+from parol6.tools import compose_tcp_transform, get_tool_transform
 from parol6 import config as _cfg
 
 # Drive-fault labels indexed by (overtemperature | following-error << 1).
@@ -158,6 +158,8 @@ class StatusCache:
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
         self._last_tool_name: str = "NONE"  # Track tool changes
         self._last_tool_variant: str = ""  # Track variant changes
+        self._last_tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_tcp_rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._last_tool_positions: tuple[float, ...] = ()  # Track tool DOF changes
 
         # Action tracking fields
@@ -423,6 +425,8 @@ class StatusCache:
         tool_changed = (
             state.current_tool != self._last_tool_name
             or state.current_tool_variant != self._last_tool_variant
+            or state.tcp_offset_m != self._last_tcp_offset
+            or state.tcp_rotation_rad != self._last_tcp_rotation
         )
 
         # Convert speeds from steps/s to rad/s when they change
@@ -432,12 +436,17 @@ class StatusCache:
         if tool_changed:
             self._last_tool_name = state.current_tool
             self._last_tool_variant = state.current_tool_variant
+            self._last_tcp_offset = state.tcp_offset_m
+            self._last_tcp_rotation = state.tcp_rotation_rad
             self._tcp_pos_initialized = (
                 False  # avoid speed spike from TCP offset change
             )
             # Sync tool transform to IK worker
             T_tool = get_tool_transform(
                 state.current_tool, variant_key=state.current_tool_variant
+            )
+            T_tool = compose_tcp_transform(
+                T_tool, state.tcp_offset_m, state.tcp_rotation_rad
             )
             self._ik_input_tool_view.reshape(4, 4)[:] = T_tool
             # Sync the tool's collision geometry to the IK worker's checker
@@ -488,6 +497,7 @@ class StatusCache:
         # Populate tool status from hardware state via the tool config
         ts = self.tool_status
         ts.key = state.current_tool
+        ts.variant_key = state.current_tool_variant
         # Reset value fields to defaults first so a tool whose populate_status is
         # a no-op (NONE / passive / plugin tools) doesn't inherit the previous
         # tool's engaged/part_detected/positions/etc. (in-place, zero-alloc).

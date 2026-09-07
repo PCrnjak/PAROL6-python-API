@@ -15,6 +15,7 @@ Wire format uses msgpack arrays with integer type codes:
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from collections.abc import Sequence
 from enum import IntEnum, auto
@@ -93,6 +94,7 @@ class QueryType(IntEnum):
     TCP_OFFSET = auto()
     SHAPES = auto()
     STATUS_RATE = auto()
+    TCP_TRANSFORM = auto()
 
 
 class CmdType(IntEnum):
@@ -164,6 +166,8 @@ class CmdType(IntEnum):
     # control rate it divides.
     SET_STATUS_RATE = auto()
     STATUS_RATE = auto()
+    SET_TCP_TRANSFORM = auto()
+    TCP_TRANSFORM = auto()
 
 
 # =============================================================================
@@ -642,6 +646,30 @@ class SetTcpOffsetCmd(
     z: float = 0.0
 
 
+class SetTcpTransformCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_TCP_TRANSFORM),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """User TCP transform: mm and intrinsic XYZ degrees."""
+
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(v, bool) or not math.isfinite(v)
+            for v in (self.x, self.y, self.z, self.roll, self.pitch, self.yaw)
+        ):
+            raise ValueError("TCP transform requires six finite numbers")
+
+
 class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
     """One workspace shape — mirrors waldoctl ``Shape.to_wire()``.
 
@@ -778,6 +806,16 @@ class TcpOffsetCmd(
     """TCP_OFFSET: query current TCP offset."""
 
     pass
+
+
+class TcpTransformCmd(
+    msgspec.Struct,
+    tag=int(CmdType.TCP_TRANSFORM),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Read the applied user TCP transform."""
 
 
 class ShapesCmd(
@@ -1160,7 +1198,7 @@ class ToolStatusResultStruct(
     frozen=True,
     gc=False,
 ):
-    """Tool status response — full 7-field ToolStatus."""
+    """Tool status response, including the applied variant."""
 
     tool_key: str
     state: ToolState
@@ -1169,6 +1207,7 @@ class ToolStatusResultStruct(
     fault_code: int
     positions: list[float]
     channels: list[float]
+    variant_key: str = ""
 
 
 class EnablementResultStruct(
@@ -1235,6 +1274,23 @@ class TcpOffsetResultStruct(
     z: float
 
 
+class TcpTransformResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.TCP_TRANSFORM),
+    array_like=True,
+    frozen=True,
+    gc=False,
+):
+    """Applied user TCP transform in mm and intrinsic XYZ degrees."""
+
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+
+
 class ShapesResultStruct(
     msgspec.Struct,
     tag=int(QueryType.SHAPES),
@@ -1269,6 +1325,7 @@ Response = (
     | TcpSpeedResultStruct
     | IsSimulatorResultStruct
     | TcpOffsetResultStruct
+    | TcpTransformResultStruct
     | ShapesResultStruct
 )
 
@@ -1449,6 +1506,7 @@ def pack_status(
                 ts.fault_code,
                 ts.positions,
                 ts.channels,
+                ts.variant_key,
             )
             if ts is not None
             else None,
@@ -1575,6 +1633,7 @@ class StatusBuffer:
                 fault_code=ts.fault_code,
                 positions=ts.positions,
                 channels=ts.channels,
+                variant_key=ts.variant_key,
             ),
             joint_en=self.joint_en.copy(),
             cart_en_wrf=self.cart_en_wrf.copy(),
@@ -1692,6 +1751,10 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
             and isinstance(raw_ts, (list, tuple))
             and len(raw_ts) >= 7
         ):
+            variant = raw_ts[7] if len(raw_ts) > 7 else ""
+            if not isinstance(variant, str) or len(variant) > 128:
+                return False
+            ts.variant_key = variant
             ts.key = raw_ts[0]
             ts.state = ToolState(raw_ts[1])
             ts.engaged = raw_ts[2]
@@ -1993,6 +2056,7 @@ __all__ = [
     "TeleportCmd",
     "SelectToolCmd",
     "SetTcpOffsetCmd",
+    "SetTcpTransformCmd",
     "SelectProfileCmd",
     "ToolActionCmd",
     # Command structs — query
@@ -2002,6 +2066,7 @@ __all__ = [
     "ErrorCmd",
     "TcpSpeedCmd",
     "TcpOffsetCmd",
+    "TcpTransformCmd",
     "ShapesCmd",
     "PingCmd",
     "StatusCmd",
@@ -2038,6 +2103,7 @@ __all__ = [
     "TcpSpeedResultStruct",
     "IsSimulatorResultStruct",
     "TcpOffsetResultStruct",
+    "TcpTransformResultStruct",
     "ShapesResultStruct",
     "Response",
     # Message types

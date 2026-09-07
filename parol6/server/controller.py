@@ -349,6 +349,7 @@ class Controller:
                     state.current_tool,
                     variant_key=state.current_tool_variant,
                     tcp_offset_m=state.tcp_offset_m,
+                    tcp_rotation_rad=state.tcp_rotation_rad,
                 )
                 self._planner.sync_shapes(state.shapes)
                 if self._executor.active_command:
@@ -853,6 +854,7 @@ class Controller:
                     state.current_tool,
                     variant_key=state.current_tool_variant,
                     tcp_offset_m=state.tcp_offset_m,
+                    tcp_rotation_rad=state.tcp_rotation_rad,
                 )
                 self._planner.sync_shapes(state.shapes)
 

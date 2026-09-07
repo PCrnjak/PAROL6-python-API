@@ -29,6 +29,7 @@ from parol6.protocol.wire import (
     SelectToolCmd,
     SetShapesCmd,
     SetTcpOffsetCmd,
+    SetTcpTransformCmd,
     ToolActionCmd,
 )
 from parol6.server.command_executor import _format_cmd_params
@@ -119,6 +120,7 @@ class SyncTool:
     tool_name: str
     variant_key: str = ""
     tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -162,6 +164,7 @@ class PlannerState:
     current_tool: str = "NONE"
     current_tool_variant: str = ""
     tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
     stop_on_failure: bool = True
 
     # Forward kinematics cache (same layout as ControllerState — needed by
@@ -172,6 +175,7 @@ class PlannerState:
     _fkine_last_tool_name: str = ""
     _fkine_last_tool_variant: str = ""
     _fkine_last_tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _fkine_last_tcp_rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _fkine_mat: np.ndarray = field(
         default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
     )
@@ -271,13 +275,18 @@ class TrajectoryPlanner:
         tool_name: str,
         variant_key: str = "",
         tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         """Sync tool state (e.g. after E-stop cancel)."""
         self.state.current_tool = tool_name
         self.state.current_tool_variant = variant_key
         self.state.tcp_offset_m = tcp_offset_m
+        self.state.tcp_rotation_rad = tcp_rotation_rad
         self._robot_module.apply_tool(
-            tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
+            tool_name,
+            variant_key=variant_key,
+            tcp_offset_m=tcp_offset_m,
+            tcp_rotation_rad=tcp_rotation_rad,
         )
 
     def sync_shapes(self, shapes: list) -> None:
@@ -490,20 +499,37 @@ class TrajectoryPlanner:
 
         # Predict state for subsequent trajectory planning
         if isinstance(params, SelectToolCmd):
+            if (params.tool_name, params.variant_key) != (
+                self.state.current_tool,
+                self.state.current_tool_variant,
+            ):
+                self.state.tcp_offset_m = (0.0, 0.0, 0.0)
+                self.state.tcp_rotation_rad = (0.0, 0.0, 0.0)
             self.state.current_tool = params.tool_name
             self.state.current_tool_variant = params.variant_key
-            self.state.tcp_offset_m = (0.0, 0.0, 0.0)
             self._robot_module.apply_tool(
-                params.tool_name, variant_key=params.variant_key
+                params.tool_name,
+                variant_key=params.variant_key,
+                tcp_offset_m=self.state.tcp_offset_m,
+                tcp_rotation_rad=self.state.tcp_rotation_rad,
             )
-        elif isinstance(params, SetTcpOffsetCmd):
+        elif isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
+            from math import radians
+
             offset_m = (params.x / 1000.0, params.y / 1000.0, params.z / 1000.0)
-            self.state.tcp_offset_m = offset_m
+            rotation_rad = (
+                (radians(params.roll), radians(params.pitch), radians(params.yaw))
+                if isinstance(params, SetTcpTransformCmd)
+                else (0.0, 0.0, 0.0)
+            )
             self._robot_module.apply_tool(
                 self.state.current_tool,
                 variant_key=self.state.current_tool_variant,
                 tcp_offset_m=offset_m,
+                tcp_rotation_rad=rotation_rad,
             )
+            self.state.tcp_offset_m = offset_m
+            self.state.tcp_rotation_rad = rotation_rad
         elif isinstance(params, HomeCmd):
             self.state.Position_in[:] = self._home_steps
             self.state.Homed_in.fill(1)
@@ -562,10 +588,14 @@ class PlannerWorker:
         tool_name: str,
         variant_key: str = "",
         tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         """Sync tool state (e.g. after E-stop)."""
         self._planner.sync_tool(
-            tool_name, variant_key=variant_key, tcp_offset_m=tcp_offset_m
+            tool_name,
+            variant_key=variant_key,
+            tcp_offset_m=tcp_offset_m,
+            tcp_rotation_rad=tcp_rotation_rad,
         )
 
     def apply_shapes(self, shapes: list) -> None:
@@ -653,6 +683,7 @@ def motion_planner_main(
                     msg.tool_name,
                     variant_key=msg.variant_key,
                     tcp_offset_m=msg.tcp_offset_m,
+                    tcp_rotation_rad=msg.tcp_rotation_rad,
                 )
                 continue
 
@@ -799,6 +830,7 @@ class MotionPlanner:
         tool_name: str,
         variant_key: str = "",
         tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         """Update the planner's tool state."""
         self.submit(
@@ -806,6 +838,7 @@ class MotionPlanner:
                 tool_name=tool_name,
                 variant_key=variant_key,
                 tcp_offset_m=tcp_offset_m,
+                tcp_rotation_rad=tcp_rotation_rad,
             )
         )
 

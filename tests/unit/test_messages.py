@@ -115,8 +115,7 @@ class TestPackUnpack:
         # action_params at index 16
         assert unpacked[16] == "speed=50 acc=100"
 
-        # tool_status at index 17 is a 7-element tuple:
-        # (key, state, engaged, part_detected, fault_code, positions, channels)
+        # The optional variant follows the original seven tool-status fields.
         ts = unpacked[17]
         assert ts[0] == "ssg48"  # key
         assert ts[1] == 2  # state (ToolState.ACTIVE)
@@ -140,6 +139,7 @@ class TestPackUnpack:
         cart_en_trf = np.ones(12, dtype=np.uint8)
         tool_status = ToolStatus(
             key="electric_gripper",
+            variant_key="pinch",
             state=ToolState.IDLE,
             engaged=False,
             part_detected=True,
@@ -175,6 +175,18 @@ class TestPackUnpack:
         assert ts.positions == (0.5,)
         assert ts.channels == (1.2, 3.4)
         assert buf.tcp_speed == pytest.approx(55.5)
+        assert ts.variant_key == "pinch"
+        assert buf.copy().tool_status.variant_key == "pinch"
+        legacy = decode(packed)
+        legacy[17] = legacy[17][:7]
+        assert decode_status_bin_into(encode(legacy), buf)
+        assert buf.tool_status.variant_key == "", (
+            "legacy status retained a stale variant"
+        )
+        for invalid in (False, 42, None, "x" * 129):
+            bad = decode(packed)
+            bad[17][7] = invalid
+            assert not decode_status_bin_into(encode(bad), buf)
 
     def test_invalid_data_raises(self):
         with pytest.raises(msgspec.ValidationError):

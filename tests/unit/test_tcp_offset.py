@@ -69,8 +69,10 @@ def test_dry_run_select_tool_resets_tcp_offset():
     client.set_tcp_offset(x=0, y=0, z=-190)
     assert client.tcp_offset() == [0.0, 0.0, -190.0]
 
-    # Selecting a tool resets offset
+    # Re-selecting the same tool preserves the applied calibration, as live does.
     client.select_tool("SSG-48")
+    assert client.tcp_offset() == [0.0, 0.0, -190.0]
+    client.select_tool("NONE")
     assert client.tcp_offset() == [0.0, 0.0, 0.0]
 
 
