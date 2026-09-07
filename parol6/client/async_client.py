@@ -5,6 +5,7 @@ Async UDP client for PAROL6 robot control.
 import asyncio
 import contextlib
 import logging
+import math
 import random
 import socket
 import struct
@@ -257,7 +258,11 @@ class AsyncRobotClient(_RobotClientABC):
 
     @property
     def skill_capabilities(self) -> frozenset[str]:
-        return super().skill_capabilities | {"backend.parol6", "tool.gripper"}
+        return super().skill_capabilities | {
+            "backend.parol6",
+            "tool.gripper",
+            "io.digital",
+        }
 
     def __init__(
         self,
@@ -850,16 +855,26 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(AnglesCmd())
         return resp.angles if isinstance(resp, AnglesResultStruct) else None
 
-    async def io(self) -> list[int] | None:
+    async def io(self, *, timeout: float | None = None) -> list[int] | None:
         """Digital I/O status [in1, in2, out1, out2, estop].
+
+        ``timeout`` bounds setup, retries, and the reply; None uses client defaults.
 
         Category: Query
 
         Example:
             io = rbt.io()
         """
-        resp = await self._request(IOCmd())
-        return resp.io if isinstance(resp, IOResultStruct) else None
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("I/O timeout must be positive and finite")
+        try:
+            async with asyncio.timeout(timeout):
+                resp = await self._request(IOCmd())
+                return resp.io if isinstance(resp, IOResultStruct) else None
+        except TimeoutError:
+            return None
 
     async def joint_speeds(self) -> list[float] | None:
         """Current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
@@ -1847,13 +1862,18 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- IO / Gripper / Utility ---------------
 
-    async def write_io(self, index: int, value: int) -> int:
+    async def write_io(
+        self, index: int, value: int, *, timeout: float | None = None
+    ) -> int:
         """Set digital output by logical index (0 = first output pin).
 
         The firmware I/O byte layout is ``[in0, in1, out0, out1, estop, ...]``
         so logical output index 0 maps to bit position 2.
 
         Returns the command index (≥ 0) on success, -1 on failure.
+
+        ``timeout`` bounds command acceptance. TimeoutError leaves application
+        unconfirmed; None uses the client defaults.
 
         Category: I/O
 
@@ -1866,8 +1886,15 @@ class AsyncRobotClient(_RobotClientABC):
             raise ValueError("I/O value must be 0 or 1")
         # Firmware bit layout: [in0, in1, out0, out1, estop, ...]
         firmware_index = index + 2
-        result = await self._send(WriteIOCmd(port_index=firmware_index, value=value))
-        return result
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("I/O timeout must be positive and finite")
+        async with asyncio.timeout(timeout):
+            result = await self._send(
+                WriteIOCmd(port_index=firmware_index, value=value)
+            )
+            return result
 
     async def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue.

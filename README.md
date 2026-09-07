@@ -451,3 +451,13 @@ The existing `set_tcp_offset(x, y, z)` clears user rotation and now returns its
 queued index for confirmation. `tcp_offset()` still reads three translations;
 `tcp_transform()` reads all six values. Both raise `TimeoutError` when no valid
 reply arrives instead of reporting a misleading zero correction.
+
+Digital I/O reads and writes accept an optional per-call `timeout` in seconds:
+`rbt.io(timeout=1.0)` returns `None` without a reply, while
+`rbt.write_io(0, 1, timeout=1.0)` raises `TimeoutError` if acceptance remains
+unconfirmed. The deadline includes transport setup and retries. Omitting it
+retains the configured client timeout. The same options work on the sync client.
+The client advertises `io.digital` for typed named-signal skills, which can be
+imported from `waldo_commander.skills`; mappings are `waldoctl.signals.DigitalSignal`
+values stored in a setup snapshot. Dry-run clients advertise `execution.preview`
+so those skills require explicit observation fixtures during preview.

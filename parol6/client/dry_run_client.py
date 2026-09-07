@@ -43,6 +43,7 @@ from ..protocol.wire import (
     SelectToolCmd,
     SetTcpOffsetCmd,
     SetTcpTransformCmd,
+    WriteIOCmd,
     TeleportCmd,
     ToolActionCmd,
 )
@@ -546,7 +547,14 @@ class DryRunRobotClient:
     @property
     def skill_capabilities(self) -> frozenset[str]:
         return frozenset(
-            {"motion.joint", "motion.linear", "tool.gripper", "backend.parol6"}
+            {
+                "motion.joint",
+                "motion.linear",
+                "tool.gripper",
+                "backend.parol6",
+                "io.digital",
+                "execution.preview",
+            }
         )
 
     def angles(self) -> list[float]:
@@ -600,6 +608,16 @@ class DryRunRobotClient:
         if pose is not None:
             return self._dispatch(build_cmd("servo_j_pose", pose, **kwargs))
         return self._dispatch(build_cmd("servo_j", angles or [], **kwargs))
+
+    def write_io(self, index: int, value: int, *, timeout: float | None = None) -> int:
+        if type(index) is not int or index not in (0, 1):
+            raise ValueError("Output index must be 0 or 1")
+        if type(value) not in (int, bool) or value not in (0, 1):
+            raise ValueError("Digital output must be 0 or 1")
+        result = self._dispatch(WriteIOCmd(port_index=index + 2, value=int(value)))
+        if result is not None and result.error is not None:
+            raise RuntimeError(str(result.error))
+        return 0
 
     def delay(self, seconds: float = 0.0) -> None:
         pass
