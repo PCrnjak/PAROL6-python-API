@@ -701,10 +701,8 @@ class Controller:
             self._segment_player.cancel(state)
             # Unconditional: a jog self-collision sets the viz but no state.error.
             state.clear_collision()
-            if self.udp_transport:
-                drained = self.udp_transport.drain_buffer()
-                if drained > 0:
-                    logger.log(TRACE, "udp_buffer_drained count=%d", drained)
+            # Coalesce decoded motion only: unread UDP packets can contain
+            # configuration, queries, or stop commands that must survive.
             self._executor.cancel_active_streamable()
             removed = self._executor.clear_streamable_commands(
                 "Streaming command prepare"

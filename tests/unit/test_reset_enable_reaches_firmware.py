@@ -76,3 +76,28 @@ def test_reset_enable_reaches_firmware_write(controller):
         "RESET's ENABLE never reached the firmware write phase — "
         f"written command codes: {sorted(set(written))}"
     )
+
+
+def test_streaming_packet_keeps_following_configuration_and_stop(controller):
+    from parol6.config import MAX_POLL_COUNT
+    from parol6.protocol.wire import PingCmd, SelectProfileCmd, TeleportCmd
+
+    state = controller.state_manager.get_state()
+    assert controller.udp_transport is not None
+    address = ("127.0.0.1", controller.udp_transport.socket.getsockname()[1])
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+        sender.sendto(
+            encode_command(TeleportCmd(angles=[90, -90, 180, 0, 0, 180])), address
+        )
+        for _ in range(MAX_POLL_COUNT - 1):
+            sender.sendto(encode_command(PingCmd()), address)
+        sender.sendto(encode_command(SelectProfileCmd(profile="QUINTIC")), address)
+        sender.sendto(encode_command(EstopCmd()), address)
+        for _ in range(2):
+            controller._poll_commands(state)
+            controller._execute_commands(state)
+
+    assert state.motion_profile == "QUINTIC", (
+        "streaming must not discard pending configuration"
+    )
+    assert not state.enabled, "a queued stop must survive a streaming batch boundary"
