@@ -630,10 +630,13 @@ class AsyncRobotClient(_RobotClientABC):
                     end_time = time.monotonic() + self.timeout
                     while time.monotonic() < end_time:
                         try:
-                            resp_data, _ = await asyncio.wait_for(
-                                self._rx_queue.get(),
-                                timeout=max(0.0, end_time - time.monotonic()),
-                            )
+                            # Keep the receive in this task: Python 3.11's
+                            # wait_for can swallow an outer cancellation when
+                            # its child receives a reply in the same turn.
+                            async with asyncio.timeout(
+                                max(0.0, end_time - time.monotonic())
+                            ):
+                                resp_data, _ = await self._rx_queue.get()
                             try:
                                 parsed = decode_message(resp_data)
                                 if isinstance(parsed, ResponseMsg):
@@ -681,10 +684,8 @@ class AsyncRobotClient(_RobotClientABC):
             self._transport.sendto(data)
             while time.monotonic() < end_time:
                 try:
-                    resp_data, _addr = await asyncio.wait_for(
-                        self._rx_queue.get(),
-                        timeout=max(0.0, end_time - time.monotonic()),
-                    )
+                    async with asyncio.timeout(max(0.0, end_time - time.monotonic())):
+                        resp_data, _addr = await self._rx_queue.get()
                     try:
                         match decode_message(resp_data):
                             case OkMsg() as ok:

@@ -90,7 +90,7 @@ class TestPneumaticGripperMethods:
     """Test pneumatic gripper via client.tool()."""
 
     @pytest.mark.asyncio
-    async def test_pneumatic_open_close(self, async_client):
+    async def test_pneumatic_open_close(self, async_client, monkeypatch):
         """Open and close pneumatic gripper via tool methods."""
         robot, client = async_client
         spec = robot.tools["PNEUMATIC"]
@@ -145,6 +145,22 @@ class TestPneumaticGripperMethods:
         client._transport.sendto(encode_command(CommandCompletionCmd(closed)))
         reply = await asyncio.wait_for(client._rx_queue.get(), timeout=1.0)
         client._rx_queue.put_nowait(reply)
+        assert await client.status() is not None
+
+        # Cancel as an actual controller reply arrives. The reply must not
+        # swallow cancellation of a caller's completion budget or task.
+        receive = client._rx_queue.get
+
+        async def receive_and_cancel():
+            packet = await receive()
+            request.cancel()
+            return packet
+
+        with monkeypatch.context() as patch:
+            patch.setattr(client._rx_queue, "get", receive_and_cancel)
+            request = asyncio.create_task(client.status())
+            with pytest.raises(asyncio.CancelledError):
+                await request
         assert await client.status() is not None
 
     @pytest.mark.asyncio
