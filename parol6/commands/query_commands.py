@@ -410,6 +410,7 @@ class ShapesCommand(QueryCommand[ShapesCmd]):
                 ],
                 program=[ShapeWire(*s.to_wire()) for s in state.shapes],
                 epoch=state.shapes_version,
+                attachment_epoch=state.attachment_epoch,
             )
         )
 

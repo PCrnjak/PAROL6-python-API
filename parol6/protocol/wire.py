@@ -691,6 +691,13 @@ class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
     margin: float | None
     name: str
     physics: tuple[float | None, list[float]] | None = None
+    attachment: tuple[int, list[str]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.attachment is not None:
+            from waldoctl.shapes import Attachment
+
+            Attachment.from_wire(self.attachment)
 
 
 class SetShapesCmd(
@@ -1372,6 +1379,7 @@ class ShapesResultStruct(
     installation: list[ShapeWire]
     program: list[ShapeWire]
     epoch: int
+    attachment_epoch: int = 0
 
 
 # Tagged Union for responses

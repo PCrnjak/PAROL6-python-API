@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -286,6 +287,10 @@ class ControllerState:
     # can mirror them to the IK worker's checker.
     shapes: list = field(default_factory=list)
     shapes_version: int = 0
+    attachment_epoch: int = field(default_factory=lambda: secrets.randbits(64) or 1)
+    has_attachments: bool = False
+    attachments_valid: bool = True
+    attachment_motion_stopped: bool = False
 
     # Network setup and uptime
     ip: str = "127.0.0.1"
@@ -351,6 +356,7 @@ class ControllerState:
         Preserves: ser, ip, port, start_time, next_command_index
         Resets: positions, speeds, I/O, queues, tool, errors, etc.
         """
+        self.invalidate_attachments()
         # Safety and control flags
         self.enabled = True
         self.soft_error = False
@@ -436,6 +442,7 @@ class ControllerState:
         Resets TCP offset to zero (changing tools invalidates any prior offset).
         """
         if tool_name != self._current_tool or variant_key != self._current_tool_variant:
+            self.invalidate_attachments()
             self._current_tool = tool_name
             self._current_tool_variant = variant_key
             self._tcp_offset_m = (0.0, 0.0, 0.0)
@@ -452,9 +459,29 @@ class ControllerState:
         to the IK worker's checker for enablement greying; the version doubles
         as the ``scene_epoch`` broadcast in status so displays re-query.
         """
+        attached = [s for s in shapes if s.attachment is not None]
+        if any(s.attachment.epoch != self.attachment_epoch for s in attached):
+            raise ValueError(
+                "attachment context changed; reconcile the physical scene and reapply"
+            )
+        if (attached or self.has_attachments) and self.queued_segments:
+            raise ValueError("stop queued motion before changing attachments")
+        if attached and (not self.enabled or not all(self.Homed_in)):
+            raise ValueError("attachments require enabled, referenced robot state")
         PAROL6_ROBOT.apply_shapes(shapes)
+        self.has_attachments = bool(attached)
+        self.attachments_valid = True
+        self.attachment_motion_stopped = False
         self.shapes = list(shapes)
         self.shapes_version += 1
+
+    def invalidate_attachments(self) -> None:
+        """Require explicit reconciliation after a reference/source/tool change."""
+        self.attachment_epoch = self.attachment_epoch % (2**64 - 1) + 1
+        if self.has_attachments:
+            self.attachments_valid = False
+            self.attachment_motion_stopped = False
+            self.shapes_version += 1
 
     @property
     def tcp_offset_m(self) -> tuple[float, float, float]:

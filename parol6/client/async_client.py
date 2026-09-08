@@ -268,6 +268,7 @@ class AsyncRobotClient(_RobotClientABC):
             "backend.parol6",
             "execution.speed",
             "observation.timed",
+            "world.attachments",
             "tool.gripper",
             "io.digital",
         }
@@ -1173,15 +1174,30 @@ class AsyncRobotClient(_RobotClientABC):
         if not isinstance(resp, ShapesResultStruct):
             return None
         return ShapeWorld(
+            attachment_epoch=resp.attachment_epoch,
             installation=tuple(
                 shape_from_wire(
-                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                    w.attachment,
                 )
                 for w in resp.installation
             ),
             program=tuple(
                 shape_from_wire(
-                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                    w.attachment,
                 )
                 for w in resp.program
             ),

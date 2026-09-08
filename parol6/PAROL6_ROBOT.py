@@ -313,12 +313,35 @@ def apply_shapes(shapes: "Iterable[Any]") -> None:
     """
     global _active_shape_names, _program_shapes
     shapes = _validate_shapes(shapes)
-    _program_shapes = shapes
     if collision is None:
+        if any(s.attachment is not None for s in shapes):
+            raise ValueError("attachments require an active collision checker")
+        _program_shapes = shapes
         return
+    names = {
+        reported
+        for name, reported in collision.geometry_link_names
+        if not name.startswith("shape:")
+    } | {f"shape:{s.name}" for s in shapes if s.collision}
+    for shape in shapes:
+        if shape.attachment is not None:
+            unknown = set(shape.attachment.allowed_contacts) - names
+            if unknown:
+                raise ValueError(f"unknown contact partners: {sorted(unknown)}")
+    previous = _program_shapes
+    try:
+        _replace_program_geometry(shapes)
+    except Exception:
+        _replace_program_geometry(previous)
+        raise
+    _program_shapes = shapes
+
+
+def _replace_program_geometry(shapes: list) -> None:
+    assert collision is not None
     for name in _active_shape_names:
         collision.remove_geometry_by_name(name)
-    _active_shape_names = []
+    _active_shape_names.clear()
     for s in shapes:
         if not s.collision:
             continue
@@ -327,6 +350,27 @@ def apply_shapes(shapes: "Iterable[Any]") -> None:
             name, s.kind, s.params(), _pose_to_matrix(s.pose), margin=s.margin
         )
         _active_shape_names.append(name)
+        if s.attachment is not None:
+            collision.reparent_geometry_by_name(name, "L6", _pose_to_matrix(s.pose))
+    geom_names = collision.geometry_names
+    reports = dict(collision.geometry_link_names)
+    attached = {
+        f"shape:{s.name}": s.attachment for s in shapes if s.attachment is not None
+    }
+    for name, attachment in attached.items():
+        index = geom_names.index(name)
+        for other_index, other_name in enumerate(geom_names):
+            if other_index == index:
+                continue
+            other_attachment = attached.get(other_name)
+            allowed = reports[other_name] in attachment.allowed_contacts or (
+                other_attachment is not None
+                and reports[name] in other_attachment.allowed_contacts
+            )
+            if allowed:
+                collision.remove_collision_pair(index, other_index)
+            else:
+                collision.add_collision_pair(index, other_index)
 
 
 def apply_installation_shapes(shapes: "Iterable[Any]") -> None:
@@ -339,6 +383,8 @@ def apply_installation_shapes(shapes: "Iterable[Any]") -> None:
     """
     global _installation_shapes
     shapes = _validate_shapes(shapes)
+    if any(s.attachment is not None for s in shapes):
+        raise ValueError("installation shapes cannot declare attachments")
     _installation_shapes = shapes
     if collision is None:
         return

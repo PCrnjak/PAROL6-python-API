@@ -27,6 +27,111 @@ pytestmark = pytest.mark.integration
 HOME_J1 = 90.0
 
 
+def test_preview_attachment_context_survives_only_explicit_reconciliation():
+    from parol6.client.dry_run_client import DryRunRobotClient
+    from waldoctl import Sphere
+
+    preview = DryRunRobotClient()
+    try:
+        world = preview.shapes()
+        part = Sphere(name="part", radius=0.01).attach(
+            flange_pose=(0, 0, 0.25, 0, 0, 0),
+            epoch=world.attachment_epoch,
+        )
+        assert preview.set_shapes([part]) == 1
+        preview.estop()
+        assert not preview.shapes().attachments_valid
+        preview.reset()
+        with pytest.raises(ValueError, match="attachment context"):
+            preview.move_j(preview.angles(), duration=1)
+        with pytest.raises(ValueError, match="attachment context"):
+            preview.set_shapes([part])
+        part = part.attach(
+            flange_pose=part.pose, epoch=preview.shapes().attachment_epoch
+        )
+        assert preview.set_shapes([part]) == 1
+        assert preview.shapes().attachments_valid
+        assert preview.set_shapes([part.detach(world_pose=(1, 1, 1, 0, 0, 0))]) == 1
+        assert preview.shapes().program[0].attachment is None
+    finally:
+        preview.set_shapes([])
+
+
+def test_attached_part_blocks_motion_except_for_declared_contacts(client: RobotClient):
+    from dataclasses import replace
+
+    import parol6.PAROL6_ROBOT as model
+    from waldoctl import Sphere
+
+    start = client.angles()
+    assert start is not None
+    target = list(start)
+    target[0] -= 40
+    flange = model.robot.fkine(np.radians(target))
+    local = (0.0, 0.0, 0.25, 0.0, 0.0, 0.0)
+    at = flange[:3, 3] + flange[:3, 2] * local[2]
+    fixture = Sphere(name="fixture", radius=0.025, pose=(*at, 0.0, 0.0, 0.0))
+    fence = replace(fixture, name="fence")
+    world = client.shapes()
+    assert world is not None
+    part = Sphere(name="part", radius=0.025).attach(
+        flange_pose=local,
+        epoch=world.attachment_epoch,
+        allowed_contacts=("shape:fixture",),
+    )
+    try:
+        assert client.set_shapes([fixture, fence, part]) == 1
+        applied = client.shapes()
+        assert applied is not None and applied.program[-1] == part
+        with pytest.raises(MotionError, match="shape:fence"):
+            index = client.move_j(target, duration=1.0, wait=False)
+            client.wait_command(index, timeout=10.0)
+        assert abs(client.angles()[0] - start[0]) < 1.0
+        assert client.set_shapes([fixture, part]) == 1
+        index = client.move_j(target, duration=1.0, wait=False)
+        assert client.wait_command(index, timeout=10.0)
+        assert abs(client.angles()[0] - target[0]) < 1.0
+
+        with pytest.raises(MotionError, match="unknown contact"):
+            client.set_shapes(
+                [
+                    fixture,
+                    part.attach(
+                        flange_pose=local,
+                        epoch=world.attachment_epoch,
+                        allowed_contacts=("shape:typo",),
+                    ),
+                ]
+            )
+        assert client.shapes().program[-1] == part
+
+        assert client.estop() == 1
+        _wait_until(
+            lambda: not client.shapes().attachments_valid,
+            3.0,
+            "attachment remained valid after stop",
+        )
+        assert client.reset() == 1
+        with pytest.raises(MotionError, match="attachment context"):
+            client.move_j(start, duration=1.0, wait=False)
+        fresh = client.shapes()
+        assert fresh is not None and fresh.attachment_epoch != world.attachment_epoch
+        reconciled = part.attach(
+            flange_pose=local,
+            epoch=fresh.attachment_epoch,
+            allowed_contacts=("shape:fixture",),
+        )
+        assert client.set_shapes([fixture, reconciled]) == 1
+        assert client.shapes().attachments_valid
+        released = reconciled.detach(world_pose=(*at, 0.0, 0.0, 0.0))
+        assert client.set_shapes([fixture, released]) == 1
+        index = client.move_j(start, duration=1.0, wait=False)
+        assert client.wait_command(index, timeout=10.0)
+    finally:
+        client.stop()
+        client.set_shapes([])
+
+
 def _wrist_box(target_deg: list[float], name: str) -> Box:
     """A keep-out enveloping the wrist position of ``target_deg``."""
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
