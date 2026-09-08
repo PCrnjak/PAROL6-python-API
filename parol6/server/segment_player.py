@@ -416,7 +416,8 @@ class SegmentPlayer:
                     final_idx = idx
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
-        state.completed_command_index = final_idx
+        # The concurrent tool lane may already have completed a newer index.
+        state.completed_command_index = max(state.completed_command_index, final_idx)
         state.action_current = ""
         state.action_params = ""
         state.action_state = ActionState.IDLE
