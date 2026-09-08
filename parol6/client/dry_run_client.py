@@ -219,7 +219,7 @@ class DryRunRobotClient:
         self._q_rad_buf = np.zeros(6, dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._max_snapshot_points = max_snapshot_points
-        self._active_tool_key: str = ""
+        self._active_tool_key: str = "NONE"
         self._active_variant_key: str = ""
         self._tool_proxy = _DryRunTool(self)
 

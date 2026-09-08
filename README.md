@@ -329,6 +329,20 @@ case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning
 preview retimes trajectories and reports paused queued operations as
 `UnresolvedPreview` instead of claiming completion.
 
+## Timed observations
+
+`stream_status()` supplies `session_id`, `seq` and `mono_time_ns` for recording
+observations. The session identifies the status publisher's lifetime and changes
+on restart. Sequence gaps reveal missed publications; the monotonic timestamp
+marks publication of the current controller snapshot, not simultaneous sensor
+acquisition. Status without these fields reports zero metadata and cannot support
+identified demonstration capture. The client advertises `observation.timed`.
+
+Waldo Commander's `record_demonstration` stores this metadata and its host receipt
+time with the observed joints and tool state. Its replay skill uses ordinary
+native joint moves/delays, including native retiming, completion and collision
+checks; no continuous recorded-trajectory command is added.
+
 ## Command system
 
 Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.

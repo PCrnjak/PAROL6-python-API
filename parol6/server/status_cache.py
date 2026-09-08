@@ -630,9 +630,11 @@ class StatusCache:
         ):
             self._binary_dirty = True
 
-    def to_binary(self) -> bytes:
+    def to_binary(
+        self, *, session_id: int = 0, seq: int = 0, mono_time_ns: int = 0
+    ) -> bytes:
         """Return the msgpack-encoded STATUS payload."""
-        if self._binary_dirty:
+        if self._binary_dirty or session_id:
             from parol6.server.transports.transport_factory import is_simulation_mode
 
             self._binary_cache = pack_status(
@@ -666,6 +668,9 @@ class StatusCache:
                 p99_period_s=self._p99_period_s,
                 overruns=self._overruns,
                 drive_faults=self._drive_faults,
+                session_id=session_id,
+                seq=seq,
+                mono_time_ns=mono_time_ns,
             )
             self._binary_dirty = False
         return self._binary_cache

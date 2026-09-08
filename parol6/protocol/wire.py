@@ -1542,6 +1542,9 @@ def pack_status(
     p99_period_s: float = 0.0,
     overruns: int = 0,
     drive_faults: Sequence[Sequence[str]] = (),
+    session_id: int = 0,
+    seq: int = 0,
+    mono_time_ns: int = 0,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1592,6 +1595,9 @@ def pack_status(
             joints_homed,
             (p99_period_s, overruns),
             drive_faults,
+            session_id,
+            seq,
+            mono_time_ns,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1610,6 +1616,9 @@ class StatusBuffer:
     Use decode_status_bin_into() to fill this buffer without allocating new objects.
     """
 
+    session_id: int = 0
+    seq: int = 0
+    mono_time_ns: int = 0
     pose: np.ndarray = field(default_factory=lambda: np.zeros(16, dtype=np.float64))
     angles: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     speeds: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
@@ -1691,6 +1700,9 @@ class StatusBuffer:
         """Return a deep copy with all arrays copied."""
         ts = self.tool_status
         return StatusBuffer(
+            session_id=self.session_id,
+            seq=self.seq,
+            mono_time_ns=self.mono_time_ns,
             pose=self.pose.copy(),
             angles=self.angles.copy(),
             speeds=self.speeds.copy(),
@@ -1778,7 +1790,7 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
                      accepted_index, homed, enabled, homing_step, joints_homed,
-                     loop_health, drive_faults]
+                     loop_health, drive_faults, session_id, seq, mono_time_ns]
 
     Args:
         data: Raw msgpack bytes
@@ -1795,6 +1807,17 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
             or msg[0] != MsgType.STATUS
         ):
             return False
+
+        if 30 < len(msg) < 33:
+            return False
+        if len(msg) >= 33:
+            for index in range(30, 33):
+                value = msg[index]
+                if type(value) is not int or not 0 <= value <= 0xFFFFFFFFFFFFFFFF:
+                    return False
+            buf.session_id, buf.seq, buf.mono_time_ns = msg[30], msg[31], msg[32]
+        else:
+            buf.session_id = buf.seq = buf.mono_time_ns = 0
 
         buf.pose[:] = msg[1]
         buf.angles[:] = msg[2]
