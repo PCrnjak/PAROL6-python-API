@@ -274,9 +274,7 @@ class CommandExecutor:
             state.action_current = ""
             state.action_params = ""
             state.action_state = ActionState.IDLE
-            state.completed_command_index = max(
-                state.completed_command_index, ac.command_index
-            )
+            state.record_completion(ac.command_index)
             self._update_queue_state(state)
             self.active_command = None
 

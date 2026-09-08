@@ -13,6 +13,8 @@ from parol6.protocol.wire import (
     AnglesCmd,
     AnglesResultStruct,
     CmdType,
+    CommandCompletionCmd,
+    CommandCompletionResultStruct,
     CurrentActionResultStruct,
     EnablementResultStruct,
     ErrorCmd,
@@ -280,6 +282,23 @@ class ActivityCommand(QueryCommand[ActivityCmd]):
                 state=state.action_state.name,
                 next=state.action_next,
                 params=state.action_params,
+            )
+        )
+
+
+@register_command(CmdType.COMMAND_COMPLETION)
+class CommandCompletionCommand(QueryCommand[CommandCompletionCmd]):
+    PARAMS_TYPE = CommandCompletionCmd
+    QUERY_TYPE = QueryType.COMMAND_COMPLETION
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            CommandCompletionResultStruct(
+                command_index=self.p.command_index,
+                session_id=state.status_session_id,
+                completed=state.command_completed(self.p.command_index),
             )
         )
 

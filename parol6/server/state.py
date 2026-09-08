@@ -262,6 +262,9 @@ class ControllerState:
     next_command_index: int = 0
     executing_command_index: int = -1
     completed_command_index: int = -1
+    status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
+    _recent_completions: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _completion_cursor: int = 0
     last_checkpoint: str = ""
 
     # Planning behavior (stop on first IK failure vs solve all for diagnostic)
@@ -349,6 +352,17 @@ class ControllerState:
         self.collision_active = False
         self.collision_pairs = ()
 
+    def record_completion(self, index: int) -> None:
+        """Retain exact successes; concurrent lanes do not finish in index order."""
+        self.completed_command_index = max(self.completed_command_index, index)
+        self._recent_completions[self._completion_cursor] = index
+        self._completion_cursor = (self._completion_cursor + 1) % len(
+            self._recent_completions
+        )
+
+    def command_completed(self, index: int) -> bool:
+        return index >= 0 and index in self._recent_completions
+
     def reset(self) -> None:
         """
         Reset robot state to initial values without losing connection state.
@@ -404,6 +418,9 @@ class ControllerState:
         # can never satisfy a wait on a post-reset command.
         self.executing_command_index = -1
         self.completed_command_index = -1
+        for i in range(len(self._recent_completions)):
+            self._recent_completions[i] = -1
+        self._completion_cursor = 0
         self.last_checkpoint = ""
 
         # Error and pipeline depth

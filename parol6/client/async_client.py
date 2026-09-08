@@ -30,7 +30,12 @@ from waldoctl.tools import ToolSpec
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 
 from .. import config as cfg
-from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
+from ..ack_policy import (
+    QUERY_CMD_TYPES,
+    QUERY_RESPONSE_TYPES,
+    SYSTEM_CMD_TYPES,
+    AckPolicy,
+)
 from ..utils.error_catalog import RobotError
 from ..utils.errors import MotionError
 from ..protocol.wire import (
@@ -41,6 +46,8 @@ from ..protocol.wire import (
     decode_status_bin_into,
     CheckpointCmd,
     ConnectHardwareCmd,
+    CommandCompletionCmd,
+    CommandCompletionResultStruct,
     CurrentActionResultStruct,
     DelayCmd,
     EnablementResultStruct,
@@ -615,6 +622,7 @@ class AsyncRobotClient(_RobotClientABC):
         await self._ensure_endpoint()
         assert self._transport is not None
         data = encode_command(cmd)
+        expected = QUERY_RESPONSE_TYPES[STRUCT_TO_CMDTYPE[type(cmd)]]
         for attempt in range(self.retries + 1):
             try:
                 async with self._req_lock:
@@ -629,6 +637,10 @@ class AsyncRobotClient(_RobotClientABC):
                             try:
                                 parsed = decode_message(resp_data)
                                 if isinstance(parsed, ResponseMsg):
+                                    # A timed-out query can reply after the next
+                                    # query starts on this same UDP endpoint.
+                                    if parsed.result.__struct_config__.tag != expected:
+                                        continue
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
                                     raise MotionError(
@@ -1528,9 +1540,10 @@ class AsyncRobotClient(_RobotClientABC):
     async def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
-        Uses status broadcasts to monitor the server's completed_command_index.
-        Raises MotionError if the pipeline reports a planning/execution failure
-        at or before the awaited command index.
+        Queries exact success in the controller's last 1024 completions.
+        A concurrent tool finishing does not complete an unfinished arm command.
+        Unknown, cancelled, or expired results are never inferred successful
+        from the status high-water mark. Pipeline failures raise MotionError.
 
         Args:
             command_index: The command index to wait for (returned by motion commands).
@@ -1558,17 +1571,31 @@ class AsyncRobotClient(_RobotClientABC):
                 return err
             return None
 
-        def _done(s: StatusBuffer) -> bool:
-            if s.completed_index >= command_index:
-                return True
-            return _blocking_error(s) is not None
-
-        ok = await self.wait_status(_done, timeout=timeout)
-        if ok:
-            err = _blocking_error(self._shared_status)
-            if err is not None:
-                raise MotionError(err)
-        return ok
+        command = CommandCompletionCmd(command_index)
+        session_id = self._shared_status.session_id or None
+        try:
+            async with asyncio.timeout(timeout):
+                while not self._closed:
+                    result = await self._request(command)
+                    if (
+                        isinstance(result, CommandCompletionResultStruct)
+                        and result.command_index == command_index
+                    ):
+                        if session_id is None:
+                            session_id = result.session_id
+                        elif result.session_id != session_id:
+                            raise ConnectionError(
+                                "Controller session changed during completion wait"
+                            )
+                        if result.completed:
+                            return True
+                    err = _blocking_error(self._shared_status)
+                    if err is not None:
+                        raise MotionError(err)
+                    await asyncio.sleep(0.02)
+        except TimeoutError:
+            return False
+        return False
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 

@@ -5,8 +5,12 @@ Tests tool switching, gripper methods, and tool registry through the client API
 with a running controller (FAKE_SERIAL mode).
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
+
+from parol6.protocol.wire import CommandCompletionCmd, encode_command
 
 from waldoctl import (
     ElectricGripperTool,
@@ -115,9 +119,33 @@ class TestPneumaticGripperMethods:
         assert await client.wait_status(
             lambda s: s.executing_index == earlier, timeout=5.0
         )
-        opened = await tool.open(wait=False)
+        assert await client.pause() == 1
+        try:
+            opened = await tool.open(wait=False)
+            assert await client.wait_command(opened, timeout=1.0)
+            assert not await client.wait_command(earlier, timeout=0.05), (
+                "a completed tool action must not confirm the paused delay"
+            )
+        finally:
+            assert await client.resume() == 1
         assert await client.wait_motion(timeout=5.0)
         assert await client.wait_command(opened, timeout=1.0)
+
+        cancelled = await client.delay(1.0)
+        assert await client.wait_status(
+            lambda s: s.executing_index == cancelled, timeout=5.0
+        )
+        assert await client.stop() == 1
+        closed = await tool.close(wait=False)
+        assert await client.wait_command(closed, timeout=1.0)
+        assert not await client.wait_command(cancelled, timeout=0.05)
+
+        # Deliver a real completion reply late, ahead of a different query.
+        assert client._transport is not None
+        client._transport.sendto(encode_command(CommandCompletionCmd(closed)))
+        reply = await asyncio.wait_for(client._rx_queue.get(), timeout=1.0)
+        client._rx_queue.put_nowait(reply)
+        assert await client.status() is not None
 
     @pytest.mark.asyncio
     async def test_pneumatic_set_position_threshold(self, async_client):

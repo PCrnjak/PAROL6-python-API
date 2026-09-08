@@ -431,9 +431,7 @@ class Controller:
         code = self._tool_cmd.tick(state)
 
         if code == ExecutionStatusCode.COMPLETED:
-            state.completed_command_index = max(
-                state.completed_command_index, self._tool_cmd_index
-            )
+            state.record_completion(self._tool_cmd_index)
             self._tool_cmd = None
             self._tool_cmd_activated = False
         elif code == ExecutionStatusCode.FAILED:

@@ -409,15 +409,13 @@ class SegmentPlayer:
 
     def _complete_segment(self, seg: Segment, state: ControllerState) -> None:
         """Mark segment as completed and update tracking indices."""
-        final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
-                if idx > final_idx:
-                    final_idx = idx
+                if idx != seg.command_index:
+                    state.record_completion(idx)
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
-        # The concurrent tool lane may already have completed a newer index.
-        state.completed_command_index = max(state.completed_command_index, final_idx)
+        state.record_completion(seg.command_index)
         state.action_current = ""
         state.action_params = ""
         state.action_state = ActionState.IDLE
