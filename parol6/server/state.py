@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import logging
 import secrets
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -257,6 +258,7 @@ class ControllerState:
     action_state: ActionState = ActionState.IDLE  # IDLE, EXECUTING, ERROR
     action_next: str = ""
     queue_nonstreamable: list[str] = field(default_factory=list)
+    pending_planned: deque[tuple[int, str]] = field(default_factory=deque)
 
     # Queue progress tracking (monotonically increasing command indices)
     next_command_index: int = 0
@@ -397,6 +399,7 @@ class ControllerState:
         self.action_state = ActionState.IDLE
         self.action_next = ""
         self.queue_nonstreamable.clear()
+        self.pending_planned.clear()
 
         # Queue progress tracking. next_command_index is deliberately NOT
         # reset: indices must stay monotonic across reset so a stale

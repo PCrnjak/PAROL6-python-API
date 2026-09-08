@@ -293,6 +293,7 @@ class SegmentPlayer:
                 state.collision_pairs = tuple(pairs) if pairs else ()
                 state.action_state = ActionState.ERROR
                 state.action_current = ""
+                state.executing_command_index = -1
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
@@ -417,7 +418,10 @@ class SegmentPlayer:
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
         state.completed_command_index = final_idx
+        while state.pending_planned and state.pending_planned[0][0] <= final_idx:
+            state.pending_planned.popleft()
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.IDLE
         self._active = None
@@ -428,6 +432,7 @@ class SegmentPlayer:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
         state.error = error
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.ERROR
         self._active = None
@@ -472,6 +477,7 @@ class SegmentPlayer:
             state.collision_pairs = tuple(pairs) if pairs else ()
             state.action_state = ActionState.ERROR
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             self._active = None
             self._buffer.clear()
@@ -486,6 +492,7 @@ class SegmentPlayer:
             # Planned trajectories live here rather than in CommandExecutor.
             # Cancelling its command cannot clear this player's activity.
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
         self._active = None
@@ -502,5 +509,6 @@ class SegmentPlayer:
         """Drain any remaining segments from the planner's output queue."""
         while self._planner.poll_segment() is not None:
             pass
+        state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0
