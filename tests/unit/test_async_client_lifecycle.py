@@ -84,3 +84,35 @@ async def test_stream_status_terminates_on_close(ports, server_proc):
     finally:
         # Ensure cleanup even if assertions fail earlier
         await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_completion_wait_refuses_a_restarted_controller(ports, server_proc):
+    client = AsyncRobotClient(
+        host=ports.server_ip, port=ports.server_port, timeout=0.25, retries=0
+    )
+    waiting = None
+    try:
+        assert await client.wait_status(lambda s: s.session_id != 0, timeout=5.0)
+        waiting = asyncio.create_task(client.wait_command(999999, timeout=20.0))
+        await asyncio.sleep(0)
+        await asyncio.to_thread(server_proc.stop)
+        await asyncio.to_thread(
+            server_proc.start,
+            timeout=15.0,
+            extra_env={
+                "PAROL6_FAKE_SERIAL": "1",
+                "PAROL6_NOAUTOHOME": "1",
+                "PAROL6_CONTROLLER_IP": ports.server_ip,
+                "PAROL6_CONTROLLER_PORT": str(ports.server_port),
+                "PAROL6_MCAST_PORT": str(ports.mcast_port),
+            },
+        )
+        with pytest.raises(ConnectionError, match="session changed"):
+            await asyncio.wait_for(waiting, timeout=5.0)
+    finally:
+        if waiting is not None:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+        await client.close()

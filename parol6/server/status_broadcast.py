@@ -63,6 +63,7 @@ class StatusBroadcaster:
         self._max_send_failures = 3
         self._last_fail_log_time = 0.0
         self._session_id = secrets.randbits(64) or 1
+        state_mgr.get_state().status_session_id = self._session_id
         self._seq = 0
 
         self._setup_socket()

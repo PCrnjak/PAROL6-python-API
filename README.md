@@ -323,6 +323,14 @@ the pause request can be acknowledged while still decelerating. Queued delays
 retain their remaining time while paused; positive speed changes do not retime
 delays, tool actuators or homing routines already in progress.
 
+Completion waits query the requested command's exact success. Tool actions run
+concurrently with arm motion, so the highest completed index alone cannot prove
+that an earlier command finished. The controller retains its latest 1024
+successful completions; an unknown, cancelled, or expired result remains
+unconfirmed. A controller-session change during a wait raises `ConnectionError`.
+This requires matching client and controller versions supporting the completion
+query.
+
 Standalone `wait_command()` keeps its wall-clock timeout and returns false if
 completion is unconfirmed. Blocking motion calls raise `TimeoutError` in that
 case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning

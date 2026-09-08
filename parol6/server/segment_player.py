@@ -413,12 +413,13 @@ class SegmentPlayer:
         final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
+                if idx != seg.command_index:
+                    state.record_completion(idx)
                 if idx > final_idx:
                     final_idx = idx
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
-        # The concurrent tool lane may already have completed a newer index.
-        state.completed_command_index = max(state.completed_command_index, final_idx)
+        state.record_completion(seg.command_index)
         while state.pending_planned and state.pending_planned[0][0] <= final_idx:
             state.pending_planned.popleft()
         state.action_current = ""
