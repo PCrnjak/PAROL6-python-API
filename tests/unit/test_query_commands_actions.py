@@ -2,14 +2,13 @@
 Unit tests for action-related query commands.
 
 Tests ACTIVITY and QUEUE query commands without requiring a running server.
-Uses minimal state objects to test command logic in isolation.
+Uses the controller state to test command logic in isolation.
 """
-
-from types import SimpleNamespace
 
 from waldoctl import ActionState
 
 from parol6.commands.query_commands import ActivityCommand, QueueCommand
+from parol6.server.state import ControllerState
 from parol6.protocol.wire import (
     CurrentActionResultStruct,
     ActivityCmd,
@@ -29,7 +28,7 @@ def _unpack_response(data: bytes):
 
 def test_activity_returns_details():
     """Test that ACTIVITY compute() returns correct data."""
-    state = SimpleNamespace(
+    state = ControllerState(
         action_current="MoveJPoseCommand",
         action_state=ActionState.EXECUTING,
         action_next="HomeCommand",
@@ -49,7 +48,7 @@ def test_activity_returns_details():
 
 def test_activity_with_idle_state():
     """Test ACTIVITY when robot is idle."""
-    state = SimpleNamespace(
+    state = ControllerState(
         action_current="",
         action_state=ActionState.IDLE,
         action_next="",
@@ -69,7 +68,7 @@ def test_activity_with_idle_state():
 
 def test_queue_returns_details():
     """Test that QUEUE compute() returns correct data."""
-    state = SimpleNamespace(
+    state = ControllerState(
         queue_nonstreamable=["MoveJPoseCommand", "HomeCommand", "MoveJCommand"],
         executing_command_index=1,
         completed_command_index=0,
@@ -91,7 +90,7 @@ def test_queue_returns_details():
 
 def test_queue_with_empty_queue():
     """Test QUEUE when queue is empty."""
-    state = SimpleNamespace(
+    state = ControllerState(
         queue_nonstreamable=[],
         executing_command_index=-1,
         completed_command_index=-1,
@@ -111,7 +110,7 @@ def test_queue_with_empty_queue():
 
 def test_queue_excludes_streamable():
     """Test that queue only contains non-streamable commands (by design)."""
-    state = SimpleNamespace(
+    state = ControllerState(
         queue_nonstreamable=["MoveJPoseCommand", "HomeCommand"],
         executing_command_index=2,
         completed_command_index=1,
