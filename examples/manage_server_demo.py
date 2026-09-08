@@ -32,6 +32,9 @@ def main() -> None:
             print("simulator(True):", sim_on)
 
             if sim_on:
+                # Reference the robot first: planned motion is refused until
+                # it is homed, whatever its reported angles look like.
+                client.home(wait=True)
                 # Small relative move: +3mm in Z over 0.8s
                 moved = client.move_l([0, 0, 3, 0, 0, 0], rel=True, duration=0.8)
                 print("move_l ->", moved)

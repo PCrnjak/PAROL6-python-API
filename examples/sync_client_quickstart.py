@@ -23,6 +23,10 @@ def main() -> None:
                 raise SystemExit(1)
 
             client.simulator(True)
+            # Planned motion is refused until the robot is referenced, and a
+            # freshly started one is not — however sensible its reported
+            # angles look.
+            client.home(wait=True)
             print("ping:", client.ping())
             print("pose xyz:", client.pose()[:3])
             print("angles:", client.angles())

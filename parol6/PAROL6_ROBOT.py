@@ -294,6 +294,13 @@ def _validate_shapes(shapes: "Iterable[Any]") -> "list[Any]":
     for s in shapes:
         if s.kind not in _SHAPE_KINDS:
             raise ValueError(f"Shape {s.name!r}: unknown kind {s.kind!r}")
+        # Refused, never flattened to geometry: a caller declaring a body
+        # expects it to be simulated, and this backend simulates no contact.
+        if s.physics is not None:
+            raise ValueError(
+                f"Shape {s.name!r}: physics is not supported by the parol6 "
+                "backend (no contact simulation); declare geometry only"
+            )
     return shapes
 
 
