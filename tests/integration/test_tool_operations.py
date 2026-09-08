@@ -109,6 +109,16 @@ class TestPneumaticGripperMethods:
         assert idx >= 0
         assert await client.wait_motion(timeout=5.0)
 
+        # A side-channel tool action can finish before an older planned
+        # command. Its completion must still be observable after that command.
+        earlier = await client.delay(0.5)
+        assert await client.wait_status(
+            lambda s: s.executing_index == earlier, timeout=5.0
+        )
+        opened = await tool.open(wait=False)
+        assert await client.wait_motion(timeout=5.0)
+        assert await client.wait_command(opened, timeout=1.0)
+
     @pytest.mark.asyncio
     async def test_pneumatic_set_position_threshold(self, async_client):
         """set_position uses binary threshold: < 0.5 opens, >= 0.5 closes."""
