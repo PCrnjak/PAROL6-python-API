@@ -88,13 +88,21 @@ async def test_stream_status_terminates_on_close(ports, server_proc):
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_completion_wait_refuses_a_restarted_controller(ports, server_proc):
+@pytest.mark.parametrize("close_commands", [False, True])
+async def test_completion_wait_refuses_a_restarted_controller(
+    ports, server_proc, close_commands
+):
     client = AsyncRobotClient(
         host=ports.server_ip, port=ports.server_port, timeout=0.25, retries=0
     )
     waiting = None
     try:
         assert await client.wait_status(lambda s: s.session_id != 0, timeout=5.0)
+        # The command socket can stop receiving after a peer reset on Windows.
+        # Session broadcasts must still invalidate its outstanding wait.
+        if close_commands:
+            assert client._transport is not None
+            client._transport.close()
         waiting = asyncio.create_task(client.wait_command(999999, timeout=20.0))
         await asyncio.sleep(0)
         await asyncio.to_thread(server_proc.stop)

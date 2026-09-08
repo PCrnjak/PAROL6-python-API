@@ -1573,20 +1573,31 @@ class AsyncRobotClient(_RobotClientABC):
 
         command = CommandCompletionCmd(command_index)
         session_id = self._shared_status.session_id or None
+
+        def check_session(candidate: int) -> None:
+            nonlocal session_id
+            if not candidate:
+                return
+            if session_id is None:
+                session_id = candidate
+            elif candidate != session_id:
+                raise ConnectionError(
+                    "Controller session changed during completion wait"
+                )
+
         try:
             async with asyncio.timeout(timeout):
                 while not self._closed:
+                    check_session(self._shared_status.session_id)
                     result = await self._request(command)
+                    # Status has its own socket and can survive a command
+                    # socket that stopped receiving after a peer restart.
+                    check_session(self._shared_status.session_id)
                     if (
                         isinstance(result, CommandCompletionResultStruct)
                         and result.command_index == command_index
                     ):
-                        if session_id is None:
-                            session_id = result.session_id
-                        elif result.session_id != session_id:
-                            raise ConnectionError(
-                                "Controller session changed during completion wait"
-                            )
+                        check_session(result.session_id)
                         if result.completed:
                             return True
                     err = _blocking_error(self._shared_status)
