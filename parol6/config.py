@@ -88,13 +88,23 @@ STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
 STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.5"))
 
+
+def status_broadcast_interval(hz: float) -> int:
+    """Control ticks between status broadcasts at *hz*.
+
+    Derived on demand rather than fixed at import: the rate is a session
+    knob (SET_STATUS_RATE), and a constant computed from the boot rate would
+    be a second answer to the question of how often status goes out.
+    """
+    return max(1, int(CONTROL_RATE_HZ) // int(hz))
+
+
 # Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
 if int(CONTROL_RATE_HZ) % int(STATUS_RATE_HZ) != 0:
     raise ValueError(
         f"STATUS_RATE_HZ ({STATUS_RATE_HZ}) must divide evenly into "
         f"CONTROL_RATE_HZ ({CONTROL_RATE_HZ})"
     )
-STATUS_BROADCAST_INTERVAL: int = int(CONTROL_RATE_HZ) // int(STATUS_RATE_HZ)
 
 # Max ticks to hold MOVE at trajectory endpoint waiting for Position_in to converge.
 # At 100Hz control rate, 20 ticks = 200ms. If the robot hasn't reached the target

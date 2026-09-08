@@ -29,8 +29,11 @@ class StatusBroadcaster:
       - cfg.STATUS_UNICAST_HOST (default "127.0.0.1")
 
     General:
-      - cfg.STATUS_RATE_HZ (default 50)
       - cfg.STATUS_STALE_S (default 0.2) -> skip broadcast if cache is stale
+
+    How often tick() is called is the control loop's business: the rate is a
+    session knob living in ControllerState, and a copy here would be a second
+    answer to it.
     """
 
     def __init__(
@@ -40,7 +43,6 @@ class StatusBroadcaster:
         port: int = cfg.MCAST_PORT,
         ttl: int = cfg.MCAST_TTL,
         iface_ip: str = cfg.MCAST_IF,
-        rate_hz: float = cfg.STATUS_RATE_HZ,
         stale_s: float = cfg.STATUS_STALE_S,
     ) -> None:
         self._state_mgr = state_mgr

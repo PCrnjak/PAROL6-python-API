@@ -14,7 +14,12 @@ from typing import Any, TypeVar, overload
 from waldoctl.sync_tools import SyncTool
 
 from waldoctl import PingResult, ToolStatus
-from waldoctl.status import ActivityResult, LoopStatsResult, ToolResult
+from waldoctl.status import (
+    ActivityResult,
+    LoopStatsResult,
+    StatusRate,
+    ToolResult,
+)
 
 from waldoctl.types import Axis, Frame
 from ..protocol.wire import (
@@ -318,6 +323,14 @@ class RobotClient:
     def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count."""
         return _run(self._inner.reset_loop_stats())
+
+    def set_status_rate(self, hz: float) -> int:
+        """Set the rate the controller broadcasts status at."""
+        return _run(self._inner.set_status_rate(hz))
+
+    def status_rate(self) -> StatusRate | None:
+        """Current broadcast rate and the control rate it divides."""
+        return _run(self._inner.status_rate())
 
     def tools(self) -> ToolResult | None:
         """Current tool and available tools.
