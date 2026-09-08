@@ -1003,17 +1003,41 @@ class AsyncRobotClient(_RobotClientABC):
             return None
         return ShapeWorld(
             installation=tuple(
-                shape_from_wire(w.kind, w.params, w.pose, w.collision, w.margin, w.name)
+                shape_from_wire(
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                )
                 for w in resp.installation
             ),
             program=tuple(
-                shape_from_wire(w.kind, w.params, w.pose, w.collision, w.margin, w.name)
+                shape_from_wire(
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                )
                 for w in resp.program
             ),
         )
 
     async def tcp_offset(self) -> list[float]:
         """Query current TCP offset in mm [x, y, z].
+
+        Raises ``ConnectionError`` when the controller does not answer.
+        ``[0, 0, 0]`` is a legitimate offset -- a tool deliberately cleared
+        -- so returning it as a not-answered sentinel leaves the caller
+        unable to tell "the offset is zero" from "there is no controller",
+        and a host that adopts the readback quietly erases the offset the
+        user just set. ``_request`` already retries, so reaching the end
+        here means unreachable, not one lost datagram.
 
         Category: Configuration
 
@@ -1023,7 +1047,7 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(TcpOffsetCmd())
         if isinstance(resp, TcpOffsetResultStruct):
             return [resp.x, resp.y, resp.z]
-        return [0.0, 0.0, 0.0]
+        raise ConnectionError("the controller did not answer tcp_offset()")
 
     async def select_profile(self, profile: str) -> int:
         """Set the motion profile (e.g. ``"TOPPRA"``).

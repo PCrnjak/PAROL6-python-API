@@ -638,7 +638,14 @@ class SetTcpOffsetCmd(
 
 
 class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
-    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``."""
+    """One workspace shape — mirrors waldoctl ``Shape.to_wire()``.
+
+    ``physics`` is seventh and defaulted, which is what keeps this readable
+    both ways across the waldoctl 0.13 boundary: a peer still sending the
+    six-element form decodes with ``physics`` absent, and one sending seven
+    decodes fully. Without the field at all, every ``set_shapes`` against
+    0.13 raised ``TypeError: Extra positional arguments provided``.
+    """
 
     kind: str
     params: list[float]
@@ -646,6 +653,7 @@ class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
     collision: bool
     margin: float | None
     name: str
+    physics: list | None = None
 
 
 class SetShapesCmd(
