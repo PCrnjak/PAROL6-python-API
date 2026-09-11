@@ -114,6 +114,13 @@ def test_attached_part_blocks_motion_except_for_declared_contacts(client: RobotC
         assert client.reset() == 1
         with pytest.raises(MotionError, match="attachment context"):
             client.move_j(start, duration=1.0, wait=False)
+        # Streamed datagrams are dropped while the context is stale, not
+        # answered: nothing awaits a reply, and an ERROR sent anyway would be
+        # dequeued by the next unrelated request on this client.
+        for _ in range(50):
+            client.jog_j(0, speed=0.1, duration=0.02)
+        time.sleep(0.3)
+        assert client._inner._rx_queue.empty(), "unsolicited ERROR replies queued"
         fresh = client.shapes()
         assert fresh is not None and fresh.attachment_epoch != world.attachment_epoch
         reconciled = part.attach(

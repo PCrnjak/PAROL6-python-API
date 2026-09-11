@@ -145,6 +145,7 @@ class Controller:
         self._cmd_rate = EventRateMetrics()
         self._gc_tracker = GCTracker()
         self._ack_policy = AckPolicy()
+        self._stale_attachment_logged_epoch = -1
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
             shutdown_event=self.shutdown_event,
@@ -369,13 +370,7 @@ class Controller:
                 logger.warning("E-STOP activated")
                 self.estop_active = True
                 self._segment_player.cancel(state)
-                self._planner.sync_tool(
-                    state.current_tool,
-                    variant_key=state.current_tool_variant,
-                    tcp_offset_m=state.tcp_offset_m,
-                    tcp_rotation_rad=state.tcp_rotation_rad,
-                )
-                self._planner.sync_shapes(state.shapes)
+                self._resync_planner(state)
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
                 self._executor.clear_queue("E-Stop activated")
@@ -728,13 +723,22 @@ class Controller:
             CmdType.SERVOL,
             CmdType.TELEPORT,
         ):
-            self._reply_error(
-                addr,
-                make_error(
-                    ErrorCode.COMM_VALIDATION_ERROR,
-                    detail="attachment context changed; reconcile the physical scene and reapply",
-                ),
-            )
+            if self._ack_policy.requires_ack(cmd_type):
+                self._reply_error(
+                    addr,
+                    make_error(
+                        ErrorCode.COMM_VALIDATION_ERROR,
+                        detail="attachment context changed; reconcile the physical scene and reapply",
+                    ),
+                )
+            elif self._stale_attachment_logged_epoch != state.attachment_epoch:
+                # Nothing awaits a reply to a streamed datagram; an ERROR sent
+                # anyway is dequeued by the client's next unrelated request.
+                self._stale_attachment_logged_epoch = state.attachment_epoch
+                logger.warning(
+                    "Dropping streamed %s: attachment context changed; reconcile the physical scene and reapply",
+                    cmd_name,
+                )
             return
         if not state.enabled:
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
@@ -863,6 +867,22 @@ class Controller:
                 addr, make_error(ErrorCode.COMM_DECODE_ERROR, detail=str(e))
             )
 
+    def _resync_planner(self, state: ControllerState) -> None:
+        """Bring the planner subprocess back to the controller's tool and world.
+
+        The planner applies SET_TCP_TRANSFORM / SELECT_TOOL / SET_SHAPES at
+        plan time, when the command is still queued. Cancelling that queue
+        leaves the planner holding a change the controller never applied,
+        and every later plan would be solved against it.
+        """
+        self._planner.sync_tool(
+            state.current_tool,
+            variant_key=state.current_tool_variant,
+            tcp_offset_m=state.tcp_offset_m,
+            tcp_rotation_rad=state.tcp_rotation_rad,
+        )
+        self._planner.sync_shapes(state.shapes)
+
     def _handle_system_command(
         self,
         command: SystemCommand,
@@ -905,6 +925,9 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command(reason)
                 self._executor.clear_queue(reason)
+                self._resync_planner(state)
+                # A pause holds the queue it interrupted; that queue is gone.
+                state.execution_paused = False
 
             # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
@@ -913,13 +936,8 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
-                self._planner.sync_tool(
-                    state.current_tool,
-                    variant_key=state.current_tool_variant,
-                    tcp_offset_m=state.tcp_offset_m,
-                    tcp_rotation_rad=state.tcp_rotation_rad,
-                )
-                self._planner.sync_shapes(state.shapes)
+                self._resync_planner(state)
+                state.execution_paused = False
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:

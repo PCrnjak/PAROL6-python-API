@@ -375,6 +375,7 @@ class ControllerState:
         self.invalidate_attachments()
         # Safety and control flags
         self.enabled = True
+        self.execution_paused = False
         self.soft_error = False
         self.disabled_reason = ""
         self.e_stop_active = False
@@ -486,7 +487,7 @@ class ControllerState:
             )
         if (attached or self.has_attachments) and self.queued_segments:
             raise ValueError("stop queued motion before changing attachments")
-        if attached and (not self.enabled or not all(self.Homed_in)):
+        if attached and (not self.enabled or not all(self.Homed_in[:6])):
             raise ValueError("attachments require enabled, referenced robot state")
         PAROL6_ROBOT.apply_shapes(shapes)
         self.has_attachments = bool(attached)

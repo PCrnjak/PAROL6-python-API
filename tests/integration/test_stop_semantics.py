@@ -117,3 +117,31 @@ def test_stop_discards_plans_still_in_the_planner(client: RobotClient, server_pr
     )
     assert client.queue() == []
     assert client.home(wait=True, timeout=30.0) >= 0
+
+
+def test_stop_discards_a_queued_tcp_transform_from_the_planner_too(
+    client: RobotClient, server_proc
+):
+    """The planner applies SET_TCP_TRANSFORM when it plans, while the command
+    is still queued; a Stop that cancels the queue must take that transform
+    back from the planner, or every later plan is solved against a TCP the
+    controller never applied."""
+    assert client.home(wait=True, timeout=30.0) >= 0
+    index = client.set_tcp_transform(0, 0, 0, 0, 0, 0)
+    assert index >= 0 and client.wait_command(index, timeout=5.0)
+    start = client.angles()
+    pose = client.pose()
+    assert start is not None and pose is not None
+    assert client.delay(3.0) >= 0
+    assert client.set_tcp_transform(0, 0, 40, 0, 90, 0) >= 0
+    assert client.stop() == 1
+    assert client.tcp_transform() == pytest.approx([0] * 6)
+    # A move to the pose the arm is already at is planned against the
+    # controller's TCP and therefore goes nowhere.
+    index = client.move_l(pose, duration=1.0, wait=False)
+    assert index >= 0 and client.wait_command(index, timeout=10.0)
+    after = client.angles()
+    assert after is not None
+    assert np.allclose(after, start, atol=0.5), (
+        f"the planner kept the cancelled TCP: {start} -> {after}"
+    )

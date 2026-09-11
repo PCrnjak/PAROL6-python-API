@@ -57,10 +57,17 @@ def test_execution_pause_speed_dwell_and_standalone_deadlines(client: RobotClien
         assert client.pause() == 1
         with pytest.raises(TimeoutError):
             client.move_j(start, duration=1, wait=True, timeout=0.2)
+        # Stop discards the queue the pause was holding, and the pause with
+        # it: the next queued command runs without a resume.
         assert client.stop() == 1
-        assert client.execution_speed().paused
-        assert client.resume() == 1
         assert client.queue() == []
+        assert not client.execution_speed().paused
+        assert client.move_j(start, duration=1, wait=True, timeout=5) >= 0
+        assert np.allclose(client.angles(), start, atol=0.1)
+        assert client.pause() == 1
+        assert client.reset_state() == 1
+        assert not client.execution_speed().paused
+        assert client.resume() == 1
     finally:
         client.stop()
         client.resume()
