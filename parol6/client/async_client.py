@@ -902,7 +902,13 @@ class AsyncRobotClient(_RobotClientABC):
             isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
         ):
             raise ValueError("I/O timeout must be positive and finite")
-        resp = await self._request(IOCmd(), timeout=timeout)
+        # The outer deadline also bounds endpoint setup and its retries on an
+        # absent peer; the inner one keeps the query to a single attempt.
+        try:
+            async with asyncio.timeout(timeout):
+                resp = await self._request(IOCmd(), timeout=timeout)
+        except TimeoutError:
+            return None
         return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
