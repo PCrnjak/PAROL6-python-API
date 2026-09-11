@@ -373,6 +373,7 @@ class ControllerState:
         self.invalidate_attachments()
         # Safety and control flags
         self.enabled = True
+        self.execution_paused = False
         self.soft_error = False
         self.disabled_reason = ""
         self.e_stop_active = False

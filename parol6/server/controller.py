@@ -370,13 +370,7 @@ class Controller:
                 logger.warning("E-STOP activated")
                 self.estop_active = True
                 self._segment_player.cancel(state)
-                self._planner.sync_tool(
-                    state.current_tool,
-                    variant_key=state.current_tool_variant,
-                    tcp_offset_m=state.tcp_offset_m,
-                    tcp_rotation_rad=state.tcp_rotation_rad,
-                )
-                self._planner.sync_shapes(state.shapes)
+                self._resync_planner(state)
                 if self._executor.active_command:
                     self._executor.cancel_active_command("E-Stop activated")
                 self._executor.clear_queue("E-Stop activated")
@@ -872,6 +866,22 @@ class Controller:
                 addr, make_error(ErrorCode.COMM_DECODE_ERROR, detail=str(e))
             )
 
+    def _resync_planner(self, state: ControllerState) -> None:
+        """Bring the planner subprocess back to the controller's tool and world.
+
+        The planner applies SET_TCP_TRANSFORM / SELECT_TOOL / SET_SHAPES at
+        plan time, when the command is still queued. Cancelling that queue
+        leaves the planner holding a change the controller never applied,
+        and every later plan would be solved against it.
+        """
+        self._planner.sync_tool(
+            state.current_tool,
+            variant_key=state.current_tool_variant,
+            tcp_offset_m=state.tcp_offset_m,
+            tcp_rotation_rad=state.tcp_rotation_rad,
+        )
+        self._planner.sync_shapes(state.shapes)
+
     def _handle_system_command(
         self,
         command: SystemCommand,
@@ -914,6 +924,9 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command(reason)
                 self._executor.clear_queue(reason)
+                self._resync_planner(state)
+                # A pause holds the queue it interrupted; that queue is gone.
+                state.execution_paused = False
 
             # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
@@ -922,13 +935,8 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
-                self._planner.sync_tool(
-                    state.current_tool,
-                    variant_key=state.current_tool_variant,
-                    tcp_offset_m=state.tcp_offset_m,
-                    tcp_rotation_rad=state.tcp_rotation_rad,
-                )
-                self._planner.sync_shapes(state.shapes)
+                self._resync_planner(state)
+                state.execution_paused = False
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
