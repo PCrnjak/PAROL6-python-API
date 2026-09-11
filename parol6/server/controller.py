@@ -38,6 +38,8 @@ from parol6.protocol.wire import (
     pack_error,
     pack_ok,
     pack_ok_index,
+    pack_response,
+    split_request,
     unpack_rx_frame_into,
 )
 from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
@@ -66,6 +68,7 @@ from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
     TRACE,
     INTERVAL_S,
+    MAX_BACKLOG_COUNT,
     MAX_POLL_COUNT,
     MCAST_GROUP,
     MCAST_PORT,
@@ -604,28 +607,46 @@ class Controller:
                 state.Speed_out.fill(0)
 
     def _poll_commands(self, state: ControllerState) -> None:
-        """Poll and process UDP commands (non-blocking)."""
+        """Poll and process UDP commands (non-blocking).
+
+        A full batch means a client outran the tick, so the rest of the socket
+        is read in this tick as well: each streaming command supersedes the one
+        before it, so the arm ends the tick on the newest target instead of
+        following a queue of old ones for as many ticks as the backlog is deep,
+        and the configuration, queries and stops mixed into it are still seen,
+        in order -- which a blind socket drain threw away.
+        """
         assert self.udp_transport is not None
 
         state.command_out_locked = False
-        msgs = self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT)
+        # Copied: the transport hands back a buffer it reuses on the next call.
+        msgs = list(self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT))
+        if len(msgs) == MAX_POLL_COUNT:
+            backlog = self.udp_transport.poll_receive_all(max_count=MAX_BACKLOG_COUNT)
+            if len(backlog) == MAX_BACKLOG_COUNT:
+                logger.log(
+                    TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT
+                )
+            msgs.extend(backlog)
         for data, addr in msgs:
             self._process_command(data, addr, state)
 
-    def _reply_error(self, addr: tuple[str, int], error: RobotError) -> None:
+    def _reply_error(
+        self, req_id: int, addr: tuple[str, int], error: RobotError
+    ) -> None:
         """Send error response to client. Caller must ensure udp_transport is not None."""
         assert self.udp_transport is not None
-        self.udp_transport.send(pack_error(error), addr)
+        self.udp_transport.send(pack_error(error, req_id), addr)
 
-    def _reply_ok(self, addr: tuple[str, int]) -> None:
+    def _reply_ok(self, req_id: int, addr: tuple[str, int]) -> None:
         """Send OK response to client. Caller must ensure udp_transport is not None."""
         assert self.udp_transport is not None
-        self.udp_transport.send(pack_ok(), addr)
+        self.udp_transport.send(pack_ok(req_id), addr)
 
-    def _reply_ok_index(self, addr: tuple[str, int], index: int) -> None:
+    def _reply_ok_index(self, req_id: int, addr: tuple[str, int], index: int) -> None:
         """Send OK response with command index. Caller must ensure udp_transport is not None."""
         assert self.udp_transport is not None
-        self.udp_transport.send(pack_ok_index(index), addr)
+        self.udp_transport.send(pack_ok_index(index, req_id), addr)
 
     def _process_command(
         self, data: bytes, addr: tuple[str, int], state: ControllerState
@@ -638,9 +659,14 @@ class Controller:
             state: Controller state
         """
         self._cmd_rate.record(time.perf_counter())
+        try:
+            req_id, payload = split_request(data)
+        except ValueError as e:
+            logger.warning("Dropped datagram from %s: %s", addr, e)
+            return
 
         # Try stream fast-path first (avoids full command creation)
-        result = self._executor.try_stream_fast_path(data, state)
+        result = self._executor.try_stream_fast_path(payload, state)
         if result is True:
             return
 
@@ -648,17 +674,21 @@ class Controller:
         if result is not False:
             command, category, error = create_command_from_struct(result)
         else:
-            command, category, error = create_command(data)
+            command, category, error = create_command(payload)
 
         if not command or category is None:
             if error:
                 logger.warning(f"Command validation failed: {error}")
                 self._reply_error(
-                    addr, make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=error)
+                    req_id,
+                    addr,
+                    make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=error),
                 )
             else:
                 logger.warning("Unknown command")
-                self._reply_error(addr, make_error(ErrorCode.COMM_UNKNOWN_COMMAND))
+                self._reply_error(
+                    req_id, addr, make_error(ErrorCode.COMM_UNKNOWN_COMMAND)
+                )
             return
 
         cmd_name = type(command).__name__
@@ -667,14 +697,18 @@ class Controller:
         # Dispatch by category (determined at registration time, no isinstance needed)
         match category:
             case CommandCategory.QUERY:
-                self._handle_query(command, state, addr)  # type: ignore[arg-type]
+                self._handle_query(command, state, addr, req_id)  # type: ignore[arg-type]
             case CommandCategory.SYSTEM:
-                self._handle_system_command(command, state, addr)  # type: ignore[arg-type]
+                self._handle_system_command(command, state, addr, req_id)  # type: ignore[arg-type]
             case CommandCategory.MOTION:
-                self._handle_motion_command(command, state, addr)  # type: ignore[arg-type]
+                self._handle_motion_command(command, state, addr, req_id)  # type: ignore[arg-type]
 
     def _handle_motion_command(
-        self, command: MotionCommand, state: ControllerState, addr: tuple[str, int]
+        self,
+        command: MotionCommand,
+        state: ControllerState,
+        addr: tuple[str, int],
+        req_id: int,
     ) -> None:
         """Queue motion command for execution."""
         cmd_name = type(command).__name__
@@ -684,7 +718,9 @@ class Controller:
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
                 reason = state.disabled_reason or "Controller disabled"
                 self._reply_error(
-                    addr, make_error(ErrorCode.SYS_CONTROLLER_DISABLED, detail=reason)
+                    req_id,
+                    addr,
+                    make_error(ErrorCode.SYS_CONTROLLER_DISABLED, detail=reason),
                 )
             logger.warning(
                 "Motion command rejected - controller disabled: %s", cmd_name
@@ -715,10 +751,12 @@ class Controller:
                     state.action_state = ActionState.IDLE
                 logger.log(TRACE, "Command %s queued (index=%d)", cmd_name, cmd_index)
                 if cmd_type and self._ack_policy.requires_ack(cmd_type):
-                    self._reply_ok_index(addr, cmd_index)
+                    self._reply_ok_index(req_id, addr, cmd_index)
             except QueueFullError:
                 if cmd_type and self._ack_policy.requires_ack(cmd_type):
-                    self._reply_error(addr, make_error(ErrorCode.COMM_QUEUE_FULL))
+                    self._reply_error(
+                        req_id, addr, make_error(ErrorCode.COMM_QUEUE_FULL)
+                    )
             return
 
         # Tool actions bypass planner — execute directly via side channel
@@ -736,6 +774,7 @@ class Controller:
                 logger.error("Failed to create tool command: %s", error_msg)
                 if cmd_type and self._ack_policy.requires_ack(cmd_type):
                     self._reply_error(
+                        req_id,
                         addr,
                         make_error(ErrorCode.COMM_DECODE_ERROR, detail=error_msg or ""),
                     )
@@ -749,7 +788,7 @@ class Controller:
                 TRACE, "Command %s → tool side channel (index=%d)", cmd_name, cmd_index
             )
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
-                self._reply_ok_index(addr, cmd_index)
+                self._reply_ok_index(req_id, addr, cmd_index)
             return
 
         # Non-streaming commands → planner
@@ -786,24 +825,25 @@ class Controller:
             )
         )
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
-            self._reply_ok_index(addr, cmd_index)
+            self._reply_ok_index(req_id, addr, cmd_index)
 
     def _handle_query(
         self,
         command: QueryCommand,
         state: ControllerState,
         addr: tuple[str, int],
+        req_id: int,
     ) -> None:
         """Execute query command and send response directly."""
         try:
             command.setup(state)
-            response = command.compute(state)
+            response = pack_response(command.compute(state), req_id)
             assert self.udp_transport is not None
             self.udp_transport.send(response, addr)
         except Exception as e:
             logger.error("Query error: %s", e)
             self._reply_error(
-                addr, make_error(ErrorCode.COMM_DECODE_ERROR, detail=str(e))
+                req_id, addr, make_error(ErrorCode.COMM_DECODE_ERROR, detail=str(e))
             )
 
     def _resync_planner(self, state: ControllerState) -> None:
@@ -827,6 +867,7 @@ class Controller:
         command: SystemCommand,
         state: ControllerState,
         addr: tuple[str, int],
+        req_id: int,
     ) -> None:
         """Execute system command, apply side effects, and send reply."""
         try:
@@ -892,17 +933,19 @@ class Controller:
                 self._planner.sync_shapes(state.shapes)
 
             if code == ExecutionStatusCode.COMPLETED:
-                self._reply_ok(addr)
+                self._reply_ok(req_id, addr)
             else:
                 robot_error = command.robot_error or make_error(
                     ErrorCode.MOTN_TICK_FAILED, detail="System command failed"
                 )
-                self._reply_error(addr, robot_error)
+                self._reply_error(req_id, addr, robot_error)
 
         except Exception as e:
             logger.error("System command error: %s", e)
             self._reply_error(
-                addr, extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+                req_id,
+                addr,
+                extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e)),
             )
 
     def _assign_command_index(self, state: ControllerState) -> int:

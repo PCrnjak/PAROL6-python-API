@@ -22,18 +22,20 @@ def test_status_metadata_rejects_malformed_fields_and_clears_unavailable_metadat
         )
         assert (buffer.session_id, buffer.seq, buffer.mono_time_ns) == (9, 0, 1)
         packet = msgspec.msgpack.decode(raw)
-        for field in (30, 31, 32):
+        # One slot later than the fields above them: the protocol version
+        # leads the message.
+        for field in (31, 32, 33):
             for invalid in (True, -1, 1.5, float("nan"), "1", None):
                 changed = list(packet)
                 changed[field] = invalid
                 assert not decode_status_bin_into(
                     msgspec.msgpack.encode(changed), buffer
                 )
-        for length in (31, 32):
+        for length in (32, 33):
             assert not decode_status_bin_into(
                 msgspec.msgpack.encode(packet[:length]), buffer
             )
-        assert decode_status_bin_into(msgspec.msgpack.encode(packet[:30]), buffer)
+        assert decode_status_bin_into(msgspec.msgpack.encode(packet[:31]), buffer)
         assert (buffer.session_id, buffer.seq, buffer.mono_time_ns) == (0, 0, 0)
     finally:
         cache.close()

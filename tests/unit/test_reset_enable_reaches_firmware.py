@@ -101,3 +101,33 @@ def test_streaming_packet_keeps_following_configuration_and_stop(controller):
         "streaming must not discard pending configuration"
     )
     assert not state.enabled, "a queued stop must survive a streaming batch boundary"
+
+
+def test_a_streaming_flood_is_consumed_in_the_tick_it_arrived_in(controller):
+    """A client streaming faster than one tick's batch leaves a backlog in the
+    socket. It is stale the moment the tick runs, so the tick has to consume
+    it: otherwise the arm follows superseded targets for backlog/batch ticks
+    and anything queued behind them — here a stop — waits just as long."""
+    from parol6.config import MAX_POLL_COUNT
+    from parol6.protocol.wire import JogJCmd
+
+    state = controller.state_manager.get_state()
+    assert controller.udp_transport is not None
+    address = ("127.0.0.1", controller.udp_transport.socket.getsockname()[1])
+    flood = MAX_POLL_COUNT * 4
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+        for _ in range(flood):
+            sender.sendto(
+                encode_command(
+                    JogJCmd(speeds=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0], duration=0.2)
+                ),
+                address,
+            )
+        sender.sendto(encode_command(EstopCmd()), address)
+        controller._poll_commands(state)
+        controller._execute_commands(state)
+
+    assert not state.enabled, (
+        f"one tick left {flood} streamed targets unread, so the stop behind "
+        f"them was not seen either"
+    )

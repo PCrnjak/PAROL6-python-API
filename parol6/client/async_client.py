@@ -116,6 +116,8 @@ from ..protocol.wire import (
     ToolStatusResultStruct,
     ToolsCmd,
     WriteIOCmd,
+    MAX_REQ_ID,
+    ProtocolVersionError,
     decode_message,
     encode_command,
     encode_command_into,
@@ -242,7 +244,15 @@ class _StatusProtocol(asyncio.DatagramProtocol):
         if self._client._closed:
             return
         # Zero-allocation decode directly into shared buffer
-        if decode_status_bin_into(data, self._client._shared_status):
+        try:
+            fresh = decode_status_bin_into(data, self._client._shared_status)
+        except ProtocolVersionError as mismatch:
+            # Raising inside a datagram callback reaches nobody. Hold it for
+            # whoever reads status next, and wake them now.
+            self._client._proto_error = mismatch
+            self._client._status_event.set()
+            return
+        if fresh:
             self._client._status_generation += 1
             # Event.set() is synchronous, so it's safe to wake waiters from this callback
             self._client._status_event.set()
@@ -307,6 +317,9 @@ class AsyncRobotClient(_RobotClientABC):
         # Single shared buffer with event-based notification
         self._status_transport: asyncio.DatagramTransport | None = None
         self._status_sock: socket.socket | None = None
+        self._proto_error: ProtocolVersionError | None = None
+        #: Correlates each reply with its request; 0 means "no reply wanted".
+        self._next_req_id = 1
         self._shared_status: StatusBuffer = StatusBuffer()
         self._status_generation: int = 0
         self._status_event: asyncio.Event = asyncio.Event()
@@ -539,6 +552,7 @@ class AsyncRobotClient(_RobotClientABC):
         last_gen = 0
 
         while not self._closed:
+            self._check_protocol()
             # Clear before waiting - only affects future waits, not current waiters
             self._status_event.clear()
 
@@ -555,6 +569,16 @@ class AsyncRobotClient(_RobotClientABC):
             if self._status_generation != last_gen:
                 last_gen = self._status_generation
                 yield self._shared_status
+
+    def _request_id(self) -> int:
+        """The next request id, wrapping past the wire's 32-bit field."""
+        req_id = self._next_req_id
+        self._next_req_id = req_id + 1 if req_id < MAX_REQ_ID else 1
+        return req_id
+
+    def _check_protocol(self) -> None:
+        if self._proto_error is not None:
+            raise self._proto_error
 
     async def _send(self, cmd: msgspec.Struct) -> int:
         """
@@ -573,16 +597,22 @@ class AsyncRobotClient(_RobotClientABC):
 
         # System commands need stable bytes across the await, so encode a fresh buffer
         if cmd_type in SYSTEM_CMD_TYPES:
+            req_id = self._request_id()
             try:
-                await self._request_ok_raw(encode_command(cmd), self.timeout)
+                await self._request_ok_raw(
+                    encode_command(cmd, req_id), self.timeout, req_id
+                )
                 return 1
             except TimeoutError:
                 return 0
 
         if cmd_type not in QUERY_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
+                req_id = self._request_id()
                 try:
-                    ok = await self._request_ok_raw(encode_command(cmd), self.timeout)
+                    ok = await self._request_ok_raw(
+                        encode_command(cmd, req_id), self.timeout, req_id
+                    )
                     self._last_command_index = ok.index
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
@@ -595,31 +625,6 @@ class AsyncRobotClient(_RobotClientABC):
         encode_command_into(cmd, self._tx_buf)
         self._transport.sendto(self._tx_buf)
         return 1
-
-    def _drop_stale_replies(self) -> None:
-        """Discard replies already queued when a new request is about to go out.
-
-        Nothing awaits them: their caller's deadline expired mid-flight. The
-        wire carries no request id, so handing one to the next request would
-        answer it with the wrong struct and leave every later query one reply
-        behind.
-        """
-        kept = []
-        while True:
-            try:
-                item = self._rx_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                stale = isinstance(
-                    decode_message(item[0]), (ResponseMsg, OkMsg, ErrorMsg)
-                )
-            except msgspec.DecodeError:
-                stale = False
-            if not stale:
-                kept.append(item)
-        for item in kept:
-            self._rx_queue.put_nowait(item)
 
     async def _request(
         self, cmd: msgspec.Struct, timeout: float | None = None
@@ -642,13 +647,13 @@ class AsyncRobotClient(_RobotClientABC):
         """
         await self._ensure_endpoint()
         assert self._transport is not None
-        data = encode_command(cmd)
         wait = self.timeout if timeout is None else timeout
         attempts = self.retries + 1 if timeout is None else 1
         for attempt in range(attempts):
+            req_id = self._request_id()
+            data = encode_command(cmd, req_id)
             try:
                 async with self._req_lock:
-                    self._drop_stale_replies()
                     self._transport.sendto(data)
                     end_time = time.monotonic() + wait
                     while time.monotonic() < end_time:
@@ -659,6 +664,12 @@ class AsyncRobotClient(_RobotClientABC):
                             )
                             try:
                                 parsed = decode_message(resp_data)
+                                if parsed.req_id != req_id:
+                                    # A reply to a request whose caller has
+                                    # given up. Answering this one with it
+                                    # would leave every later query a reply
+                                    # behind.
+                                    continue
                                 if isinstance(parsed, ResponseMsg):
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
@@ -682,13 +693,15 @@ class AsyncRobotClient(_RobotClientABC):
                 await asyncio.sleep(backoff)
         return None
 
-    async def _request_ok_raw(self, data: bytes, timeout: float) -> OkMsg:
+    async def _request_ok_raw(self, data: bytes, timeout: float, req_id: int) -> OkMsg:
         """
-        Send pre-encoded binary command and wait for 'OK' or 'ERROR' reply.
+        Send pre-encoded binary command and wait for the 'OK' or 'ERROR' reply
+        carrying *req_id*; replies to abandoned requests are discarded.
 
         Args:
-            data: Pre-encoded msgpack bytes
+            data: Pre-encoded command datagram, id header included
             timeout: Timeout in seconds.
+            req_id: The id *data* carries, echoed by the reply.
 
         Returns OkMsg on OK; raises RuntimeError on ERROR, TimeoutError on timeout.
         """
@@ -697,7 +710,6 @@ class AsyncRobotClient(_RobotClientABC):
 
         end_time = time.monotonic() + timeout
         async with self._req_lock:
-            self._drop_stale_replies()
             self._transport.sendto(data)
             while time.monotonic() < end_time:
                 try:
@@ -707,9 +719,9 @@ class AsyncRobotClient(_RobotClientABC):
                     )
                     try:
                         match decode_message(resp_data):
-                            case OkMsg() as ok:
+                            case OkMsg(reply_id) as ok if reply_id == req_id:
                                 return ok
-                            case ErrorMsg(message):
+                            case ErrorMsg(reply_id, message) if reply_id == req_id:
                                 raise MotionError(RobotError.from_wire(message))
                     except msgspec.ValidationError:
                         pass  # Ignore non-matching datagrams
@@ -1050,7 +1062,11 @@ class AsyncRobotClient(_RobotClientABC):
                     if confirmed:
                         return 1
                     await asyncio.sleep(0.01)
-        except TimeoutError:
+        except (TimeoutError, ConnectionError):
+            # 0 is "unconfirmed": the command may or may not have been applied.
+            # A readback whose reply was lost inside the confirmation window is
+            # exactly that, and raising instead told the caller the controller
+            # was unreachable when it had acked the command a moment earlier.
             return 0
 
     async def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
@@ -1109,7 +1125,11 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(StatusRateCmd())
         if not isinstance(resp, StatusRateResultStruct):
             return None
-        return StatusRate(hz=resp.hz, control_hz=resp.control_hz)
+        return StatusRate(
+            hz=resp.hz,
+            control_hz=resp.control_hz,
+            servable=tuple(float(v) for v in resp.servable),
+        )
 
     async def select_tool(self, tool_name: str, variant_key: str = "") -> int:
         """Set the active end-effector tool on the controller.
@@ -1510,6 +1530,7 @@ class AsyncRobotClient(_RobotClientABC):
         end_time = time.monotonic() + timeout
 
         while time.monotonic() < end_time and not self._closed:
+            self._check_protocol()
             self._status_event.clear()
 
             # Check if we already have new data
