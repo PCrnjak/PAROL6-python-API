@@ -842,6 +842,8 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command(reason)
                 self._executor.clear_queue(reason)
+                # A pause holds the queue it interrupted; that queue is gone.
+                state.execution_paused = False
 
             # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
@@ -850,6 +852,7 @@ class Controller:
                 self._segment_player.cancel(state)
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
+                state.execution_paused = False
                 self._planner.sync_tool(
                     state.current_tool,
                     variant_key=state.current_tool_variant,
