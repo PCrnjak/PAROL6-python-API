@@ -595,7 +595,34 @@ class AsyncRobotClient(_RobotClientABC):
         self._transport.sendto(self._tx_buf)
         return 1
 
-    async def _request(self, cmd: msgspec.Struct) -> Response | None:
+    def _drop_stale_replies(self) -> None:
+        """Discard replies already queued when a new request is about to go out.
+
+        Nothing awaits them: their caller's deadline expired mid-flight. The
+        wire carries no request id, so handing one to the next request would
+        answer it with the wrong struct and leave every later query one reply
+        behind.
+        """
+        kept = []
+        while True:
+            try:
+                item = self._rx_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                stale = isinstance(
+                    decode_message(item[0]), (ResponseMsg, OkMsg, ErrorMsg)
+                )
+            except msgspec.DecodeError:
+                stale = False
+            if not stale:
+                kept.append(item)
+        for item in kept:
+            self._rx_queue.put_nowait(item)
+
+    async def _request(
+        self, cmd: msgspec.Struct, timeout: float | None = None
+    ) -> Response | None:
         """Send a query command and wait for a typed response.
 
         Drains the receive queue until a ResponseMsg is found or timeout.
@@ -603,6 +630,8 @@ class AsyncRobotClient(_RobotClientABC):
 
         Args:
             cmd: Typed command struct
+            timeout: Per-call deadline; when given, the query is sent once
+                with no retries so the deadline is the caller's total wait.
 
         Returns:
             Typed Response struct, or None on timeout.
@@ -613,11 +642,14 @@ class AsyncRobotClient(_RobotClientABC):
         await self._ensure_endpoint()
         assert self._transport is not None
         data = encode_command(cmd)
-        for attempt in range(self.retries + 1):
+        wait = self.timeout if timeout is None else timeout
+        attempts = self.retries + 1 if timeout is None else 1
+        for attempt in range(attempts):
             try:
                 async with self._req_lock:
+                    self._drop_stale_replies()
                     self._transport.sendto(data)
-                    end_time = time.monotonic() + self.timeout
+                    end_time = time.monotonic() + wait
                     while time.monotonic() < end_time:
                         try:
                             resp_data, _ = await asyncio.wait_for(
@@ -644,7 +676,7 @@ class AsyncRobotClient(_RobotClientABC):
                 pass
             except Exception:
                 break
-            if attempt < self.retries:
+            if attempt < attempts - 1:
                 backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
                 await asyncio.sleep(backoff)
         return None
@@ -664,6 +696,7 @@ class AsyncRobotClient(_RobotClientABC):
 
         end_time = time.monotonic() + timeout
         async with self._req_lock:
+            self._drop_stale_replies()
             self._transport.sendto(data)
             while time.monotonic() < end_time:
                 try:
@@ -876,12 +909,8 @@ class AsyncRobotClient(_RobotClientABC):
             isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
         ):
             raise ValueError("I/O timeout must be positive and finite")
-        try:
-            async with asyncio.timeout(timeout):
-                resp = await self._request(IOCmd())
-                return resp.io if isinstance(resp, IOResultStruct) else None
-        except TimeoutError:
-            return None
+        resp = await self._request(IOCmd(), timeout=timeout)
+        return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
         """Current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
