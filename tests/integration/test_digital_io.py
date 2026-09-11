@@ -51,9 +51,10 @@ def test_digital_io_readback_and_missing_peer_deadlines(client, server_proc):
 
 
 def test_late_replies_never_answer_the_next_request(ports, server_proc):
-    """A reply that lands after its caller's deadline expired is not served
-    to the next request: the wire carries no request ids, so a stale reply
-    would answer the wrong query and leave every later one a reply behind."""
+    """A reply that lands after its caller's deadline expired is not served to
+    the next request: it carries the abandoned request's id, so the client
+    drops it instead of answering the wrong query and leaving every later one
+    a reply behind."""
     from parol6.protocol.wire import IOResultStruct, pack_ok, pack_response
 
     async def scenario():
@@ -62,13 +63,14 @@ def test_late_replies_never_answer_the_next_request(ports, server_proc):
         ) as rbt:
             await rbt._ensure_endpoint()
             peer = (ports.server_ip, ports.server_port)
+            abandoned = 10_000  # an id no live request will be given
             rbt._rx_queue.put_nowait(
-                (pack_response(IOResultStruct(io=[0, 0, 0, 0, 1])), peer)
+                (pack_response(IOResultStruct(io=[0, 0, 0, 0, 1]), abandoned), peer)
             )
             pose = await rbt.pose()
             assert pose is not None and len(pose) == 6
             assert await rbt.angles() is not None
-            rbt._rx_queue.put_nowait((pack_ok(), peer))
+            rbt._rx_queue.put_nowait((pack_ok(abandoned), peer))
             index = await rbt.delay(0.1)
             assert index >= 1, "a stale index-less OK must not stand in for the ack"
             assert await rbt.wait_command(index, timeout=5)

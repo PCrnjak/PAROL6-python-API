@@ -22,6 +22,11 @@ logging.addLevelName(TRACE, "TRACE")
 MAX_COMMAND_QUEUE_SIZE: int = 100
 MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "100"))
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
+# Further messages read in a tick whose batch filled up. A client streaming
+# faster than the tick leaves a backlog in the socket; it is already stale, so
+# carrying it to later ticks makes the arm chase old targets and delays the
+# stop behind them by as many ticks as the backlog is deep.
+MAX_BACKLOG_COUNT: int = int(os.getenv("PAROL6_MAX_BACKLOG_COUNT", "500"))
 
 # Serial transport defaults
 SERIAL_RX_RING_DEFAULT: int = 262144
@@ -107,6 +112,19 @@ def status_broadcast_interval(hz: float) -> int:
     be a second answer to the question of how often status goes out.
     """
     return max(1, int(CONTROL_RATE_HZ) // int(hz))
+
+
+def servable_status_rates() -> tuple[float, ...]:
+    """Broadcast rates this controller accepts, highest first.
+
+    Status goes out every Nth control tick, so the servable rates are the
+    divisors of the control rate. One answer, used by the query that reports
+    the set and by the refusal that names it.
+    """
+    control = int(CONTROL_RATE_HZ)
+    return tuple(
+        float(control // n) for n in range(1, control + 1) if control % n == 0
+    )
 
 
 # Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
