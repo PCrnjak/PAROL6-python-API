@@ -89,3 +89,31 @@ def test_estop_latches_until_reset(client: RobotClient, server_proc):
         "canceled motion resurfaced after reset"
     )
     assert client.home(wait=True, timeout=30.0) >= 0
+
+
+def test_stop_discards_plans_still_in_the_planner(client: RobotClient, server_proc):
+    """Commands the planner has not finished planning when Stop arrives must
+    not play afterwards: a plan finished after the cancel is not a queue."""
+    start = client.angles()
+    assert start is not None
+    pose = client.pose()
+    assert pose is not None
+    away = list(pose)
+    away[0] += 40.0
+    # Cartesian plans take the planner long enough that Stop lands while
+    # most of these are still in its inbox, behind which CancelAll queues.
+    for i in range(40):
+        target = away if i % 2 == 0 else pose
+        assert client.move_l(target, duration=10.0, wait=False) >= 0
+    assert client.stop() == 1
+    time.sleep(0.3)
+    frozen = client.angles()
+    assert frozen is not None
+    time.sleep(1.5)
+    after = client.angles()
+    assert after is not None
+    assert np.allclose(after, frozen, atol=0.05), (
+        f"a plan finished after Stop played: {frozen} -> {after}"
+    )
+    assert client.queue() == []
+    assert client.home(wait=True, timeout=30.0) >= 0
