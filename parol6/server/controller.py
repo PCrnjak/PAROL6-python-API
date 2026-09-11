@@ -68,6 +68,7 @@ from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
     TRACE,
     INTERVAL_S,
+    MAX_BACKLOG_COUNT,
     MAX_POLL_COUNT,
     MCAST_GROUP,
     MCAST_PORT,
@@ -606,11 +607,27 @@ class Controller:
                 state.Speed_out.fill(0)
 
     def _poll_commands(self, state: ControllerState) -> None:
-        """Poll and process UDP commands (non-blocking)."""
+        """Poll and process UDP commands (non-blocking).
+
+        A full batch means a client outran the tick, so the rest of the socket
+        is read in this tick as well: each streaming command supersedes the one
+        before it, so the arm ends the tick on the newest target instead of
+        following a queue of old ones for as many ticks as the backlog is deep,
+        and the configuration, queries and stops mixed into it are still seen,
+        in order -- which a blind socket drain threw away.
+        """
         assert self.udp_transport is not None
 
         state.command_out_locked = False
-        msgs = self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT)
+        # Copied: the transport hands back a buffer it reuses on the next call.
+        msgs = list(self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT))
+        if len(msgs) == MAX_POLL_COUNT:
+            backlog = self.udp_transport.poll_receive_all(max_count=MAX_BACKLOG_COUNT)
+            if len(backlog) == MAX_BACKLOG_COUNT:
+                logger.log(
+                    TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT
+                )
+            msgs.extend(backlog)
         for data, addr in msgs:
             self._process_command(data, addr, state)
 

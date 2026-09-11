@@ -1030,7 +1030,11 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(StatusRateCmd())
         if not isinstance(resp, StatusRateResultStruct):
             return None
-        return StatusRate(hz=resp.hz, control_hz=resp.control_hz)
+        return StatusRate(
+            hz=resp.hz,
+            control_hz=resp.control_hz,
+            servable=tuple(float(v) for v in resp.servable),
+        )
 
     async def select_tool(self, tool_name: str, variant_key: str = "") -> int:
         """Set the active end-effector tool on the controller.
