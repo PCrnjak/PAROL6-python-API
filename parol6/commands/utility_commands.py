@@ -4,6 +4,7 @@ Contains utility commands like Delay and Reset
 """
 
 import logging
+import time
 
 from parol6.commands.base import (
     CommandBase,
@@ -11,7 +12,7 @@ from parol6.commands.base import (
     MotionCommand,
     SystemCommand,
 )
-from parol6.config import CONTROL_RATE_HZ, INTERVAL_S
+from parol6.config import CONTROL_RATE_HZ, INTERVAL_S, servable_status_rates
 from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
@@ -29,18 +30,31 @@ from parol6.server.state import ControllerState
 logger = logging.getLogger(__name__)
 
 
+#: Most real time one tick of a delay may count toward its dwell. A control
+#: loop running late still spends real seconds, so the dwell follows the clock;
+#: but the segment player stops ticking a paused delay altogether, so the gap
+#: across a pause arrives as one enormous tick and must not be counted as
+#: waiting the program asked for.
+_MAX_DELAY_TICK_S = 4 * INTERVAL_S
+
+
 @register_command(CmdType.DELAY)
 class DelayCommand(CommandBase[DelayCmd]):
     """
     A non-blocking command that pauses execution for a specified duration.
+
+    The dwell is measured on the clock, not in nominal ticks: a loaded
+    controller's periods exceed the nominal one, and counting ticks stretched
+    every queued delay by the loop's cumulative overrun.
     """
 
     PARAMS_TYPE = DelayCmd
 
-    __slots__ = ("_remaining_s",)
+    __slots__ = ("_remaining_s", "_ticked_at")
 
     def do_setup(self, state: "ControllerState") -> None:
         self._remaining_s = self.p.seconds
+        self._ticked_at = time.perf_counter()
         logger.info(f"  -> Delay starting for {self.p.seconds} seconds...")
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
@@ -48,7 +62,9 @@ class DelayCommand(CommandBase[DelayCmd]):
         state.Command_out = CommandCode.IDLE
         state.Speed_out.fill(0)
 
-        self._remaining_s -= INTERVAL_S
+        now = time.perf_counter()
+        self._remaining_s -= min(now - self._ticked_at, _MAX_DELAY_TICK_S)
+        self._ticked_at = now
         if self._remaining_s <= 0:
             logger.info(f"Delay finished after {self.p.seconds} seconds.")
             self.finish()
@@ -116,9 +132,7 @@ class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
         # as a generic tick failure instead of the refusal that names the
         # rates this controller can serve.
         if not (1.0 <= hz <= control) or not hz.is_integer() or control % int(hz) != 0:
-            allowed = ", ".join(
-                str(control // n) for n in range(1, control + 1) if control % n == 0
-            )
+            allowed = ", ".join(f"{hz:g}" for hz in servable_status_rates())
             self.fail(
                 make_error(
                     ErrorCode.SYS_STATUS_RATE_INVALID,

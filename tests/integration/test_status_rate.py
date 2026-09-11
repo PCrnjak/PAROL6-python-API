@@ -111,6 +111,14 @@ async def test_an_unachievable_rate_is_refused_with_the_rule(server_proc, ports)
         assert await client.wait_ready(timeout=10.0)
         before = await client.status_rate()
         assert before is not None
+        assert before.servable, (
+            "the controller knows its divisor set -- it formats it into the "
+            "refusal -- so the query has to report it rather than leaving the "
+            "client to re-derive one backend's rule"
+        )
+        assert before.achievable() == before.servable
+        assert before.hz in before.servable
+        assert before.control_hz == max(before.servable)
         achievable = before.achievable()
 
         for bogus in (0.0, -50.0, 0.5, 62.5, float("nan"), float("inf")):
@@ -123,7 +131,7 @@ async def test_an_unachievable_rate_is_refused_with_the_rule(server_proc, ports)
                 f"{bogus} Hz came back as {refusal.title!r} rather than as an "
                 f"unservable rate: {refusal.cause}"
             )
-            unnamed = [hz for hz in achievable if str(int(hz)) not in refusal.remedy]
+            unnamed = [hz for hz in achievable if f"{hz:g}" not in refusal.remedy]
             assert not unnamed, (
                 f"refusing {bogus} Hz has to say what would work instead, but "
                 f"{unnamed} are missing from {refusal.remedy!r}"
@@ -157,19 +165,23 @@ def test_the_speed_derivative_follows_the_rate_it_was_sampled_at():
             return cache.tcp_speed
 
         advance()  # first difference has nothing to difference against
-        at_50 = advance()
-        assert at_50 > 0.0, "a moving arm has to report a speed"
+        started = advance()
+        assert started > 0.0, "a moving arm has to report a speed"
 
-        state.status_rate_hz = 25.0
+        # Halve whatever rate this environment configured, rather than
+        # assuming the 50 Hz default: the cache reads its period from the
+        # state, so a shell with PAROL6_STATUS_RATE_HZ set would otherwise
+        # fail the ratio for reasons that have nothing to do with the code.
+        state.status_rate_hz = state.status_rate_hz / 2
         straddling = advance()
         settled = advance()
 
-        assert straddling == pytest.approx(at_50, rel=1e-3), (
+        assert straddling == pytest.approx(started, rel=1e-3), (
             "the sample taken before the rate changed spans the old period"
         )
-        assert settled == pytest.approx(at_50 / 2, rel=1e-3), (
+        assert settled == pytest.approx(started / 2, rel=1e-3), (
             "half the broadcast rate is twice the period, so the same "
-            f"movement per frame is half the speed: {settled} vs {at_50}"
+            f"movement per frame is half the speed: {settled} vs {started}"
         )
     finally:
         cache.close()

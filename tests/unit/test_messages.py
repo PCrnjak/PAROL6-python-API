@@ -29,27 +29,30 @@ from parol6.protocol.wire import (
     pack_response,
     pack_status,
 )
+from parol6.protocol.wire import PROTO_VERSION, ProtocolVersionError
 
 
 class TestPackUnpack:
     """Test packing and unpacking roundtrips via decode_message."""
 
     def test_pack_ok(self):
-        msg = decode_message(pack_ok())
+        msg = decode_message(pack_ok(7))
         assert isinstance(msg, OkMsg)
+        assert msg.req_id == 7
         assert msg.index is None
 
     def test_pack_ok_index(self):
-        msg = decode_message(pack_ok_index(42))
+        msg = decode_message(pack_ok_index(42, 7))
         assert isinstance(msg, OkMsg)
-        assert msg.index == 42
+        assert (msg.req_id, msg.index) == (7, 42)
 
     def test_pack_error(self):
         error = make_error(
             ErrorCode.COMM_VALIDATION_ERROR, detail="Something went wrong"
         )
-        msg = decode_message(pack_error(error))
+        msg = decode_message(pack_error(error, 7))
         assert isinstance(msg, ErrorMsg)
+        assert msg.req_id == 7
         assert isinstance(msg.message, list)
         from parol6.utils.error_catalog import RobotError
 
@@ -59,15 +62,16 @@ class TestPackUnpack:
 
     def test_pack_response(self):
         msg = decode_message(
-            pack_response(AnglesResultStruct(angles=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+            pack_response(AnglesResultStruct(angles=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 7)
         )
         assert isinstance(msg, ResponseMsg)
+        assert msg.req_id == 7
         assert isinstance(msg.result, AnglesResultStruct)
         assert msg.result.angles == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
     def test_pack_response_with_numpy(self):
         arr = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-        msg = decode_message(pack_response(PoseResultStruct(pose=arr)))
+        msg = decode_message(pack_response(PoseResultStruct(pose=arr), 7))
         assert isinstance(msg, ResponseMsg)
         assert isinstance(msg.result, PoseResultStruct)
         assert msg.result.pose == [1.0, 2.0, 3.0]
@@ -107,16 +111,17 @@ class TestPackUnpack:
         )
         unpacked = decode(packed)
         assert unpacked[0] == MsgType.STATUS
-        assert unpacked[1] == list(pose)
-        assert unpacked[2] == list(angles)
-        assert unpacked[5] == "MoveJCommand"
-        assert unpacked[6] == ActionState.EXECUTING
+        assert unpacked[1] == PROTO_VERSION
+        assert unpacked[2] == list(pose)
+        assert unpacked[3] == list(angles)
+        assert unpacked[6] == "MoveJCommand"
+        assert unpacked[7] == ActionState.EXECUTING
 
-        # action_params at index 16
-        assert unpacked[16] == "speed=50 acc=100"
+        # action_params at index 17
+        assert unpacked[17] == "speed=50 acc=100"
 
         # The optional variant follows the original seven tool-status fields.
-        ts = unpacked[17]
+        ts = unpacked[18]
         assert ts[0] == "ssg48"  # key
         assert ts[1] == 2  # state (ToolState.ACTIVE)
         assert ts[2] is True  # engaged
@@ -125,8 +130,8 @@ class TestPackUnpack:
         assert ts[5] == [0.75, 0.25]  # positions (tuple -> list via msgpack)
         assert ts[6] == [5.5, 3.14]  # channels (tuple -> list via msgpack)
 
-        # tcp_speed at index 18
-        assert unpacked[18] == pytest.approx(123.456)
+        # tcp_speed at index 19
+        assert unpacked[19] == pytest.approx(123.456)
 
     def test_pack_decode_status_bin_roundtrip(self):
         """pack_status -> decode_status_bin_into preserves all tool status fields."""
@@ -178,15 +183,23 @@ class TestPackUnpack:
         assert ts.variant_key == "pinch"
         assert buf.copy().tool_status.variant_key == "pinch"
         legacy = decode(packed)
-        legacy[17] = legacy[17][:7]
+        legacy[18] = legacy[18][:7]
         assert decode_status_bin_into(encode(legacy), buf)
         assert buf.tool_status.variant_key == "", (
             "legacy status retained a stale variant"
         )
         for invalid in (False, 42, None, "x" * 129):
             bad = decode(packed)
-            bad[17][7] = invalid
+            bad[18][7] = invalid
             assert not decode_status_bin_into(encode(bad), buf)
+
+        # A producer speaking another protocol version is named, not decoded
+        # as silence: a consumer that saw nothing would report a dead
+        # controller and send an operator looking at cables.
+        other = decode(packed)
+        other[1] = PROTO_VERSION + 1
+        with pytest.raises(ProtocolVersionError, match=str(PROTO_VERSION + 1)):
+            decode_status_bin_into(encode(other), buf)
 
     def test_invalid_data_raises(self):
         with pytest.raises(msgspec.ValidationError):

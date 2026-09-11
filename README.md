@@ -10,6 +10,13 @@ This package provides:
 - **`parol6-server`** CLI for standalone controller operation
 
 The controller speaks a msgpack-based UDP protocol and can run on the same machine or remotely.
+Every command datagram carries a 4-byte request id ahead of the msgpack body, and the
+OK / ERROR / RESPONSE reply echoes it, so a reply whose caller has already given up is
+dropped instead of answering the next request. An id of 0 asks for no reply, which is
+what streamed motion sends. Status broadcasts carry `PROTO_VERSION` in their second
+slot: a client reading a status from another version raises `ProtocolVersionError`
+naming both, rather than reporting the silence of a failed decode. Client and
+controller are released together — there is no compatibility window between versions.
 
 ---
 
