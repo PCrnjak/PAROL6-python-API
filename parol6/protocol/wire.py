@@ -6,11 +6,17 @@ This module contains all protocol definitions:
 - Msgpack message types and structs (UDP communication)
 - Command/response encoding and decoding
 
+Every command datagram is a 4-byte big-endian request id followed by the
+msgpack command; 0 means "no reply expected" (streamed motion). A reply
+echoes the id so the client matches it to its request and drops the rest.
+Status broadcasts carry PROTO_VERSION right after the type code, so a
+client can tell an outdated peer from a silent one.
+
 Wire format uses msgpack arrays with integer type codes:
-- OK:       MsgType.OK (just the integer)
-- ERROR:    [MsgType.ERROR, message]
-- STATUS:   [MsgType.STATUS, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health, drive_faults]
-- RESPONSE: [MsgType.RESPONSE, query_type, value]
+- OK:       [MsgType.OK, req_id, index?]
+- ERROR:    [MsgType.ERROR, req_id, message]
+- STATUS:   [MsgType.STATUS, proto_version, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health, drive_faults]
+- RESPONSE: [MsgType.RESPONSE, req_id, [query_type, ...fields]]
 - COMMAND:  [CmdType.XXX, ...params]
 """
 
@@ -31,8 +37,7 @@ from waldoctl import ActionState, ToolStatus
 from waldoctl.tools import ToolState
 
 from parol6.tools import get_registry, list_tools
-from parol6.utils.error_catalog import RobotError, make_error
-from parol6.utils.error_codes import ErrorCode
+from parol6.utils.error_catalog import RobotError
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,23 @@ _decoder = msgspec.msgpack.Decoder()
 # =============================================================================
 # Message Types
 # =============================================================================
+
+
+#: Bumped on any change to the command envelope, a reply or the STATUS layout.
+PROTO_VERSION = 1
+_REQ_ID_BYTES = 4
+MAX_REQ_ID = 2**32 - 1
+
+
+class ProtocolVersionError(RuntimeError):
+    """The peer speaks another protocol version; one side needs upgrading."""
+
+    def __init__(self, server_version: object) -> None:
+        self.server_version = server_version
+        super().__init__(
+            f"parol6 server speaks protocol version {server_version!r}, this "
+            f"client speaks {PROTO_VERSION}; update the older side"
+        )
 
 
 class MsgType(IntEnum):
@@ -1023,34 +1045,31 @@ def decode_command(data: bytes) -> Command:
     return _command_decoder.decode(data)
 
 
-def encode_command(cmd: Command) -> bytes:
-    """Encode a typed command struct to bytes.
+def encode_command(cmd: Command, req_id: int = 0) -> bytes:
+    """A command datagram: the request id header, then the msgpack struct.
 
-    Args:
-        cmd: Typed command struct
-
-    Returns:
-        Raw msgpack-encoded bytes
+    *req_id* 0 asks for no reply (streamed motion); anything else is echoed
+    on the OK, ERROR or RESPONSE the server answers with.
     """
-    return _encoder.encode(cmd)
+    return req_id.to_bytes(_REQ_ID_BYTES, "big") + _encoder.encode(cmd)
 
 
-def encode_command_into(cmd: Command, buf: bytearray) -> bytearray:
-    """Encode a typed command struct into a pre-allocated bytearray.
+def encode_command_into(cmd: Command, buf: bytearray, req_id: int = 0) -> bytearray:
+    """``encode_command`` into a pre-allocated bytearray, resized to fit, so
+    fire-and-forget paths allocate no ``bytes`` per send.
 
-    The buffer is resized to exactly fit the encoded output.
-    Reuses the same bytearray object across calls to avoid per-send
-    ``bytes`` allocations on fire-and-forget paths.
-
-    Args:
-        cmd: Typed command struct
-        buf: Pre-allocated bytearray (will be resized in-place)
-
-    Returns:
-        The same *buf* object, now containing the encoded bytes.
+    Returns the same *buf* object, now containing the datagram.
     """
-    _encoder.encode_into(cmd, buf)
+    _encoder.encode_into(cmd, buf, _REQ_ID_BYTES)
+    buf[:_REQ_ID_BYTES] = req_id.to_bytes(_REQ_ID_BYTES, "big")
     return buf
+
+
+def split_request(data: bytes) -> tuple[int, bytes]:
+    """The request id and the msgpack payload of a command datagram."""
+    if len(data) <= _REQ_ID_BYTES:
+        raise ValueError(f"command datagram of {len(data)} bytes carries no command")
+    return int.from_bytes(data[:_REQ_ID_BYTES], "big"), data[_REQ_ID_BYTES:]
 
 
 # =============================================================================
@@ -1342,6 +1361,7 @@ class OkMsg(
 ):
     """OK response, optionally carrying a command index for queued commands."""
 
+    req_id: int
     index: int | None = None
 
 
@@ -1354,6 +1374,7 @@ class ErrorMsg(
 ):
     """Error response carrying a RobotError wire representation."""
 
+    req_id: int
     message: list
 
 
@@ -1366,6 +1387,7 @@ class ResponseMsg(
 ):
     """Query response carrying a typed result struct."""
 
+    req_id: int
     result: Response
 
 
@@ -1398,44 +1420,24 @@ def decode(data: bytes) -> object:
     return _decoder.decode(data)
 
 
-# Pre-packed common responses (avoid repeated packing)
-OK_PACKED = _encoder.encode(OkMsg())
-
-# Cache for common error responses (3x faster for repeated errors)
-_UNKNOWN_CMD_ERROR = make_error(ErrorCode.COMM_UNKNOWN_COMMAND)
-_QUEUE_FULL_ERROR = make_error(ErrorCode.COMM_QUEUE_FULL)
-_ERROR_CACHE: dict[int, bytes] = {
-    ErrorCode.COMM_UNKNOWN_COMMAND: _encoder.encode(
-        ErrorMsg(_UNKNOWN_CMD_ERROR.to_wire())
-    ),
-    ErrorCode.COMM_QUEUE_FULL: _encoder.encode(ErrorMsg(_QUEUE_FULL_ERROR.to_wire())),
-}
-
-
-def pack_ok() -> bytes:
+def pack_ok(req_id: int) -> bytes:
     """Pack an OK response (no command index)."""
-    return OK_PACKED
+    return _encoder.encode(OkMsg(req_id))
 
 
-def pack_ok_index(index: int) -> bytes:
+def pack_ok_index(index: int, req_id: int) -> bytes:
     """Pack an OK response with a command index for queued commands."""
-    return _encoder.encode(OkMsg(index=index))
+    return _encoder.encode(OkMsg(req_id, index=index))
 
 
-def pack_error(error: RobotError) -> bytes:
-    """Pack an error response: [ERROR, [command_index, code, title, cause, effect, remedy]].
-
-    Common errors are cached by ErrorCode for performance.
-    """
-    cached = _ERROR_CACHE.get(error.code)
-    if cached is not None:
-        return cached
-    return _encoder.encode(ErrorMsg(error.to_wire()))
+def pack_error(error: RobotError, req_id: int) -> bytes:
+    """Pack an error response: [ERROR, req_id, [command_index, code, title, cause, effect, remedy]]."""
+    return _encoder.encode(ErrorMsg(req_id, error.to_wire()))
 
 
-def pack_response(result: Response) -> bytes:
-    """Pack a query response: [RESPONSE, [query_type_tag, ...fields]]."""
-    return _encoder.encode(ResponseMsg(result))
+def pack_response(result: Response, req_id: int) -> bytes:
+    """Pack a query response: [RESPONSE, req_id, [query_type_tag, ...fields]]."""
+    return _encoder.encode(ResponseMsg(req_id, result))
 
 
 _NO_JOINTS_HOMED: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
@@ -1482,6 +1484,7 @@ def pack_status(
     return ormsgpack.packb(
         (
             MsgType.STATUS,
+            PROTO_VERSION,
             pose,
             angles,
             speeds,
@@ -1701,7 +1704,7 @@ def _apply_homing_progress(buf: StatusBuffer, step: int, bits: list[int]) -> Non
 def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
     """Zero-allocation decode of STATUS message into preallocated buffer.
 
-    Message format: [MsgType.STATUS, pose, angles, speeds, io,
+    Message format: [MsgType.STATUS, proto_version, pose, angles, speeds, io,
                      action_current, action_state, joint_en, cart_en_wrf, cart_en_trf,
                      executing_index, completed_index, last_checkpoint,
                      error, queued_segments, queued_duration, action_params,
@@ -1716,35 +1719,40 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
 
     Returns:
         True if valid STATUS message, False otherwise.
+
+    Raises:
+        ProtocolVersionError: the producer speaks another protocol version.
     """
     try:
         msg = _decoder.decode(data)
         if (
             not isinstance(msg, (list, tuple))
-            or len(msg) < 17
+            or len(msg) < 18
             or msg[0] != MsgType.STATUS
         ):
             return False
+        if msg[1] != PROTO_VERSION:
+            raise ProtocolVersionError(msg[1])
 
-        buf.pose[:] = msg[1]
-        buf.angles[:] = msg[2]
-        buf.speeds[:] = msg[3]
-        buf.io[:] = msg[4]
-        buf.action_current = msg[5]
-        buf.action_state = ActionState(msg[6])
-        buf.joint_en[:] = msg[7]
-        buf.cart_en_wrf[:] = msg[8]
-        buf.cart_en_trf[:] = msg[9]
-        buf.executing_index = msg[10]
-        buf.completed_index = msg[11]
-        buf.last_checkpoint = msg[12]
-        raw_error = msg[13]
+        buf.pose[:] = msg[2]
+        buf.angles[:] = msg[3]
+        buf.speeds[:] = msg[4]
+        buf.io[:] = msg[5]
+        buf.action_current = msg[6]
+        buf.action_state = ActionState(msg[7])
+        buf.joint_en[:] = msg[8]
+        buf.cart_en_wrf[:] = msg[9]
+        buf.cart_en_trf[:] = msg[10]
+        buf.executing_index = msg[11]
+        buf.completed_index = msg[12]
+        buf.last_checkpoint = msg[13]
+        raw_error = msg[14]
         buf.error = RobotError.from_wire(raw_error) if raw_error is not None else None
-        buf.queued_segments = msg[14]
-        buf.queued_duration = msg[15]
-        buf.action_params = msg[16]
+        buf.queued_segments = msg[15]
+        buf.queued_duration = msg[16]
+        buf.action_params = msg[17]
 
-        raw_ts = msg[17] if len(msg) > 17 else None
+        raw_ts = msg[18] if len(msg) > 18 else None
         ts = buf.tool_status
         if (
             raw_ts is not None
@@ -1763,48 +1771,52 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
             ts.positions = tuple(raw_ts[5]) if raw_ts[5] else ()
             ts.channels = tuple(raw_ts[6]) if raw_ts[6] else ()
 
-        if len(msg) > 18:
-            buf.tcp_speed = float(msg[18])
-
         if len(msg) > 19:
-            buf.simulator_active = bool(msg[19])
+            buf.tcp_speed = float(msg[19])
+
+        if len(msg) > 20:
+            buf.simulator_active = bool(msg[20])
 
         # Collision viz (appended after simulator_active; len-guarded for
         # backward-compat with pre-collision status producers).
-        if len(msg) > 20:
-            buf.collision_active = bool(msg[20])
         if len(msg) > 21:
-            raw_pairs = msg[21]
+            buf.collision_active = bool(msg[21])
+        if len(msg) > 22:
+            raw_pairs = msg[22]
             cp = buf.collision_pairs
             cp.clear()
             if raw_pairs:
                 for p in raw_pairs:
                     cp.append((p[0], p[1]))
-        if len(msg) > 22:
-            buf.scene_epoch = int(msg[22])
-        buf.accepted_index = int(msg[23]) if len(msg) > 23 else -1
-        buf.homed = bool(msg[24]) if len(msg) > 24 else True
-        buf.enabled = bool(msg[25]) if len(msg) > 25 else True
-        if len(msg) > 27:
-            _apply_homing_progress(buf, int(msg[26]), msg[27])
+        if len(msg) > 23:
+            buf.scene_epoch = int(msg[23])
+        buf.accepted_index = int(msg[24]) if len(msg) > 24 else -1
+        buf.homed = bool(msg[25]) if len(msg) > 25 else True
+        buf.enabled = bool(msg[26]) if len(msg) > 26 else True
         if len(msg) > 28:
-            lh = msg[28]
+            _apply_homing_progress(buf, int(msg[27]), msg[28])
+        if len(msg) > 29:
+            lh = msg[29]
             buf.loop_health = {
                 "p99_period_s": float(lh[0]),
                 "overruns": int(lh[1]),
             }
-        if len(msg) > 29:
+        if len(msg) > 30:
             # One label tuple per joint, empty when that drive is healthy.
             # Absent entirely from producers that predate the field, which is
             # what tells a consumer this backend reports no drive faults at
             # all rather than reporting all-clear. Replaced wholesale only on
             # change, so a snapshot's shallow dict copy keeps the labels that
             # were current when it was taken.
-            faults = [tuple(f) for f in msg[29]]
+            faults = [tuple(f) for f in msg[30]]
             if buf.drive_health.get("faults") != faults:
                 buf.drive_health["faults"] = faults
 
         return True
+    except ProtocolVersionError:
+        # A version mismatch is the one decode failure that is not a malformed
+        # datagram: the caller has to hear about it rather than see silence.
+        raise
     except Exception as e:
         logger.debug("decode_status_bin_into: %s", e)
         return False
