@@ -72,8 +72,11 @@ def test_late_replies_never_answer_the_next_request(ports, server_proc):
             index = await rbt.delay(0.1)
             assert index >= 1, "a stale index-less OK must not stand in for the ack"
             assert await rbt.wait_command(index, timeout=5)
-            for _ in range(5):
-                await rbt.io(timeout=1e-4)
-            assert await rbt.pose() is not None
+            # A deadline that lapses mid-flight: the reply lands afterwards
+            # and must be dropped before the next query goes out.
+            assert await rbt.io(timeout=1e-4) is None
+            await asyncio.sleep(0.1)
+            pose = await rbt.pose()
+            assert pose is not None and len(pose) == 6
 
     asyncio.run(scenario())
