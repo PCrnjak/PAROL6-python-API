@@ -30,7 +30,7 @@ def test_execution_controls_roundtrip_and_reject_malformed_frames():
     ):
         assert decode_command(encode(command)) == command
     for values in ((0.5, 0.7, 0.5), (0, 0.03, 0.6), (0, 0, 1)):
-        response = ResponseMsg(ExecutionSpeedResultStruct(*values))
+        response = ResponseMsg(7, ExecutionSpeedResultStruct(*values))
         assert decode_message(encode(response)) == response
 
     invalid_commands = [

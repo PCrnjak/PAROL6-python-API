@@ -25,7 +25,8 @@ def test_attachment_wire_roundtrip_and_hostile_contexts():
     assert msgspec.msgpack.decode(
         encode(decode_command(encode(command)))
     ) == msgspec.msgpack.decode(encode(command))
-    reply = [MsgType.RESPONSE, [QueryType.SHAPES, [], [wire], 2, 2**64 - 1]]
+    # The reply carries the request id it answers.
+    reply = [MsgType.RESPONSE, 7, [QueryType.SHAPES, [], [wire], 2, 2**64 - 1]]
     assert msgspec.msgpack.decode(
         encode(decode_message(encode(reply)))
     ) == msgspec.msgpack.decode(encode(reply))

@@ -171,25 +171,31 @@ class TestErrorHandling:
     """Test error handling and edge cases."""
 
     def test_invalid_command_format(self, server_proc, ports):
-        """Test server response to invalid binary msgpack commands."""
-        from parol6.protocol.wire import MsgType, encode, decode
+        """A command body the codec cannot read is refused to the id that sent
+        it, and a datagram with no request id at all is dropped without
+        unsettling the controller."""
+        from parol6.protocol.wire import ErrorMsg, decode_message, encode
 
-        # Send invalid command via raw socket with binary msgpack
+        req_id = 4242
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(2.0)
-            # Send an array with invalid command type (9999 is not a valid CmdType)
-            msg = encode([9999, "invalid_param"])
-            sock.sendto(msg, (ports.server_ip, ports.server_port))
+            # 9999 is not a CmdType: the envelope is well formed, the body is not.
+            body = encode([9999, "invalid_param"])
+            sock.sendto(
+                req_id.to_bytes(4, "big") + body, (ports.server_ip, ports.server_port)
+            )
 
-            # Expect error response in array format: [MsgType.ERROR, message]
-            data, _ = sock.recvfrom(1024)
-            resp = decode(data)
-            assert isinstance(resp, (list, tuple))
-            assert resp[0] == MsgType.ERROR
-            # resp[1] is a RobotError wire list: [cmd_idx, code, title, cause, effect, remedy]
-            error_wire = resp[1]
-            assert isinstance(error_wire, list)
-            assert any("9999" in str(f) or "Invalid" in str(f) for f in error_wire)
+            reply = decode_message(sock.recvfrom(1024)[0])
+            assert isinstance(reply, ErrorMsg)
+            assert reply.req_id == req_id, "the refusal must name the request"
+            # message is a RobotError wire list: [cmd_idx, code, title, cause, …]
+            assert isinstance(reply.message, list)
+            assert any("9999" in str(f) or "Invalid" in str(f) for f in reply.message)
+
+            # A datagram too short to carry an id: nothing to reply to.
+            sock.sendto(b"\x00\x01", (ports.server_ip, ports.server_port))
+            with pytest.raises(socket.timeout):
+                sock.recvfrom(1024)
 
         # Server should remain responsive after handling the error
         client = RobotClient(ports.server_ip, ports.server_port)

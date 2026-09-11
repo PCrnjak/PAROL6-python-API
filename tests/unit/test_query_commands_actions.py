@@ -10,20 +10,11 @@ from waldoctl import ActionState
 from parol6.commands.query_commands import ActivityCommand, QueueCommand
 from parol6.server.state import ControllerState
 from parol6.protocol.wire import (
-    CurrentActionResultStruct,
     ActivityCmd,
+    CurrentActionResultStruct,
     QueueCmd,
     QueueResultStruct,
-    ResponseMsg,
-    decode_message,
 )
-
-
-def _unpack_response(data: bytes):
-    """Decode packed bytes into a typed result struct."""
-    msg = decode_message(data)
-    assert isinstance(msg, ResponseMsg)
-    return msg.result
 
 
 def test_activity_returns_details():
@@ -37,7 +28,7 @@ def test_activity_returns_details():
 
     cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, CurrentActionResultStruct)
     assert result.current == "MoveJPoseCommand"
@@ -57,7 +48,7 @@ def test_activity_with_idle_state():
 
     cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, CurrentActionResultStruct)
     assert result.current == ""
@@ -78,7 +69,7 @@ def test_queue_returns_details():
 
     cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, QueueResultStruct)
     assert result.queue == ["MoveJPoseCommand", "HomeCommand", "MoveJCommand"]
@@ -100,7 +91,7 @@ def test_queue_with_empty_queue():
 
     cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, QueueResultStruct)
     assert result.queue == []
@@ -120,7 +111,7 @@ def test_queue_excludes_streamable():
 
     cmd = QueueCommand(QueueCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, QueueResultStruct)
     assert "MoveJPoseCommand" in result.queue

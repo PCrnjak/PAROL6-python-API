@@ -1,6 +1,7 @@
 """Observe firmware position commands from the real planner/player pipeline."""
 
 import numpy as np
+import pytest
 
 from parol6.config import INTERVAL_S, LIMITS, deg_to_steps, steps_to_rad
 from parol6.protocol.wire import MoveJCmd, PauseCmd, SetExecutionSpeedCmd
@@ -80,3 +81,40 @@ def test_override_transitions_bound_commanded_acceleration(monkeypatch):
             )
         finally:
             planner.stop()
+
+
+def test_a_queued_delay_dwells_on_the_clock_and_not_through_a_pause(monkeypatch):
+    """A delay is a dwell in seconds.
+
+    Counting nominal ticks stretched it by whatever the control loop's real
+    period is -- on a loaded controller, visibly. Counting raw wall time
+    instead would swallow the gap where the player holds a paused delay
+    without ticking it, ending the dwell the moment it resumes.
+    """
+    import parol6.commands.utility_commands as module
+    from parol6.protocol.wire import DelayCmd
+    from parol6.server.command_executor import ExecutionStatusCode
+
+    clock = [1_000.0]
+    monkeypatch.setattr(module.time, "perf_counter", lambda: clock[0])
+    state = ControllerState()
+
+    def dwell(step_s: float, pause_s: float = 0.0) -> float:
+        command, _, error = create_command_from_struct(DelayCmd(seconds=1.0))
+        assert command is not None, error
+        started = clock[0]
+        command.setup(state)
+        paused_at = started + 0.4
+        while True:
+            clock[0] += step_s
+            if pause_s and clock[0] >= paused_at:
+                clock[0] += pause_s  # the player stops ticking a paused delay
+                pause_s = 0.0
+            if command.tick(state) == ExecutionStatusCode.COMPLETED:
+                return clock[0] - started
+
+    # Ticks arriving 60% late still end the dwell after a second of real time.
+    assert dwell(INTERVAL_S) == pytest.approx(1.0, abs=2 * INTERVAL_S)
+    assert dwell(1.6 * INTERVAL_S) == pytest.approx(1.0, abs=3 * INTERVAL_S)
+    # A two-second hold is not two seconds of waiting the program asked for.
+    assert dwell(INTERVAL_S, pause_s=2.0) == pytest.approx(3.0, abs=0.1)

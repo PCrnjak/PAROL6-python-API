@@ -162,28 +162,35 @@ class SegmentPlayer:
                     target_scale = (
                         0.0 if state.execution_paused else state.execution_speed
                     )
-                    low = -1.0 / EXECUTION_OVERRIDE_TRANSITION_S
-                    high = -low
-                    for joint in range(6):
-                        velocity = active.velocity_rad_s[self._step, joint]
-                        if abs(velocity) > 1e-12:
-                            base = (
-                                old_scale
-                                * old_scale
-                                * active.acceleration_rad_s2[self._step, joint]
-                            )
-                            limit = LIMITS.joint.hard.acceleration[joint]
-                            first = (-limit - base) / velocity
-                            second = (limit - base) / velocity
-                            low = max(low, min(first, second))
-                            high = min(high, max(first, second))
-                    requested = (target_scale - old_scale) / INTERVAL_S
-                    rate = min(high, max(low, requested)) if low <= high else 0.0
-                    if requested == 0.0 or rate * requested < 0.0:
-                        rate = 0.0
-                    new_scale = min(1.0, max(0.0, old_scale + rate * INTERVAL_S))
-                    if abs(new_scale - target_scale) < 1e-12:
-                        new_scale = target_scale
+                    # Steady state -- every tick of a playback nobody has
+                    # overridden -- holds the scale, so the acceleration-window
+                    # search and the admissibility bisection below are skipped:
+                    # they exist to bound a change, and compute a rate that is
+                    # forced to zero when there is none.
+                    new_scale = old_scale
+                    if target_scale != old_scale:
+                        low = -1.0 / EXECUTION_OVERRIDE_TRANSITION_S
+                        high = -low
+                        for joint in range(6):
+                            velocity = active.velocity_rad_s[self._step, joint]
+                            if abs(velocity) > 1e-12:
+                                base = (
+                                    old_scale
+                                    * old_scale
+                                    * active.acceleration_rad_s2[self._step, joint]
+                                )
+                                limit = LIMITS.joint.hard.acceleration[joint]
+                                first = (-limit - base) / velocity
+                                second = (limit - base) / velocity
+                                low = max(low, min(first, second))
+                                high = min(high, max(first, second))
+                        requested = (target_scale - old_scale) / INTERVAL_S
+                        rate = min(high, max(low, requested)) if low <= high else 0.0
+                        if rate * requested < 0.0:
+                            rate = 0.0
+                        new_scale = min(1.0, max(0.0, old_scale + rate * INTERVAL_S))
+                        if abs(new_scale - target_scale) < 1e-12:
+                            new_scale = target_scale
                     if new_scale != old_scale and not self._rate_is_admissible(
                         active, old_scale, new_scale
                     ):

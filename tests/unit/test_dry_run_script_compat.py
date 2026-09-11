@@ -11,8 +11,9 @@ from the real client.
 
 import numpy as np
 import pytest
+from waldoctl import CommandKind, command_table
 
-from parol6.client.dry_run_client import DryRunRobotClient
+from parol6.client.dry_run_client import _CMD_STRUCTS, DryRunRobotClient
 
 HOME = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 POSE_A = [0.0, 280.0, 200.0, 90.0, 0.0, 90.0]
@@ -176,3 +177,60 @@ class TestDryRunHomedGate:
         assert len(result.joint_trajectory_rad) > 1
         assert np.allclose(np.degrees(result.end_joints_rad), HOME, atol=0.5)
         assert client.flush() == []
+
+
+def test_jogs_take_the_live_clients_arguments(client):
+    """`rbt.jog_j(0, 0.5, 1.0)` and `rbt.jog_l("WRF", "X", 0.5, 1.0)` are the
+    forms the docs show; the preview must plan them, not the wire struct's
+    field order."""
+    before = np.asarray(client.angles())
+    result = client.jog_j(0, 0.5, 1.0)
+    assert result is not None and result.error is None
+    after = np.degrees(result.end_joints_rad)
+    assert after[0] > before[0] + 1.0
+    assert np.allclose(after[1:], before[1:], atol=1e-6)
+
+    client = DryRunRobotClient()
+    x_before = client.pose()[0]
+    result = client.jog_l("WRF", "X", 0.5, 1.0)
+    assert result is not None and result.error is None
+    assert result.tcp_poses[-1][0] * 1000.0 > x_before + 1.0
+    assert client.pose()[0] > x_before + 1.0
+    with pytest.raises(ValueError, match="joint="):
+        client.jog_j(speed=0.5)
+
+
+_STATE_ARGS = {
+    "reset": (),
+    "reset_state": (),
+    "set_status_rate": (50,),
+    "simulator": (True,),
+    "teleport": (HOME,),
+    "set_shapes": ([],),
+    "select_profile": ("RUCKIG",),
+    "select_tool": ("NONE",),
+    "set_tcp_offset": (0.0, 0.0, 0.0),
+    "connect_hardware": ("/dev/null",),
+    "stop": (),
+    "estop": (),
+    "pause": (),
+    "resume": (),
+    "set_execution_speed": (0.5,),
+}
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(
+        n
+        for n, s in command_table().items()
+        if s.kind in (CommandKind.SYSTEM, CommandKind.CONTROL) and n in _CMD_STRUCTS
+    ),
+)
+def test_state_commands_answer_with_the_live_clients_int_codes(client, name):
+    """`if rbt.stop() < 0:` must read the same in preview as on the arm: a
+    system or control command returns 1/0/negative, never a planner result."""
+    assert name in _STATE_ARGS, f"add sample arguments for {name}"
+    result = getattr(client, name)(*_STATE_ARGS[name])
+    assert isinstance(result, int) and not isinstance(result, bool)
+    assert result == 1
