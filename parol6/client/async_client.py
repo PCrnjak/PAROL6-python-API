@@ -1049,7 +1049,11 @@ class AsyncRobotClient(_RobotClientABC):
                     if confirmed:
                         return 1
                     await asyncio.sleep(0.01)
-        except TimeoutError:
+        except (TimeoutError, ConnectionError):
+            # 0 is "unconfirmed": the command may or may not have been applied.
+            # A readback whose reply was lost inside the confirmation window is
+            # exactly that, and raising instead told the caller the controller
+            # was unreachable when it had acked the command a moment earlier.
             return 0
 
     async def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
