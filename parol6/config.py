@@ -99,6 +99,19 @@ def status_broadcast_interval(hz: float) -> int:
     return max(1, int(CONTROL_RATE_HZ) // int(hz))
 
 
+def servable_status_rates() -> tuple[float, ...]:
+    """Broadcast rates this controller accepts, highest first.
+
+    Status goes out every Nth control tick, so the servable rates are the
+    divisors of the control rate. One answer, used by the query that reports
+    the set and by the refusal that names it.
+    """
+    control = int(CONTROL_RATE_HZ)
+    return tuple(
+        float(control // n) for n in range(1, control + 1) if control % n == 0
+    )
+
+
 # Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
 if int(CONTROL_RATE_HZ) % int(STATUS_RATE_HZ) != 0:
     raise ValueError(

@@ -11,7 +11,7 @@ from parol6.commands.base import (
     MotionCommand,
     SystemCommand,
 )
-from parol6.config import CONTROL_RATE_HZ
+from parol6.config import CONTROL_RATE_HZ, servable_status_rates
 from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
@@ -115,9 +115,7 @@ class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
         # as a generic tick failure instead of the refusal that names the
         # rates this controller can serve.
         if not (1.0 <= hz <= control) or not hz.is_integer() or control % int(hz) != 0:
-            allowed = ", ".join(
-                str(control // n) for n in range(1, control + 1) if control % n == 0
-            )
+            allowed = ", ".join(f"{hz:g}" for hz in servable_status_rates())
             self.fail(
                 make_error(
                     ErrorCode.SYS_STATUS_RATE_INVALID,
