@@ -1078,10 +1078,13 @@ class StatusRateResultStruct(
     frozen=True,
     gc=False,
 ):
-    """Broadcast rate, and the control rate it divides."""
+    """Broadcast rate, the control rate it divides, and the rates the
+    controller accepts -- its own answer, so a caller can pick one that will
+    be accepted instead of discovering the constraint by rejection."""
 
     hz: float
     control_hz: float
+    servable: tuple[float, ...] = ()
 
 
 class LoopStatsResultStruct(

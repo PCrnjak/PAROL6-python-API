@@ -200,7 +200,11 @@ class StatusRateCommand(QueryCommand[StatusRateCmd]):
         return pack_response(
             StatusRateResultStruct(
                 hz=state.status_rate_hz,
-                control_hz=1.0 / max(cfg.INTERVAL_S, 1e-9),
+                # The configured rate, not 1/INTERVAL_S: inverting the
+                # interval adds float noise to a value `achievable()` and the
+                # divisor arithmetic treat as exact (1/(1/49) is 49.000000001).
+                control_hz=float(cfg.CONTROL_RATE_HZ),
+                servable=cfg.servable_status_rates(),
             )
         )
 
