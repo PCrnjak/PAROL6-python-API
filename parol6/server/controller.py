@@ -145,6 +145,7 @@ class Controller:
         self._cmd_rate = EventRateMetrics()
         self._gc_tracker = GCTracker()
         self._ack_policy = AckPolicy()
+        self._stale_attachment_logged_epoch = -1
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
             shutdown_event=self.shutdown_event,
@@ -728,13 +729,22 @@ class Controller:
             CmdType.SERVOL,
             CmdType.TELEPORT,
         ):
-            self._reply_error(
-                addr,
-                make_error(
-                    ErrorCode.COMM_VALIDATION_ERROR,
-                    detail="attachment context changed; reconcile the physical scene and reapply",
-                ),
-            )
+            if self._ack_policy.requires_ack(cmd_type):
+                self._reply_error(
+                    addr,
+                    make_error(
+                        ErrorCode.COMM_VALIDATION_ERROR,
+                        detail="attachment context changed; reconcile the physical scene and reapply",
+                    ),
+                )
+            elif self._stale_attachment_logged_epoch != state.attachment_epoch:
+                # Nothing awaits a reply to a streamed datagram; an ERROR sent
+                # anyway is dequeued by the client's next unrelated request.
+                self._stale_attachment_logged_epoch = state.attachment_epoch
+                logger.warning(
+                    "Dropping streamed %s: attachment context changed; reconcile the physical scene and reapply",
+                    cmd_name,
+                )
             return
         if not state.enabled:
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
