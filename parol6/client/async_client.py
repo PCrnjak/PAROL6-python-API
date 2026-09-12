@@ -30,7 +30,12 @@ from waldoctl.tools import ToolSpec
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 
 from .. import config as cfg
-from ..ack_policy import QUERY_CMD_TYPES, SYSTEM_CMD_TYPES, AckPolicy
+from ..ack_policy import (
+    QUERY_CMD_TYPES,
+    QUERY_RESPONSE_TYPES,
+    SYSTEM_CMD_TYPES,
+    AckPolicy,
+)
 from ..utils.error_catalog import RobotError
 from ..utils.errors import MotionError
 from ..protocol.wire import (
@@ -41,6 +46,8 @@ from ..protocol.wire import (
     decode_status_bin_into,
     CheckpointCmd,
     ConnectHardwareCmd,
+    CommandCompletionCmd,
+    CommandCompletionResultStruct,
     CurrentActionResultStruct,
     DelayCmd,
     EnablementResultStruct,
@@ -278,6 +285,7 @@ class AsyncRobotClient(_RobotClientABC):
             "backend.parol6",
             "execution.speed",
             "observation.timed",
+            "world.attachments",
             "tool.gripper",
             "io.digital",
         }
@@ -647,6 +655,7 @@ class AsyncRobotClient(_RobotClientABC):
         """
         await self._ensure_endpoint()
         assert self._transport is not None
+        expected = QUERY_RESPONSE_TYPES[STRUCT_TO_CMDTYPE[type(cmd)]]
         wait = self.timeout if timeout is None else timeout
         attempts = self.retries + 1 if timeout is None else 1
         for attempt in range(attempts):
@@ -658,10 +667,13 @@ class AsyncRobotClient(_RobotClientABC):
                     end_time = time.monotonic() + wait
                     while time.monotonic() < end_time:
                         try:
-                            resp_data, _ = await asyncio.wait_for(
-                                self._rx_queue.get(),
-                                timeout=max(0.0, end_time - time.monotonic()),
-                            )
+                            # Keep the receive in this task: Python 3.11's
+                            # wait_for can swallow an outer cancellation when
+                            # its child receives a reply in the same turn.
+                            async with asyncio.timeout(
+                                max(0.0, end_time - time.monotonic())
+                            ):
+                                resp_data, _ = await self._rx_queue.get()
                             try:
                                 parsed = decode_message(resp_data)
                                 if parsed.req_id != req_id:
@@ -671,6 +683,10 @@ class AsyncRobotClient(_RobotClientABC):
                                     # behind.
                                     continue
                                 if isinstance(parsed, ResponseMsg):
+                                    # A timed-out query can reply after the next
+                                    # query starts on this same UDP endpoint.
+                                    if parsed.result.__struct_config__.tag != expected:
+                                        continue
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
                                     raise MotionError(
@@ -713,10 +729,8 @@ class AsyncRobotClient(_RobotClientABC):
             self._transport.sendto(data)
             while time.monotonic() < end_time:
                 try:
-                    resp_data, _addr = await asyncio.wait_for(
-                        self._rx_queue.get(),
-                        timeout=max(0.0, end_time - time.monotonic()),
-                    )
+                    async with asyncio.timeout(max(0.0, end_time - time.monotonic())):
+                        resp_data, _addr = await self._rx_queue.get()
                     try:
                         match decode_message(resp_data):
                             case OkMsg(reply_id) as ok if reply_id == req_id:
@@ -1228,15 +1242,30 @@ class AsyncRobotClient(_RobotClientABC):
         if not isinstance(resp, ShapesResultStruct):
             return None
         return ShapeWorld(
+            attachment_epoch=resp.attachment_epoch,
             installation=tuple(
                 shape_from_wire(
-                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                    w.attachment,
                 )
                 for w in resp.installation
             ),
             program=tuple(
                 shape_from_wire(
-                    w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                    w.kind,
+                    w.params,
+                    w.pose,
+                    w.collision,
+                    w.margin,
+                    w.name,
+                    w.physics,
+                    w.attachment,
                 )
                 for w in resp.program
             ),
@@ -1568,9 +1597,10 @@ class AsyncRobotClient(_RobotClientABC):
     async def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
-        Uses status broadcasts to monitor the server's completed_command_index.
-        Raises MotionError if the pipeline reports a planning/execution failure
-        at or before the awaited command index.
+        Queries exact success in the controller's last 1024 completions.
+        A concurrent tool finishing does not complete an unfinished arm command.
+        Unknown, cancelled, or expired results are never inferred successful
+        from the status high-water mark. Pipeline failures raise MotionError.
 
         Args:
             command_index: The command index to wait for (returned by motion commands).
@@ -1598,17 +1628,42 @@ class AsyncRobotClient(_RobotClientABC):
                 return err
             return None
 
-        def _done(s: StatusBuffer) -> bool:
-            if s.completed_index >= command_index:
-                return True
-            return _blocking_error(s) is not None
+        command = CommandCompletionCmd(command_index)
+        session_id = self._shared_status.session_id or None
 
-        ok = await self.wait_status(_done, timeout=timeout)
-        if ok:
-            err = _blocking_error(self._shared_status)
-            if err is not None:
-                raise MotionError(err)
-        return ok
+        def check_session(candidate: int) -> None:
+            nonlocal session_id
+            if not candidate:
+                return
+            if session_id is None:
+                session_id = candidate
+            elif candidate != session_id:
+                raise ConnectionError(
+                    "Controller session changed during completion wait"
+                )
+
+        try:
+            async with asyncio.timeout(timeout):
+                while not self._closed:
+                    check_session(self._shared_status.session_id)
+                    result = await self._request(command)
+                    # Status has its own socket and can survive a command
+                    # socket that stopped receiving after a peer restart.
+                    check_session(self._shared_status.session_id)
+                    if (
+                        isinstance(result, CommandCompletionResultStruct)
+                        and result.command_index == command_index
+                    ):
+                        check_session(result.session_id)
+                        if result.completed:
+                            return True
+                    err = _blocking_error(self._shared_status)
+                    if err is not None:
+                        raise MotionError(err)
+                    await asyncio.sleep(0.02)
+        except TimeoutError:
+            return False
+        return False
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 

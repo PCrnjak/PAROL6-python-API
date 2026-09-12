@@ -13,6 +13,8 @@ from parol6.protocol.wire import (
     AnglesCmd,
     AnglesResultStruct,
     CmdType,
+    CommandCompletionCmd,
+    CommandCompletionResultStruct,
     CurrentActionResultStruct,
     EnablementResultStruct,
     ErrorCmd,
@@ -272,6 +274,21 @@ class ActivityCommand(QueryCommand[ActivityCmd]):
         )
 
 
+@register_command(CmdType.COMMAND_COMPLETION)
+class CommandCompletionCommand(QueryCommand[CommandCompletionCmd]):
+    PARAMS_TYPE = CommandCompletionCmd
+    QUERY_TYPE = QueryType.COMMAND_COMPLETION
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> Response:
+        return CommandCompletionResultStruct(
+            command_index=self.p.command_index,
+            session_id=state.status_session_id,
+            completed=state.command_completed(self.p.command_index),
+        )
+
+
 @register_command(CmdType.QUEUE)
 class QueueCommand(QueryCommand[QueueCmd]):
     """Get the list of queued non-streamable commands."""
@@ -391,6 +408,7 @@ class ShapesCommand(QueryCommand[ShapesCmd]):
             ],
             program=[ShapeWire(*s.to_wire()) for s in state.shapes],
             epoch=state.shapes_version,
+            attachment_epoch=state.attachment_epoch,
         )
 
 

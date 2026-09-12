@@ -43,6 +43,7 @@ import parol6.protocol.wire as _wire
 from waldoctl.commands import CommandKind, command_table
 from ..protocol.wire import (
     HomeCmd,
+    SetShapesCmd,
     SelectToolCmd,
     SetTcpOffsetCmd,
     SetTcpTransformCmd,
@@ -286,6 +287,27 @@ class DryRunRobotClient:
 
     def _dispatch(self, params: Any) -> DryRunResult | None:
         """Route a command struct through the trajectory planner."""
+        self._state.Homed_in[:] = self._planner.state.Homed_in
+        if isinstance(params, (_wire.EstopCmd, _wire.ResetCmd)):
+            self._state.invalidate_attachments()
+            self._state.enabled = isinstance(params, _wire.ResetCmd)
+            if not self._state.enabled:
+                self._planner.cancel()
+            return None
+        if isinstance(params, _wire.ResetStateCmd):
+            self._planner.cancel()
+            self._state.reset()
+            self._planner.state.Position_in[:] = self._state.Position_in
+            self._planner.state.Homed_in[:] = self._state.Homed_in
+            return None
+        if isinstance(params, (_wire.SimulatorCmd, _wire.ConnectHardwareCmd)):
+            self._state.invalidate_attachments()
+            self._planner.cancel()
+            self._state.Homed_in.fill(0)
+            self._planner.state.Homed_in.fill(0)
+            return None
+        if isinstance(params, SetShapesCmd):
+            self._state.set_shapes(params.shapes)
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if (
             cmd_cls is not None
@@ -293,8 +315,27 @@ class DryRunRobotClient:
             and not cmd_cls.streamable
         ):
             self._require_running()
+        if not self._state.attachments_valid and isinstance(
+            params,
+            (
+                _wire.MoveJCmd,
+                _wire.MoveJPoseCmd,
+                _wire.MoveLCmd,
+                _wire.MoveCCmd,
+                _wire.MoveSCmd,
+                _wire.MovePCmd,
+                _wire.JogJCmd,
+                _wire.JogLCmd,
+                _wire.ServoJCmd,
+                _wire.ServoJPoseCmd,
+                _wire.ServoLCmd,
+                _wire.TeleportCmd,
+            ),
+        ):
+            raise ValueError("attachment context changed; reconcile and reapply")
         if isinstance(params, HomeCmd):
             if params.calibrate or not self._planner.state.Homed_in[:6].all():
+                self._state.invalidate_attachments()
                 return self._snap_to_angles(HOME_ANGLES_DEG)
             # Already referenced → fall through: the planner fast-paths HOME
             # into a planned return move, so the preview renders the path.
@@ -567,6 +608,7 @@ class DryRunRobotClient:
                 "backend.parol6",
                 "io.digital",
                 "execution.preview",
+                "world.attachments",
                 "execution.speed",
             }
         )
@@ -574,6 +616,10 @@ class DryRunRobotClient:
     def angles(self) -> list[float]:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
         return np.degrees(self._q_rad_buf).tolist()
+
+    def set_shapes(self, shapes: list) -> int:
+        self._dispatch(SetShapesCmd(shapes=shapes))
+        return 1
 
     def shapes(self):
         """The preview's collision world by layer (mirrors the live query).
@@ -584,6 +630,7 @@ class DryRunRobotClient:
         from waldoctl import ShapeWorld
 
         return ShapeWorld(
+            attachment_epoch=self._state.attachment_epoch,
             installation=tuple(PAROL6_ROBOT.installation_shapes()),
             program=tuple(PAROL6_ROBOT.program_shapes()),
         )
@@ -634,6 +681,8 @@ class DryRunRobotClient:
         return 0
 
     def _require_running(self) -> None:
+        if not self._state.enabled:
+            raise ValueError("Controller disabled; reset before previewing motion")
         if self._state.execution_paused:
             raise UnresolvedPreview(
                 "Queued execution is paused; preview needs an explicit resume "

@@ -34,6 +34,7 @@ from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
     CommandCode,
+    CmdType,
     ToolActionCmd,
     pack_error,
     pack_ok,
@@ -147,6 +148,7 @@ class Controller:
         self._cmd_rate = EventRateMetrics()
         self._gc_tracker = GCTracker()
         self._ack_policy = AckPolicy()
+        self._stale_attachment_logged_epoch = -1
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
             shutdown_event=self.shutdown_event,
@@ -329,11 +331,34 @@ class Controller:
 
         # Serial auto-reconnect when a port is known
         if self._transport_mgr.auto_reconnect():
+            state.invalidate_attachments()
             # Flush stale commands so the robot doesn't replay old moves
             self._segment_player.cancel(state)
             self._planner.cancel()
             self._executor.cancel_active_command("Serial reconnect")
             self._executor.clear_queue("Serial reconnect")
+
+    def _check_attachments(self, state: ControllerState) -> None:
+        if not state.has_attachments:
+            return
+        healthy = state.enabled and self._transport_mgr.is_connected()
+        for i in range(6):
+            if not state.Homed_in[i]:
+                healthy = False
+                break
+        if not healthy and state.attachments_valid:
+            state.invalidate_attachments()
+        if not state.attachments_valid and not state.attachment_motion_stopped:
+            self._segment_player.cancel(state)
+            self._planner.cancel()
+            self._executor.cancel_active_command("Attachment context changed")
+            self._executor.clear_queue("Attachment context changed")
+            state.Speed_out.fill(0)
+            state.error = make_error(
+                ErrorCode.COMM_VALIDATION_ERROR,
+                detail="attachment context changed; reconcile the physical scene and reapply",
+            )
+            state.attachment_motion_stopped = True
 
     def _handle_estop(self, state: ControllerState) -> None:
         """Phase 2: Handle E-stop activation and recovery."""
@@ -404,9 +429,7 @@ class Controller:
         code = self._tool_cmd.tick(state)
 
         if code == ExecutionStatusCode.COMPLETED:
-            state.completed_command_index = max(
-                state.completed_command_index, self._tool_cmd_index
-            )
+            state.record_completion(self._tool_cmd_index)
             self._tool_cmd = None
             self._tool_cmd_activated = False
         elif code == ExecutionStatusCode.FAILED:
@@ -548,12 +571,14 @@ class Controller:
 
                 with pt.phase("read"):
                     self._read_from_firmware(state)
+                    self._check_attachments(state)
 
                 with pt.phase("poll_cmd"):
                     self._poll_commands(state)
 
                 with pt.phase("estop"):
                     self._handle_estop(state)
+                    self._check_attachments(state)
 
                 if not self.estop_active:
                     with pt.phase("execute"):
@@ -666,7 +691,11 @@ class Controller:
             return
 
         # Try stream fast-path first (avoids full command creation)
-        result = self._executor.try_stream_fast_path(payload, state)
+        result = (
+            self._executor.try_stream_fast_path(payload, state)
+            if state.attachments_valid
+            else False
+        )
         if result is True:
             return
 
@@ -714,6 +743,37 @@ class Controller:
         cmd_name = type(command).__name__
 
         cmd_type = command._cmd_type
+        if not state.attachments_valid and cmd_type in (
+            CmdType.MOVEJ,
+            CmdType.MOVEJ_POSE,
+            CmdType.MOVEL,
+            CmdType.MOVEC,
+            CmdType.MOVES,
+            CmdType.MOVEP,
+            CmdType.JOGJ,
+            CmdType.JOGL,
+            CmdType.SERVOJ,
+            CmdType.SERVOJ_POSE,
+            CmdType.SERVOL,
+            CmdType.TELEPORT,
+        ):
+            if self._ack_policy.requires_ack(cmd_type):
+                self._reply_error(
+                    addr,
+                    make_error(
+                        ErrorCode.COMM_VALIDATION_ERROR,
+                        detail="attachment context changed; reconcile the physical scene and reapply",
+                    ),
+                )
+            elif self._stale_attachment_logged_epoch != state.attachment_epoch:
+                # Nothing awaits a reply to a streamed datagram; an ERROR sent
+                # anyway is dequeued by the client's next unrelated request.
+                self._stale_attachment_logged_epoch = state.attachment_epoch
+                logger.warning(
+                    "Dropping streamed %s: attachment context changed; reconcile the physical scene and reapply",
+                    cmd_name,
+                )
+            return
         if not state.enabled:
             if cmd_type and self._ack_policy.requires_ack(cmd_type):
                 reason = state.disabled_reason or "Controller disabled"
@@ -871,6 +931,18 @@ class Controller:
     ) -> None:
         """Execute system command, apply side effects, and send reply."""
         try:
+            if (
+                isinstance(command, SetShapesCommand)
+                and (
+                    state.has_attachments
+                    or any(w.attachment is not None for w in command.p.shapes)
+                )
+                and (
+                    self._segment_player.active
+                    or self._executor.active_command is not None
+                )
+            ):
+                raise ValueError("stop motion before changing attachments")
             command.setup(state)
             code = command.tick(state)
 
@@ -909,6 +981,7 @@ class Controller:
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
+                state.invalidate_attachments()
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
                 self._segment_player.cancel(state)
@@ -920,6 +993,7 @@ class Controller:
                 if not success:
                     raise RuntimeError(error or "Simulator toggle failed")
             if command._switch_port is not None:
+                state.invalidate_attachments()
                 self._transport_mgr.switch_to_port(command._switch_port)
             if command._sync_mock:
                 self._transport_mgr.sync_mock_from_state(state)

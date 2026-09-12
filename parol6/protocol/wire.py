@@ -119,6 +119,7 @@ class QueryType(IntEnum):
     STATUS_RATE = auto()
     TCP_TRANSFORM = auto()
     EXECUTION_SPEED = auto()
+    COMMAND_COMPLETION = auto()
 
 
 class CmdType(IntEnum):
@@ -195,6 +196,7 @@ class CmdType(IntEnum):
     PAUSE = auto()
     SET_EXECUTION_SPEED = auto()
     EXECUTION_SPEED = auto()
+    COMMAND_COMPLETION = auto()
 
 
 # =============================================================================
@@ -713,6 +715,13 @@ class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
     margin: float | None
     name: str
     physics: tuple[float | None, list[float]] | None = None
+    attachment: tuple[int, list[str]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.attachment is not None:
+            from waldoctl.shapes import Attachment
+
+            Attachment.from_wire(self.attachment)
 
 
 class SetShapesCmd(
@@ -1006,6 +1015,25 @@ class SetStatusRateCmd(
     """SET_STATUS_RATE: [CmdType.SET_STATUS_RATE, hz]"""
 
     hz: float
+
+
+class CommandCompletionCmd(
+    msgspec.Struct,
+    tag=int(CmdType.COMMAND_COMPLETION),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    """Query exact success of one command in the controller's bounded history."""
+
+    command_index: int
+
+    def __post_init__(self) -> None:
+        if type(self.command_index) is not int or not 0 <= self.command_index < 2**63:
+            raise ValueError(
+                "Command index must be a nonnegative signed 64-bit integer"
+            )
 
 
 class LoopStatsCmd(
@@ -1394,11 +1422,32 @@ class ShapesResultStruct(
     installation: list[ShapeWire]
     program: list[ShapeWire]
     epoch: int
+    attachment_epoch: int = 0
+
+
+class CommandCompletionResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.COMMAND_COMPLETION),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    command_index: int
+    session_id: int
+    completed: bool
+
+    def __post_init__(self) -> None:
+        if type(self.command_index) is not int or not 0 <= self.command_index < 2**63:
+            raise ValueError("Invalid command index in completion result")
+        if type(self.session_id) is not int or not 0 < self.session_id < 2**64:
+            raise ValueError("Invalid controller session in completion result")
 
 
 # Tagged Union for responses
 Response = (
     StatusResultStruct
+    | CommandCompletionResultStruct
     | LoopStatsResultStruct
     | StatusRateResultStruct
     | ExecutionSpeedResultStruct

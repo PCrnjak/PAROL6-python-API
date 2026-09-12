@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -261,6 +262,9 @@ class ControllerState:
     next_command_index: int = 0
     executing_command_index: int = -1
     completed_command_index: int = -1
+    status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
+    _recent_completions: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _completion_cursor: int = 0
     last_checkpoint: str = ""
 
     # Planning behavior (stop on first IK failure vs solve all for diagnostic)
@@ -286,6 +290,10 @@ class ControllerState:
     # can mirror them to the IK worker's checker.
     shapes: list = field(default_factory=list)
     shapes_version: int = 0
+    attachment_epoch: int = field(default_factory=lambda: secrets.randbits(64) or 1)
+    has_attachments: bool = False
+    attachments_valid: bool = True
+    attachment_motion_stopped: bool = False
 
     # Network setup and uptime
     ip: str = "127.0.0.1"
@@ -344,6 +352,17 @@ class ControllerState:
         self.collision_active = False
         self.collision_pairs = ()
 
+    def record_completion(self, index: int) -> None:
+        """Retain exact successes; concurrent lanes do not finish in index order."""
+        self.completed_command_index = max(self.completed_command_index, index)
+        self._recent_completions[self._completion_cursor] = index
+        self._completion_cursor = (self._completion_cursor + 1) % len(
+            self._recent_completions
+        )
+
+    def command_completed(self, index: int) -> bool:
+        return index >= 0 and index in self._recent_completions
+
     def reset(self) -> None:
         """
         Reset robot state to initial values without losing connection state.
@@ -351,6 +370,7 @@ class ControllerState:
         Preserves: ser, ip, port, start_time, next_command_index
         Resets: positions, speeds, I/O, queues, tool, errors, etc.
         """
+        self.invalidate_attachments()
         # Safety and control flags
         self.enabled = True
         self.execution_paused = False
@@ -399,6 +419,9 @@ class ControllerState:
         # can never satisfy a wait on a post-reset command.
         self.executing_command_index = -1
         self.completed_command_index = -1
+        for i in range(len(self._recent_completions)):
+            self._recent_completions[i] = -1
+        self._completion_cursor = 0
         self.last_checkpoint = ""
 
         # Error and pipeline depth
@@ -437,6 +460,7 @@ class ControllerState:
         Resets TCP offset to zero (changing tools invalidates any prior offset).
         """
         if tool_name != self._current_tool or variant_key != self._current_tool_variant:
+            self.invalidate_attachments()
             self._current_tool = tool_name
             self._current_tool_variant = variant_key
             self._tcp_offset_m = (0.0, 0.0, 0.0)
@@ -453,9 +477,29 @@ class ControllerState:
         to the IK worker's checker for enablement greying; the version doubles
         as the ``scene_epoch`` broadcast in status so displays re-query.
         """
+        attached = [s for s in shapes if s.attachment is not None]
+        if any(s.attachment.epoch != self.attachment_epoch for s in attached):
+            raise ValueError(
+                "attachment context changed; reconcile the physical scene and reapply"
+            )
+        if (attached or self.has_attachments) and self.queued_segments:
+            raise ValueError("stop queued motion before changing attachments")
+        if attached and (not self.enabled or not all(self.Homed_in[:6])):
+            raise ValueError("attachments require enabled, referenced robot state")
         PAROL6_ROBOT.apply_shapes(shapes)
+        self.has_attachments = bool(attached)
+        self.attachments_valid = True
+        self.attachment_motion_stopped = False
         self.shapes = list(shapes)
         self.shapes_version += 1
+
+    def invalidate_attachments(self) -> None:
+        """Require explicit reconciliation after a reference/source/tool change."""
+        self.attachment_epoch = self.attachment_epoch % (2**64 - 1) + 1
+        if self.has_attachments:
+            self.attachments_valid = False
+            self.attachment_motion_stopped = False
+            self.shapes_version += 1
 
     @property
     def tcp_offset_m(self) -> tuple[float, float, float]:
