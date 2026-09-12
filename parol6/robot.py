@@ -654,6 +654,10 @@ class Robot(_RobotABC):
 
     # -- Kinematics ---------------------------------------------------------
 
+    @property
+    def has_tcp_transform(self) -> bool:
+        return True
+
     def _load_q_buf(self, q_rad: NDArray[np.float64]) -> None:
         """Copy joint radians into the padded pinokin q buffer."""
         n = min(len(q_rad), self._pinokin.nq)
@@ -665,6 +669,8 @@ class Robot(_RobotABC):
         tool_key: str,
         tcp_offset_m: tuple[float, float, float] | None = None,
         variant_key: str | None = None,
+        *,
+        tcp_rotation_rad: tuple[float, float, float] | None = None,
     ) -> None:
         """Apply tool transform to the local FK/IK model.
 
@@ -678,7 +684,7 @@ class Robot(_RobotABC):
         checker so client-side collision queries (preview / editing pose)
         see the attached tool.
         """
-        from parol6.tools import get_tool_transform
+        from parol6.tools import compose_tcp_transform, get_tool_transform
 
         try:
             T_tool = get_tool_transform(tool_key, variant_key=variant_key)
@@ -687,14 +693,9 @@ class Robot(_RobotABC):
             # TCP from the ToolSpec instead.
             T_tool = self._plugin_tool_transform(tool_key, variant_key)
 
-        if tcp_offset_m is not None and any(v != 0 for v in tcp_offset_m):
-            T_offset = np.eye(4)
-            T_offset[0, 3] = tcp_offset_m[0]
-            T_offset[1, 3] = tcp_offset_m[1]
-            T_offset[2, 3] = tcp_offset_m[2]
-            T_tool = T_tool @ T_offset
+        T_tool = compose_tcp_transform(T_tool, tcp_offset_m, tcp_rotation_rad)
 
-        if tool_key != "NONE" and not np.allclose(T_tool, np.eye(4)):
+        if not np.allclose(T_tool, np.eye(4)):
             self._pinokin.set_tool_transform(T_tool)
         else:
             self._pinokin.clear_tool_transform()

@@ -424,3 +424,30 @@ For consistent high-rate performance:
 - Keep physical E‑Stop accessible at all times when connected to hardware
 - The controller can halt motion via `halt()` and reacts to E‑Stop inputs when on real hardware
 - Prefer `simulator_on()` for development without hardware and validate motions before switching to real serial
+
+## TCP transforms
+
+Use `set_tcp_transform(x, y, z, roll, pitch, yaw)` for a full user TCP correction,
+in millimetres and intrinsic XYZ degrees (`Rx · Ry · Rz`) relative to the
+registered tool. Async and sync clients return a queued command index; wait for
+that index before treating the correction as applied or querying it.
+
+```python
+with RobotClient() as rbt:
+    index = rbt.set_tcp_transform(0, 0, 25, 0, 90, 0)
+    if not rbt.wait_command(index):
+        raise RuntimeError("TCP application was not confirmed")
+    applied = rbt.tcp_transform()
+```
+
+Live FK, Cartesian planning, TRF motion and dry-run preview use the same
+transform. Pending blend paths are completed with their original TCP before a
+configuration change. Cancelling a queued change preserves the applied value.
+A different tool or variant clears the correction; reselecting the same tool
+and variant preserves it. Physical collision meshes stay on their registered
+links, independent of the user-defined tip and axes.
+
+The existing `set_tcp_offset(x, y, z)` clears user rotation and now returns its
+queued index for confirmation. `tcp_offset()` still reads three translations;
+`tcp_transform()` reads all six values. Both raise `TimeoutError` when no valid
+reply arrives instead of reporting a misleading zero correction.

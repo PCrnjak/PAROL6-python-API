@@ -467,6 +467,23 @@ def get_tool_transform(
 # ---------------------------------------------------------------------------
 
 
+def compose_tcp_transform(
+    registered: np.ndarray,
+    offset_m: tuple[float, float, float] | None = None,
+    rotation_rad: tuple[float, float, float] | None = None,
+) -> np.ndarray:
+    """Compose an explicit user transform after the registered physical tool."""
+    if offset_m is None and rotation_rad is None:
+        return registered
+    translation = offset_m if offset_m is not None else (0.0, 0.0, 0.0)
+    rotation = rotation_rad if rotation_rad is not None else (0.0, 0.0, 0.0)
+    if not all(math.isfinite(v) for v in (*translation, *rotation)):
+        raise ValueError("TCP transform must be finite")
+    user = np.empty((4, 4), dtype=np.float64)
+    se3_from_rpy(*translation, *rotation, user)
+    return registered @ user
+
+
 def _make_tcp_transform(
     x: float = 0.0,
     y: float = 0.0,

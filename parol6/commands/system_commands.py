@@ -20,6 +20,7 @@ from parol6.protocol.wire import (
     ResetCmd,
     SelectProfileCmd,
     SetTcpOffsetCmd,
+    SetTcpTransformCmd,
     SimulatorCmd,
     StopCmd,
     WriteIOCmd,
@@ -218,5 +219,25 @@ class SetTcpOffsetCommand(MotionCommand[SetTcpOffsetCmd]):
         offset_m = (self.p.x / 1000.0, self.p.y / 1000.0, self.p.z / 1000.0)
         state.set_tcp_offset(offset_m)
 
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.SET_TCP_TRANSFORM)
+class SetTcpTransformCommand(MotionCommand[SetTcpTransformCmd]):
+    """Apply a user TCP transform at its position in the motion queue."""
+
+    PARAMS_TYPE = SetTcpTransformCmd
+    __slots__ = ()
+
+    def do_setup(self, state: ControllerState) -> None:
+        from math import radians
+
+        state.set_tcp_transform(
+            (self.p.x / 1000, self.p.y / 1000, self.p.z / 1000),
+            (radians(self.p.roll), radians(self.p.pitch), radians(self.p.yaw)),
+        )
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         self.finish()
         return ExecutionStatusCode.COMPLETED
