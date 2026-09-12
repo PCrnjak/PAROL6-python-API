@@ -287,13 +287,13 @@ class RobotClient:
         """
         return _run(self._inner.angles())
 
-    def io(self) -> list[int] | None:
+    def io(self, *, timeout: float | None = None) -> list[int] | None:
         """Digital I/O status.
 
         Returns:
             List of 5 integers [in1, in2, out1, out2, estop], or None on timeout.
         """
-        return _run(self._inner.io())
+        return _run(self._inner.io(timeout=timeout))
 
     def joint_speeds(self) -> list[float] | None:
         """Current joint speeds in steps per second.
@@ -851,9 +851,9 @@ class RobotClient:
     def wait_checkpoint(self, label: str, timeout: float = 30.0) -> bool:
         return _run(self._inner.wait_checkpoint(label, timeout=timeout))
 
-    def write_io(self, index: int, value: int) -> int:
+    def write_io(self, index: int, value: int, *, timeout: float | None = None) -> int:
         """Set digital output by logical index (0 = first output pin)."""
-        return _run(self._inner.write_io(index, value))
+        return _run(self._inner.write_io(index, value, timeout=timeout))
 
     def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue."""

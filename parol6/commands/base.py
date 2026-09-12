@@ -11,7 +11,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 import numpy as np
 
 from parol6.config import TRACE
-from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType
+from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType, Response
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
 from parol6.utils.error_codes import ErrorCode
@@ -254,8 +254,8 @@ class QueryCommand(CommandBase[P]):
     QUERY_TYPE: ClassVar[QueryType]
 
     @abstractmethod
-    def compute(self, state: ControllerState) -> bytes:
-        """Compute the query result, pack it, and return response bytes."""
+    def compute(self, state: ControllerState) -> Response:
+        """The query's typed result; the controller packs it with the request id."""
         ...
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
