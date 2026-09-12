@@ -49,7 +49,6 @@ async def test_status_broadcast_auto_failover_to_unicast(monkeypatch):
         group=group,
         port=port,
         iface_ip=iface,
-        rate_hz=20.0,
         stale_s=1.0,
     )
 
@@ -155,7 +154,7 @@ async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_no
 
     state_mgr = StateManager()
     broadcaster = StatusBroadcaster(
-        state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", rate_hz=20.0, stale_s=2.0
+        state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", stale_s=2.0
     )
 
     # StatusBroadcaster is now a polling class - call tick() manually

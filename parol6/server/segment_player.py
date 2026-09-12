@@ -343,6 +343,12 @@ class SegmentPlayer:
 
     def cancel(self, state: ControllerState) -> None:
         """Clear buffer, drain stale segments, and stop playback."""
+        if self._active is not None:
+            # Planned trajectories live here rather than in CommandExecutor.
+            # Cancelling its command cannot clear this player's activity.
+            state.action_current = ""
+            state.action_params = ""
+            state.action_state = ActionState.IDLE
         self._active = None
         self._step = 0
         self._inline_cmd = None

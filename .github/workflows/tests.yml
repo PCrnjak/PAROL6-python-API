@@ -27,15 +27,15 @@ jobs:
           # ruckig 0.17.3 sdist doesn't build under scikit-build-core 1.0;
           # pre-install the fixed commit until a release lands (pantor/ruckig#262).
           pip install "ruckig @ git+https://github.com/pantor/ruckig@2249d57ffaa19ecdadeaab62daf97857813629ff"
-          pip install -e ".[dev]"
-          # Override the pinned waldoctl with the matching feature branch if one
-          # exists, AFTER ".[dev]" (and with --force-reinstall) so the pinned tag
-          # in pyproject can't clobber it. Deps are kept (no --no-deps): the
-          # refactored waldoctl imports nicegui, which parol6 doesn't otherwise
-          # install. Skipped on main so main CI exercises the released pin.
+          # Resolve the shared contract branch before the package: the new
+          # release tag is created only after its companion PR merges.
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
           if [ "$BRANCH" != "main" ] && git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
-            pip install --force-reinstall "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+            sed -i.bak "s#waldoctl.git@v[0-9.]*#waldoctl.git@${BRANCH}#" pyproject.toml
+          fi
+          pip install -e ".[dev]"
+          if [ -f pyproject.toml.bak ]; then
+            mv pyproject.toml.bak pyproject.toml
           fi
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
@@ -112,15 +112,15 @@ jobs:
           # ruckig 0.17.3 sdist doesn't build under scikit-build-core 1.0;
           # pre-install the fixed commit until a release lands (pantor/ruckig#262).
           pip install "ruckig @ git+https://github.com/pantor/ruckig@2249d57ffaa19ecdadeaab62daf97857813629ff"
-          pip install -e ".[dev]" pytest-timeout
-          # Override the pinned waldoctl with the matching feature branch if one
-          # exists, AFTER ".[dev]" (and with --force-reinstall) so the pinned tag
-          # in pyproject can't clobber it. Deps are kept (no --no-deps): the
-          # refactored waldoctl imports nicegui, which parol6 doesn't otherwise
-          # install. Skipped on main so main CI exercises the released pin.
+          # Resolve the shared contract branch before the package: the new
+          # release tag is created only after its companion PR merges.
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
           if [ "$BRANCH" != "main" ] && git ls-remote --heads https://github.com/Jepson2k/waldoctl.git "$BRANCH" 2>/dev/null | grep -q .; then
-            pip install --force-reinstall "waldoctl @ git+https://github.com/Jepson2k/waldoctl.git@${BRANCH}"
+            sed -i.bak "s#waldoctl.git@v[0-9.]*#waldoctl.git@${BRANCH}#" pyproject.toml
+          fi
+          pip install -e ".[dev]" pytest-timeout
+          if [ -f pyproject.toml.bak ]; then
+            mv pyproject.toml.bak pyproject.toml
           fi
 
       # Override the pinned pinokin v0.1.6 wheel with the matching-branch
