@@ -23,6 +23,8 @@ from parol6.protocol.wire import (
     SetTcpTransformCmd,
     SimulatorCmd,
     StopCmd,
+    PauseCmd,
+    SetExecutionSpeedCmd,
     WriteIOCmd,
 )
 from parol6.protocol.wire import CommandCode
@@ -239,5 +241,31 @@ class SetTcpTransformCommand(MotionCommand[SetTcpTransformCmd]):
         )
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.SET_EXECUTION_SPEED)
+class SetExecutionSpeedCommand(SystemCommand[SetExecutionSpeedCmd]):
+    """Select the queued trajectory clock rate without changing pause."""
+
+    PARAMS_TYPE = SetExecutionSpeedCmd
+    __slots__ = ()
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        state.execution_speed = self.p.scale
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.PAUSE)
+class PauseCommand(SystemCommand[PauseCmd]):
+    """Retain the queue and request a controlled pause or explicit resume."""
+
+    PARAMS_TYPE = PauseCmd
+    __slots__ = ()
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
+        state.execution_paused = self.p.on
         self.finish()
         return ExecutionStatusCode.COMPLETED

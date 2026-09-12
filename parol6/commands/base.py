@@ -301,11 +301,12 @@ class TrajectoryMoveCommandBase(MotionCommand[P]):
     so execute_step() simply outputs waypoints tick-by-tick.
     """
 
-    __slots__ = ("trajectory_steps", "command_step", "_duration")
+    __slots__ = ("trajectory_steps", "trajectory_rad", "command_step", "_duration")
 
     def __init__(self, p: P):
         super().__init__(p)
         self.trajectory_steps: np.ndarray = np.empty((0, 6), dtype=np.int32)
+        self.trajectory_rad: np.ndarray = np.empty((0, 6), dtype=np.float64)
         self.command_step = 0
         self._duration: float = 0.0
 

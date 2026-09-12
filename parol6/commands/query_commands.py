@@ -16,6 +16,8 @@ from parol6.protocol.wire import (
     CurrentActionResultStruct,
     EnablementResultStruct,
     ErrorCmd,
+    ExecutionSpeedCmd,
+    ExecutionSpeedResultStruct,
     ErrorResultStruct,
     IOCmd,
     IOResultStruct,
@@ -428,4 +430,20 @@ class TcpTransformCommand(QueryCommand[TcpTransformCmd]):
             roll=degrees(rpy[0]),
             pitch=degrees(rpy[1]),
             yaw=degrees(rpy[2]),
+        )
+
+
+@register_command(CmdType.EXECUTION_SPEED)
+class ExecutionSpeedCommand(QueryCommand[ExecutionSpeedCmd]):
+    """Read the trajectory clock owned by the control loop."""
+
+    PARAMS_TYPE = ExecutionSpeedCmd
+    QUERY_TYPE = QueryType.EXECUTION_SPEED
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> Response:
+        return ExecutionSpeedResultStruct(
+            target_scale=0.0 if state.execution_paused else state.execution_speed,
+            applied_scale=state.execution_applied_speed,
+            resume_scale=state.execution_speed,
         )

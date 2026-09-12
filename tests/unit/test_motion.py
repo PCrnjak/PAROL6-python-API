@@ -224,14 +224,18 @@ class TestTrajectory:
     def test_len_returns_step_count(self):
         """len() should return number of steps."""
         steps = np.zeros((100, 6), dtype=np.int32)
-        traj = Trajectory(steps=steps, duration=1.0)
+        traj = Trajectory(
+            steps=steps, duration=1.0, positions_rad=np.zeros(steps.shape)
+        )
 
         assert len(traj) == 100
 
     def test_getitem_returns_step(self):
         """Indexing should return individual step."""
         steps = np.arange(60, dtype=np.int32).reshape(10, 6)
-        traj = Trajectory(steps=steps, duration=1.0)
+        traj = Trajectory(
+            steps=steps, duration=1.0, positions_rad=np.zeros(steps.shape)
+        )
 
         assert np.array_equal(traj[0], steps[0])
         assert np.array_equal(traj[5], steps[5])

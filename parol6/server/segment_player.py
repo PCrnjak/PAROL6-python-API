@@ -20,8 +20,16 @@ import numpy as np
 
 from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import CommandBase, ExecutionStatusCode
-from parol6.config import COLLISION_PATH_SAMPLES, SETTLE_MAX_TICKS, steps_to_rad
-from parol6.protocol.wire import CommandCode
+from parol6.config import (
+    COLLISION_PATH_SAMPLES,
+    EXECUTION_OVERRIDE_TRANSITION_S,
+    INTERVAL_S,
+    LIMITS,
+    SETTLE_MAX_TICKS,
+    rad_to_steps,
+    steps_to_rad,
+)
+from parol6.protocol.wire import CommandCode, DelayCmd
 from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
 from parol6.server.motion_planner import (
@@ -54,6 +62,10 @@ class SegmentPlayer:
         "_planner",
         "_active",
         "_step",
+        "_phase",
+        "_position_rad",
+        "_candidate_position_rad",
+        "_velocity_rad_s",
         "_buffer",
         "_inline_cmd",
         "_inline_activated",
@@ -67,6 +79,11 @@ class SegmentPlayer:
         self._planner = planner
         self._active: Segment | None = None
         self._step: int = 0
+        self._phase = -1.0
+        self._position_rad = np.zeros(6, dtype=np.float64)
+        self._candidate_position_rad = np.zeros(6, dtype=np.float64)
+        self._velocity_rad_s = np.zeros(6, dtype=np.float64)
+        rad_to_steps(self._position_rad, np.empty(6, dtype=np.int32))
         self._buffer: deque[Segment] = deque()
         self._inline_cmd: CommandBase | None = None
         self._inline_activated: bool = False
@@ -113,7 +130,16 @@ class SegmentPlayer:
             # Activate next segment if idle
             if self._active is None:
                 if not self._buffer:
+                    state.execution_applied_speed = (
+                        0.0 if state.execution_paused else state.execution_speed
+                    )
                     return False
+                if state.execution_paused and not isinstance(
+                    self._buffer[0], ErrorSegment
+                ):
+                    state.execution_applied_speed = 0.0
+                    state.Speed_out.fill(0)
+                    return True
                 self._activate_next(state)
                 if self._active is None:
                     continue  # activation-time world guard rejected the segment
@@ -122,10 +148,93 @@ class SegmentPlayer:
 
             # --- Trajectory segment: index into waypoints ---
             if isinstance(active, TrajectorySegment):
-                if self._step < len(active.trajectory_steps):
-                    state.Position_out[:] = active.trajectory_steps[self._step]
+                if state.execution_paused and (
+                    state.execution_applied_speed == 0.0
+                    or self._step >= len(active.trajectory_steps)
+                ):
+                    state.execution_applied_speed = 0.0
+                    self._velocity_rad_s.fill(0.0)
                     state.Command_out = CommandCode.MOVE
-                    self._step += 1
+                    state.Speed_out.fill(0)
+                    return True
+                if self._step < len(active.trajectory_steps):
+                    old_scale = state.execution_applied_speed
+                    target_scale = (
+                        0.0 if state.execution_paused else state.execution_speed
+                    )
+                    # Steady state -- every tick of a playback nobody has
+                    # overridden -- holds the scale, so the acceleration-window
+                    # search and the admissibility bisection below are skipped:
+                    # they exist to bound a change, and compute a rate that is
+                    # forced to zero when there is none.
+                    new_scale = old_scale
+                    if target_scale != old_scale:
+                        low = -1.0 / EXECUTION_OVERRIDE_TRANSITION_S
+                        high = -low
+                        for joint in range(6):
+                            velocity = active.velocity_rad_s[self._step, joint]
+                            if abs(velocity) > 1e-12:
+                                base = (
+                                    old_scale
+                                    * old_scale
+                                    * active.acceleration_rad_s2[self._step, joint]
+                                )
+                                limit = LIMITS.joint.hard.acceleration[joint]
+                                first = (-limit - base) / velocity
+                                second = (limit - base) / velocity
+                                low = max(low, min(first, second))
+                                high = min(high, max(first, second))
+                        requested = (target_scale - old_scale) / INTERVAL_S
+                        rate = min(high, max(low, requested)) if low <= high else 0.0
+                        if rate * requested < 0.0:
+                            rate = 0.0
+                        new_scale = min(1.0, max(0.0, old_scale + rate * INTERVAL_S))
+                        if abs(new_scale - target_scale) < 1e-12:
+                            new_scale = target_scale
+                    if new_scale != old_scale and not self._rate_is_admissible(
+                        active, old_scale, new_scale
+                    ):
+                        allowed = 0.0
+                        refused = 1.0
+                        for _ in range(16):
+                            fraction = 0.5 * (allowed + refused)
+                            if self._rate_is_admissible(
+                                active,
+                                old_scale,
+                                old_scale + fraction * (new_scale - old_scale),
+                            ):
+                                allowed = fraction
+                            else:
+                                refused = fraction
+                        new_scale = old_scale + allowed * (new_scale - old_scale)
+                    state.execution_applied_speed = new_scale
+                    self._candidate_position(
+                        active, self._phase + 0.5 * (old_scale + new_scale)
+                    )
+                    for joint in range(6):
+                        self._velocity_rad_s[joint] = (
+                            self._candidate_position_rad[joint]
+                            - self._position_rad[joint]
+                        ) / INTERVAL_S
+                    self._position_rad[:] = self._candidate_position_rad
+                    self._phase += 0.5 * (old_scale + new_scale)
+                    if self._phase >= 1.0:
+                        self._step += 1
+                        self._phase -= 1.0
+                    if self._phase <= 0.0 or self._step + 1 == len(
+                        active.trajectory_steps
+                    ):
+                        state.Position_out[:] = active.trajectory_steps[self._step]
+                    else:
+                        # Preserve the planner's piecewise-linear joint path;
+                        # rounding happens only at the firmware boundary.
+                        rad_to_steps(self._position_rad, state.Position_out)
+                    state.Command_out = CommandCode.MOVE
+                    if (
+                        self._step + 1 == len(active.trajectory_steps)
+                        and self._phase >= 0.0
+                    ):
+                        self._step += 1
                     self._settling = False
                     return True
                 # All waypoints sent — hold MOVE at target until Position_in
@@ -168,6 +277,12 @@ class SegmentPlayer:
 
             # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
+                state.execution_applied_speed = (
+                    0.0 if state.execution_paused else state.execution_speed
+                )
+                if state.execution_paused and isinstance(active.params, DelayCmd):
+                    state.Speed_out.fill(0)
+                    return True
                 result = self._tick_inline(active, state)
                 if result is None:
                     # Instant completion — try next immediately
@@ -201,6 +316,34 @@ class SegmentPlayer:
         # Exhausted immediate iterations (unlikely)
         return self._active is not None
 
+    def _candidate_position(self, segment: TrajectorySegment, phase: float) -> None:
+        step = self._step
+        if phase >= 1.0:
+            step += 1
+            phase -= 1.0
+        step = min(step, len(segment.trajectory_rad) - 1)
+        following = min(step + 1, len(segment.trajectory_rad) - 1)
+        phase = max(0.0, phase)
+        for joint in range(6):
+            left = segment.trajectory_rad[step, joint]
+            right = segment.trajectory_rad[following, joint]
+            self._candidate_position_rad[joint] = left + phase * (right - left)
+
+    def _rate_is_admissible(
+        self, segment: TrajectorySegment, old_scale: float, scale: float
+    ) -> bool:
+        # Central planner derivatives do not bound the second difference
+        # of a fractional, piecewise-linear position command.
+        self._candidate_position(segment, self._phase + 0.5 * (old_scale + scale))
+        for joint in range(6):
+            velocity = (
+                self._candidate_position_rad[joint] - self._position_rad[joint]
+            ) / INTERVAL_S
+            acceleration = (velocity - self._velocity_rad_s[joint]) / INTERVAL_S
+            if abs(acceleration) > LIMITS.joint.hard.acceleration[joint] * (1.0 + 1e-6):
+                return False
+        return True
+
     def _activate_next(self, state: ControllerState) -> None:
         """Promote next buffered segment to active.
 
@@ -216,12 +359,15 @@ class SegmentPlayer:
             return
         self._active = seg
         self._step = 0
+        self._phase = -1.0
         self._inline_cmd = None
         self._inline_activated = False
         state.executing_command_index = self._active.command_index
         state.action_state = ActionState.EXECUTING
         # Populate action info for trajectory segments (inline segments set these later)
         if isinstance(self._active, TrajectorySegment):
+            self._position_rad[:] = self._active.trajectory_rad[0]
+            self._velocity_rad_s.fill(0.0)
             state.action_current = self._active.command_name
             state.action_params = self._active.action_params
 
@@ -351,6 +497,7 @@ class SegmentPlayer:
             state.action_state = ActionState.IDLE
         self._active = None
         self._step = 0
+        self._phase = -1.0
         self._inline_cmd = None
         self._inline_activated = False
         self._buffer.clear()

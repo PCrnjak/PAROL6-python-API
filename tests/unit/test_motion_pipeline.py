@@ -10,7 +10,7 @@ import time
 import numpy as np
 import pytest
 
-from parol6.config import deg_to_steps
+from parol6.config import deg_to_steps, steps_to_rad
 from parol6.protocol.wire import (
     CheckpointCmd,
     DelayCmd,
@@ -49,6 +49,13 @@ def _deg_to_steps(angles: list[float]) -> np.ndarray:
     buf = np.zeros(6, dtype=np.int32)
     deg_to_steps(np.array(angles, dtype=np.float64), buf)
     return buf
+
+
+def _path_radians(steps: np.ndarray) -> np.ndarray:
+    radians = np.empty(steps.shape, dtype=np.float64)
+    for source, target in zip(steps, radians):
+        steps_to_rad(source, target)
+    return radians
 
 
 def _make_movej_cmd(
@@ -400,6 +407,7 @@ class TestSegmentPlayer:
         seg = TrajectorySegment(
             command_index=0,
             trajectory_steps=steps,
+            trajectory_rad=_path_radians(steps),
             duration=0.05,
         )
         player._buffer.append(seg)
@@ -440,7 +448,12 @@ class TestSegmentPlayer:
 
         # Trajectory segment
         steps = np.tile(_home_steps(), (3, 1))
-        traj = TrajectorySegment(command_index=0, trajectory_steps=steps, duration=0.03)
+        traj = TrajectorySegment(
+            command_index=0,
+            trajectory_steps=steps,
+            trajectory_rad=_path_radians(steps),
+            duration=0.03,
+        )
 
         # Inline segment
         inline = InlineSegment(
@@ -465,7 +478,12 @@ class TestSegmentPlayer:
         player = SegmentPlayer(planner)
 
         steps = np.tile(_home_steps(), (100, 1))
-        seg = TrajectorySegment(command_index=0, trajectory_steps=steps, duration=1.0)
+        seg = TrajectorySegment(
+            command_index=0,
+            trajectory_steps=steps,
+            trajectory_rad=_path_radians(steps),
+            duration=1.0,
+        )
         player._buffer.append(seg)
 
         # Start playing
@@ -488,6 +506,7 @@ class TestSegmentPlayer:
         seg = TrajectorySegment(
             command_index=0,
             trajectory_steps=steps,
+            trajectory_rad=_path_radians(steps),
             duration=0.02,
             blend_consumed_indices=[1, 2],
         )
@@ -510,7 +529,12 @@ class TestSegmentPlayer:
 
         steps = np.tile(_home_steps(), (2, 1))
         player._buffer.append(
-            TrajectorySegment(command_index=0, trajectory_steps=steps, duration=0.02)
+            TrajectorySegment(
+                command_index=0,
+                trajectory_steps=steps,
+                trajectory_rad=_path_radians(steps),
+                duration=0.02,
+            )
         )
         assert player.active is True
 

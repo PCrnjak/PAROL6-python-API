@@ -272,6 +272,9 @@ class ControllerState:
     # Pipeline depth (maintained by segment player)
     queued_segments: int = 0
     queued_duration: float = 0.0
+    execution_paused: bool = False
+    execution_speed: float = 1.0
+    execution_applied_speed: float = 1.0
 
     # Self-collision viz: colliding pairs captured at the predicted colliding
     # config when a move is blocked or a jog is stopped; cleared when a
@@ -350,6 +353,7 @@ class ControllerState:
         """
         # Safety and control flags
         self.enabled = True
+        self.execution_paused = False
         self.soft_error = False
         self.disabled_reason = ""
         self.e_stop_active = False

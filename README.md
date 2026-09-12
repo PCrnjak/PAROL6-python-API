@@ -310,6 +310,32 @@ Speed and accel are fractions of maximum (0.0–1.0), not percentages.
 
 For Cartesian moves, joint limits stay at 100% as hard bounds—the speed fraction only affects the Cartesian velocity constraint.
 
+### Queued execution speed and pause
+
+`set_execution_speed(scale)` selects 10–100% of an already planned trajectory's
+speed. The command's `speed`, `accel` and `duration` still define the original
+plan. Jog and streamed servo commands retain their own timing.
+
+Override transitions use a separate rate ramp and acceleration checks. The
+nominal motion profile's jerk ceiling is not guaranteed during a transition.
+
+Use `pause()` to retain the queue and decelerate queued motion to a hold, and
+`resume()` to continue at the selected scale. Changing speed while paused keeps
+the pause. The speed setter rejects zero. These controls return 1 when their
+request is confirmed, or 0 when confirmation times out.
+
+Fresh `execution_speed()` readback exposes `target_scale`, `applied_scale` and
+`resume_scale`. Its `paused` property confirms the applied scale reached zero;
+the pause request can be acknowledged while still decelerating. Queued delays
+retain their remaining time while paused; positive speed changes do not retime
+delays, tool actuators or homing routines already in progress.
+
+Standalone `wait_command()` keeps its wall-clock timeout and returns false if
+completion is unconfirmed. Blocking motion calls raise `TimeoutError` in that
+case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning
+preview retimes trajectories and reports paused queued operations as
+`UnresolvedPreview` instead of claiming completion.
+
 ## Command system
 
 Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.

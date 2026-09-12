@@ -894,6 +894,8 @@ class Controller:
                 self._executor.cancel_active_command(reason)
                 self._executor.clear_queue(reason)
                 self._resync_planner(state)
+                # A pause holds the queue it interrupted; that queue is gone.
+                state.execution_paused = False
 
             # Reset-state: cancel motion pipeline so stale segments don't play.
             # Also sync the (now-cleared) tool state to the planner subprocess
@@ -903,6 +905,7 @@ class Controller:
                 self._executor.cancel_active_command("Reset")
                 self._executor.clear_queue("Reset")
                 self._resync_planner(state)
+                state.execution_paused = False
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:

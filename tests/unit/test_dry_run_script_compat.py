@@ -213,6 +213,9 @@ _STATE_ARGS = {
     "connect_hardware": ("/dev/null",),
     "stop": (),
     "estop": (),
+    "pause": (),
+    "resume": (),
+    "set_execution_speed": (0.5,),
 }
 
 
