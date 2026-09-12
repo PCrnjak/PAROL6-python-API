@@ -23,7 +23,14 @@ async def _observed_hz(client: AsyncRobotClient, frames: int = 40) -> float:
     """Measure arrival rate over *frames* distinct broadcasts."""
     seen = 0
     start = 0.0
-    async for _ in client.stream_status():
+    previous = None
+    async for status in client.stream_status():
+        assert status.session_id > 0 and status.mono_time_ns > 0
+        if previous is not None:
+            assert status.session_id == previous.session_id
+            assert status.seq > previous.seq
+            assert status.mono_time_ns > previous.mono_time_ns
+        previous = status
         if seen == 0:
             start = time.perf_counter()
         seen += 1

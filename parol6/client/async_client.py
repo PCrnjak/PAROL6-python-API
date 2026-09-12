@@ -277,6 +277,7 @@ class AsyncRobotClient(_RobotClientABC):
         return super().skill_capabilities | {
             "backend.parol6",
             "execution.speed",
+            "observation.timed",
             "tool.gripper",
             "io.digital",
         }
