@@ -60,6 +60,7 @@ class TrajectorySegment:
     command_name: str = ""
     action_params: str = ""
     blend_consumed_indices: list[int] = field(default_factory=list)
+    generation: int = 0
     velocity_rad_s: np.ndarray = field(init=False)
     acceleration_rad_s2: np.ndarray = field(init=False)
 
@@ -82,6 +83,7 @@ class InlineSegment:
 
     command_index: int
     params: object  # wire struct (msgspec.Struct — picklable)
+    generation: int = 0
 
 
 @dataclass
@@ -93,6 +95,7 @@ class ErrorSegment:
     cartesian_path: np.ndarray | None = None  # (N, 6) full TCP path
     ik_valid: np.ndarray | None = None  # (N,) per-pose bool
     colliding_pairs: list[tuple[str, str]] | None = None  # self-collision viz
+    generation: int = 0
 
 
 Segment = Union[TrajectorySegment, InlineSegment, ErrorSegment]
@@ -112,6 +115,9 @@ class PlanCommand:
         None  # current Position_in (None = use planner internal)
     )
     homed: bool | None = None  # all joints homed (None = use planner internal)
+    # Stamped by the proxy; a cancel starts a new generation and every segment
+    # planned for an older one is dropped on the way back.
+    generation: int = 0
 
 
 @dataclass
@@ -574,6 +580,7 @@ class PlannerWorker:
     def __init__(self, segment_queue: multiprocessing.Queue) -> None:
         self._segment_queue = segment_queue
         self._planner = TrajectoryPlanner(diagnostic=False)
+        self._generation = 0
 
     @property
     def state(self) -> PlannerState:
@@ -586,14 +593,17 @@ class PlannerWorker:
         if msg.homed is not None:
             self._planner.state.Homed_in.fill(1 if msg.homed else 0)
 
+        self._generation = msg.generation
         segments = self._planner.process(msg.params, msg.command_index)
         for seg in segments:
+            seg.generation = self._generation
             self._segment_queue.put(seg)
 
     def flush_stale_blend(self) -> None:
         """Flush any pending blend buffer (called on queue timeout)."""
         segments = self._planner.flush()
         for seg in segments:
+            seg.generation = self._generation
             self._segment_queue.put(seg)
 
     def cancel(self) -> None:
@@ -761,6 +771,10 @@ class MotionPlanner:
         self._shutdown_event: EventType = multiprocessing.Event()
         self._ready_event: EventType = multiprocessing.Event()
         self._process: multiprocessing.Process | None = None
+        # CancelAll travels the command FIFO behind plans already queued, so
+        # the worker still emits them after a cancel; the generation is what
+        # tells those late segments from the next program's.
+        self._generation = 0
 
     # -- lifecycle --
 
@@ -832,6 +846,8 @@ class MotionPlanner:
 
     def submit(self, msg: PlannerMessage) -> None:
         """Send a message to the planner (non-blocking)."""
+        if isinstance(msg, PlanCommand):
+            msg.generation = self._generation
         self._command_queue.put_nowait(msg)
 
     def sync_position(self, position_in: np.ndarray) -> None:
@@ -865,16 +881,23 @@ class MotionPlanner:
 
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""
+        self._generation += 1
         self.submit(CancelAll())
 
     # -- planner → main --
 
     def poll_segment(self) -> Segment | None:
-        """Non-blocking poll for a computed segment. Returns None if empty."""
-        try:
-            return self._segment_queue.get_nowait()
-        except queue.Empty:
-            return None
+        """Non-blocking poll for a computed segment. Returns None if empty.
+
+        Segments planned before the last cancel are discarded here.
+        """
+        while True:
+            try:
+                seg = self._segment_queue.get_nowait()
+            except queue.Empty:
+                return None
+            if seg.generation >= self._generation:
+                return seg
 
 
 def _drain_queue(q: multiprocessing.Queue) -> None:

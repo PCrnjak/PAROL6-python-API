@@ -300,6 +300,7 @@ class SegmentPlayer:
                 state.collision_pairs = tuple(pairs) if pairs else ()
                 state.action_state = ActionState.ERROR
                 state.action_current = ""
+                state.executing_command_index = -1
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
@@ -416,14 +417,20 @@ class SegmentPlayer:
 
     def _complete_segment(self, seg: Segment, state: ControllerState) -> None:
         """Mark segment as completed and update tracking indices."""
+        final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
                 if idx != seg.command_index:
                     state.record_completion(idx)
+                if idx > final_idx:
+                    final_idx = idx
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
         state.record_completion(seg.command_index)
+        while state.pending_planned and state.pending_planned[0][0] <= final_idx:
+            state.pending_planned.popleft()
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.IDLE
         self._active = None
@@ -434,6 +441,7 @@ class SegmentPlayer:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
         state.error = error
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.ERROR
         self._active = None
@@ -478,6 +486,7 @@ class SegmentPlayer:
             state.collision_pairs = tuple(pairs) if pairs else ()
             state.action_state = ActionState.ERROR
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             self._active = None
             self._buffer.clear()
@@ -492,6 +501,7 @@ class SegmentPlayer:
             # Planned trajectories live here rather than in CommandExecutor.
             # Cancelling its command cannot clear this player's activity.
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
         self._active = None
@@ -508,5 +518,6 @@ class SegmentPlayer:
         """Drain any remaining segments from the planner's output queue."""
         while self._planner.poll_segment() is not None:
             pass
+        state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0

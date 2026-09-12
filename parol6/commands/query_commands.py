@@ -300,7 +300,12 @@ class QueueCommand(QueryCommand[QueueCmd]):
 
     def compute(self, state: "ControllerState") -> Response:
         return QueueResultStruct(
-            queue=state.queue_nonstreamable,
+            queue=state.queue_nonstreamable
+            + [
+                name
+                for index, name in state.pending_planned
+                if index != state.executing_command_index
+            ],
             executing_index=state.executing_command_index,
             completed_index=state.completed_command_index,
             last_checkpoint=state.last_checkpoint,

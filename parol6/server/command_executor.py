@@ -232,6 +232,7 @@ class CommandExecutor:
         except Exception as e:
             logger.error("Command execution error: %s", e)
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
             self._update_queue_state(state)
@@ -272,6 +273,7 @@ class CommandExecutor:
             )
 
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
             state.record_completion(ac.command_index)
@@ -288,6 +290,7 @@ class CommandExecutor:
             )
 
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
 
@@ -320,6 +323,7 @@ class CommandExecutor:
 
         state = self._state_manager.get_state()
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.IDLE
 
@@ -335,6 +339,7 @@ class CommandExecutor:
         if ac and isinstance(ac.command, MotionCommand) and ac.command.streamable:
             state = self._state_manager.get_state()
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
             self.active_command = None

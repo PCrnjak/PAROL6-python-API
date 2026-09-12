@@ -867,7 +867,7 @@ class Controller:
         # segments are active/queued (e.g. homing), the planner's internal
         # tracking is correct: Position_in may reflect a mid-motion position
         # and the planner has already predicted a queued HOME's homed flags.
-        segment_idle = not self._segment_player.active
+        segment_idle = not self._segment_player.active and not state.pending_planned
         pos_snapshot = state.Position_in.copy() if segment_idle else None
         homed_snapshot: bool | None = None
         if segment_idle:
@@ -884,6 +884,7 @@ class Controller:
                 homed=homed_snapshot,
             )
         )
+        state.pending_planned.append((cmd_index, cmd_name))
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
             self._reply_ok_index(req_id, addr, cmd_index)
 
