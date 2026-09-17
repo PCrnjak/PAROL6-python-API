@@ -627,9 +627,7 @@ class Controller:
         if len(msgs) == MAX_POLL_COUNT:
             backlog = self.udp_transport.poll_receive_all(max_count=MAX_BACKLOG_COUNT)
             if len(backlog) == MAX_BACKLOG_COUNT:
-                logger.log(
-                    TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT
-                )
+                logger.log(TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT)
             msgs.extend(backlog)
         for data, addr in msgs:
             self._process_command(data, addr, state)
