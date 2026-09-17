@@ -11,7 +11,6 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
     CmdType.SIMULATOR,
     CmdType.SELECT_PROFILE,
     CmdType.RESET_STATE,
-    CmdType.WRITE_IO,
     CmdType.SET_TCP_OFFSET,
     CmdType.SET_SHAPES,
     CmdType.SET_STATUS_RATE,
@@ -63,6 +62,7 @@ QUEUED_CMD_TYPES: set[CmdType] = {
     CmdType.SELECT_TOOL,
     CmdType.DELAY,
     CmdType.CHECKPOINT,
+    CmdType.WRITE_IO,
     CmdType.TOOL_ACTION,
 }
 
