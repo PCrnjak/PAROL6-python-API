@@ -13,9 +13,9 @@ from parol6.protocol.wire import (
     decode_command,
     decode_message,
     encode,
+    pack_response,
 )
 from parol6.server.command_registry import create_command
-from parol6.protocol.wire import pack_response
 from parol6.server.state import ControllerState
 
 

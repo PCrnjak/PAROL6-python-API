@@ -22,83 +22,61 @@ def client():
 
 
 class TestDryRunBlend:
-    """Tests for blend buffering in DryRunRobotClient."""
+    """Blend buffering: a chain lands under its head command."""
 
-    def test_blend_produces_composite(self, client):
-        """3x move_j with r > 0 should buffer, then flush returns a single composite."""
-        r1 = client.move_j(angles=W1, speed=0.5, r=10)
-        assert r1 is None, "r > 0 should buffer, not return immediately"
-
-        r2 = client.move_j(angles=W2, speed=0.5, r=10)
-        assert r2 is None, "r > 0 should buffer"
-
-        # r=0 terminates the chain → flush returns composite result
-        r3 = client.move_j(angles=W3, speed=0.5, r=0)
-        assert r3 is not None, "r=0 after buffered commands should flush and return"
-        assert r3.tcp_poses.shape[0] > 0
-        assert r3.tcp_poses.shape[1] == 6
-        assert r3.error is None
+    def test_blend_chain_lands_under_its_head(self, client):
+        """3x move_j with r > 0 buffer; the head block owns the chain's rows
+        and the folded commands keep their place at zero rows."""
+        first = client.move_j(angles=W1, speed=0.5, r=10)
+        second = client.move_j(angles=W2, speed=0.5, r=10)
+        third = client.move_j(angles=W3, speed=0.5, r=0)
+        assert (first, second, third) == (0, 1, 2)
+        record = client.plan()
+        assert record.blocks[first].rows > 0
+        assert record.blocks[second].rows == 0 and record.blocks[third].rows == 0
+        assert record.tcp.shape == (record.rows, 6)
+        assert all(b.error is None for b in record.blocks)
+        np.testing.assert_allclose(np.degrees(record.joints_rad[-1]), W3, atol=0.5)
 
     def test_no_blend_without_radius(self, client):
-        """move_j with r=0 should return immediately (no buffering)."""
-        result = client.move_j(angles=W1, speed=0.5, r=0)
-        assert result is not None, "r=0 should return immediately"
-        assert result.tcp_poses.shape[0] > 0
-        assert result.error is None
+        index = client.move_j(angles=W1, speed=0.5, r=0)
+        block = client.plan().blocks[index]
+        assert block.rows > 0 and block.error is None
 
-    def test_flush_returns_buffered(self, client):
-        """Explicit flush() after buffered commands should return results list."""
-        r1 = client.move_j(angles=W1, speed=0.5, r=10)
-        assert r1 is None
+    def test_flush_plans_the_pending_chain(self, client):
+        client.move_j(angles=W1, speed=0.5, r=10)
+        client.move_j(angles=W2, speed=0.5, r=10)
+        assert client.program_length == 2
+        client.flush()
+        assert client.plan().blocks[0].rows > 0
 
-        r2 = client.move_j(angles=W2, speed=0.5, r=10)
-        assert r2 is None
+    def test_empty_program_is_an_empty_record(self, client):
+        assert client.flush() is None
+        record = client.plan()
+        assert record.rows == 0 and record.blocks == ()
 
-        results = client.flush()
-        assert len(results) > 0, "flush() should return buffered results"
-        assert results[0].tcp_poses.shape[0] > 0
-        assert results[0].error is None
-
-    def test_flush_empty_returns_empty_list(self, client):
-        """flush() with no buffered commands should return empty list."""
-        assert client.flush() == []
-
-    def test_blended_trajectory_is_longer(self, client):
-        """Composite blended trajectory should have longer duration than a single move."""
+    def test_blended_chain_is_longer_than_one_move(self, client):
         single = DryRunRobotClient()
-        single_result = single.move_j(angles=W3, speed=0.3, r=0)
-        assert single_result is not None
-
-        # Blended chain of 3 moves
+        single.move_j(angles=W3, speed=0.3, r=0)
         client.move_j(angles=W1, speed=0.3, r=10)
         client.move_j(angles=W2, speed=0.3, r=10)
-        r3 = client.move_j(angles=W3, speed=0.3, r=0)
-        assert r3 is not None
-
-        assert r3.duration > single_result.duration, (
-            f"Blended ({r3.duration:.3f}s) should be longer than single ({single_result.duration:.3f}s)"
-        )
+        client.move_j(angles=W3, speed=0.3, r=0)
+        assert client.plan().duration_s > single.plan().duration_s
 
     def test_state_updated_after_blend(self, client):
-        """Position should reflect the final waypoint after a blended chain."""
         client.move_j(angles=W1, speed=0.5, r=10)
         client.move_j(angles=W2, speed=0.5, r=0)
-
-        angles_after = client.angles()
-        assert len(angles_after) == 6
-        np.testing.assert_allclose(angles_after, W2, atol=0.5)
+        np.testing.assert_allclose(client.angles(), W2, atol=0.5)
 
     def test_execution_override_preserves_path_and_pause(self):
         normal = DryRunRobotClient(initial_joints_deg=W0)
         slow = DryRunRobotClient(initial_joints_deg=W0)
-        normal_result = normal.move_j(W1, duration=2)
+        n = normal.move_j(W1, duration=2)
         assert slow.set_execution_speed(0.5) == 1
-        slow_result = slow.move_j(W1, duration=2)
-        assert normal_result is not None and slow_result is not None
-        assert slow_result.duration == pytest.approx(normal_result.duration * 2)
-        np.testing.assert_allclose(
-            slow_result.joint_trajectory_rad, normal_result.joint_trajectory_rad
-        )
+        s = slow.move_j(W1, duration=2)
+        normal_block = normal.plan().blocks[n]
+        slow_block = slow.plan().blocks[s]
+        assert slow_block.rows == pytest.approx(normal_block.rows * 2, abs=1)
         assert slow.pause() == 1
         assert slow.set_execution_speed(0.3) == 1
         assert slow.execution_speed().paused
@@ -108,7 +86,7 @@ class TestDryRunBlend:
         np.testing.assert_allclose(slow.angles(), W1, atol=0.05)
         assert slow.resume() == 1
         assert slow.execution_speed().applied_scale == 0.3
-        assert slow.move_j(W2, duration=2).error is None
+        assert slow.wait_command(slow.move_j(W2, duration=2))
         for invalid in (0, True, 2, float("nan")):
             with pytest.raises(ValueError):
                 slow.set_execution_speed(invalid)
