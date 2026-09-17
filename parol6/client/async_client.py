@@ -223,11 +223,14 @@ def _create_unicast_socket(port: int, host: str) -> socket.socket:
 if TYPE_CHECKING:
     from typing import Protocol
 
+    from parol6.robot import Robot
+
     class _StatusNotifier(Protocol):
         _shared_status: StatusBuffer
         _status_generation: int
         _status_event: asyncio.Event
         _closed: bool
+        _proto_error: ProtocolVersionError | None
 
 
 class _StatusProtocol(asyncio.DatagramProtocol):
@@ -272,15 +275,21 @@ class AsyncRobotClient(_RobotClientABC):
     Query commands: request/response with timeout and simple retry
     """
 
+    _robot: "Robot | None" = None
+
     @property
-    def skill_capabilities(self) -> frozenset[str]:
-        return super().skill_capabilities | {
-            "backend.parol6",
-            "execution.speed",
-            "observation.timed",
-            "tool.gripper",
-            "io.digital",
-        }
+    def robot(self) -> "Robot":
+        """The backend this client drives, built on first read when a bare
+        client (what a user script constructs) supplied none."""
+        if self._robot is None:
+            from parol6.robot import Robot
+
+            self._robot = Robot()
+        return self._robot
+
+    @robot.setter
+    def robot(self, value: "Robot | None") -> None:
+        self._robot = value
 
     def __init__(
         self,
@@ -288,12 +297,14 @@ class AsyncRobotClient(_RobotClientABC):
         port: int = 5001,
         timeout: float = 1.0,
         retries: int = 1,
+        robot: "Robot | None" = None,
     ) -> None:
         # host/port are immutable after endpoint creation
         self._host = host
         self._port = port
         self.timeout = timeout
         self.retries = retries
+        self._robot = robot
 
         # Pre-allocated buffers for pose() RPY conversion
         self._R_buf = np.zeros((3, 3), dtype=np.float64)
