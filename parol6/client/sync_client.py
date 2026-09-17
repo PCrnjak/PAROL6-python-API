@@ -9,7 +9,7 @@ import asyncio
 import atexit
 import threading
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from waldoctl.sync_tools import SyncTool
 
@@ -29,6 +29,9 @@ from ..protocol.wire import (
 )
 from ..utils.error_catalog import RobotError
 from .async_client import AsyncRobotClient
+
+if TYPE_CHECKING:
+    from parol6.robot import Robot
 
 T = TypeVar("T")
 
@@ -128,9 +131,10 @@ class RobotClient:
         port: int = 5001,
         timeout: float = 2.0,
         retries: int = 1,
+        robot: "Robot | None" = None,
     ) -> None:
         self._inner = AsyncRobotClient(
-            host=host, port=port, timeout=timeout, retries=retries
+            host=host, port=port, timeout=timeout, retries=retries, robot=robot
         )
         # Wrap the inner async client's bound tools with sync adapters so that
         # `from parol6 import RobotClient; rbt = RobotClient(...)` works without
@@ -157,8 +161,12 @@ class RobotClient:
         return _run(invoke(self._inner))
 
     @property
-    def skill_capabilities(self) -> frozenset[str]:
-        return self._inner.skill_capabilities
+    def robot(self) -> "Robot":
+        return self._inner.robot
+
+    @robot.setter
+    def robot(self, value: "Robot | None") -> None:
+        self._inner.robot = value
 
     @property
     def tool(self) -> SyncTool:

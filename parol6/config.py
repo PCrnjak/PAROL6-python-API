@@ -112,9 +112,7 @@ def servable_status_rates() -> tuple[float, ...]:
     the set and by the refusal that names it.
     """
     control = int(CONTROL_RATE_HZ)
-    return tuple(
-        float(control // n) for n in range(1, control + 1) if control % n == 0
-    )
+    return tuple(float(control // n) for n in range(1, control + 1) if control % n == 0)
 
 
 # Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
