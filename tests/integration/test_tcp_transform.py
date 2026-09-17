@@ -61,10 +61,12 @@ async def test_full_tcp_transform_agrees_across_wire_fk_preview_and_motion(ports
 
         preview = DryRunRobotClient(initial_joints_deg=angles)
         preview.set_tcp_transform(*values)
-        predicted = preview.move_l([0, 0, 5, 0, 0, 0], frame="TRF", rel=True, speed=0.2)
-        assert predicted is not None and predicted.error is None
+        planned = preview.move_l([0, 0, 5, 0, 0, 0], frame="TRF", rel=True, speed=0.2)
+        assert preview.wait_command(planned)
         target = expected @ Pose((0, 0, 5, 0, 0, 0)).matrix()
-        predicted_pose = predicted.tcp_poses[-1]
+        record = preview.plan()
+        block = record.blocks[planned]
+        predicted_pose = record.tcp[block.start_row + block.rows - 1].astype(float)
         predicted_matrix = Pose(
             tuple([*(predicted_pose[:3] * 1000), *np.degrees(predicted_pose[3:])])
         ).matrix()
