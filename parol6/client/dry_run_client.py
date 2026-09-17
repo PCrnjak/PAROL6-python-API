@@ -760,21 +760,6 @@ class DryRunRobotClient:
 
     # ---- Explicit methods for state reads ----
 
-    @property
-    def skill_capabilities(self) -> frozenset[str]:
-        return frozenset(
-            {
-                "motion.joint",
-                "motion.linear",
-                "tool.gripper",
-                "backend.parol6",
-                "io.digital",
-                "execution.preview",
-                "world.attachments",
-                "execution.speed",
-            }
-        )
-
     def angles(self) -> list[float]:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
         return np.degrees(self._q_rad_buf).tolist()

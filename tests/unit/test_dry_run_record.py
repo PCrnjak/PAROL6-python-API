@@ -34,7 +34,9 @@ def test_delay_holds_the_pose_for_its_rows():
     held = record.joints_rad[_span(record, block)]
     # Motor-step quantisation moves the pose by well under a hundredth of a
     # degree; what matters is that every row holds the same pose.
-    np.testing.assert_allclose(np.degrees(held), np.broadcast_to(HOME, held.shape), atol=0.01)
+    np.testing.assert_allclose(
+        np.degrees(held), np.broadcast_to(HOME, held.shape), atol=0.01
+    )
     assert np.ptp(held, axis=0).max() == 0
     assert block.error is None and block.move_type is None
     assert record.duration_s == pytest.approx(2.0, abs=record.row_dt_s)
