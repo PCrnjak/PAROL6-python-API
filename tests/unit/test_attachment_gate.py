@@ -15,5 +15,10 @@ def test_attachments_accept_a_homed_arm_with_unused_homed_slots_clear():
     part = Sphere(name="part", radius=0.02).attach(
         flange_pose=(0.0, 0.0, 0.1, 0.0, 0.0, 0.0), epoch=state.attachment_epoch
     )
-    state.set_shapes([part])
-    assert state.has_attachments and state.attachments_valid
+    # The set lands in the process-wide collision world; leaving the part on
+    # the flange would put every later test's arm in collision at home.
+    try:
+        state.set_shapes([part])
+        assert state.has_attachments and state.attachments_valid
+    finally:
+        state.set_shapes([])

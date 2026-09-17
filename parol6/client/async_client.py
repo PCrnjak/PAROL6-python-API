@@ -235,6 +235,7 @@ if TYPE_CHECKING:
         _status_generation: int
         _status_event: asyncio.Event
         _closed: bool
+        _proto_error: ProtocolVersionError | None
 
 
 class _StatusProtocol(asyncio.DatagramProtocol):
