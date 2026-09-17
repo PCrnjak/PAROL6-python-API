@@ -954,7 +954,7 @@ class Robot(_RobotABC):
         host: str = kwargs.get("host", self._host)
         port: int = kwargs.get("port", self._port)
         timeout: float = kwargs.get("timeout", 5.0)
-        client = AsyncRobotClient(host=host, port=port, timeout=timeout)
+        client = AsyncRobotClient(host=host, port=port, timeout=timeout, robot=self)
         bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
@@ -973,7 +973,7 @@ class Robot(_RobotABC):
         host: str = kwargs.get("host", self._host)
         port: int = kwargs.get("port", self._port)
         timeout: float = kwargs.get("timeout", 5.0)
-        client = SyncRobotClient(host=host, port=port, timeout=timeout)
+        client = SyncRobotClient(host=host, port=port, timeout=timeout, robot=self)
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
@@ -993,4 +993,5 @@ class Robot(_RobotABC):
         return DryRunRobotClient(  # ty: ignore[invalid-return-type]
             initial_joints_deg=initial_joints_deg,
             initial_homed=initial_homed,
+            robot=self,
         )
