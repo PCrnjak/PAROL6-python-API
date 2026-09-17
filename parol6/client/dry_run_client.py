@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -58,6 +58,9 @@ from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
 from parol6.tools import get_registry
+
+if TYPE_CHECKING:
+    from parol6.robot import Robot
 
 
 def _pascal_to_snake(name: str) -> str:
@@ -167,12 +170,31 @@ class DryRunRobotClient:
     and delay (no-op).
     """
 
+    _robot: Robot | None = None
+
+    @property
+    def robot(self) -> Robot:
+        """The backend this preview stands in for, built on first read when
+        the host constructed the client bare. A real descriptor on the class,
+        so the read never reaches ``__getattr__``'s command dispatch."""
+        if self._robot is None:
+            from parol6.robot import Robot
+
+            self._robot = Robot()
+        return self._robot
+
+    @robot.setter
+    def robot(self, value: Robot | None) -> None:
+        self._robot = value
+
     def __init__(
         self,
         initial_joints_deg: list[float] | None = None,
         max_snapshot_points: int = 200,
         initial_homed: bool = True,
+        robot: Robot | None = None,
     ) -> None:
+        self._robot = robot
         # Reset tool transform — process pool workers persist across
         # invocations, so a previous run's select_tool() leaves a stale
         # TCP offset on the module-level robot singleton.
@@ -523,10 +545,6 @@ class DryRunRobotClient:
         return _build_result(radians, duration)
 
     # ---- Explicit methods for state reads ----
-
-    @property
-    def skill_capabilities(self) -> frozenset[str]:
-        return frozenset({"motion.joint", "motion.linear", "backend.parol6"})
 
     def angles(self) -> list[float]:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)

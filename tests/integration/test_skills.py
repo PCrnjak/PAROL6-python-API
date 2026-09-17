@@ -9,11 +9,7 @@ from parol6 import AsyncRobotClient
 from parol6.protocol.wire import ActionState
 
 
-@skill(
-    id="test.nudge",
-    version="1.0.0",
-    requires=frozenset({"motion.joint", "backend.parol6"}),
-)
+@skill(id="test.nudge", version="1.0.0")
 async def nudge(rbt: AsyncRobotClient, *, degrees: float) -> list[float]:
     target = await rbt.angles()
     assert target is not None
