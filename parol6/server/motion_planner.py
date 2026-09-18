@@ -20,6 +20,7 @@ import queue
 import signal
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union, cast
+from math import radians
 
 import numpy as np
 
@@ -514,8 +515,6 @@ class TrajectoryPlanner:
                 tcp_rotation_rad=self.state.tcp_rotation_rad,
             )
         elif isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
-            from math import radians
-
             offset_m = (params.x / 1000.0, params.y / 1000.0, params.z / 1000.0)
             rotation_rad = (
                 (radians(params.roll), radians(params.pitch), radians(params.yaw))

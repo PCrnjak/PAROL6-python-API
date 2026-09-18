@@ -3,6 +3,7 @@ Query commands that return immediate status information.
 """
 
 from typing import TYPE_CHECKING
+from math import degrees
 
 import numpy as np
 
@@ -417,8 +418,6 @@ class TcpTransformCommand(QueryCommand[TcpTransformCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> Response:
-        from math import degrees
-
         xyz = state.tcp_offset_m
         rpy = state.tcp_rotation_rad
         return TcpTransformResultStruct(
