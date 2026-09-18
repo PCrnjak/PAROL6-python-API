@@ -29,6 +29,7 @@ from waldoctl.skills import UnresolvedPreview
 from waldoctl.ticks import TickBlock, TickIndex
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from ..ack_policy import ARM_MOTION_CMD_TYPES
 from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import (
     JogLCommand,
@@ -564,22 +565,9 @@ class DryRunRobotClient:
             and not cmd_cls.streamable
         ):
             self._require_running()
-        if not self._state.attachments_valid and isinstance(
-            params,
-            (
-                _wire.MoveJCmd,
-                _wire.MoveJPoseCmd,
-                _wire.MoveLCmd,
-                _wire.MoveCCmd,
-                _wire.MoveSCmd,
-                _wire.MovePCmd,
-                _wire.JogJCmd,
-                _wire.JogLCmd,
-                _wire.ServoJCmd,
-                _wire.ServoJPoseCmd,
-                _wire.ServoLCmd,
-                _wire.TeleportCmd,
-            ),
+        if (
+            not self._state.attachments_valid
+            and _wire.STRUCT_TO_CMDTYPE.get(type(params)) in ARM_MOTION_CMD_TYPES
         ):
             raise ValueError("attachment context changed; reconcile and reapply")
         idx = self._open(method)
@@ -964,14 +952,9 @@ class DryRunRobotClient:
 
         def method(*args: Any, **kwargs: Any) -> int:
             idx = self._dispatch(build_cmd(name, *args, **kwargs), name)
-            # A system or control command answers as the live client does:
-            # 1 when it applied, negative when the planner refused it. Queued
-            # work answers with its program index; a motion that mints none
-            # (a jog, a servo step) with the code.
-            if spec.kind in (CommandKind.SYSTEM, CommandKind.CONTROL):
-                return -1 if self._failed(idx) else 1
-            if spec.mints_index:
-                return idx
-            return -1 if self._failed(idx) else 1
+            # Queued work answers with its program index; everything else
+            # answers as the live client does: 1 when it applied, -1 when
+            # the planner refused it.
+            return idx if spec.mints_index else (-1 if self._failed(idx) else 1)
 
         return method

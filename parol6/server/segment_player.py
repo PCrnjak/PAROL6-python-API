@@ -108,8 +108,13 @@ class SegmentPlayer:
         while seg is not None:
             self._buffer.append(seg)
             state.queued_segments += 1
+            if seg.command_index > state.plan_received_index:
+                state.plan_received_index = seg.command_index
             if isinstance(seg, TrajectorySegment):
                 state.queued_duration += seg.duration
+                for idx in seg.blend_consumed_indices:
+                    if idx > state.plan_received_index:
+                        state.plan_received_index = idx
             seg = self._planner.poll_segment()
 
         # MoveIt-style invalidation: a world change (SET_SHAPES bumps
@@ -510,3 +515,4 @@ class SegmentPlayer:
             pass
         state.queued_segments = 0
         state.queued_duration = 0.0
+        state.plan_received_index = state.plan_submitted_index

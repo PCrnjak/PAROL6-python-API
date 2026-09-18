@@ -32,7 +32,6 @@ from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from .. import config as cfg
 from ..ack_policy import (
     QUERY_CMD_TYPES,
-    QUERY_RESPONSE_TYPES,
     SYSTEM_CMD_TYPES,
     AckPolicy,
 )
@@ -665,7 +664,6 @@ class AsyncRobotClient(_RobotClientABC):
         """
         await self._ensure_endpoint()
         assert self._transport is not None
-        expected = QUERY_RESPONSE_TYPES[STRUCT_TO_CMDTYPE[type(cmd)]]
         wait = self.timeout if timeout is None else timeout
         attempts = self.retries + 1 if timeout is None else 1
         for attempt in range(attempts):
@@ -693,10 +691,6 @@ class AsyncRobotClient(_RobotClientABC):
                                     # behind.
                                     continue
                                 if isinstance(parsed, ResponseMsg):
-                                    # A timed-out query can reply after the next
-                                    # query starts on this same UDP endpoint.
-                                    if parsed.result.__struct_config__.tag != expected:
-                                        continue
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
                                     raise MotionError(
@@ -1670,10 +1664,28 @@ class AsyncRobotClient(_RobotClientABC):
                     err = _blocking_error(self._shared_status)
                     if err is not None:
                         raise MotionError(err)
-                    await asyncio.sleep(0.02)
+                    await self._await_completion_hint(command_index, 0.25)
         except TimeoutError:
             return False
         return False
+
+    async def _await_completion_hint(self, command_index: int, timeout: float) -> None:
+        """Return once a status frame reports the command complete or an
+        error standing, or after ``timeout`` without one, so the completion
+        query is paced by the status stream and still re-asked without it."""
+        end_time = time.monotonic() + timeout
+        while True:
+            self._status_event.clear()
+            status = self._shared_status
+            if status.completed_index >= command_index or status.error is not None:
+                return
+            remaining = end_time - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._status_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 

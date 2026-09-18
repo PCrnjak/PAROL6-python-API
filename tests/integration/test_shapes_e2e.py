@@ -114,6 +114,8 @@ def test_attached_part_blocks_motion_except_for_declared_contacts(client: RobotC
         assert client.reset() == 1
         with pytest.raises(MotionError, match="attachment context"):
             client.move_j(start, duration=1.0, wait=False)
+        with pytest.raises(MotionError, match="attachment context"):
+            client.home(wait=False)
         # Streamed datagrams are dropped while the context is stale, not
         # answered: nothing awaits a reply, and an ERROR sent anyway would be
         # dequeued by the next unrelated request on this client.
@@ -134,6 +136,34 @@ def test_attached_part_blocks_motion_except_for_declared_contacts(client: RobotC
         assert client.set_shapes([fixture, released]) == 1
         index = client.move_j(start, duration=1.0, wait=False)
         assert client.wait_command(index, timeout=10.0)
+    finally:
+        client.stop()
+        client.set_shapes([])
+
+
+def test_attaching_a_part_is_refused_while_a_plan_is_in_flight(
+    client: RobotClient, server_proc
+):
+    """A move accepted an instant ago may still be in the planner: attaching a
+    part waits for that plan to come back, not only for a queued segment."""
+    from waldoctl import Sphere
+
+    start = client.angles()
+    assert start is not None
+    target = list(start)
+    target[0] -= 20
+    world = client.shapes()
+    assert world is not None
+    part = Sphere(name="part", radius=0.01).attach(
+        flange_pose=(0.0, 0.0, 0.25, 0.0, 0.0, 0.0), epoch=world.attachment_epoch
+    )
+    try:
+        index = client.move_j(target, duration=1.0, wait=False)
+        assert index >= 0
+        with pytest.raises(MotionError, match="stop motion"):
+            client.set_shapes([part])
+        assert client.wait_command(index, timeout=10.0)
+        assert client.set_shapes([part]) == 1
     finally:
         client.stop()
         client.set_shapes([])

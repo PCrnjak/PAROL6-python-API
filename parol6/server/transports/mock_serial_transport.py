@@ -72,9 +72,6 @@ def _simulate_motion_jit(
                 speed_in[i] = 0
             command_out = CommandCode.IDLE
 
-    # Ensure E-stop stays released
-    io_in[4] = 1
-
     if command_out == CommandCode.HOME:
         if homing_countdown == 0:
             for i in range(6):
@@ -465,6 +462,10 @@ class MockSerialTransport:
             logger.warning(
                 "MockSerialTransport: failed to sync from controller state: %s", e
             )
+
+    def press_estop(self, pressed: bool) -> None:
+        """Drive the simulated E-stop input (bit 4: 0 pressed, 1 released)."""
+        self._state.io_in[4] = 0 if pressed else 1
 
     def disconnect(self) -> None:
         """Simulate serial port disconnection."""
