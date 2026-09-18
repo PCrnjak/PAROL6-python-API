@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 from waldoctl import CommandKind, command_table
 
-from parol6.client.dry_run_client import _CMD_STRUCTS, _STRIDE, DryRunRobotClient
-from parol6.config import INTERVAL_S
+from parol6.client.dry_run_client import _CMD_STRUCTS, DryRunRobotClient
+from tests.conftest import rows_for
 
 HOME = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 POSE_A = [0.0, 280.0, 200.0, 90.0, 0.0, 90.0]
@@ -22,12 +22,6 @@ POSE_B = [50.0, 280.0, 200.0, 90.0, 0.0, 90.0]
 POSE_C = [50.0, 280.0, 250.0, 90.0, 0.0, 90.0]
 ANGLES_A = [80.0, -80.0, 190.0, 10.0, 10.0, 190.0]
 ANGLES_B = [70.0, -70.0, 200.0, 20.0, 20.0, 200.0]
-
-
-def _rows_for(seconds: float) -> int:
-    import math
-
-    return math.ceil(round(seconds / INTERVAL_S) / _STRIDE)
 
 
 @pytest.fixture
@@ -111,7 +105,7 @@ class TestDryRunScriptCompat:
 
     def test_delay(self, client):
         index = client.delay(1.0)
-        assert client.plan().blocks[index].rows == _rows_for(1.0)
+        assert client.plan().blocks[index].rows == rows_for(1.0)
 
     def test_wait_motion(self, client):
         client.move_j(ANGLES_A, speed=0.5)

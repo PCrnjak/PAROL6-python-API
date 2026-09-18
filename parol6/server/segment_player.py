@@ -300,7 +300,6 @@ class SegmentPlayer:
                 state.collision_pairs = tuple(pairs) if pairs else ()
                 state.action_state = ActionState.ERROR
                 state.action_current = ""
-                state.executing_command_index = -1
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
@@ -365,6 +364,15 @@ class SegmentPlayer:
         self._inline_activated = False
         state.executing_command_index = self._active.command_index
         state.action_state = ActionState.EXECUTING
+        # The chain this segment plays is no longer owed: QUEUE lists only
+        # commands not yet started.
+        started = seg.command_index
+        if isinstance(seg, TrajectorySegment):
+            for idx in seg.blend_consumed_indices:
+                if idx > started:
+                    started = idx
+        while state.pending_planned and state.pending_planned[0][0] <= started:
+            state.pending_planned.popleft()
         # Populate action info for trajectory segments (inline segments set these later)
         if isinstance(self._active, TrajectorySegment):
             self._position_rad[:] = self._active.trajectory_rad[0]
@@ -441,7 +449,6 @@ class SegmentPlayer:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
         state.error = error
         state.action_current = ""
-        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.ERROR
         self._active = None
@@ -486,7 +493,6 @@ class SegmentPlayer:
             state.collision_pairs = tuple(pairs) if pairs else ()
             state.action_state = ActionState.ERROR
             state.action_current = ""
-            state.executing_command_index = -1
             state.action_params = ""
             self._active = None
             self._buffer.clear()

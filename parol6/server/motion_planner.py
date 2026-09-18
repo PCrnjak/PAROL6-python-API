@@ -737,6 +737,7 @@ def motion_planner_main(
                         ErrorSegment(
                             command_index=msg.command_index,
                             error=robot_error,
+                            generation=msg.generation,
                         )
                     )
                     worker.cancel()

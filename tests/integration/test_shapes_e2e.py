@@ -18,7 +18,7 @@ import pytest
 
 from parol6 import MotionError, RobotClient
 
-from tests.conftest import free_udp_port
+from tests.conftest import free_udp_port, wait_until
 from waldoctl import Box, Physical
 
 pytestmark = pytest.mark.integration
@@ -106,7 +106,7 @@ def test_attached_part_blocks_motion_except_for_declared_contacts(client: RobotC
         assert client.shapes().program[-1] == part
 
         assert client.estop() == 1
-        _wait_until(
+        wait_until(
             lambda: not client.shapes().attachments_valid,
             3.0,
             "attachment remained valid after stop",
@@ -151,15 +151,6 @@ def _wrist_box(target_deg: list[float], name: str) -> Box:
         z=0.25,
         pose=(float(p[0]), float(p[1]), float(p[2]), 0, 0, 0),
     )
-
-
-def _wait_until(pred, timeout: float, msg: str) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return
-        time.sleep(0.02)
-    pytest.fail(msg)
 
 
 def _j1(client: RobotClient) -> float:
@@ -222,18 +213,23 @@ def test_set_shapes_mid_flight_halts_streaming_move(client: RobotClient, server_
     try:
         idx = client.move_j(target, duration=4.0, wait=False)
         assert idx >= 0
-        _wait_until(
+        wait_until(
             lambda: _j1(client) < HOME_J1 - 5.0, 10.0, "move never started streaming"
         )
 
         assert client.set_shapes([_wrist_box(target, "blocker")]) == 1
-        _wait_until(
+        wait_until(
             lambda: client.error() is not None,
             3.0,
             "world change never halted the move",
         )
         err = client.error()
         assert err is not None and "shape:blocker" in err.cause
+        # The ERROR frame names the halted command, so a log keyed on the
+        # executing index sees the failure.
+        assert client.wait_status(
+            lambda s: s.executing_index == idx and s.error is not None, timeout=2.0
+        ), "the ERROR frame dropped the halted command's index"
 
         j1_stop = _j1(client)
         assert j1_stop > 30.0, f"arm reached the keep-out region (J1={j1_stop:.1f})"
@@ -256,13 +252,13 @@ def test_set_shapes_mid_flight_rejects_queued_move_at_activation(
         i1 = client.move_j(t1, duration=1.5, wait=False)
         i2 = client.move_j(t2, duration=2.0, wait=False)
         assert i1 >= 0 and i2 >= 0
-        _wait_until(
+        wait_until(
             lambda: _j1(client) < HOME_J1 - 2.0, 10.0, "first move never started"
         )
 
         assert client.set_shapes([_wrist_box(t2, "late-wall")]) == 1
 
-        _wait_until(
+        wait_until(
             lambda: client.error() is not None,
             10.0,
             "queued move was never invalidated",
@@ -270,7 +266,7 @@ def test_set_shapes_mid_flight_rejects_queued_move_at_activation(
         err = client.error()
         assert err is not None and "shape:late-wall" in err.cause
         # The clear first move finished; the blocked second never streamed.
-        _wait_until(
+        wait_until(
             lambda: abs(_j1(client) - 60.0) < 2.0,
             10.0,
             f"arm not at the first target (J1={_j1(client):.1f})",
@@ -291,7 +287,7 @@ def test_set_shapes_mid_flight_off_path_does_not_disturb_motion(
     try:
         idx = client.move_j(target, duration=2.5, wait=False)
         assert idx >= 0
-        _wait_until(
+        wait_until(
             lambda: _j1(client) < HOME_J1 - 5.0, 10.0, "move never started streaming"
         )
 

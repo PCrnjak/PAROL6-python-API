@@ -6,8 +6,10 @@ environment configuration, and test utilities used across the test suite.
 """
 
 import logging
+import math
 import os
 import socket
+import time
 from collections.abc import Generator
 from dataclasses import dataclass
 
@@ -25,6 +27,23 @@ def free_udp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(("", 0))
         return sock.getsockname()[1]
+
+
+def wait_until(pred, timeout: float, msg: str) -> None:
+    """Poll ``pred`` until it holds, failing the test with ``msg`` at ``timeout``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.02)
+    pytest.fail(msg)
+
+
+def rows_for(seconds: float) -> int:
+    """Rows a hold of ``seconds`` occupies in a dry-run record from its first tick."""
+    from parol6.client.dry_run_client import _STRIDE
+
+    return math.ceil(round(seconds / cfg.INTERVAL_S) / _STRIDE)
 
 
 logger = logging.getLogger(__name__)

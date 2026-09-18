@@ -290,7 +290,6 @@ class CommandExecutor:
             )
 
             state.action_current = ""
-            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
 

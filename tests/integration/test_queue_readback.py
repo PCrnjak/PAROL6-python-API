@@ -64,6 +64,10 @@ def test_the_queue_lists_what_is_owed_and_a_stop_clears_it(client: RobotClient):
             "the paused queue never listed the blend chain",
         )
         assert client.resume() == 1
+        # The chain plays as one motion: while its head executes, the command
+        # it swallowed is not owed work either.
+        assert client.wait_status(lambda s: s.executing_index == blended, timeout=5)
+        assert client.queue() == [], "a consumed blend member was listed as owed"
         assert client.wait_command(tail, timeout=20)
         _wait(
             lambda: client.queue() == [],
