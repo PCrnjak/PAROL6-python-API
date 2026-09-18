@@ -656,10 +656,6 @@ class Robot(_RobotABC):
 
     # -- Kinematics ---------------------------------------------------------
 
-    @property
-    def has_tcp_transform(self) -> bool:
-        return True
-
     def _load_q_buf(self, q_rad: NDArray[np.float64]) -> None:
         """Copy joint radians into the padded pinokin q buffer."""
         n = min(len(q_rad), self._pinokin.nq)
