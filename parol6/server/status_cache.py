@@ -192,10 +192,6 @@ class StatusCache:
         self._queued_segments: int = 0
         self._queued_duration: float = 0.0
 
-        # Binary cache
-        self._binary_cache: bytes = b""
-        self._binary_dirty: bool = True
-
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
         self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
         self._last_io_buf: np.ndarray = np.zeros((5,), dtype=np.uint8)
@@ -460,8 +456,6 @@ class StatusCache:
         if state.shapes_version != self._last_shapes_version:
             self._last_shapes_version = state.shapes_version
             self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
-            # World changed → broadcast the new epoch so displays re-query.
-            self._binary_dirty = True
 
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
@@ -517,7 +511,7 @@ class StatusCache:
             self._last_tool_positions = ts.positions
 
         # Poll for async IK results (non-blocking, zero-alloc)
-        ik_changed = self._poll_ik_results()
+        self._poll_ik_results()
 
         action_changed = (
             self._action_current != state.action_current
@@ -548,15 +542,12 @@ class StatusCache:
         # One scalar pass keeps the 100Hz path allocation-free; the per-joint
         # bits feed both the aggregate `homed` and the homing-progress view.
         homed = True
-        homing_changed = False
         joints_homed = self._joints_homed
         for i in range(6):
             bit = 1 if state.Homed_in[i] else 0
             if not bit:
                 homed = False
-            if joints_homed[i] != bit:
-                joints_homed[i] = bit
-                homing_changed = True
+            joints_homed[i] = bit
         homed_changed = self._homed != homed
         if homed_changed:
             self._homed = homed
@@ -565,7 +556,6 @@ class StatusCache:
         if enabled_changed:
             self._enabled = state.enabled
 
-        faults_changed = False
         for i in range(6):
             bits = (1 if state.Temperature_error_in[i] else 0) | (
                 2 if state.Position_error_in[i] else 0
@@ -573,14 +563,12 @@ class StatusCache:
             if self._drive_fault_bits[i] != bits:
                 self._drive_fault_bits[i] = bits
                 self._drive_faults[i] = _DRIVE_FAULT_LABELS[bits]
-                faults_changed = True
 
         # Only a live HomeCommand owns homing_step; any cancel path that drops
         # the command clears action_current, so derive "idle" from that.
-        step = state.homing_step if state.action_current == "HomeCommand" else 0
-        if self._homing_step != step:
-            self._homing_step = step
-            homing_changed = True
+        self._homing_step = (
+            state.homing_step if state.action_current == "HomeCommand" else 0
+        )
 
         collision_changed = (
             self._collision_active != state.collision_active
@@ -609,71 +597,47 @@ class StatusCache:
             self._p99_period_s = state.p99_period_s
             self._overruns = state.overrun_count
 
-        # Mark binary cache dirty if anything changed
-        if (
-            pos_changed
-            or tool_changed
-            or tool_status_changed
-            or io_changed
-            or spd_changed
-            or ik_changed
-            or action_changed
-            or queue_changed
-            or error_changed
-            or homed_changed
-            or enabled_changed
-            or homing_changed
-            or collision_changed
-            or depth_changed
-            or loop_changed
-            or faults_changed
-        ):
-            self._binary_dirty = True
-
     def to_binary(
         self, *, session_id: int = 0, seq: int = 0, mono_time_ns: int = 0
     ) -> bytes:
         """Return the msgpack-encoded STATUS payload."""
-        if self._binary_dirty or session_id:
-            from parol6.server.transports.transport_factory import is_simulation_mode
+        from parol6.server.transports.transport_factory import is_simulation_mode
 
-            self._binary_cache = pack_status(
-                self.pose,
-                self.angles_deg,
-                self.speeds_rad_s,
-                self.io,
-                self._action_current,
-                self._action_state,
-                self._joint_en,
-                self._cart_en_wrf,
-                self._cart_en_trf,
-                self._executing_index,
-                self._completed_index,
-                self._last_checkpoint,
-                self._error,
-                self._queued_segments,
-                self._queued_duration,
-                self._action_params,
-                self.tool_status,
-                self.tcp_speed,
-                simulator_active=is_simulation_mode(),
-                collision_active=self._collision_active,
-                collision_pairs=self._collision_pairs,
-                scene_epoch=self._last_shapes_version,
-                accepted_index=self._accepted_index,
-                homed=self._homed,
-                enabled=self._enabled,
-                homing_step=self._homing_step,
-                joints_homed=self._joints_homed,
-                p99_period_s=self._p99_period_s,
-                overruns=self._overruns,
-                drive_faults=self._drive_faults,
-                session_id=session_id,
-                seq=seq,
-                mono_time_ns=mono_time_ns,
-            )
-            self._binary_dirty = False
-        return self._binary_cache
+        return pack_status(
+            self.pose,
+            self.angles_deg,
+            self.speeds_rad_s,
+            self.io,
+            self._action_current,
+            self._action_state,
+            self._joint_en,
+            self._cart_en_wrf,
+            self._cart_en_trf,
+            self._executing_index,
+            self._completed_index,
+            self._last_checkpoint,
+            self._error,
+            self._queued_segments,
+            self._queued_duration,
+            self._action_params,
+            self.tool_status,
+            self.tcp_speed,
+            simulator_active=is_simulation_mode(),
+            collision_active=self._collision_active,
+            collision_pairs=self._collision_pairs,
+            scene_epoch=self._last_shapes_version,
+            accepted_index=self._accepted_index,
+            homed=self._homed,
+            enabled=self._enabled,
+            homing_step=self._homing_step,
+            joints_homed=self._joints_homed,
+            p99_period_s=self._p99_period_s,
+            overruns=self._overruns,
+            drive_faults=self._drive_faults,
+            session_id=session_id,
+            seq=seq,
+            mono_time_ns=mono_time_ns,
+        )
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""
