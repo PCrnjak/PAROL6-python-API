@@ -52,6 +52,7 @@ from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
 from pinokin import se3_from_rpy, se3_rpy
 import re as _re
+from math import degrees, radians
 
 import parol6.protocol.wire as _wire
 from waldoctl.commands import CommandKind, command_table
@@ -75,7 +76,8 @@ from ..server.motion_planner import (
 )
 from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError
-from parol6.tools import get_registry
+from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig, get_registry
+from waldoctl.tools import ToolType
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
@@ -213,9 +215,6 @@ class _DryRunTool:
 
     @property
     def tool_type(self) -> str:
-        from waldoctl.tools import ToolType
-        from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig
-
         spec = get_registry().get(self.key)
         return (
             ToolType.GRIPPER
@@ -336,8 +335,6 @@ class DryRunRobotClient:
         ]
 
     def tcp_transform(self) -> list[float]:
-        from math import degrees
-
         return self.tcp_offset() + [degrees(v) for v in self._state.tcp_rotation_rad]
 
     # ---- The record ----
@@ -609,8 +606,6 @@ class DryRunRobotClient:
             self._active_variant_key = params.variant_key
             self._state.set_tool(self._active_tool_key, params.variant_key)
         if isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
-            from math import radians
-
             rotation = (
                 (radians(params.roll), radians(params.pitch), radians(params.yaw))
                 if isinstance(params, SetTcpTransformCmd)

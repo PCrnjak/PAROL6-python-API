@@ -54,6 +54,24 @@ def test_execution_pause_speed_dwell_and_standalone_deadlines(client: RobotClien
         assert client.resume() == 1
         assert client.wait_command(index, timeout=3)
 
+        # A pause cannot hold a home in progress, so the readback must not
+        # claim a hold while it runs; once the arm is idle the hold is real.
+        homing = client.home(calibrate=True, wait=False)
+        assert homing >= 0
+        assert client.wait_status(lambda s: s.executing_index == homing, timeout=5)
+        assert client.pause() == 1
+        speed = client.execution_speed()
+        still_homing = client.wait_status(
+            lambda s: s.executing_index == homing, timeout=0.5
+        )
+        assert not still_homing or not speed.paused, "a running home reported a hold"
+        assert client.wait_command(homing, timeout=30)
+        deadline = time.monotonic() + 5
+        while not client.execution_speed().paused:
+            assert time.monotonic() < deadline, "idle pause never reported a hold"
+            time.sleep(0.02)
+        assert client.resume() == 1
+
         assert client.pause() == 1
         with pytest.raises(TimeoutError):
             client.move_j(start, duration=1, wait=True, timeout=0.2)

@@ -46,6 +46,18 @@ def test_digital_io_readback_and_missing_peer_deadlines(client, server_proc):
                         await absent.io(timeout=invalid)
                     with pytest.raises(ValueError):
                         await absent.write_io(0, 1, timeout=invalid)
+            # A deadline longer than the client's own is honoured in full and
+            # still reported as a timeout, not cut short into a failure code.
+            async with AsyncRobotClient(
+                port=silent.getsockname()[1], timeout=0.2, retries=0
+            ) as absent:
+                start = time.monotonic()
+                with pytest.raises(TimeoutError):
+                    await absent.write_io(0, 1, timeout=1.0)
+                elapsed = time.monotonic() - start
+                assert 0.9 < elapsed < 3.0, (
+                    f"write cut short at {elapsed:.2f}s by the client default"
+                )
 
     asyncio.run(missing_peer())
 

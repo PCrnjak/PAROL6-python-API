@@ -140,32 +140,6 @@ class UDPTransport:
             self._recv_all_buf.append(msg)
         return self._recv_all_buf
 
-    def drain_buffer(self) -> int:
-        """
-        Drain all pending messages from the UDP receive buffer.
-
-        This is useful in stream mode to discard stale commands when new ones arrive.
-        Returns the number of messages drained.
-        """
-        if not self.socket or not self._running:
-            return 0
-
-        drained_count = 0
-        try:
-            # Socket is already non-blocking; read all pending messages
-            while True:
-                try:
-                    nbytes, _ = self.socket.recvfrom_into(self._rxv)
-                    if nbytes > 0:
-                        drained_count += 1
-                except (BlockingIOError, OSError):
-                    # No more data available (expected)
-                    break
-        except Exception as e:
-            logger.debug(f"Error draining UDP buffer: {e}")
-
-        return drained_count
-
     def send(self, data: bytes, address: tuple[str, int]) -> bool:
         """
         Send raw bytes to a specific address.

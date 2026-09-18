@@ -20,9 +20,11 @@ import queue
 import signal
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union, cast
+from math import radians
 
 import numpy as np
 
+from parol6.config import INTERVAL_S
 from parol6.protocol.wire import (
     HomeCmd,
     MoveJCmd,
@@ -64,8 +66,6 @@ class TrajectorySegment:
     acceleration_rad_s2: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
-        from parol6.config import INTERVAL_S
-
         if len(self.trajectory_rad) < 2:
             self.velocity_rad_s = np.zeros_like(self.trajectory_rad)
             self.acceleration_rad_s2 = np.zeros_like(self.trajectory_rad)
@@ -531,8 +531,6 @@ class TrajectoryPlanner:
                 tcp_rotation_rad=self.state.tcp_rotation_rad,
             )
         elif isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
-            from math import radians
-
             offset_m = (params.x / 1000.0, params.y / 1000.0, params.z / 1000.0)
             rotation_rad = (
                 (radians(params.roll), radians(params.pitch), radians(params.yaw))

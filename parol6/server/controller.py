@@ -647,15 +647,18 @@ class Controller:
         assert self.udp_transport is not None
 
         state.command_out_locked = False
-        # Copied: the transport hands back a buffer it reuses on the next call.
-        msgs = list(self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT))
-        if len(msgs) == MAX_POLL_COUNT:
+        # The transport reuses its batch buffer, so each batch is processed
+        # before the next one is read; nothing is copied on the tick.
+        msgs = self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT)
+        full = len(msgs) == MAX_POLL_COUNT
+        for data, addr in msgs:
+            self._process_command(data, addr, state)
+        if full:
             backlog = self.udp_transport.poll_receive_all(max_count=MAX_BACKLOG_COUNT)
             if len(backlog) == MAX_BACKLOG_COUNT:
                 logger.log(TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT)
-            msgs.extend(backlog)
-        for data, addr in msgs:
-            self._process_command(data, addr, state)
+            for data, addr in backlog:
+                self._process_command(data, addr, state)
 
     def _reply_error(
         self, req_id: int, addr: tuple[str, int], error: RobotError
