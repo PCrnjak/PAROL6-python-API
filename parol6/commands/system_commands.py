@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import TYPE_CHECKING
+from math import radians
 
 from parol6.commands.base import (
     CommandBase,
@@ -244,8 +245,6 @@ class SetTcpTransformCommand(MotionCommand[SetTcpTransformCmd]):
     __slots__ = ()
 
     def do_setup(self, state: ControllerState) -> None:
-        from math import radians
-
         state.set_tcp_transform(
             (self.p.x / 1000, self.p.y / 1000, self.p.z / 1000),
             (radians(self.p.roll), radians(self.p.pitch), radians(self.p.yaw)),
