@@ -15,16 +15,16 @@ from parol6.config import CONTROL_RATE_HZ, servable_status_rates
 from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
+    CommandCode,
     DelayCmd,
     ResetLoopStatsCmd,
     ResetStateCmd,
     SetStatusRateCmd,
 )
-from parol6.utils.error_catalog import make_error
-from parol6.utils.error_codes import ErrorCode
-from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -109,19 +109,14 @@ class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         hz = float(self.p.hz)
-        control = int(CONTROL_RATE_HZ)
-        # Ordered so the modulo only ever sees a finite, in-range, integral
-        # divisor: int(0.5) is 0 and int(nan) raises, and either would leave
-        # as a generic tick failure instead of the refusal that names the
-        # rates this controller can serve.
-        if not (1.0 <= hz <= control) or not hz.is_integer() or control % int(hz) != 0:
-            allowed = ", ".join(f"{hz:g}" for hz in servable_status_rates())
+        allowed = servable_status_rates()
+        if hz not in allowed:
             self.fail(
                 make_error(
                     ErrorCode.SYS_STATUS_RATE_INVALID,
                     requested=hz,
-                    control=control,
-                    allowed=allowed,
+                    control=int(CONTROL_RATE_HZ),
+                    allowed=", ".join(f"{v:g}" for v in allowed),
                 )
             )
             return ExecutionStatusCode.FAILED
