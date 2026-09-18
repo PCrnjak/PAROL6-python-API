@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-from parol6.ack_policy import AckPolicy
+from parol6.ack_policy import ARM_MOTION_CMD_TYPES, AckPolicy
 from parol6.commands.base import (
     CommandBase,
     ExecutionStatusCode,
@@ -34,7 +34,6 @@ from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
     CommandCode,
-    CmdType,
     ToolActionCmd,
     pack_error,
     pack_ok,
@@ -348,6 +347,10 @@ class Controller:
                 break
         if not healthy and state.attachments_valid:
             state.invalidate_attachments()
+        # A hardware E-stop already cancelled all motion and owns the error
+        # until it is released; the attachment error latches on that tick.
+        if state.error is not None and state.error.code == ErrorCode.SYS_ESTOP_ACTIVE:
+            return
         if not state.attachments_valid and not state.attachment_motion_stopped:
             self._segment_player.cancel(state)
             self._planner.cancel()
@@ -644,15 +647,18 @@ class Controller:
         assert self.udp_transport is not None
 
         state.command_out_locked = False
-        # Copied: the transport hands back a buffer it reuses on the next call.
-        msgs = list(self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT))
-        if len(msgs) == MAX_POLL_COUNT:
+        # The transport reuses its batch buffer, so each batch is processed
+        # before the next one is read; nothing is copied on the tick.
+        msgs = self.udp_transport.poll_receive_all(max_count=MAX_POLL_COUNT)
+        full = len(msgs) == MAX_POLL_COUNT
+        for data, addr in msgs:
+            self._process_command(data, addr, state)
+        if full:
             backlog = self.udp_transport.poll_receive_all(max_count=MAX_BACKLOG_COUNT)
             if len(backlog) == MAX_BACKLOG_COUNT:
                 logger.log(TRACE, "udp_backlog_capped count=%d", MAX_BACKLOG_COUNT)
-            msgs.extend(backlog)
-        for data, addr in msgs:
-            self._process_command(data, addr, state)
+            for data, addr in backlog:
+                self._process_command(data, addr, state)
 
     def _reply_error(
         self, req_id: int, addr: tuple[str, int], error: RobotError
@@ -741,20 +747,7 @@ class Controller:
         cmd_name = type(command).__name__
 
         cmd_type = command._cmd_type
-        if not state.attachments_valid and cmd_type in (
-            CmdType.MOVEJ,
-            CmdType.MOVEJ_POSE,
-            CmdType.MOVEL,
-            CmdType.MOVEC,
-            CmdType.MOVES,
-            CmdType.MOVEP,
-            CmdType.JOGJ,
-            CmdType.JOGL,
-            CmdType.SERVOJ,
-            CmdType.SERVOJ_POSE,
-            CmdType.SERVOL,
-            CmdType.TELEPORT,
-        ):
+        if not state.attachments_valid and cmd_type in ARM_MOTION_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
                 self._reply_error(
                     req_id,
@@ -884,6 +877,7 @@ class Controller:
             )
         )
         state.pending_planned.append((cmd_index, cmd_name))
+        state.plan_submitted_index = cmd_index
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
             self._reply_ok_index(req_id, addr, cmd_index)
 
@@ -931,18 +925,6 @@ class Controller:
     ) -> None:
         """Execute system command, apply side effects, and send reply."""
         try:
-            if (
-                isinstance(command, SetShapesCommand)
-                and (
-                    state.has_attachments
-                    or any(w.attachment is not None for w in command.p.shapes)
-                )
-                and (
-                    self._segment_player.active
-                    or self._executor.active_command is not None
-                )
-            ):
-                raise ValueError("stop motion before changing attachments")
             command.setup(state)
             code = command.tick(state)
 

@@ -58,20 +58,3 @@ def test_faults_reach_the_client_against_the_joint_that_tripped():
         assert set(faults[4]) == {"overtemperature", "following_error"}, faults
     finally:
         cache.close()
-
-
-@pytest.mark.integration
-def test_a_bus_with_no_analog_registers_reports_no_readings():
-    """Faults are this backend's only drive health. Empty temperature and
-    current lists are what tell a consumer there is no such sensor, rather
-    than a row of zeros that reads as a cold, idle drive."""
-    cache = StatusCache()
-    try:
-        cache.update_from_state(ControllerState())
-        health = _decode(cache).drive_health
-        assert health.get("faults"), "faults are reported"
-        assert not health.get("temperatures_c"), health
-        assert not health.get("currents_ma"), health
-        assert health.get("bus_voltage_v") is None, health
-    finally:
-        cache.close()

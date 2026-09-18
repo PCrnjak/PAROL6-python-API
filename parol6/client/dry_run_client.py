@@ -29,6 +29,7 @@ from waldoctl.skills import UnresolvedPreview
 from waldoctl.ticks import TickBlock, TickIndex
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from ..ack_policy import ARM_MOTION_CMD_TYPES
 from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import (
     JogLCommand,
@@ -51,6 +52,7 @@ from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
 from pinokin import se3_from_rpy, se3_rpy
 import re as _re
+from math import degrees, radians
 
 import parol6.protocol.wire as _wire
 from waldoctl.commands import CommandKind, command_table
@@ -74,7 +76,8 @@ from ..server.motion_planner import (
 )
 from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError
-from parol6.tools import get_registry
+from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig, get_registry
+from waldoctl.tools import ToolType
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
@@ -212,9 +215,6 @@ class _DryRunTool:
 
     @property
     def tool_type(self) -> str:
-        from waldoctl.tools import ToolType
-        from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig
-
         spec = get_registry().get(self.key)
         return (
             ToolType.GRIPPER
@@ -335,8 +335,6 @@ class DryRunRobotClient:
         ]
 
     def tcp_transform(self) -> list[float]:
-        from math import degrees
-
         return self.tcp_offset() + [degrees(v) for v in self._state.tcp_rotation_rad]
 
     # ---- The record ----
@@ -564,22 +562,9 @@ class DryRunRobotClient:
             and not cmd_cls.streamable
         ):
             self._require_running()
-        if not self._state.attachments_valid and isinstance(
-            params,
-            (
-                _wire.MoveJCmd,
-                _wire.MoveJPoseCmd,
-                _wire.MoveLCmd,
-                _wire.MoveCCmd,
-                _wire.MoveSCmd,
-                _wire.MovePCmd,
-                _wire.JogJCmd,
-                _wire.JogLCmd,
-                _wire.ServoJCmd,
-                _wire.ServoJPoseCmd,
-                _wire.ServoLCmd,
-                _wire.TeleportCmd,
-            ),
+        if (
+            not self._state.attachments_valid
+            and _wire.STRUCT_TO_CMDTYPE.get(type(params)) in ARM_MOTION_CMD_TYPES
         ):
             raise ValueError("attachment context changed; reconcile and reapply")
         idx = self._open(method)
@@ -621,8 +606,6 @@ class DryRunRobotClient:
             self._active_variant_key = params.variant_key
             self._state.set_tool(self._active_tool_key, params.variant_key)
         if isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
-            from math import radians
-
             rotation = (
                 (radians(params.roll), radians(params.pitch), radians(params.yaw))
                 if isinstance(params, SetTcpTransformCmd)
@@ -964,14 +947,9 @@ class DryRunRobotClient:
 
         def method(*args: Any, **kwargs: Any) -> int:
             idx = self._dispatch(build_cmd(name, *args, **kwargs), name)
-            # A system or control command answers as the live client does:
-            # 1 when it applied, negative when the planner refused it. Queued
-            # work answers with its program index; a motion that mints none
-            # (a jog, a servo step) with the code.
-            if spec.kind in (CommandKind.SYSTEM, CommandKind.CONTROL):
-                return -1 if self._failed(idx) else 1
-            if spec.mints_index:
-                return idx
-            return -1 if self._failed(idx) else 1
+            # Queued work answers with its program index; everything else
+            # answers as the live client does: 1 when it applied, -1 when
+            # the planner refused it.
+            return idx if spec.mints_index else (-1 if self._failed(idx) else 1)
 
         return method

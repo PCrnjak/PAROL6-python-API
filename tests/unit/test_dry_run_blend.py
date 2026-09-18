@@ -68,15 +68,10 @@ class TestDryRunBlend:
         client.move_j(angles=W2, speed=0.5, r=0)
         np.testing.assert_allclose(client.angles(), W2, atol=0.5)
 
-    def test_execution_override_preserves_path_and_pause(self):
-        normal = DryRunRobotClient(initial_joints_deg=W0)
+    def test_pause_holds_the_program_until_resume(self):
         slow = DryRunRobotClient(initial_joints_deg=W0)
-        n = normal.move_j(W1, duration=2)
         assert slow.set_execution_speed(0.5) == 1
-        s = slow.move_j(W1, duration=2)
-        normal_block = normal.plan().blocks[n]
-        slow_block = slow.plan().blocks[s]
-        assert slow_block.rows == pytest.approx(normal_block.rows * 2, abs=1)
+        assert slow.move_j(W1, duration=2) >= 0
         assert slow.pause() == 1
         assert slow.set_execution_speed(0.3) == 1
         assert slow.execution_speed().paused

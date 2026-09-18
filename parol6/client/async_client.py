@@ -12,6 +12,7 @@ import struct
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, cast
+from math import isfinite
 
 import msgspec
 import numpy as np
@@ -32,7 +33,6 @@ from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from .. import config as cfg
 from ..ack_policy import (
     QUERY_CMD_TYPES,
-    QUERY_RESPONSE_TYPES,
     SYSTEM_CMD_TYPES,
     AckPolicy,
 )
@@ -598,9 +598,13 @@ class AsyncRobotClient(_RobotClientABC):
         if self._proto_error is not None:
             raise self._proto_error
 
-    async def _send(self, cmd: msgspec.Struct) -> int:
+    async def _send(self, cmd: msgspec.Struct, *, timeout: float | None = None) -> int:
         """
         Send a binary command based on AckPolicy.
+
+        ``timeout`` replaces the client default for an acknowledged command,
+        and its expiry raises TimeoutError instead of answering a failure
+        code: a caller that named a deadline asked to hear about it.
 
         Returns:
             int (command index ≥ 0) for ACK'd queued commands, -1 on failure,
@@ -612,16 +616,17 @@ class AsyncRobotClient(_RobotClientABC):
         cmd_type = STRUCT_TO_CMDTYPE.get(type(cmd))
         if cmd_type is None:
             return 0
+        wait = self.timeout if timeout is None else timeout
 
         # System commands need stable bytes across the await, so encode a fresh buffer
         if cmd_type in SYSTEM_CMD_TYPES:
             req_id = self._request_id()
             try:
-                await self._request_ok_raw(
-                    encode_command(cmd, req_id), self.timeout, req_id
-                )
+                await self._request_ok_raw(encode_command(cmd, req_id), wait, req_id)
                 return 1
             except TimeoutError:
+                if timeout is not None:
+                    raise
                 return 0
 
         if cmd_type not in QUERY_CMD_TYPES:
@@ -629,11 +634,13 @@ class AsyncRobotClient(_RobotClientABC):
                 req_id = self._request_id()
                 try:
                     ok = await self._request_ok_raw(
-                        encode_command(cmd, req_id), self.timeout, req_id
+                        encode_command(cmd, req_id), wait, req_id
                     )
                     self._last_command_index = ok.index
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
+                    if timeout is not None:
+                        raise
                     return -1
             # Fire-and-forget: safe to reuse the shared buffer since sendto copies it
             encode_command_into(cmd, self._tx_buf)
@@ -665,7 +672,6 @@ class AsyncRobotClient(_RobotClientABC):
         """
         await self._ensure_endpoint()
         assert self._transport is not None
-        expected = QUERY_RESPONSE_TYPES[STRUCT_TO_CMDTYPE[type(cmd)]]
         wait = self.timeout if timeout is None else timeout
         attempts = self.retries + 1 if timeout is None else 1
         for attempt in range(attempts):
@@ -693,10 +699,6 @@ class AsyncRobotClient(_RobotClientABC):
                                     # behind.
                                     continue
                                 if isinstance(parsed, ResponseMsg):
-                                    # A timed-out query can reply after the next
-                                    # query starts on this same UDP endpoint.
-                                    if parsed.result.__struct_config__.tag != expected:
-                                        continue
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
                                     raise MotionError(
@@ -1206,8 +1208,6 @@ class AsyncRobotClient(_RobotClientABC):
         )
 
     async def tcp_transform(self) -> list[float]:
-        from math import isfinite
-
         resp = await self._request(TcpTransformCmd())
         if not isinstance(resp, TcpTransformResultStruct):
             raise TimeoutError("Controller did not return a TCP transform")
@@ -1670,10 +1670,28 @@ class AsyncRobotClient(_RobotClientABC):
                     err = _blocking_error(self._shared_status)
                     if err is not None:
                         raise MotionError(err)
-                    await asyncio.sleep(0.02)
+                    await self._await_completion_hint(command_index, 0.25)
         except TimeoutError:
             return False
         return False
+
+    async def _await_completion_hint(self, command_index: int, timeout: float) -> None:
+        """Return once a status frame reports the command complete or an
+        error standing, or after ``timeout`` without one, so the completion
+        query is paced by the status stream and still re-asked without it."""
+        end_time = time.monotonic() + timeout
+        while True:
+            self._status_event.clear()
+            status = self._shared_status
+            if status.completed_index >= command_index or status.error is not None:
+                return
+            remaining = end_time - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._status_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
 
@@ -2103,10 +2121,9 @@ class AsyncRobotClient(_RobotClientABC):
         ):
             raise ValueError("I/O timeout must be positive and finite")
         async with asyncio.timeout(timeout):
-            result = await self._send(
-                WriteIOCmd(port_index=firmware_index, value=value)
+            return await self._send(
+                WriteIOCmd(port_index=firmware_index, value=value), timeout=timeout
             )
-            return result
 
     async def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue.

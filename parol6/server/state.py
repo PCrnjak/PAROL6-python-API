@@ -296,6 +296,10 @@ class ControllerState:
     has_attachments: bool = False
     attachments_valid: bool = True
     attachment_motion_stopped: bool = False
+    # Highest command index handed to the planner, and the highest one a
+    # returned segment accounts for (a blend head answers for its chain).
+    plan_submitted_index: int = -1
+    plan_received_index: int = -1
 
     # Network setup and uptime
     ip: str = "127.0.0.1"
@@ -432,6 +436,8 @@ class ControllerState:
         self.clear_collision()
         self.queued_segments = 0
         self.queued_duration = 0.0
+        self.plan_submitted_index = -1
+        self.plan_received_index = -1
 
         # Gripper mode tracker
         self.gripper_mode_tracker = GripperModeResetTracker()
@@ -485,8 +491,12 @@ class ControllerState:
             raise ValueError(
                 "attachment context changed; reconcile the physical scene and reapply"
             )
-        if (attached or self.has_attachments) and self.queued_segments:
-            raise ValueError("stop queued motion before changing attachments")
+        if (attached or self.has_attachments) and (
+            self.action_state == ActionState.EXECUTING
+            or self.queued_segments
+            or self.plan_in_flight
+        ):
+            raise ValueError("stop motion before changing attachments")
         if attached and (not self.enabled or not all(self.Homed_in[:6])):
             raise ValueError("attachments require enabled, referenced robot state")
         PAROL6_ROBOT.apply_shapes(shapes)
@@ -495,6 +505,11 @@ class ControllerState:
         self.attachment_motion_stopped = False
         self.shapes = list(shapes)
         self.shapes_version += 1
+
+    @property
+    def plan_in_flight(self) -> bool:
+        """True while a submitted plan has not come back from the planner."""
+        return self.plan_submitted_index > self.plan_received_index
 
     def invalidate_attachments(self) -> None:
         """Require explicit reconciliation after a reference/source/tool change."""

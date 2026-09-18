@@ -35,6 +35,7 @@ from numba import njit
 from parol6.config import LIMITS
 from waldoctl import ActionState, ToolStatus
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
+from waldoctl.shapes import Attachment
 from waldoctl.tools import ToolState
 
 from parol6.tools import get_registry, list_tools
@@ -719,8 +720,6 @@ class ShapeWire(msgspec.Struct, array_like=True, frozen=True, gc=False):
 
     def __post_init__(self) -> None:
         if self.attachment is not None:
-            from waldoctl.shapes import Attachment
-
             Attachment.from_wire(self.attachment)
 
 

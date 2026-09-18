@@ -108,8 +108,13 @@ class SegmentPlayer:
         while seg is not None:
             self._buffer.append(seg)
             state.queued_segments += 1
+            if seg.command_index > state.plan_received_index:
+                state.plan_received_index = seg.command_index
             if isinstance(seg, TrajectorySegment):
                 state.queued_duration += seg.duration
+                for idx in seg.blend_consumed_indices:
+                    if idx > state.plan_received_index:
+                        state.plan_received_index = idx
             seg = self._planner.poll_segment()
 
         # MoveIt-style invalidation: a world change (SET_SHAPES bumps
@@ -277,10 +282,11 @@ class SegmentPlayer:
 
             # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
-                state.execution_applied_speed = (
-                    0.0 if state.execution_paused else state.execution_speed
-                )
-                if state.execution_paused and isinstance(active.params, DelayCmd):
+                # A pause holds a dwell; a running home keeps ticking, so the
+                # applied speed reports a hold only for the command it holds.
+                held = state.execution_paused and isinstance(active.params, DelayCmd)
+                state.execution_applied_speed = 0.0 if held else state.execution_speed
+                if held:
                     state.Speed_out.fill(0)
                     return True
                 result = self._tick_inline(active, state)
@@ -527,3 +533,4 @@ class SegmentPlayer:
         state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0
+        state.plan_received_index = state.plan_submitted_index

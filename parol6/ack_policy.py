@@ -1,6 +1,6 @@
 import os
 
-from parol6.protocol.wire import CmdType, QueryType
+from parol6.protocol.wire import CmdType
 
 # System command types (always require ACK)
 SYSTEM_CMD_TYPES: set[CmdType] = {
@@ -18,31 +18,30 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
 }
 
 # Query command types (use request/response, not ACK)
-QUERY_RESPONSE_TYPES: dict[CmdType, QueryType] = {
-    CmdType.POSE: QueryType.POSE,
-    CmdType.ANGLES: QueryType.ANGLES,
-    CmdType.IO: QueryType.IO,
-    CmdType.JOINT_SPEEDS: QueryType.SPEEDS,
-    CmdType.STATUS: QueryType.STATUS,
-    CmdType.LOOP_STATS: QueryType.LOOP_STATS,
-    CmdType.ACTIVITY: QueryType.CURRENT_ACTION,
-    CmdType.QUEUE: QueryType.QUEUE,
-    CmdType.TOOLS: QueryType.TOOL,
-    CmdType.TOOL_STATUS: QueryType.TOOL_STATUS,
-    CmdType.PROFILE: QueryType.PROFILE,
-    CmdType.REACHABLE: QueryType.ENABLEMENT,
-    CmdType.ERROR: QueryType.ERROR,
-    CmdType.TCP_SPEED: QueryType.TCP_SPEED,
-    CmdType.PING: QueryType.PING,
-    CmdType.IS_SIMULATOR: QueryType.IS_SIMULATOR,
-    CmdType.TCP_OFFSET: QueryType.TCP_OFFSET,
-    CmdType.TCP_TRANSFORM: QueryType.TCP_TRANSFORM,
-    CmdType.SHAPES: QueryType.SHAPES,
-    CmdType.STATUS_RATE: QueryType.STATUS_RATE,
-    CmdType.EXECUTION_SPEED: QueryType.EXECUTION_SPEED,
-    CmdType.COMMAND_COMPLETION: QueryType.COMMAND_COMPLETION,
+QUERY_CMD_TYPES: set[CmdType] = {
+    CmdType.POSE,
+    CmdType.ANGLES,
+    CmdType.IO,
+    CmdType.JOINT_SPEEDS,
+    CmdType.STATUS,
+    CmdType.LOOP_STATS,
+    CmdType.ACTIVITY,
+    CmdType.QUEUE,
+    CmdType.TOOLS,
+    CmdType.TOOL_STATUS,
+    CmdType.PROFILE,
+    CmdType.REACHABLE,
+    CmdType.ERROR,
+    CmdType.TCP_SPEED,
+    CmdType.PING,
+    CmdType.IS_SIMULATOR,
+    CmdType.TCP_OFFSET,
+    CmdType.TCP_TRANSFORM,
+    CmdType.SHAPES,
+    CmdType.STATUS_RATE,
+    CmdType.EXECUTION_SPEED,
+    CmdType.COMMAND_COMPLETION,
 }
-QUERY_CMD_TYPES: set[CmdType] = set(QUERY_RESPONSE_TYPES)
 
 # Streaming commands are fire-and-forget (no ACK needed)
 FIRE_AND_FORGET: set[CmdType] = {
@@ -72,6 +71,25 @@ QUEUED_CMD_TYPES: set[CmdType] = {
     CmdType.WRITE_IO,
     CmdType.TOOL_ACTION,
 }
+
+# Commands that move the arm: refused while the attachment context is stale
+ARM_MOTION_CMD_TYPES: frozenset[CmdType] = frozenset(
+    {
+        CmdType.HOME,
+        CmdType.MOVEJ,
+        CmdType.MOVEJ_POSE,
+        CmdType.MOVEL,
+        CmdType.MOVEC,
+        CmdType.MOVES,
+        CmdType.MOVEP,
+        CmdType.JOGJ,
+        CmdType.JOGL,
+        CmdType.SERVOJ,
+        CmdType.SERVOJ_POSE,
+        CmdType.SERVOL,
+        CmdType.TELEPORT,
+    }
+)
 
 
 class AckPolicy:
