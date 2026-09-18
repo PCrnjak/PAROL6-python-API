@@ -277,10 +277,11 @@ class SegmentPlayer:
 
             # --- Inline segment: tick the command ---
             if isinstance(active, InlineSegment):
-                state.execution_applied_speed = (
-                    0.0 if state.execution_paused else state.execution_speed
-                )
-                if state.execution_paused and isinstance(active.params, DelayCmd):
+                # A pause holds a dwell; a running home keeps ticking, so the
+                # applied speed reports a hold only for the command it holds.
+                held = state.execution_paused and isinstance(active.params, DelayCmd)
+                state.execution_applied_speed = 0.0 if held else state.execution_speed
+                if held:
                     state.Speed_out.fill(0)
                     return True
                 result = self._tick_inline(active, state)
