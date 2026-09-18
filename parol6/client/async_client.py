@@ -11,6 +11,7 @@ import struct
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, cast
+from math import isfinite
 
 import msgspec
 import numpy as np
@@ -1041,8 +1042,6 @@ class AsyncRobotClient(_RobotClientABC):
         )
 
     async def tcp_transform(self) -> list[float]:
-        from math import isfinite
-
         resp = await self._request(TcpTransformCmd())
         if not isinstance(resp, TcpTransformResultStruct):
             raise TimeoutError("Controller did not return a TCP transform")
