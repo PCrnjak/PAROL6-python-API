@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 
+from parol6.config import INTERVAL_S
 from parol6.protocol.wire import (
     HomeCmd,
     MoveJCmd,
@@ -64,8 +65,6 @@ class TrajectorySegment:
     acceleration_rad_s2: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
-        from parol6.config import INTERVAL_S
-
         if len(self.trajectory_rad) < 2:
             self.velocity_rad_s = np.zeros_like(self.trajectory_rad)
             self.acceleration_rad_s2 = np.zeros_like(self.trajectory_rad)
