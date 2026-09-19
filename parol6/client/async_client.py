@@ -17,7 +17,13 @@ import numpy as np
 from waldoctl import RobotClient as _RobotClientABC, Shape, ShapeWorld, ToolStatus
 from msgspec.structs import asdict
 from waldoctl.shapes import shape_from_wire
-from waldoctl.status import ActionState, ActivityResult, LoopStatsResult, ToolResult
+from waldoctl.status import (
+    ActionState,
+    ActivityResult,
+    LoopStatsResult,
+    StatusRate,
+    ToolResult,
+)
 from waldoctl.tools import ToolSpec
 
 from .. import config as cfg
@@ -65,6 +71,9 @@ from ..protocol.wire import (
     ReachableCmd,
     ResetCmd,
     ResetLoopStatsCmd,
+    SetStatusRateCmd,
+    StatusRateCmd,
+    StatusRateResultStruct,
     ResetStateCmd,
     Response,
     StopCmd,
@@ -202,6 +211,8 @@ def _create_unicast_socket(port: int, host: str) -> socket.socket:
 if TYPE_CHECKING:
     from typing import Protocol
 
+    from parol6.robot import Robot
+
     class _StatusNotifier(Protocol):
         _shared_status: StatusBuffer
         _status_generation: int
@@ -243,18 +254,36 @@ class AsyncRobotClient(_RobotClientABC):
     Query commands: request/response with timeout and simple retry
     """
 
+    _robot: "Robot | None" = None
+
+    @property
+    def robot(self) -> "Robot":
+        """The backend this client drives, built on first read when a bare
+        client (what a user script constructs) supplied none."""
+        if self._robot is None:
+            from parol6.robot import Robot
+
+            self._robot = Robot()
+        return self._robot
+
+    @robot.setter
+    def robot(self, value: "Robot | None") -> None:
+        self._robot = value
+
     def __init__(
         self,
         host: str = "127.0.0.1",
         port: int = 5001,
         timeout: float = 1.0,
         retries: int = 1,
+        robot: "Robot | None" = None,
     ) -> None:
         # host/port are immutable after endpoint creation
         self._host = host
         self._port = port
         self.timeout = timeout
         self.retries = retries
+        self._robot = robot
 
         # Pre-allocated buffers for pose() RPY conversion
         self._R_buf = np.zeros((3, 3), dtype=np.float64)
@@ -930,6 +959,33 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.reset_loop_stats()
         """
         return await self._send(ResetLoopStatsCmd())
+
+    async def set_status_rate(self, hz: float) -> int:
+        """Set the rate the controller broadcasts status at.
+
+        Category: Configuration
+
+        Example:
+            rbt.set_status_rate(100)
+        """
+        return await self._send(SetStatusRateCmd(hz=float(hz)))
+
+    async def status_rate(self) -> StatusRate | None:
+        """Current broadcast rate and the control rate it divides.
+
+        Category: Query
+
+        Example:
+            rate = rbt.status_rate()
+        """
+        resp = await self._request(StatusRateCmd())
+        if not isinstance(resp, StatusRateResultStruct):
+            return None
+        return StatusRate(
+            hz=resp.hz,
+            control_hz=resp.control_hz,
+            servable=tuple(float(v) for v in resp.servable),
+        )
 
     async def select_tool(self, tool_name: str, variant_key: str = "") -> int:
         """Set the active end-effector tool on the controller.

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -38,6 +38,7 @@ from pinokin import se3_from_rpy, se3_rpy
 import re as _re
 
 import parol6.protocol.wire as _wire
+from waldoctl.commands import CommandKind, command_table
 from ..protocol.wire import (
     HomeCmd,
     SelectToolCmd,
@@ -58,6 +59,9 @@ from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
 from parol6.tools import get_registry
 
+if TYPE_CHECKING:
+    from parol6.robot import Robot
+
 
 def _pascal_to_snake(name: str) -> str:
     """Convert PascalCase to snake_case: MoveJPose → move_j_pose"""
@@ -76,6 +80,9 @@ for _attr in dir(_wire):
         )
 
 _UPPER_FIELDS: frozenset[str] = frozenset({"tool_name", "tool_key", "profile"})
+
+_COMMANDS = command_table()
+_AXIS_INDEX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
 
 
 def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
@@ -163,12 +170,31 @@ class DryRunRobotClient:
     and delay (no-op).
     """
 
+    _robot: Robot | None = None
+
+    @property
+    def robot(self) -> Robot:
+        """The backend this preview stands in for, built on first read when
+        the host constructed the client bare. A real descriptor on the class,
+        so the read never reaches ``__getattr__``'s command dispatch."""
+        if self._robot is None:
+            from parol6.robot import Robot
+
+            self._robot = Robot()
+        return self._robot
+
+    @robot.setter
+    def robot(self, value: Robot | None) -> None:
+        self._robot = value
+
     def __init__(
         self,
         initial_joints_deg: list[float] | None = None,
         max_snapshot_points: int = 200,
         initial_homed: bool = True,
+        robot: Robot | None = None,
     ) -> None:
+        self._robot = robot
         # Reset tool transform — process pool workers persist across
         # invocations, so a previous run's select_tool() leaves a stale
         # TCP offset on the module-level robot singleton.
@@ -572,6 +598,52 @@ class DryRunRobotClient:
             return self._dispatch(build_cmd("servo_j_pose", pose, **kwargs))
         return self._dispatch(build_cmd("servo_j", angles or [], **kwargs))
 
+    def jog_j(
+        self,
+        joint: int = -1,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        joints: list[int] | None = None,
+        speeds: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> DryRunResult | None:
+        """The live client's signature, so a script's jog previews as written."""
+        speed_arr = [0.0] * 6
+        if joints is not None and speeds is not None:
+            for j, s in zip(joints, speeds):
+                speed_arr[j] = s
+        elif joint >= 0:
+            speed_arr[joint] = speed
+        else:
+            raise ValueError("jog_j requires either joint= or joints=/speeds=")
+        return self._dispatch(
+            _wire.JogJCmd(speeds=speed_arr, duration=duration, accel=accel)
+        )
+
+    def jog_l(
+        self,
+        frame: str,
+        axis: str | None = None,
+        speed: float = 0.0,
+        duration: float = 0.1,
+        *,
+        axes: list[str] | None = None,
+        speeds_list: list[float] | None = None,
+        accel: float = 1.0,
+    ) -> DryRunResult | None:
+        vel = [0.0] * 6
+        if axes is not None and speeds_list is not None:
+            for a, s in zip(axes, speeds_list):
+                vel[_AXIS_INDEX[a]] = s
+        elif axis is not None:
+            vel[_AXIS_INDEX[axis]] = speed
+        else:
+            raise ValueError("jog_l requires either axis= or axes=/speeds_list=")
+        return self._dispatch(
+            _wire.JogLCmd(frame=frame, velocities=vel, duration=duration, accel=accel)
+        )
+
     def delay(self, seconds: float = 0.0) -> None:
         pass
 
@@ -586,8 +658,19 @@ class DryRunRobotClient:
         if name not in _CMD_STRUCTS:
             raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
-        def method(*args: Any, **kwargs: Any) -> DryRunResult | None:
-            cmd = build_cmd(name, *args, **kwargs)
-            return self._dispatch(cmd)
+        spec = _COMMANDS.get(name)
+        applies = spec is not None and spec.kind in (
+            CommandKind.SYSTEM,
+            CommandKind.CONTROL,
+        )
+
+        def method(*args: Any, **kwargs: Any) -> DryRunResult | int | None:
+            result = self._dispatch(build_cmd(name, *args, **kwargs))
+            if not applies:
+                return result
+            # A system or control command answers as the live client does:
+            # 1 when it applied, negative when the planner refused it. Its
+            # planner result carries no path a program could wait on.
+            return -1 if result is not None and result.error is not None else 1
 
         return method

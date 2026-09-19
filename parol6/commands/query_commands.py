@@ -22,6 +22,8 @@ from parol6.protocol.wire import (
     JointSpeedsCmd,
     LoopStatsCmd,
     LoopStatsResultStruct,
+    StatusRateCmd,
+    StatusRateResultStruct,
     PingCmd,
     PingResultStruct,
     PoseCmd,
@@ -178,6 +180,28 @@ class LoopStatsCommand(QueryCommand[LoopStatsCmd]):
                 mean_hz=mean_hz,
                 p50_period_s=state.p50_period_s,
                 p90_period_s=state.p90_period_s,
+            )
+        )
+
+
+@register_command(CmdType.STATUS_RATE)
+class StatusRateCommand(QueryCommand[StatusRateCmd]):
+    """Return the broadcast rate and the control rate it divides."""
+
+    PARAMS_TYPE = StatusRateCmd
+    QUERY_TYPE = QueryType.STATUS_RATE
+
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        return pack_response(
+            StatusRateResultStruct(
+                hz=state.status_rate_hz,
+                # The configured rate, not 1/INTERVAL_S: inverting the
+                # interval adds float noise to a value `achievable()` and the
+                # divisor arithmetic treat as exact (1/(1/49) is 49.000000001).
+                control_hz=float(cfg.CONTROL_RATE_HZ),
+                servable=cfg.servable_status_rates(),
             )
         )
 

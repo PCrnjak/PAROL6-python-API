@@ -11,7 +11,12 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from parol6.commands.base import ExecutionStatusCode, MotionCommand, SystemCommand
+from parol6.commands.base import (
+    CommandBase,
+    ExecutionStatusCode,
+    MotionCommand,
+    SystemCommand,
+)
 from parol6.config import save_com_port
 from parol6.protocol.wire import (
     CmdType,
@@ -98,8 +103,14 @@ class StopCommand(SystemCommand[StopCmd]):
 
 
 @register_command(CmdType.WRITE_IO)
-class WriteIOCommand(SystemCommand[WriteIOCmd]):
-    """Set a digital I/O port state."""
+class WriteIOCommand(CommandBase[WriteIOCmd]):
+    """Set a digital output when its turn in the queue comes.
+
+    A write is queued, not applied at once: a program that moves, writes
+    and moves again sees the level change between the moves, and the
+    client gets a command index whose completion it can wait on, as the
+    command table classifies it.
+    """
 
     PARAMS_TYPE = WriteIOCmd
 

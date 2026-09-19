@@ -71,9 +71,8 @@ from parol6.config import (
     MCAST_PORT,
     MCAST_IF,
     MCAST_TTL,
-    STATUS_RATE_HZ,
     STATUS_STALE_S,
-    STATUS_BROADCAST_INTERVAL,
+    status_broadcast_interval,
 )
 
 import psutil
@@ -193,7 +192,7 @@ class Controller:
 
             try:
                 logger.debug(
-                    f"StatusBroadcaster config: group={MCAST_GROUP} port={MCAST_PORT} ttl={MCAST_TTL} iface={MCAST_IF} rate_hz={STATUS_RATE_HZ} stale_s={STATUS_STALE_S}"
+                    f"StatusBroadcaster config: group={MCAST_GROUP} port={MCAST_PORT} ttl={MCAST_TTL} iface={MCAST_IF} stale_s={STATUS_STALE_S}"
                 )
                 self._status_broadcaster = StatusBroadcaster(
                     state_mgr=self.state_manager,
@@ -201,7 +200,6 @@ class Controller:
                     port=MCAST_PORT,
                     ttl=MCAST_TTL,
                     iface_ip=MCAST_IF,
-                    rate_hz=STATUS_RATE_HZ,
                     stale_s=STATUS_STALE_S,
                 )
                 logger.debug("StatusBroadcaster initialized")
@@ -538,7 +536,12 @@ class Controller:
         self._timer.start()
         pt = self._phase_timer
         tick_count = 0
-        broadcast_interval = STATUS_BROADCAST_INTERVAL
+        # Re-derived from the state rather than captured once: SET_STATUS_RATE
+        # moves the rate mid-session, and a snapshot taken here would keep
+        # broadcasting at whatever the rate was at boot. The sentinel rate
+        # never matches, so the first tick derives the real interval.
+        broadcast_rate_hz = 0.0
+        broadcast_interval = 1
 
         while self.running:
             try:
@@ -557,6 +560,10 @@ class Controller:
                 if not self.estop_active:
                     with pt.phase("execute"):
                         self._execute_commands(state)
+
+                if state.status_rate_hz != broadcast_rate_hz:
+                    broadcast_rate_hz = state.status_rate_hz
+                    broadcast_interval = status_broadcast_interval(broadcast_rate_hz)
 
                 if tick_count % broadcast_interval == 0:
                     with pt.phase("status"):

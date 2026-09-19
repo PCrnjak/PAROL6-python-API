@@ -27,11 +27,13 @@ ENV = {
 @pytest.mark.examples
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("script", EXAMPLES)
-def test_example_runs(script):
+def test_example_runs(script, ports):
     """Run each example as a subprocess and check it exits cleanly."""
     result = subprocess.run(
         [sys.executable, str(EXAMPLES_DIR / script)],
-        env=ENV,
+        # Windows can reserve the default status port even with no listener.
+        # The subprocess and its controller share the OS-probed test port.
+        env={**ENV, "PAROL6_MCAST_PORT": str(ports.mcast_port)},
         capture_output=True,
         text=True,
         timeout=240,

@@ -9,12 +9,17 @@ import asyncio
 import atexit
 import threading
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from waldoctl.sync_tools import SyncTool
 
 from waldoctl import PingResult, ToolStatus
-from waldoctl.status import ActivityResult, LoopStatsResult, ToolResult
+from waldoctl.status import (
+    ActivityResult,
+    LoopStatsResult,
+    StatusRate,
+    ToolResult,
+)
 
 from waldoctl.types import Axis, Frame
 from ..protocol.wire import (
@@ -24,6 +29,9 @@ from ..protocol.wire import (
 )
 from ..utils.error_catalog import RobotError
 from .async_client import AsyncRobotClient
+
+if TYPE_CHECKING:
+    from parol6.robot import Robot
 
 T = TypeVar("T")
 
@@ -123,9 +131,10 @@ class RobotClient:
         port: int = 5001,
         timeout: float = 2.0,
         retries: int = 1,
+        robot: "Robot | None" = None,
     ) -> None:
         self._inner = AsyncRobotClient(
-            host=host, port=port, timeout=timeout, retries=retries
+            host=host, port=port, timeout=timeout, retries=retries, robot=robot
         )
         # Wrap the inner async client's bound tools with sync adapters so that
         # `from parol6 import RobotClient; rbt = RobotClient(...)` works without
@@ -144,6 +153,20 @@ class RobotClient:
         }
 
     # ---------- tool access ----------
+
+    def run_skill(
+        self, invoke: Callable[[AsyncRobotClient], Coroutine[Any, Any, T]]
+    ) -> T:
+        """Execute a Python skill using this connection and its existing loop."""
+        return _run(invoke(self._inner))
+
+    @property
+    def robot(self) -> "Robot":
+        return self._inner.robot
+
+    @robot.setter
+    def robot(self, value: "Robot | None") -> None:
+        self._inner.robot = value
 
     @property
     def tool(self) -> SyncTool:
@@ -318,6 +341,14 @@ class RobotClient:
     def reset_loop_stats(self) -> int:
         """Reset control-loop min/max metrics and overrun count."""
         return _run(self._inner.reset_loop_stats())
+
+    def set_status_rate(self, hz: float) -> int:
+        """Set the rate the controller broadcasts status at."""
+        return _run(self._inner.set_status_rate(hz))
+
+    def status_rate(self) -> StatusRate | None:
+        """Current broadcast rate and the control rate it divides."""
+        return _run(self._inner.status_rate())
 
     def tools(self) -> ToolResult | None:
         """Current tool and available tools.

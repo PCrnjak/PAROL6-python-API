@@ -11,16 +11,20 @@ from parol6.commands.base import (
     MotionCommand,
     SystemCommand,
 )
+from parol6.config import CONTROL_RATE_HZ, servable_status_rates
 from parol6.protocol.wire import (
     CheckpointCmd,
     CmdType,
+    CommandCode,
     DelayCmd,
     ResetLoopStatsCmd,
     ResetStateCmd,
+    SetStatusRateCmd,
 )
-from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
+from parol6.utils.error_catalog import make_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,39 @@ class ResetLoopStatsCommand(SystemCommand[ResetLoopStatsCmd]):
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         state.loop_stats_reset_pending = True
         logger.debug("RESET_LOOP_STATS command executed")
+        self.finish()
+        return ExecutionStatusCode.COMPLETED
+
+
+@register_command(CmdType.SET_STATUS_RATE)
+class SetStatusRateCommand(SystemCommand[SetStatusRateCmd]):
+    """Change the status broadcast rate for this session.
+
+    Status is emitted every Nth control tick, so a rate that does not divide
+    the control rate evenly cannot be served. It is refused rather than
+    rounded to a neighbour: a capture taken at a rate nobody asked for is
+    wrong in a way nothing reports.
+    """
+
+    PARAMS_TYPE = SetStatusRateCmd
+
+    __slots__ = ()
+
+    def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
+        hz = float(self.p.hz)
+        allowed = servable_status_rates()
+        if hz not in allowed:
+            self.fail(
+                make_error(
+                    ErrorCode.SYS_STATUS_RATE_INVALID,
+                    requested=hz,
+                    control=int(CONTROL_RATE_HZ),
+                    allowed=", ".join(f"{v:g}" for v in allowed),
+                )
+            )
+            return ExecutionStatusCode.FAILED
+        state.status_rate_hz = hz
+        logger.info("Status broadcast rate set to %g Hz", hz)
         self.finish()
         return ExecutionStatusCode.COMPLETED
 
