@@ -377,6 +377,7 @@ class Trajectory:
 
     steps: NDArray[np.int32]  # (M, 6) motor steps
     duration: float  # seconds
+    positions_rad: NDArray[np.float64]  # Before motor-step quantization
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -471,7 +472,11 @@ class TrajectoryBuilder:
             steps = _rad_to_steps_alloc(
                 self.joint_path.positions[0:1]  # Keep 2D shape (1, 6)
             )
-            return Trajectory(steps=steps, duration=0.0)
+            return Trajectory(
+                steps=steps,
+                duration=0.0,
+                positions_rad=self.joint_path.positions[0:1].copy(),
+            )
 
         if self.profile == ProfileType.RUCKIG:
             # Point-to-point jerk-limited motion; ignores intermediate waypoints
@@ -574,7 +579,9 @@ class TrajectoryBuilder:
 
             steps = _rad_to_steps_alloc(trajectory_rad)
 
-            return Trajectory(steps=steps, duration=duration)
+            return Trajectory(
+                steps=steps, duration=duration, positions_rad=trajectory_rad
+            )
 
         except Exception as e:
             logger.warning("TOPPRA failed: %s. Falling back to LINEAR profile.", e)
@@ -604,7 +611,7 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=duration)
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
 
     def _is_cartesian_path(self) -> bool:
         """Check if this is a Cartesian path (has Cartesian velocity limits set)."""
@@ -910,7 +917,7 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=duration)
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
 
     def _build_quintic_trajectory_cartesian(self) -> Trajectory:
         """
@@ -948,7 +955,7 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=duration)
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
 
     def _build_trapezoid_trajectory(self) -> Trajectory:
         """
@@ -1016,7 +1023,7 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=duration)
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
 
     def _build_trapezoid_trajectory_cartesian(self) -> Trajectory:
         """
@@ -1072,7 +1079,7 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=duration)
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
 
     def _build_cart_vel_constraint(
         self, path: ta.SplineInterpolator | _LinearPath, ss_waypoints: NDArray
@@ -1220,7 +1227,9 @@ class TrajectoryBuilder:
 
         steps = _rad_to_steps_alloc(trajectory_rad)
 
-        return Trajectory(steps=steps, duration=actual_duration)
+        return Trajectory(
+            steps=steps, duration=actual_duration, positions_rad=trajectory_rad
+        )
 
     def _estimate_simple_duration(self) -> float:
         """Estimate minimum duration based on joint velocity limits.

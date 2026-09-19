@@ -97,6 +97,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
+        self.trajectory_rad = trajectory.positions_rad
         self._duration = trajectory.duration
 
         if len(self.trajectory_steps) == 0:
@@ -229,6 +230,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
+        self.trajectory_rad = trajectory.positions_rad
         self._duration = trajectory.duration
 
         consumed = len(chain) - 1

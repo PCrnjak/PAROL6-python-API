@@ -75,7 +75,7 @@ with Robot(host=HOST, port=PORT, normalize_logs=True):
         z = z_min + t * (z_max - z_min)
         x = RADIUS * math.cos(t * 3 * 2 * math.pi)
         spline.append([x, CIRCLE_Y, z] + ORIENTATION)
-    rbt.move_s(spline, speed=SPEED, wait=True)
+    rbt.move_s(spline, speed=SPEED, wait=True, timeout=60)
 
     rbt.home(wait=True)
     print("Done!")

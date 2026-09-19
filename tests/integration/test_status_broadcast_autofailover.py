@@ -131,60 +131,45 @@ async def test_subscriber_multicast_socket_receives_unicast(monkeypatch):
     assert ok, "Subscriber did not receive unicast datagram on multicast socket"
 
 
-def _raise_sendto(*args, **kwargs):
-    raise OSError("simulated send failure")
-
-
-@pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_not(
-    monkeypatch,
-):
-    """
-    Demonstrate the bug: if multicast setup succeeds but subsequent send() calls fail,
-    the broadcaster should fall back to UNICAST. Current implementation does not,
-    so this test is expected to FAIL until the logic is improved.
-    """
-    port = _free_udp_port()
-    # Ensure we attempt multicast path
-    monkeypatch.setattr(cfg, "STATUS_TRANSPORT", "MULTICAST", raising=False)
+async def test_multicast_send_failure_recovers_with_unicast_delivery(monkeypatch):
+    from parol6.protocol.wire import StatusBuffer, decode_status_bin_into
 
-    cache = get_cache()
-    cache.mark_serial_observed()
-
-    state_mgr = StateManager()
-    broadcaster = StatusBroadcaster(
-        state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", stale_s=2.0
+    monkeypatch.setattr(cfg, "STATUS_TRANSPORT", "MULTICAST")
+    monkeypatch.setattr(cfg, "STATUS_UNICAST_HOST", "127.0.0.1")
+    monkeypatch.setattr(
+        StatusBroadcaster, "_verify_multicast_reachable", lambda *args: True
     )
-
-    # StatusBroadcaster is now a polling class - call tick() manually
-    stop_flag = False
-
-    async def _tick_loop():
-        while not stop_flag:
-            broadcaster.tick()
-            await asyncio.sleep(0.05)
-
-    tick_task = asyncio.create_task(_tick_loop())
-
-    try:
-        # Allow setup to complete and at least one send to work
-        await asyncio.sleep(0.1)
-
-        # From now on, every sendto should fail
-        monkeypatch.setattr(socket.socket, "sendto", _raise_sendto)
-
-        # Give it a few cycles to "detect" and hypothetically fall back
-        await asyncio.sleep(0.3)
-
-        # The desired behavior would be to switch to unicast after persistent errors.
-        # Current code does not, so this assertion should FAIL, making the problem visible.
-        assert broadcaster._use_unicast is True, (
-            "Broadcaster did not fall back to unicast on repeated send errors"
+    cache = get_cache()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        broadcaster = StatusBroadcaster(
+            state_mgr=StateManager(),
+            port=receiver.getsockname()[1],
+            iface_ip="127.0.0.1",
+            stale_s=2.0,
         )
-    finally:
-        stop_flag = True
-        tick_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await tick_task
-        broadcaster.close()
+        failed_socket = broadcaster._sock
+        sendto = socket.socket.sendto
+
+        def fail_multicast(sock, *args, **kwargs):
+            if sock is failed_socket:
+                raise OSError("simulated multicast send failure")
+            return sendto(sock, *args, **kwargs)
+
+        monkeypatch.setattr(socket.socket, "sendto", fail_multicast)
+        try:
+            for _ in range(broadcaster._max_send_failures):
+                cache.mark_serial_observed()
+                broadcaster.tick()
+            assert broadcaster._use_unicast
+            cache.mark_serial_observed()
+            broadcaster.tick()
+            data = await asyncio.wait_for(
+                asyncio.get_running_loop().sock_recv(receiver, 65536),
+                timeout=3,
+            )
+            assert decode_status_bin_into(data, StatusBuffer())
+        finally:
+            broadcaster.close()

@@ -171,6 +171,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
+        self.trajectory_rad = trajectory.positions_rad
         self._duration = trajectory.duration
 
         self.log_info(

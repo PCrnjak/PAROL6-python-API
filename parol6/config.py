@@ -48,6 +48,16 @@ logger = logging.getLogger(__name__)
 CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "100"))
 
 DEFAULT_ACCEL_PERCENT: float = 100.0
+EXECUTION_OVERRIDE_TRANSITION_S: float = float(
+    os.getenv("PAROL6_EXECUTION_OVERRIDE_TRANSITION_S", "1.0")
+)
+if (
+    not np.isfinite(EXECUTION_OVERRIDE_TRANSITION_S)
+    or EXECUTION_OVERRIDE_TRANSITION_S <= 0
+):
+    raise ValueError(
+        "PAROL6_EXECUTION_OVERRIDE_TRANSITION_S must be positive and finite"
+    )
 
 # Motion thresholds (mm)
 NEAR_MM_TOL_MM: float = 2.0  # Proximity threshold for considering positions "near" (mm)

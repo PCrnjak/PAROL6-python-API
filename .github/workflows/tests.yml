@@ -144,6 +144,12 @@ jobs:
           PYTHONUTF8: '1'
         run: |
           pytest
+      - name: Preserve test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-python-${{ matrix.python-version }}
+          path: test-results.xml
       # The examples are the scripts a user copies, and `--examples` is opt-in,
       # so nothing was running them: four had rotted into refusals on their
       # own happy path. They run each script as a subprocess against the
@@ -152,4 +158,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: '1'
           PYTHONUTF8: '1'
-        run: pytest tests/test_examples.py --examples
+        run: pytest tests/test_examples.py --examples --junitxml=example-results.xml
+      - name: Preserve example report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: examples-${{ matrix.os }}-python-${{ matrix.python-version }}
+          path: example-results.xml

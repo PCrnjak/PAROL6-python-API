@@ -359,6 +359,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
+        self.trajectory_rad = trajectory.positions_rad
         self._duration = trajectory.duration
 
         self.log_debug(
@@ -519,6 +520,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd]):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
+        self.trajectory_rad = trajectory.positions_rad
         self._duration = trajectory.duration
 
         consumed = len(chain) - 1

@@ -34,6 +34,7 @@ from numba import njit
 
 from parol6.config import LIMITS
 from waldoctl import ActionState, ToolStatus
+from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from waldoctl.tools import ToolState
 
 from parol6.tools import get_registry, list_tools
@@ -117,6 +118,7 @@ class QueryType(IntEnum):
     SHAPES = auto()
     STATUS_RATE = auto()
     TCP_TRANSFORM = auto()
+    EXECUTION_SPEED = auto()
 
 
 class CmdType(IntEnum):
@@ -190,6 +192,9 @@ class CmdType(IntEnum):
     STATUS_RATE = auto()
     SET_TCP_TRANSFORM = auto()
     TCP_TRANSFORM = auto()
+    PAUSE = auto()
+    SET_EXECUTION_SPEED = auto()
+    EXECUTION_SPEED = auto()
 
 
 # =============================================================================
@@ -933,6 +938,52 @@ class ActivityCmd(
     pass
 
 
+class SetExecutionSpeedCmd(
+    msgspec.Struct,
+    tag=int(CmdType.SET_EXECUTION_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    """Select 10–100% of queued trajectory speed without releasing pause."""
+
+    scale: float
+
+    def __post_init__(self) -> None:
+        validate_execution_scale(self.scale)
+
+
+class PauseCmd(
+    msgspec.Struct,
+    tag=int(CmdType.PAUSE),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    """Explicit pause or resume, retaining the selected execution speed."""
+
+    on: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.on, bool):
+            raise ValueError("Pause requires a boolean")
+
+
+class ExecutionSpeedCmd(
+    msgspec.Struct,
+    tag=int(CmdType.EXECUTION_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    """Fresh controller-owned trajectory timing readback."""
+
+    pass
+
+
 class StatusRateCmd(
     msgspec.Struct,
     tag=int(CmdType.STATUS_RATE),
@@ -1088,6 +1139,24 @@ class StatusResultStruct(
     speeds: list[float]
     io: list[int]
     tool_status: list
+
+
+class ExecutionSpeedResultStruct(
+    msgspec.Struct,
+    tag=int(QueryType.EXECUTION_SPEED),
+    array_like=True,
+    frozen=True,
+    gc=False,
+    forbid_unknown_fields=True,
+):
+    """Requested, applied, and retained positive queued-execution scales."""
+
+    target_scale: float
+    applied_scale: float
+    resume_scale: float
+
+    def __post_init__(self) -> None:
+        ExecutionSpeed(self.target_scale, self.applied_scale, self.resume_scale)
 
 
 class StatusRateResultStruct(
@@ -1332,6 +1401,7 @@ Response = (
     StatusResultStruct
     | LoopStatsResultStruct
     | StatusRateResultStruct
+    | ExecutionSpeedResultStruct
     | ToolResultStruct
     | CurrentActionResultStruct
     | PingResultStruct
@@ -2095,6 +2165,10 @@ __all__ = [
     "LoopStatsCmd",
     "StatusRateCmd",
     "SetStatusRateCmd",
+    "SetExecutionSpeedCmd",
+    "PauseCmd",
+    "ExecutionSpeedCmd",
+    "ExecutionSpeedResultStruct",
     "ProfileCmd",
     "Command",
     # Mixin

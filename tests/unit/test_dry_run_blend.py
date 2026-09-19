@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from parol6.client.dry_run_client import DryRunRobotClient
+from waldoctl.skills import UnresolvedPreview
 
 # Valid PAROL6 joint angles (deg) within limits:
 #   J1: [-123, 123], J2: [-145, -3.375], J3: [107.9, 287.9],
@@ -86,3 +87,28 @@ class TestDryRunBlend:
         angles_after = client.angles()
         assert len(angles_after) == 6
         np.testing.assert_allclose(angles_after, W2, atol=0.5)
+
+    def test_execution_override_preserves_path_and_pause(self):
+        normal = DryRunRobotClient(initial_joints_deg=W0)
+        slow = DryRunRobotClient(initial_joints_deg=W0)
+        normal_result = normal.move_j(W1, duration=2)
+        assert slow.set_execution_speed(0.5) == 1
+        slow_result = slow.move_j(W1, duration=2)
+        assert normal_result is not None and slow_result is not None
+        assert slow_result.duration == pytest.approx(normal_result.duration * 2)
+        np.testing.assert_allclose(
+            slow_result.joint_trajectory_rad, normal_result.joint_trajectory_rad
+        )
+        assert slow.pause() == 1
+        assert slow.set_execution_speed(0.3) == 1
+        assert slow.execution_speed().paused
+        for operation in (lambda: slow.move_j(W2, duration=2), lambda: slow.delay(1)):
+            with pytest.raises(UnresolvedPreview, match="paused"):
+                operation()
+        np.testing.assert_allclose(slow.angles(), W1, atol=0.05)
+        assert slow.resume() == 1
+        assert slow.execution_speed().applied_scale == 0.3
+        assert slow.move_j(W2, duration=2).error is None
+        for invalid in (0, True, 2, float("nan")):
+            with pytest.raises(ValueError):
+                slow.set_execution_speed(invalid)
