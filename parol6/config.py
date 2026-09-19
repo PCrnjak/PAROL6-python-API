@@ -22,6 +22,11 @@ logging.addLevelName(TRACE, "TRACE")
 MAX_COMMAND_QUEUE_SIZE: int = 100
 MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "100"))
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
+# Further messages read in a tick whose batch filled up. A client streaming
+# faster than the tick leaves a backlog in the socket; it is already stale, so
+# carrying it to later ticks makes the arm chase old targets and delays the
+# stop behind them by as many ticks as the backlog is deep.
+MAX_BACKLOG_COUNT: int = int(os.getenv("PAROL6_MAX_BACKLOG_COUNT", "500"))
 
 # Serial transport defaults
 SERIAL_RX_RING_DEFAULT: int = 262144

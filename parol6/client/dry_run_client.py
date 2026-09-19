@@ -149,6 +149,22 @@ class _DryRunTool:
     def __init__(self, client: DryRunRobotClient) -> None:
         self._client = client
 
+    @property
+    def key(self) -> str:
+        return self._client._active_tool_key
+
+    @property
+    def tool_type(self) -> str:
+        from waldoctl.tools import ToolType
+        from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig
+
+        spec = get_registry().get(self.key)
+        return (
+            ToolType.GRIPPER
+            if isinstance(spec, (ElectricGripperConfig, PneumaticGripperConfig))
+            else ToolType.NONE
+        )
+
     def __getattr__(self, name: str) -> Any:
         def method(*args: Any, **kwargs: Any) -> DryRunResult | None:
             return self._client.tool_action(
