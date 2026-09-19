@@ -108,8 +108,13 @@ class SegmentPlayer:
         while seg is not None:
             self._buffer.append(seg)
             state.queued_segments += 1
+            if seg.command_index > state.plan_received_index:
+                state.plan_received_index = seg.command_index
             if isinstance(seg, TrajectorySegment):
                 state.queued_duration += seg.duration
+                for idx in seg.blend_consumed_indices:
+                    if idx > state.plan_received_index:
+                        state.plan_received_index = idx
             seg = self._planner.poll_segment()
 
         # MoveIt-style invalidation: a world change (SET_SHAPES bumps
@@ -417,14 +422,13 @@ class SegmentPlayer:
 
     def _complete_segment(self, seg: Segment, state: ControllerState) -> None:
         """Mark segment as completed and update tracking indices."""
-        final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
-                if idx > final_idx:
-                    final_idx = idx
+                if idx != seg.command_index:
+                    state.record_completion(idx)
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
-        state.completed_command_index = final_idx
+        state.record_completion(seg.command_index)
         state.action_current = ""
         state.action_params = ""
         state.action_state = ActionState.IDLE
@@ -512,3 +516,4 @@ class SegmentPlayer:
             pass
         state.queued_segments = 0
         state.queued_duration = 0.0
+        state.plan_received_index = state.plan_submitted_index

@@ -42,7 +42,14 @@ class SetShapesCommand(SystemCommand[SetShapesCmd]):
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         shapes = [
             shape_from_wire(
-                w.kind, w.params, w.pose, w.collision, w.margin, w.name, w.physics
+                w.kind,
+                w.params,
+                w.pose,
+                w.collision,
+                w.margin,
+                w.name,
+                w.physics,
+                w.attachment,
             )
             for w in self.p.shapes
         ]

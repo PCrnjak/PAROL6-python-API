@@ -330,6 +330,14 @@ the pause request can be acknowledged while still decelerating. Queued delays
 retain their remaining time while paused; positive speed changes do not retime
 delays, tool actuators or homing routines already in progress.
 
+Completion waits query the requested command's exact success. Tool actions run
+concurrently with arm motion, so the highest completed index alone cannot prove
+that an earlier command finished. The controller retains its latest 1024
+successful completions; an unknown, cancelled, or expired result remains
+unconfirmed. A controller-session change during a wait raises `ConnectionError`.
+This requires matching client and controller versions supporting the completion
+query.
+
 Standalone `wait_command()` keeps its wall-clock timeout and returns false if
 completion is unconfirmed. Blocking motion calls raise `TimeoutError` in that
 case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning
@@ -508,3 +516,30 @@ The client advertises `io.digital` for typed named-signal skills, which can be
 imported from `waldo_commander.skills`; mappings are `waldoctl.signals.DigitalSignal`
 values stored in a setup snapshot. Dry-run clients advertise `execution.preview`
 so those skills require explicit observation fixtures during preview.
+
+## Held-object collision geometry
+
+Program shapes can be attached to the `L6` flange. `shape.attach(flange_pose=...,
+epoch=world.attachment_epoch, allowed_contacts=(...))` creates a declaration from
+a fresh `world = rbt.shapes()` readback; apply the complete program layer with
+`rbt.set_shapes(...)`. Poses use metres and extrinsic XYZ radians (`Rz @ Ry @ Rx`)
+relative to the flange, independently of the tool/TCP correction. A detachment
+uses `shape.detach(world_pose=...)` and removes its contact exemptions.
+
+Only collision-enabled, nonphysical program shapes can attach. Changes require
+idle motion and a fresh position reference. Exact allowed-contact names exempt
+only pairs involving their declaring shape: URDF links, `tool:name`,
+`shape:name`, or `install:name`, with at most 32 unique partners. Unknown names,
+wildcards and self names are refused without changing the applied world.
+Unrelated checks stay active during planned and streamed motion.
+
+Readback includes `attachment_epoch` and `attachments_valid`. Controller/session,
+reference, source and selected-tool changes invalidate the old assumptions;
+arm motion remains blocked until the declarations are removed or explicitly
+reconciled against fresh state. For multiple stale attachments, reapply all
+verified declarations together in one `set_shapes` call. Stored world files
+do not restore a fresh context. Dry-run clients preserve these context gates.
+
+These declarations do not actuate a gripper, confirm a grasp or estimate payload.
+Waldo Commander supplies `attach_object` / `detach_object` Python skills and
+shape-menu controls that use this API and verify controller readback.

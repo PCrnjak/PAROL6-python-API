@@ -988,7 +988,7 @@ class Robot(_RobotABC):
     def create_dry_run_client(self, **kwargs: Any) -> DryRunClient | None:
         initial_joints_deg: list[float] | None = kwargs.get("initial_joints_deg")
         initial_homed: bool = bool(kwargs.get("initial_homed", True))
-        return DryRunRobotClient(  # ty: ignore[invalid-return-type]
+        return DryRunRobotClient(
             initial_joints_deg=initial_joints_deg,
             initial_homed=initial_homed,
             robot=self,

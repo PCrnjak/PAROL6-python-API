@@ -4,19 +4,32 @@ Dry-run client that executes commands through the trajectory planner locally.
 Delegates trajectory planning to TrajectoryPlanner (diagnostic=True) —
 the same logic used by the real PlannerWorker subprocess. Jog commands
 are simulated separately since the planner doesn't handle streaming.
+
+Every command a program issues becomes one block of a commanded
+``TickIndex``: a motion at the planner's tick resolution, a delay as rows
+holding the pose, a tool action as rows over its estimated travel, and a
+command that plans nothing (a checkpoint, a tool selection, a refusal) as
+a zero-row block that still carries its place and its error. ``plan()``
+lays the blocks on one 50 Hz axis; ``simulate()`` returns the same record,
+because a planner has no plant to predict with and the plan is the honest
+answer to what the arm will do.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from waldoctl.skills import UnresolvedPreview
+from waldoctl.ticks import TickBlock, TickIndex
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from ..ack_policy import ARM_MOTION_CMD_TYPES
 from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import (
     JogLCommand,
@@ -30,6 +43,7 @@ from ..commands.basic_commands import JogJCommand
 from ..config import (
     CONTROL_RATE_HZ,
     HOME_ANGLES_DEG,
+    INTERVAL_S,
     deg_to_steps,
     rad_to_steps,
     steps_to_rad,
@@ -44,6 +58,7 @@ import parol6.protocol.wire as _wire
 from waldoctl.commands import CommandKind, command_table
 from ..protocol.wire import (
     HomeCmd,
+    SetShapesCmd,
     SelectToolCmd,
     SetTcpOffsetCmd,
     SetTcpTransformCmd,
@@ -60,8 +75,7 @@ from ..server.motion_planner import (
     TrajectorySegment,
 )
 from ..server.state import ControllerState, get_fkine_se3
-from ..utils.error_catalog import RobotError, make_error
-from ..utils.error_codes import ErrorCode
+from ..utils.error_catalog import RobotError
 from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig, get_registry
 from waldoctl.tools import ToolType
 
@@ -110,42 +124,82 @@ def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DryRunResult:
-    """Result from a dry-run motion command."""
+#: Row spacing of the commanded record: the rate par6's engine keeps too,
+#: so a host scrubs both backends on one axis.
+_ROW_RATE_HZ = 50.0
+_STRIDE = max(1, int(round(CONTROL_RATE_HZ / _ROW_RATE_HZ)))
+_ROW_DT_S = _STRIDE * INTERVAL_S
+_MOVE_TYPE: dict[str, str | None] = {
+    name: spec.move_type for name, spec in _COMMANDS.items()
+}
 
-    tcp_poses: np.ndarray  # (N, 6) [x_m, y_m, z_m, rx_rad, ry_rad, rz_rad]
-    end_joints_rad: np.ndarray  # (6,) final joint angles
-    duration: float  # trajectory duration in seconds
+
+def _tcp_from_joints(q_rad: np.ndarray) -> np.ndarray:
+    """``(N, 6)`` TCP ``[x, y, z, rx, ry, rz]`` in metres and radians for joint
+    rows in radians, under the tool applied right now."""
+    if q_rad.shape[0] == 0:
+        return np.empty((0, 6), dtype=np.float64)
+    tcp = joint_path_to_tcp_poses(q_rad)
+    tcp[:, :3] /= 1000.0
+    np.deg2rad(tcp[:, 3:], out=tcp[:, 3:])
+    return tcp
+
+
+def _digest(joints: np.ndarray, tcp: np.ndarray) -> bytes:
+    """Identity over what reaches the screen, quantised below what a display
+    resolves, so two runs that paint the same picture hash the same."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(np.round(joints / 1e-4).astype(np.int64).tobytes())
+    h.update(np.round(tcp / 1e-5).astype(np.int64).tobytes())
+    return h.digest()
+
+
+@dataclass(slots=True)
+class _Chunk:
+    """One program command at control-tick resolution, before the record
+    decimates it onto the row axis. Zero ticks for a command that plans
+    nothing: folded into a blend chain, refused, or state-only."""
+
+    command: int
+    method: str
+    q_rad: np.ndarray
+    tcp: np.ndarray
+    tool_closed: np.ndarray
+    valid: np.ndarray | None = None
     error: RobotError | None = None
-    valid: np.ndarray | None = None  # (N,) per-pose bool; None = all valid
-    joint_trajectory_rad: np.ndarray | None = None  # (N, 6) full joint trajectory
+
+    @property
+    def ticks(self) -> int:
+        return int(self.q_rad.shape[0])
 
 
-def _error_result(error: RobotError) -> DryRunResult:
-    """Build a DryRunResult for an error (empty trajectory)."""
-    return DryRunResult(
-        tcp_poses=np.empty((0, 6)),
-        end_joints_rad=np.empty(6),
-        duration=0.0,
-        error=error,
-        joint_trajectory_rad=None,
+def _truncated(record: TickIndex, max_seconds: float) -> TickIndex:
+    limit = math.ceil(max_seconds / record.row_dt_s)
+    if limit >= record.rows:
+        return record
+    blocks = tuple(
+        TickBlock(
+            command=b.command,
+            start_row=min(b.start_row, limit),
+            rows=max(0, min(b.rows, limit - b.start_row)),
+            line_number=b.line_number,
+            error=b.error,
+            move_type=b.move_type,
+        )
+        for b in record.blocks
     )
-
-
-def _build_result(radians: np.ndarray, duration: float) -> DryRunResult:
-    """Build a DryRunResult from joint radians (N, 6) and duration.
-
-    Converts joint radians → TCP poses in meters + radians.
-    """
-    tcp_poses = joint_path_to_tcp_poses(radians)
-    tcp_poses[:, :3] /= 1000.0  # mm → m
-    np.deg2rad(tcp_poses[:, 3:], out=tcp_poses[:, 3:])  # deg → rad
-    return DryRunResult(
-        tcp_poses=tcp_poses,
-        end_joints_rad=radians[-1].copy(),
-        duration=duration,
-        joint_trajectory_rad=radians.copy(),
+    joints = record.joints_rad[:limit]
+    tcp = record.tcp[:limit]
+    return TickIndex(
+        row_dt_s=record.row_dt_s,
+        joints_rad=joints,
+        tcp=tcp,
+        tool_closed=record.tool_closed[:limit],
+        tool_gripping=record.tool_gripping[:limit],
+        blocks=blocks,
+        stop="budget_exhausted",
+        digest=_digest(joints, tcp),
+        valid=None if record.valid is None else record.valid[:limit],
     )
 
 
@@ -169,7 +223,7 @@ class _DryRunTool:
         )
 
     def __getattr__(self, name: str) -> Any:
-        def method(*args: Any, **kwargs: Any) -> DryRunResult | None:
+        def method(*args: Any, **kwargs: Any) -> int:
             return self._client.tool_action(
                 self._client._active_tool_key, name, list(args), **kwargs
             )
@@ -184,8 +238,11 @@ class DryRunRobotClient:
     delegated to TrajectoryPlanner in diagnostic mode. Jog commands are
     simulated separately since the planner doesn't handle streaming.
 
-    Most methods are auto-dispatched via __getattr__ using CMD_MAP.
-    Execution controls change the planning clock; observations read local state.
+    Command methods answer as the live client does — a program index for
+    queued work, a code for the rest — and the record of what they planned
+    comes back from ``plan()``. Most methods are auto-dispatched via
+    __getattr__ using CMD_MAP; execution controls change the planning
+    clock; observations read local state.
     """
 
     _robot: Robot | None = None
@@ -208,7 +265,6 @@ class DryRunRobotClient:
     def __init__(
         self,
         initial_joints_deg: list[float] | None = None,
-        max_snapshot_points: int = 200,
         initial_homed: bool = True,
         robot: Robot | None = None,
     ) -> None:
@@ -243,10 +299,17 @@ class DryRunRobotClient:
         self._registry = CommandRegistry()
         self._q_rad_buf = np.zeros(6, dtype=np.float64)
         self._rpy_buf = np.zeros(3, dtype=np.float64)
-        self._max_snapshot_points = max_snapshot_points
         self._active_tool_key: str = "NONE"
         self._active_variant_key: str = ""
         self._tool_proxy = _DryRunTool(self)
+
+        # The commanded record: one chunk per program command, filled as the
+        # planner answers. Rows are recorded at submit time, under the tool
+        # and execution speed in force then, so a later change cannot
+        # rewrite an earlier command's path.
+        self._chunks: list[_Chunk] = []
+        self._tool_position = 0.0
+        self._plan_cache: TickIndex | None = None
 
     @property
     def state(self) -> ControllerState:
@@ -257,6 +320,11 @@ class DryRunRobotClient:
     def tool(self) -> _DryRunTool:
         """Tool proxy that routes actions through the planner."""
         return self._tool_proxy
+
+    @property
+    def program_length(self) -> int:
+        """Commands recorded so far — one block each in ``plan()``."""
+        return len(self._chunks)
 
     def tcp_offset(self) -> list[float]:
         """Return current TCP offset in mm."""
@@ -269,42 +337,224 @@ class DryRunRobotClient:
     def tcp_transform(self) -> list[float]:
         return self.tcp_offset() + [degrees(v) for v in self._state.tcp_rotation_rad]
 
-    def flush(self) -> list[DryRunResult]:
-        """Flush pending blend buffer. Call after script completion."""
+    # ---- The record ----
+
+    def _open(self, method: str) -> int:
+        """Reserve the next program index for *method* with an empty chunk."""
+        idx = len(self._chunks)
+        empty = np.empty((0, 6), dtype=np.float64)
+        self._chunks.append(
+            _Chunk(idx, method, empty, empty.copy(), np.empty(0, dtype=np.float64))
+        )
+        self._plan_cache = None
+        return idx
+
+    def _current_q(self) -> np.ndarray:
+        steps_to_rad(self._state.Position_in, self._q_rad_buf)
+        return self._q_rad_buf.copy()
+
+    def _fill(
+        self,
+        idx: int,
+        q_rad: np.ndarray,
+        *,
+        tcp: np.ndarray | None = None,
+        valid: np.ndarray | None = None,
+        tool_closed: np.ndarray | None = None,
+        error: RobotError | None = None,
+    ) -> None:
+        """Give chunk *idx* its rows, FK'd under the tool applied now."""
+        c = self._chunks[idx]
+        c.q_rad = np.ascontiguousarray(q_rad, dtype=np.float64).reshape(-1, 6)
+        c.tcp = tcp if tcp is not None else _tcp_from_joints(c.q_rad)
+        c.tool_closed = (
+            tool_closed
+            if tool_closed is not None
+            else np.full(c.ticks, self._tool_position, dtype=np.float64)
+        )
+        c.valid = valid
+        c.error = error
+        self._plan_cache = None
+
+    def _hold(self, idx: int, ticks: int, *, error: RobotError | None = None) -> None:
+        """Chunk *idx* holds the current pose for *ticks* control ticks."""
+        q = np.repeat(self._current_q()[np.newaxis], max(0, ticks), axis=0)
+        self._fill(idx, q, error=error)
+
+    def _stretched(self, q_rad: np.ndarray) -> np.ndarray:
+        """*q_rad* replayed at the execution speed in force: the segment player
+        indexes the same waypoints at a scaled rate, so the path is the same
+        and only the row count changes."""
+        scale = self._state.execution_speed
+        if scale == 1.0 or q_rad.shape[0] < 2:
+            return q_rad
+        ticks = max(1, int(round(q_rad.shape[0] / scale)))
+        at = np.clip(
+            np.round(np.arange(ticks) * scale).astype(np.intp), 0, q_rad.shape[0] - 1
+        )
+        return q_rad[at]
+
+    def _tool_target(self, action: str, params: list) -> float:
+        if action == "open":
+            return 0.0
+        if action == "close":
+            return 1.0
+        if action in ("move", "set_position") and params:
+            return float(min(1.0, max(0.0, float(params[0]))))
+        return self._tool_position
+
+    def _fill_tool_action(self, idx: int, cmd: ToolActionCmd) -> None:
+        """A tool action holds the arm for the tool's estimated travel while
+        the jaws ramp to their target."""
+        cfg = get_registry().get(cmd.tool_key.strip().upper())
+        params = list(cmd.params)
+        seconds = cfg.estimate_duration(cmd.action, params) if cfg is not None else 0.0
+        ticks = int(round(seconds / INTERVAL_S))
+        target = self._tool_target(cmd.action, params)
+        q = np.repeat(self._current_q()[np.newaxis], ticks, axis=0)
+        closed = (
+            np.linspace(self._tool_position, target, ticks, dtype=np.float64)
+            if ticks
+            else np.empty(0, dtype=np.float64)
+        )
+        self._fill(idx, q, tool_closed=closed)
+        self._tool_position = target
+
+    def _absorb(self, segments: list[Segment]) -> None:
+        """Record what the planner produced, each segment under its own
+        command. A blend chain lands under its head; the folded commands'
+        chunks stay at zero ticks."""
+        for seg in segments:
+            if isinstance(seg, TrajectorySegment):
+                self._fill(seg.command_index, self._stretched(seg.trajectory_rad))
+            elif isinstance(seg, ErrorSegment):
+                if seg.cartesian_path is not None and seg.ik_valid is not None:
+                    path = np.asarray(seg.cartesian_path, dtype=np.float64)
+                    q = np.repeat(self._current_q()[np.newaxis], path.shape[0], axis=0)
+                    self._fill(
+                        seg.command_index,
+                        q,
+                        tcp=path,
+                        valid=np.asarray(seg.ik_valid, dtype=np.bool_),
+                        error=seg.error,
+                    )
+                else:
+                    self._fill(seg.command_index, np.empty((0, 6)), error=seg.error)
+            elif isinstance(seg, InlineSegment) and isinstance(
+                seg.params, ToolActionCmd
+            ):
+                self._fill_tool_action(seg.command_index, seg.params)
+            # Any other InlineSegment (select_tool, checkpoint, write_io …)
+            # plans nothing: its chunk keeps its place at zero ticks.
+
+    def _assemble(self) -> TickIndex:
+        joints_parts: list[np.ndarray] = []
+        tcp_parts: list[np.ndarray] = []
+        closed_parts: list[np.ndarray] = []
+        valid_parts: list[np.ndarray] = []
+        blocks: list[TickBlock] = []
+        any_valid = any(c.valid is not None for c in self._chunks)
+        failed = False
+        tick0 = 0
+        row0 = 0
+        for c in self._chunks:
+            rows = 0
+            if c.ticks:
+                # Keep the control ticks that fall on the row grid, counted
+                # from the program's first tick so blocks abut exactly.
+                keep = np.arange((-tick0) % _STRIDE, c.ticks, _STRIDE)
+                rows = int(keep.shape[0])
+                if rows:
+                    joints_parts.append(c.q_rad[keep])
+                    tcp_parts.append(c.tcp[keep])
+                    closed_parts.append(c.tool_closed[keep])
+                    if any_valid:
+                        valid_parts.append(
+                            c.valid[keep]
+                            if c.valid is not None
+                            else np.ones(rows, dtype=np.bool_)
+                        )
+            blocks.append(
+                TickBlock(
+                    command=c.command,
+                    start_row=row0,
+                    rows=rows,
+                    error=c.error,
+                    move_type=_MOVE_TYPE.get(c.method),
+                )
+            )
+            failed = failed or c.error is not None
+            row0 += rows
+            tick0 += c.ticks
+        joints = (
+            np.concatenate(joints_parts).astype(np.float32)
+            if joints_parts
+            else np.empty((0, 6), dtype=np.float32)
+        )
+        tcp = (
+            np.concatenate(tcp_parts).astype(np.float32)
+            if tcp_parts
+            else np.empty((0, 6), dtype=np.float32)
+        )
+        closed = (
+            np.concatenate(closed_parts).astype(np.float32)
+            if closed_parts
+            else np.empty(0, dtype=np.float32)
+        )
+        return TickIndex(
+            row_dt_s=_ROW_DT_S,
+            joints_rad=joints,
+            tcp=tcp,
+            tool_closed=closed,
+            tool_gripping=np.zeros(row0, dtype=np.bool_),
+            blocks=tuple(blocks),
+            stop="failed" if failed else "completed",
+            digest=_digest(joints, tcp),
+            valid=np.concatenate(valid_parts) if valid_parts else None,
+        )
+
+    def plan(self, max_seconds: float | None = None) -> TickIndex:
+        """The commanded record for everything submitted so far."""
+        self.flush()
+        if self._plan_cache is None:
+            self._plan_cache = self._assemble()
+        record = self._plan_cache
+        return record if max_seconds is None else _truncated(record, max_seconds)
+
+    def simulate(self, max_seconds: float | None = None) -> TickIndex:
+        """The predicted record — the plan itself. A planner has no plant to
+        drive, so where the controller would send the arm is the honest
+        answer to where the arm goes."""
+        return self.plan(max_seconds)
+
+    # ---- Dispatch ----
+
+    def flush(self) -> None:
+        """Plan any pending blend chain. Call after script completion."""
         if self._planner._blend_buffer:
             self._require_running()
-        segments = self._planner.flush()
+        self._absorb(self._planner.flush())
         self._state.Position_in[:] = self._planner.state.Position_in
-        results: list[DryRunResult] = []
-        for seg in segments:
-            r = self._segment_to_result(seg)
-            if r is not None:
-                results.append(r)
-        return results
 
-    def _snap_to_angles(self, angles_deg: list[float]) -> DryRunResult:
+    def _snap_to_angles(self, idx: int, angles_deg: list[float]) -> None:
         """Snap to angles instantly (no trajectory) — used by Home and Teleport.
 
         Both establish position references, so subsequent planned moves pass
         the homed gate. Blended moves still buffered in the planner are
-        planned first and lead the returned result, so their paths — and any
-        refusal — reach the caller exactly as the live controller would run
-        them before the snap."""
-        pending = [
-            r
-            for seg in self._planner.flush()
-            if (r := self._segment_to_result(seg)) is not None
-        ]
+        planned first, under their own commands — the live controller runs
+        them before the snap — and the snap itself lands as one row at the
+        new pose, so the record shows where the arm is once it is there."""
+        self._absorb(self._planner.flush())
         deg = np.asarray(angles_deg, dtype=np.float64)
         deg_to_steps(deg, self._state.Position_in)
         self._planner.state.Position_in[:] = self._state.Position_in
         self._planner.state.Homed_in.fill(1)
-        rad = np.radians(deg).reshape(1, -1)
-        snap = _build_result(rad, duration=0.0)
-        return self._merge_results([*pending, snap]) if pending else snap
+        self._hold(idx, _STRIDE)
 
-    def _dispatch(self, params: Any) -> DryRunResult | None:
-        """Route a command struct through the trajectory planner."""
+    def _dispatch(self, params: Any, method: str) -> int:
+        """Route a command struct through the trajectory planner, recording
+        it as the next program command. Returns its program index."""
+        self._state.Homed_in[:] = self._planner.state.Homed_in
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if (
             cmd_cls is not None
@@ -312,17 +562,45 @@ class DryRunRobotClient:
             and not cmd_cls.streamable
         ):
             self._require_running()
+        if (
+            not self._state.attachments_valid
+            and _wire.STRUCT_TO_CMDTYPE.get(type(params)) in ARM_MOTION_CMD_TYPES
+        ):
+            raise ValueError("attachment context changed; reconcile and reapply")
+        idx = self._open(method)
+        if isinstance(params, (_wire.EstopCmd, _wire.ResetCmd)):
+            self._state.invalidate_attachments()
+            self._state.enabled = isinstance(params, _wire.ResetCmd)
+            if not self._state.enabled:
+                self._planner.cancel()
+            return idx
+        if isinstance(params, _wire.ResetStateCmd):
+            self._planner.cancel()
+            self._state.reset()
+            self._planner.state.Position_in[:] = self._state.Position_in
+            self._planner.state.Homed_in[:] = self._state.Homed_in
+            return idx
+        if isinstance(params, (_wire.SimulatorCmd, _wire.ConnectHardwareCmd)):
+            self._state.invalidate_attachments()
+            self._planner.cancel()
+            self._state.Homed_in.fill(0)
+            self._planner.state.Homed_in.fill(0)
+            return idx
+        if isinstance(params, SetShapesCmd):
+            self._state.set_shapes(params.shapes)
         if isinstance(params, HomeCmd):
             if params.calibrate or not self._planner.state.Homed_in[:6].all():
-                return self._snap_to_angles(HOME_ANGLES_DEG)
+                self._state.invalidate_attachments()
+                self._snap_to_angles(idx, HOME_ANGLES_DEG)
+                return idx
             # Already referenced → fall through: the planner fast-paths HOME
             # into a planned return move, so the preview renders the path.
         if isinstance(params, TeleportCmd):
-            return self._snap_to_angles(params.angles)
-        results: list[DryRunResult] = []
+            self._snap_to_angles(idx, params.angles)
+            return idx
         if isinstance(params, (SelectToolCmd, SetTcpOffsetCmd, SetTcpTransformCmd)):
             # Resolve pending paths against their original TCP before changing it.
-            results.extend(self.flush())
+            self.flush()
         if isinstance(params, SelectToolCmd):
             self._active_tool_key = params.tool_name.strip().upper()
             self._active_variant_key = params.variant_key
@@ -340,129 +618,28 @@ class DryRunRobotClient:
         # Other non-trajectory MotionCommands (SelectTool, Home) fall through
         # to the planner which handles them as inline segments.
         if cmd_cls is not None and issubclass(cmd_cls, (JogJCommand, JogLCommand)):
-            self._planner.flush()
-            self._state.Position_in[:] = self._planner.state.Position_in
+            self.flush()
             cmd = cmd_cls(params)
             assert isinstance(cmd, MotionCommand)
-            result = self._simulate_jog(cmd)
+            path = self._simulate_jog(cmd)
+            if path is not None:
+                self._fill(idx, path)
             self._planner.state.Position_in[:] = self._state.Position_in
-            return result
+            return idx
 
         # Everything else → planner
-        segments = self._planner.process(params)
+        self._absorb(self._planner.process(params, command_index=idx))
         self._state.Position_in[:] = self._planner.state.Position_in
+        return idx
 
-        for seg in segments:
-            r = self._segment_to_result(seg)
-            if r is not None:
-                results.append(r)
-
-        if not results:
-            return None
-        if len(results) == 1:
-            return results[0]
-        return self._merge_results(results)
-
-    def _segment_to_result(self, seg: Segment) -> DryRunResult | None:
-        """Convert a planner segment to a DryRunResult."""
-        if isinstance(seg, TrajectorySegment):
-            return self._trajectory_segment_to_result(seg)
-        if isinstance(seg, ErrorSegment):
-            return self._error_segment_to_result(seg)
-        if isinstance(seg, InlineSegment) and isinstance(seg.params, ToolActionCmd):
-            return self._tool_action_segment_to_result(seg.params)
-        # Other InlineSegments (SelectTool, Home, etc.) — no visualization
-        return None
-
-    def _trajectory_segment_to_result(self, seg: TrajectorySegment) -> DryRunResult:
-        """Convert a TrajectorySegment to a DryRunResult."""
-        steps = seg.trajectory_steps
-        stride = max(1, len(steps) // self._max_snapshot_points)
-        sampled = steps[::stride]
-        if not np.array_equal(sampled[-1], steps[-1]):
-            sampled = np.vstack([sampled, steps[-1:]])
-
-        radians = np.empty((len(sampled), 6), dtype=np.float64)
-        for i in range(len(sampled)):
-            steps_to_rad(sampled[i], radians[i])
-
-        return _build_result(radians, seg.duration / self._state.execution_speed)
-
-    def _error_segment_to_result(self, seg: ErrorSegment) -> DryRunResult:
-        """Convert an ErrorSegment to a DryRunResult with per-pose validity."""
-        if seg.cartesian_path is not None and seg.ik_valid is not None:
-            return DryRunResult(
-                tcp_poses=seg.cartesian_path,
-                end_joints_rad=np.zeros(6, dtype=np.float64),
-                duration=0.0,
-                error=seg.error,
-                valid=seg.ik_valid,
-                joint_trajectory_rad=None,
-            )
-        return _error_result(seg.error)
-
-    def _tool_action_segment_to_result(self, cmd: ToolActionCmd) -> DryRunResult:
-        """Return a single-point DryRunResult at the current TCP pose."""
-        steps_to_rad(self._state.Position_in, self._q_rad_buf)
-        duration = 0.0
-        cfg = get_registry().get(cmd.tool_key.strip().upper())
-        if cfg is not None:
-            duration = cfg.estimate_duration(cmd.action, cmd.params)
-        return _build_result(self._q_rad_buf[np.newaxis], duration)
-
-    def _merge_results(self, results: list[DryRunResult]) -> DryRunResult:
-        """Merge multiple DryRunResults into one (for multi-segment blends)."""
-        non_empty = [r for r in results if r.tcp_poses.shape[0] > 0]
-        first_error = next((r.error for r in results if r.error is not None), None)
-        if not non_empty:
-            if first_error is not None:
-                return _error_result(first_error)
-            return _error_result(make_error(ErrorCode.TRAJ_EMPTY_RESULT, detail=""))
-
-        tcp_all = np.vstack([r.tcp_poses for r in non_empty])
-        total_duration = sum(r.duration for r in results)
-        last = non_empty[-1]
-
-        has_any_valid = any(r.valid is not None for r in non_empty)
-        if has_any_valid:
-            valids = [
-                r.valid
-                if r.valid is not None
-                else np.ones(r.tcp_poses.shape[0], dtype=np.bool_)
-                for r in non_empty
-            ]
-            merged_valid = np.concatenate(valids)
-        else:
-            merged_valid = None
-
-        has_any_joints = any(r.joint_trajectory_rad is not None for r in non_empty)
-        if has_any_joints:
-            joint_parts = [
-                r.joint_trajectory_rad
-                if r.joint_trajectory_rad is not None
-                else np.broadcast_to(
-                    r.end_joints_rad[np.newaxis, :],
-                    (r.tcp_poses.shape[0], r.end_joints_rad.shape[0]),
-                ).copy()
-                for r in non_empty
-            ]
-            merged_joints = np.vstack(joint_parts)
-        else:
-            merged_joints = None
-
-        return DryRunResult(
-            tcp_poses=tcp_all,
-            end_joints_rad=last.end_joints_rad,
-            duration=total_duration,
-            error=first_error,
-            valid=merged_valid,
-            joint_trajectory_rad=merged_joints,
-        )
+    def _failed(self, idx: int) -> bool:
+        return self._chunks[idx].error is not None
 
     # ---- Jog simulation (planner doesn't handle streaming) ----
 
-    def _simulate_jog(self, cmd: MotionCommand) -> DryRunResult | None:
-        """Simulate jog commands by computing linear displacement."""
+    def _simulate_jog(self, cmd: MotionCommand) -> np.ndarray | None:
+        """Simulate jog commands by computing linear displacement, one row
+        per control tick."""
         # Run do_setup so speeds_out / _axis_index / etc. are computed
         cmd.setup(self._state)
 
@@ -472,13 +649,10 @@ class DryRunRobotClient:
             return self._simulate_cartesian_jog(cmd)
         return None
 
-    def _simulate_joint_jog(self, cmd: JogJCommand) -> DryRunResult:
+    def _simulate_joint_jog(self, cmd: JogJCommand) -> np.ndarray:
         """Simulate joint jog by computing linear displacement in joint space."""
         duration = cmd.p.duration
-        n_points = min(
-            self._max_snapshot_points,
-            max(2, int(duration * CONTROL_RATE_HZ)),
-        )
+        n_points = max(1, int(round(duration * CONTROL_RATE_HZ)))
 
         # Compute total displacement (steps/tick * ticks_in_duration)
         ticks = duration * CONTROL_RATE_HZ
@@ -496,16 +670,12 @@ class DryRunRobotClient:
         radians = np.empty((n_points, 6), dtype=np.float64)
         for i in range(n_points):
             steps_to_rad(trajectory[i], radians[i])
+        return radians
 
-        return _build_result(radians, duration)
-
-    def _simulate_cartesian_jog(self, cmd: JogLCommand) -> DryRunResult | None:
+    def _simulate_cartesian_jog(self, cmd: JogLCommand) -> np.ndarray:
         """Simulate cartesian jog by displacing along a Cartesian axis and solving IK."""
         duration = cmd.p.duration
-        n_points = min(
-            self._max_snapshot_points,
-            max(2, int(duration * CONTROL_RATE_HZ)),
-        )
+        n_points = max(1, int(round(duration * CONTROL_RATE_HZ)))
 
         current_se3 = get_fkine_se3(self._state)
         se3_rpy(current_se3, self._rpy_buf)
@@ -569,14 +739,17 @@ class DryRunRobotClient:
 
         rad_to_steps(last_valid_q, steps_buf)
         self._state.Position_in[:] = steps_buf
-
-        return _build_result(radians, duration)
+        return radians
 
     # ---- Explicit methods for state reads ----
 
     def angles(self) -> list[float]:
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
         return np.degrees(self._q_rad_buf).tolist()
+
+    def set_shapes(self, shapes: list) -> int:
+        self._dispatch(SetShapesCmd(shapes=shapes), "set_shapes")
+        return 1
 
     def shapes(self):
         """The preview's collision world by layer (mirrors the live query).
@@ -587,6 +760,7 @@ class DryRunRobotClient:
         from waldoctl import ShapeWorld
 
         return ShapeWorld(
+            attachment_epoch=self._state.attachment_epoch,
             installation=tuple(PAROL6_ROBOT.installation_shapes()),
             program=tuple(PAROL6_ROBOT.program_shapes()),
         )
@@ -604,16 +778,24 @@ class DryRunRobotClient:
             float(np.degrees(self._rpy_buf[2])),
         ]
 
+    # ---- Explicit command methods: the live client's signatures ----
+
+    def home(self, **kwargs: Any) -> int:
+        return self._dispatch(build_cmd("home", **kwargs), "home")
+
     def move_j(
         self,
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
         **kwargs: Any,
-    ) -> DryRunResult | None:
+    ) -> int:
         if pose is not None:
-            return self._dispatch(build_cmd("move_j_pose", pose, **kwargs))
-        return self._dispatch(build_cmd("move_j", angles or [], **kwargs))
+            return self._dispatch(build_cmd("move_j_pose", pose, **kwargs), "move_j")
+        return self._dispatch(build_cmd("move_j", angles or [], **kwargs), "move_j")
+
+    def move_l(self, pose: list[float], **kwargs: Any) -> int:
+        return self._dispatch(build_cmd("move_l", pose, **kwargs), "move_l")
 
     def servo_j(
         self,
@@ -621,22 +803,54 @@ class DryRunRobotClient:
         *,
         pose: list[float] | None = None,
         **kwargs: Any,
-    ) -> DryRunResult | None:
+    ) -> int:
         if pose is not None:
-            return self._dispatch(build_cmd("servo_j_pose", pose, **kwargs))
-        return self._dispatch(build_cmd("servo_j", angles or [], **kwargs))
+            idx = self._dispatch(build_cmd("servo_j_pose", pose, **kwargs), "servo_j")
+        else:
+            idx = self._dispatch(
+                build_cmd("servo_j", angles or [], **kwargs), "servo_j"
+            )
+        return -1 if self._failed(idx) else 1
+
+    def checkpoint(self, label: str) -> int:
+        return self._dispatch(build_cmd("checkpoint", label), "checkpoint")
 
     def write_io(self, index: int, value: int, *, timeout: float | None = None) -> int:
         if type(index) is not int or index not in (0, 1):
             raise ValueError("Output index must be 0 or 1")
         if type(value) not in (int, bool) or value not in (0, 1):
             raise ValueError("Digital output must be 0 or 1")
-        result = self._dispatch(WriteIOCmd(port_index=index + 2, value=int(value)))
-        if result is not None and result.error is not None:
-            raise RuntimeError(str(result.error))
-        return 0
+        return self._dispatch(
+            WriteIOCmd(port_index=index + 2, value=int(value)), "write_io"
+        )
+
+    def delay(self, seconds: float) -> int:
+        """Hold the pose for *seconds*: rows on the commanded record, so the
+        timeline carries the wait as the controller will."""
+        self._require_running()
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("delay needs a positive, finite number of seconds")
+        # The live planner runs a pending blend chain before a delay; hold
+        # the pose the chain ends at, not the one before it.
+        self.flush()
+        idx = self._open("delay")
+        self._hold(idx, int(round(seconds / INTERVAL_S)))
+        return idx
+
+    def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
+        """Whether the block for *command_index* planned without error."""
+        self.flush()
+        return 0 <= command_index < len(self._chunks) and not self._failed(
+            command_index
+        )
+
+    def wait_motion(self, **kwargs: Any) -> bool:
+        self.flush()
+        return True
 
     def _require_running(self) -> None:
+        if not self._state.enabled:
+            raise ValueError("Controller disabled; reset before previewing motion")
         if self._state.execution_paused:
             raise UnresolvedPreview(
                 "Queued execution is paused; preview needs an explicit resume "
@@ -645,6 +859,7 @@ class DryRunRobotClient:
 
     def set_execution_speed(self, scale: float, *, timeout: float = 3.0) -> int:
         self._state.execution_speed = validate_execution_scale(scale)
+        self._open("set_execution_speed")
         return 1
 
     def execution_speed(self, *, timeout: float = 3.0) -> ExecutionSpeed:
@@ -654,10 +869,12 @@ class DryRunRobotClient:
 
     def pause(self, *, timeout: float = 3.0) -> int:
         self._state.execution_paused = True
+        self._open("pause")
         return 1
 
     def resume(self, *, timeout: float = 3.0) -> int:
         self._state.execution_paused = False
+        self._open("resume")
         return 1
 
     def jog_j(
@@ -669,7 +886,7 @@ class DryRunRobotClient:
         joints: list[int] | None = None,
         speeds: list[float] | None = None,
         accel: float = 1.0,
-    ) -> DryRunResult | None:
+    ) -> int:
         """The live client's signature, so a script's jog previews as written."""
         speed_arr = [0.0] * 6
         if joints is not None and speeds is not None:
@@ -679,9 +896,10 @@ class DryRunRobotClient:
             speed_arr[joint] = speed
         else:
             raise ValueError("jog_j requires either joint= or joints=/speeds=")
-        return self._dispatch(
-            _wire.JogJCmd(speeds=speed_arr, duration=duration, accel=accel)
+        idx = self._dispatch(
+            _wire.JogJCmd(speeds=speed_arr, duration=duration, accel=accel), "jog_j"
         )
+        return -1 if self._failed(idx) else 1
 
     def jog_l(
         self,
@@ -693,7 +911,7 @@ class DryRunRobotClient:
         axes: list[str] | None = None,
         speeds_list: list[float] | None = None,
         accel: float = 1.0,
-    ) -> DryRunResult | None:
+    ) -> int:
         vel = [0.0] * 6
         if axes is not None and speeds_list is not None:
             for a, s in zip(axes, speeds_list):
@@ -702,15 +920,11 @@ class DryRunRobotClient:
             vel[_AXIS_INDEX[axis]] = speed
         else:
             raise ValueError("jog_l requires either axis= or axes=/speeds_list=")
-        return self._dispatch(
-            _wire.JogLCmd(frame=frame, velocities=vel, duration=duration, accel=accel)
+        idx = self._dispatch(
+            _wire.JogLCmd(frame=frame, velocities=vel, duration=duration, accel=accel),
+            "jog_l",
         )
-
-    def delay(self, seconds: float = 0.0) -> None:
-        self._require_running()
-
-    def wait_motion(self, **kwargs: Any) -> None:
-        self.flush()
+        return -1 if self._failed(idx) else 1
 
     # ---- Auto-dispatch for everything else ----
 
@@ -721,18 +935,21 @@ class DryRunRobotClient:
             raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
         spec = _COMMANDS.get(name)
-        applies = spec is not None and spec.kind in (
-            CommandKind.SYSTEM,
-            CommandKind.CONTROL,
-        )
+        if spec is None or spec.kind in (
+            CommandKind.QUERY,
+            CommandKind.OBSERVATION,
+            CommandKind.SYNC,
+        ):
+            raise AttributeError(
+                f"'{type(self).__name__}' previews no '{name}': the query reads "
+                "live state the dry run does not keep"
+            )
 
-        def method(*args: Any, **kwargs: Any) -> DryRunResult | int | None:
-            result = self._dispatch(build_cmd(name, *args, **kwargs))
-            if not applies:
-                return result
-            # A system or control command answers as the live client does:
-            # 1 when it applied, negative when the planner refused it. Its
-            # planner result carries no path a program could wait on.
-            return -1 if result is not None and result.error is not None else 1
+        def method(*args: Any, **kwargs: Any) -> int:
+            idx = self._dispatch(build_cmd(name, *args, **kwargs), name)
+            # Queued work answers with its program index; everything else
+            # answers as the live client does: 1 when it applied, -1 when
+            # the planner refused it.
+            return idx if spec.mints_index else (-1 if self._failed(idx) else 1)
 
         return method

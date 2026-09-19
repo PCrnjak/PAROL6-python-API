@@ -5,8 +5,12 @@ Tests tool switching, gripper methods, and tool registry through the client API
 with a running controller (FAKE_SERIAL mode).
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
+
+from parol6.protocol.wire import CommandCompletionCmd, encode_command
 
 from waldoctl import (
     ElectricGripperTool,
@@ -86,7 +90,7 @@ class TestPneumaticGripperMethods:
     """Test pneumatic gripper via client.tool()."""
 
     @pytest.mark.asyncio
-    async def test_pneumatic_open_close(self, async_client):
+    async def test_pneumatic_open_close(self, async_client, monkeypatch):
         """Open and close pneumatic gripper via tool methods."""
         robot, client = async_client
         spec = robot.tools["PNEUMATIC"]
@@ -108,6 +112,56 @@ class TestPneumaticGripperMethods:
         idx = await tool.close()
         assert idx >= 0
         assert await client.wait_motion(timeout=5.0)
+
+        # A side-channel tool action can finish before an older planned
+        # command. Its completion must still be observable after that command.
+        earlier = await client.delay(0.5)
+        assert await client.wait_status(
+            lambda s: s.executing_index == earlier, timeout=5.0
+        )
+        assert await client.pause() == 1
+        try:
+            opened = await tool.open(wait=False)
+            assert await client.wait_command(opened, timeout=1.0)
+            assert not await client.wait_command(earlier, timeout=0.05), (
+                "a completed tool action must not confirm the paused delay"
+            )
+        finally:
+            assert await client.resume() == 1
+        assert await client.wait_motion(timeout=5.0)
+        assert await client.wait_command(opened, timeout=1.0)
+
+        cancelled = await client.delay(1.0)
+        assert await client.wait_status(
+            lambda s: s.executing_index == cancelled, timeout=5.0
+        )
+        assert await client.stop() == 1
+        closed = await tool.close(wait=False)
+        assert await client.wait_command(closed, timeout=1.0)
+        assert not await client.wait_command(cancelled, timeout=0.05)
+
+        # Deliver a real completion reply late, ahead of a different query.
+        assert client._transport is not None
+        client._transport.sendto(encode_command(CommandCompletionCmd(closed)))
+        reply = await asyncio.wait_for(client._rx_queue.get(), timeout=1.0)
+        client._rx_queue.put_nowait(reply)
+        assert await client.status() is not None
+
+        # Cancel as an actual controller reply arrives. The reply must not
+        # swallow cancellation of a caller's completion budget or task.
+        receive = client._rx_queue.get
+
+        async def receive_and_cancel():
+            packet = await receive()
+            request.cancel()
+            return packet
+
+        with monkeypatch.context() as patch:
+            patch.setattr(client._rx_queue, "get", receive_and_cancel)
+            request = asyncio.create_task(client.status())
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        assert await client.status() is not None
 
     @pytest.mark.asyncio
     async def test_pneumatic_set_position_threshold(self, async_client):

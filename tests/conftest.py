@@ -349,6 +349,26 @@ def client(ports: TestPorts):
     )
 
 
+@pytest.fixture
+def controller(monkeypatch):
+    """An in-process Controller on the fake serial with an ephemeral UDP port,
+    ticked by the test through the loop's phases; the planner is not started."""
+    from parol6.server.controller import Controller, ControllerConfig
+
+    monkeypatch.setenv("PAROL6_FAKE_SERIAL", "1")
+    ctl = Controller(ControllerConfig(udp_host="127.0.0.1", udp_port=0))
+    try:
+        yield ctl
+    finally:
+        ctl._planner.stop()
+        if ctl.udp_transport is not None:
+            ctl.udp_transport.close_socket()
+        if ctl._status_broadcaster is not None:
+            ctl._status_broadcaster.close()
+        ctl._transport_mgr.disconnect()
+        ctl.state_manager.reset_state()
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Called after whole test run finished."""
     logger.info(

@@ -40,6 +40,7 @@ QUERY_CMD_TYPES: set[CmdType] = {
     CmdType.SHAPES,
     CmdType.STATUS_RATE,
     CmdType.EXECUTION_SPEED,
+    CmdType.COMMAND_COMPLETION,
 }
 
 # Streaming commands are fire-and-forget (no ACK needed)
@@ -70,6 +71,25 @@ QUEUED_CMD_TYPES: set[CmdType] = {
     CmdType.WRITE_IO,
     CmdType.TOOL_ACTION,
 }
+
+# Commands that move the arm: refused while the attachment context is stale
+ARM_MOTION_CMD_TYPES: frozenset[CmdType] = frozenset(
+    {
+        CmdType.HOME,
+        CmdType.MOVEJ,
+        CmdType.MOVEJ_POSE,
+        CmdType.MOVEL,
+        CmdType.MOVEC,
+        CmdType.MOVES,
+        CmdType.MOVEP,
+        CmdType.JOGJ,
+        CmdType.JOGL,
+        CmdType.SERVOJ,
+        CmdType.SERVOJ_POSE,
+        CmdType.SERVOL,
+        CmdType.TELEPORT,
+    }
+)
 
 
 class AckPolicy:

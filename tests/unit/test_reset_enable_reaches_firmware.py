@@ -13,21 +13,6 @@ import time
 import pytest
 
 from parol6.protocol.wire import CommandCode, EstopCmd, ResetCmd, encode_command
-from parol6.server.controller import Controller, ControllerConfig
-
-
-@pytest.fixture
-def controller():
-    ctl = Controller(ControllerConfig(udp_host="127.0.0.1", udp_port=0))
-    try:
-        yield ctl
-    finally:
-        if ctl.udp_transport is not None:
-            ctl.udp_transport.close_socket()
-        if ctl._status_broadcaster is not None:
-            ctl._status_broadcaster.close()
-        ctl._transport_mgr.disconnect()
-        ctl.state_manager.reset_state()
 
 
 def test_reset_enable_reaches_firmware_write(controller):
