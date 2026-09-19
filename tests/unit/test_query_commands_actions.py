@@ -13,16 +13,7 @@ from parol6.commands.query_commands import ActivityCommand
 from parol6.protocol.wire import (
     ActivityCmd,
     CurrentActionResultStruct,
-    ResponseMsg,
-    decode_message,
 )
-
-
-def _unpack_response(data: bytes):
-    """Decode packed bytes into a typed result struct."""
-    msg = decode_message(data)
-    assert isinstance(msg, ResponseMsg)
-    return msg.result
 
 
 def test_activity_returns_details():
@@ -36,7 +27,7 @@ def test_activity_returns_details():
 
     cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, CurrentActionResultStruct)
     assert result.current == "MoveJPoseCommand"
@@ -56,7 +47,7 @@ def test_activity_with_idle_state():
 
     cmd = ActivityCommand(ActivityCmd())
     cmd.setup(state)
-    result = _unpack_response(cmd.compute(state))
+    result = cmd.compute(state)
 
     assert isinstance(result, CurrentActionResultStruct)
     assert result.current == ""

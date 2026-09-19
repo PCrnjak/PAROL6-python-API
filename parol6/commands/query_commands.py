@@ -32,6 +32,7 @@ from parol6.protocol.wire import (
     ProfileCmd,
     ProfileResultStruct,
     QueryType,
+    Response,
     QueueCmd,
     QueueResultStruct,
     ReachableCmd,
@@ -53,7 +54,6 @@ from parol6.protocol.wire import (
     ToolResultStruct,
     ToolStatusResultStruct,
     ToolsCmd,
-    pack_response,
 )
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_flat_mm, get_fkine_se3
@@ -73,14 +73,14 @@ class PoseCommand(QueryCommand[PoseCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         frame = self.p.frame or "WRF"
         if frame == "TRF":
             T = get_fkine_se3(state)
             T_inv = np.linalg.inv(T)
             T_inv[0:3, 3] *= 1000.0
-            return pack_response(PoseResultStruct(pose=T_inv.reshape(-1).tolist()))
-        return pack_response(PoseResultStruct(pose=get_fkine_flat_mm(state).tolist()))
+            return PoseResultStruct(pose=T_inv.reshape(-1).tolist())
+        return PoseResultStruct(pose=get_fkine_flat_mm(state).tolist())
 
 
 @register_command(CmdType.ANGLES)
@@ -92,11 +92,9 @@ class AnglesCommand(QueryCommand[AnglesCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         cfg.steps_to_rad(state.Position_in, self._q_rad_buf)
-        return pack_response(
-            AnglesResultStruct(angles=np.rad2deg(self._q_rad_buf).tolist())
-        )
+        return AnglesResultStruct(angles=np.rad2deg(self._q_rad_buf).tolist())
 
 
 @register_command(CmdType.IO)
@@ -108,8 +106,8 @@ class IOCommand(QueryCommand[IOCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(IOResultStruct(io=state.InOut_in[:5].tolist()))
+    def compute(self, state: "ControllerState") -> Response:
+        return IOResultStruct(io=state.InOut_in[:5].tolist())
 
 
 @register_command(CmdType.JOINT_SPEEDS)
@@ -121,8 +119,8 @@ class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(SpeedsResultStruct(speeds=state.Speed_in.tolist()))
+    def compute(self, state: "ControllerState") -> Response:
+        return SpeedsResultStruct(speeds=state.Speed_in.tolist())
 
 
 @register_command(CmdType.STATUS)
@@ -134,27 +132,25 @@ class StatusCommand(QueryCommand[StatusCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         cache = get_cache()
         cache.update_from_state(state)
         ts = cache.tool_status
-        return pack_response(
-            StatusResultStruct(
-                pose=cache.pose.tolist(),
-                angles=cache.angles_deg.tolist(),
-                speeds=cache.speeds_rad_s.tolist(),
-                io=cache.io.tolist(),
-                tool_status=[
-                    ts.key,
-                    ts.state,
-                    ts.engaged,
-                    ts.part_detected,
-                    ts.fault_code,
-                    list(ts.positions),
-                    list(ts.channels),
-                    ts.variant_key,
-                ],
-            )
+        return StatusResultStruct(
+            pose=cache.pose.tolist(),
+            angles=cache.angles_deg.tolist(),
+            speeds=cache.speeds_rad_s.tolist(),
+            io=cache.io.tolist(),
+            tool_status=[
+                ts.key,
+                ts.state,
+                ts.engaged,
+                ts.part_detected,
+                ts.fault_code,
+                list(ts.positions),
+                list(ts.channels),
+                ts.variant_key,
+            ],
         )
 
 
@@ -167,24 +163,22 @@ class LoopStatsCommand(QueryCommand[LoopStatsCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         target_hz = 1.0 / max(cfg.INTERVAL_S, 1e-9)
         mean_hz = (1.0 / state.mean_period_s) if state.mean_period_s > 0.0 else 0.0
-        return pack_response(
-            LoopStatsResultStruct(
-                target_hz=target_hz,
-                loop_count=state.loop_count,
-                overrun_count=state.overrun_count,
-                mean_period_s=state.mean_period_s,
-                std_period_s=state.std_period_s,
-                min_period_s=state.min_period_s,
-                max_period_s=state.max_period_s,
-                p95_period_s=state.p95_period_s,
-                p99_period_s=state.p99_period_s,
-                mean_hz=mean_hz,
-                p50_period_s=state.p50_period_s,
-                p90_period_s=state.p90_period_s,
-            )
+        return LoopStatsResultStruct(
+            target_hz=target_hz,
+            loop_count=state.loop_count,
+            overrun_count=state.overrun_count,
+            mean_period_s=state.mean_period_s,
+            std_period_s=state.std_period_s,
+            min_period_s=state.min_period_s,
+            max_period_s=state.max_period_s,
+            p95_period_s=state.p95_period_s,
+            p99_period_s=state.p99_period_s,
+            mean_hz=mean_hz,
+            p50_period_s=state.p50_period_s,
+            p90_period_s=state.p90_period_s,
         )
 
 
@@ -197,16 +191,14 @@ class StatusRateCommand(QueryCommand[StatusRateCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(
-            StatusRateResultStruct(
-                hz=state.status_rate_hz,
-                # The configured rate, not 1/INTERVAL_S: inverting the
-                # interval adds float noise to a value `achievable()` and the
-                # divisor arithmetic treat as exact (1/(1/49) is 49.000000001).
-                control_hz=float(cfg.CONTROL_RATE_HZ),
-                servable=cfg.servable_status_rates(),
-            )
+    def compute(self, state: "ControllerState") -> Response:
+        return StatusRateResultStruct(
+            hz=state.status_rate_hz,
+            # The configured rate, not 1/INTERVAL_S: inverting the interval adds
+            # float noise to a value `achievable()` and the divisor arithmetic
+            # treat as exact (1/(1/49) is 49.000000001).
+            control_hz=float(cfg.CONTROL_RATE_HZ),
+            servable=cfg.servable_status_rates(),
         )
 
 
@@ -219,10 +211,8 @@ class PingCommand(QueryCommand[PingCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(
-            PingResultStruct(hardware_connected=int(state.hardware_connected))
-        )
+    def compute(self, state: "ControllerState") -> Response:
+        return PingResultStruct(hardware_connected=int(state.hardware_connected))
 
 
 @register_command(CmdType.TOOLS)
@@ -234,10 +224,8 @@ class ToolsCommand(QueryCommand[ToolsCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(
-            ToolResultStruct(tool=state.current_tool, available=list_tools())
-        )
+    def compute(self, state: "ControllerState") -> Response:
+        return ToolResultStruct(tool=state.current_tool, available=list_tools())
 
 
 @register_command(CmdType.TOOL_STATUS)
@@ -249,21 +237,19 @@ class ToolStatusCommand(QueryCommand[ToolStatusCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         cache = get_cache()
         cache.update_from_state(state)
         ts = cache.tool_status
-        return pack_response(
-            ToolStatusResultStruct(
-                tool_key=ts.key,
-                state=ts.state,
-                engaged=ts.engaged,
-                part_detected=ts.part_detected,
-                fault_code=ts.fault_code,
-                positions=list(ts.positions),
-                channels=list(ts.channels),
-                variant_key=ts.variant_key,
-            )
+        return ToolStatusResultStruct(
+            tool_key=ts.key,
+            state=ts.state,
+            engaged=ts.engaged,
+            part_detected=ts.part_detected,
+            fault_code=ts.fault_code,
+            positions=list(ts.positions),
+            channels=list(ts.channels),
+            variant_key=ts.variant_key,
         )
 
 
@@ -276,14 +262,12 @@ class ActivityCommand(QueryCommand[ActivityCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(
-            CurrentActionResultStruct(
-                current=state.action_current,
-                state=state.action_state.name,
-                next=state.action_next,
-                params=state.action_params,
-            )
+    def compute(self, state: "ControllerState") -> Response:
+        return CurrentActionResultStruct(
+            current=state.action_current,
+            state=state.action_state.name,
+            next=state.action_next,
+            params=state.action_params,
         )
 
 
@@ -296,15 +280,13 @@ class QueueCommand(QueryCommand[QueueCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(
-            QueueResultStruct(
-                queue=state.queue_nonstreamable,
-                executing_index=state.executing_command_index,
-                completed_index=state.completed_command_index,
-                last_checkpoint=state.last_checkpoint,
-                queued_duration=state.queued_duration,
-            )
+    def compute(self, state: "ControllerState") -> Response:
+        return QueueResultStruct(
+            queue=state.queue_nonstreamable,
+            executing_index=state.executing_command_index,
+            completed_index=state.completed_command_index,
+            last_checkpoint=state.last_checkpoint,
+            queued_duration=state.queued_duration,
         )
 
 
@@ -317,8 +299,8 @@ class ProfileCommand(QueryCommand[ProfileCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
-        return pack_response(ProfileResultStruct(profile=state.motion_profile))
+    def compute(self, state: "ControllerState") -> Response:
+        return ProfileResultStruct(profile=state.motion_profile)
 
 
 @register_command(CmdType.REACHABLE)
@@ -330,15 +312,13 @@ class ReachableCommand(QueryCommand[ReachableCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         cache = get_cache()
         cache.update_from_state(state)
-        return pack_response(
-            EnablementResultStruct(
-                joint_en=cache.joint_en.tolist(),
-                cart_en_wrf=cache.cart_en_wrf.tolist(),
-                cart_en_trf=cache.cart_en_trf.tolist(),
-            )
+        return EnablementResultStruct(
+            joint_en=cache.joint_en.tolist(),
+            cart_en_wrf=cache.cart_en_wrf.tolist(),
+            cart_en_trf=cache.cart_en_trf.tolist(),
         )
 
 
@@ -351,12 +331,10 @@ class ErrorCommand(QueryCommand[ErrorCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         error = state.error
-        return pack_response(
-            ErrorResultStruct(
-                error=error.to_wire() if error is not None else None,
-            )
+        return ErrorResultStruct(
+            error=error.to_wire() if error is not None else None,
         )
 
 
@@ -369,10 +347,10 @@ class TcpSpeedCommand(QueryCommand[TcpSpeedCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         cache = get_cache()
         cache.update_from_state(state)
-        return pack_response(TcpSpeedResultStruct(speed=cache.tcp_speed))
+        return TcpSpeedResultStruct(speed=cache.tcp_speed)
 
 
 @register_command(CmdType.IS_SIMULATOR)
@@ -384,10 +362,10 @@ class IsSimulatorCommand(QueryCommand[IsSimulatorCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         from parol6.server.transports.transport_factory import is_simulation_mode
 
-        return pack_response(IsSimulatorResultStruct(active=is_simulation_mode()))
+        return IsSimulatorResultStruct(active=is_simulation_mode())
 
 
 @register_command(CmdType.SHAPES)
@@ -403,17 +381,15 @@ class ShapesCommand(QueryCommand[ShapesCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
-        return pack_response(
-            ShapesResultStruct(
-                installation=[
-                    ShapeWire(*s.to_wire()) for s in PAROL6_ROBOT.installation_shapes()
-                ],
-                program=[ShapeWire(*s.to_wire()) for s in state.shapes],
-                epoch=state.shapes_version,
-            )
+        return ShapesResultStruct(
+            installation=[
+                ShapeWire(*s.to_wire()) for s in PAROL6_ROBOT.installation_shapes()
+            ],
+            program=[ShapeWire(*s.to_wire()) for s in state.shapes],
+            epoch=state.shapes_version,
         )
 
 
@@ -426,14 +402,12 @@ class TcpOffsetCommand(QueryCommand[TcpOffsetCmd]):
 
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         offset = state.tcp_offset_m
-        return pack_response(
-            TcpOffsetResultStruct(
-                x=offset[0] * 1000,
-                y=offset[1] * 1000,
-                z=offset[2] * 1000,
-            )
+        return TcpOffsetResultStruct(
+            x=offset[0] * 1000,
+            y=offset[1] * 1000,
+            z=offset[2] * 1000,
         )
 
 
@@ -443,16 +417,14 @@ class TcpTransformCommand(QueryCommand[TcpTransformCmd]):
     QUERY_TYPE = QueryType.TCP_TRANSFORM
     __slots__ = ()
 
-    def compute(self, state: "ControllerState") -> bytes:
+    def compute(self, state: "ControllerState") -> Response:
         xyz = state.tcp_offset_m
         rpy = state.tcp_rotation_rad
-        return pack_response(
-            TcpTransformResultStruct(
-                x=xyz[0] * 1000,
-                y=xyz[1] * 1000,
-                z=xyz[2] * 1000,
-                roll=degrees(rpy[0]),
-                pitch=degrees(rpy[1]),
-                yaw=degrees(rpy[2]),
-            )
+        return TcpTransformResultStruct(
+            x=xyz[0] * 1000,
+            y=xyz[1] * 1000,
+            z=xyz[2] * 1000,
+            roll=degrees(rpy[0]),
+            pitch=degrees(rpy[1]),
+            yaw=degrees(rpy[2]),
         )

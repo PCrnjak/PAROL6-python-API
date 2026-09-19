@@ -5,6 +5,7 @@ Async UDP client for PAROL6 robot control.
 import asyncio
 import contextlib
 import logging
+import math
 import random
 import socket
 import struct
@@ -110,6 +111,8 @@ from ..protocol.wire import (
     ToolStatusResultStruct,
     ToolsCmd,
     WriteIOCmd,
+    MAX_REQ_ID,
+    ProtocolVersionError,
     decode_message,
     encode_command,
     encode_command_into,
@@ -222,6 +225,7 @@ if TYPE_CHECKING:
         _status_generation: int
         _status_event: asyncio.Event
         _closed: bool
+        _proto_error: ProtocolVersionError | None
 
 
 class _StatusProtocol(asyncio.DatagramProtocol):
@@ -238,7 +242,15 @@ class _StatusProtocol(asyncio.DatagramProtocol):
         if self._client._closed:
             return
         # Zero-allocation decode directly into shared buffer
-        if decode_status_bin_into(data, self._client._shared_status):
+        try:
+            fresh = decode_status_bin_into(data, self._client._shared_status)
+        except ProtocolVersionError as mismatch:
+            # Raising inside a datagram callback reaches nobody. Hold it for
+            # whoever reads status next, and wake them now.
+            self._client._proto_error = mismatch
+            self._client._status_event.set()
+            return
+        if fresh:
             self._client._status_generation += 1
             # Event.set() is synchronous, so it's safe to wake waiters from this callback
             self._client._status_event.set()
@@ -311,6 +323,9 @@ class AsyncRobotClient(_RobotClientABC):
         # Single shared buffer with event-based notification
         self._status_transport: asyncio.DatagramTransport | None = None
         self._status_sock: socket.socket | None = None
+        self._proto_error: ProtocolVersionError | None = None
+        #: Correlates each reply with its request; 0 means "no reply wanted".
+        self._next_req_id = 1
         self._shared_status: StatusBuffer = StatusBuffer()
         self._status_generation: int = 0
         self._status_event: asyncio.Event = asyncio.Event()
@@ -543,6 +558,7 @@ class AsyncRobotClient(_RobotClientABC):
         last_gen = 0
 
         while not self._closed:
+            self._check_protocol()
             # Clear before waiting - only affects future waits, not current waiters
             self._status_event.clear()
 
@@ -560,9 +576,23 @@ class AsyncRobotClient(_RobotClientABC):
                 last_gen = self._status_generation
                 yield self._shared_status
 
-    async def _send(self, cmd: msgspec.Struct) -> int:
+    def _request_id(self) -> int:
+        """The next request id, wrapping past the wire's 32-bit field."""
+        req_id = self._next_req_id
+        self._next_req_id = req_id + 1 if req_id < MAX_REQ_ID else 1
+        return req_id
+
+    def _check_protocol(self) -> None:
+        if self._proto_error is not None:
+            raise self._proto_error
+
+    async def _send(self, cmd: msgspec.Struct, *, timeout: float | None = None) -> int:
         """
         Send a binary command based on AckPolicy.
+
+        ``timeout`` replaces the client default for an acknowledged command,
+        and its expiry raises TimeoutError instead of answering a failure
+        code: a caller that named a deadline asked to hear about it.
 
         Returns:
             int (command index ≥ 0) for ACK'd queued commands, -1 on failure,
@@ -574,22 +604,31 @@ class AsyncRobotClient(_RobotClientABC):
         cmd_type = STRUCT_TO_CMDTYPE.get(type(cmd))
         if cmd_type is None:
             return 0
+        wait = self.timeout if timeout is None else timeout
 
         # System commands need stable bytes across the await, so encode a fresh buffer
         if cmd_type in SYSTEM_CMD_TYPES:
+            req_id = self._request_id()
             try:
-                await self._request_ok_raw(encode_command(cmd), self.timeout)
+                await self._request_ok_raw(encode_command(cmd, req_id), wait, req_id)
                 return 1
             except TimeoutError:
+                if timeout is not None:
+                    raise
                 return 0
 
         if cmd_type not in QUERY_CMD_TYPES:
             if self._ack_policy.requires_ack(cmd_type):
+                req_id = self._request_id()
                 try:
-                    ok = await self._request_ok_raw(encode_command(cmd), self.timeout)
+                    ok = await self._request_ok_raw(
+                        encode_command(cmd, req_id), wait, req_id
+                    )
                     self._last_command_index = ok.index
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
+                    if timeout is not None:
+                        raise
                     return -1
             # Fire-and-forget: safe to reuse the shared buffer since sendto copies it
             encode_command_into(cmd, self._tx_buf)
@@ -600,7 +639,9 @@ class AsyncRobotClient(_RobotClientABC):
         self._transport.sendto(self._tx_buf)
         return 1
 
-    async def _request(self, cmd: msgspec.Struct) -> Response | None:
+    async def _request(
+        self, cmd: msgspec.Struct, timeout: float | None = None
+    ) -> Response | None:
         """Send a query command and wait for a typed response.
 
         Drains the receive queue until a ResponseMsg is found or timeout.
@@ -608,6 +649,8 @@ class AsyncRobotClient(_RobotClientABC):
 
         Args:
             cmd: Typed command struct
+            timeout: Per-call deadline; when given, the query is sent once
+                with no retries so the deadline is the caller's total wait.
 
         Returns:
             Typed Response struct, or None on timeout.
@@ -617,12 +660,15 @@ class AsyncRobotClient(_RobotClientABC):
         """
         await self._ensure_endpoint()
         assert self._transport is not None
-        data = encode_command(cmd)
-        for attempt in range(self.retries + 1):
+        wait = self.timeout if timeout is None else timeout
+        attempts = self.retries + 1 if timeout is None else 1
+        for attempt in range(attempts):
+            req_id = self._request_id()
+            data = encode_command(cmd, req_id)
             try:
                 async with self._req_lock:
                     self._transport.sendto(data)
-                    end_time = time.monotonic() + self.timeout
+                    end_time = time.monotonic() + wait
                     while time.monotonic() < end_time:
                         try:
                             resp_data, _ = await asyncio.wait_for(
@@ -631,6 +677,12 @@ class AsyncRobotClient(_RobotClientABC):
                             )
                             try:
                                 parsed = decode_message(resp_data)
+                                if parsed.req_id != req_id:
+                                    # A reply to a request whose caller has
+                                    # given up. Answering this one with it
+                                    # would leave every later query a reply
+                                    # behind.
+                                    continue
                                 if isinstance(parsed, ResponseMsg):
                                     return parsed.result
                                 if isinstance(parsed, ErrorMsg):
@@ -649,18 +701,20 @@ class AsyncRobotClient(_RobotClientABC):
                 pass
             except Exception:
                 break
-            if attempt < self.retries:
+            if attempt < attempts - 1:
                 backoff = min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05)
                 await asyncio.sleep(backoff)
         return None
 
-    async def _request_ok_raw(self, data: bytes, timeout: float) -> OkMsg:
+    async def _request_ok_raw(self, data: bytes, timeout: float, req_id: int) -> OkMsg:
         """
-        Send pre-encoded binary command and wait for 'OK' or 'ERROR' reply.
+        Send pre-encoded binary command and wait for the 'OK' or 'ERROR' reply
+        carrying *req_id*; replies to abandoned requests are discarded.
 
         Args:
-            data: Pre-encoded msgpack bytes
+            data: Pre-encoded command datagram, id header included
             timeout: Timeout in seconds.
+            req_id: The id *data* carries, echoed by the reply.
 
         Returns OkMsg on OK; raises RuntimeError on ERROR, TimeoutError on timeout.
         """
@@ -678,9 +732,9 @@ class AsyncRobotClient(_RobotClientABC):
                     )
                     try:
                         match decode_message(resp_data):
-                            case OkMsg() as ok:
+                            case OkMsg(reply_id) as ok if reply_id == req_id:
                                 return ok
-                            case ErrorMsg(message):
+                            case ErrorMsg(reply_id, message) if reply_id == req_id:
                                 raise MotionError(RobotError.from_wire(message))
                     except msgspec.ValidationError:
                         pass  # Ignore non-matching datagrams
@@ -867,15 +921,27 @@ class AsyncRobotClient(_RobotClientABC):
         resp = await self._request(AnglesCmd())
         return resp.angles if isinstance(resp, AnglesResultStruct) else None
 
-    async def io(self) -> list[int] | None:
+    async def io(self, *, timeout: float | None = None) -> list[int] | None:
         """Digital I/O status [in1, in2, out1, out2, estop].
+
+        ``timeout`` bounds setup, retries, and the reply; None uses client defaults.
 
         Category: Query
 
         Example:
             io = rbt.io()
         """
-        resp = await self._request(IOCmd())
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("I/O timeout must be positive and finite")
+        # The outer deadline also bounds endpoint setup and its retries on an
+        # absent peer; the inner one keeps the query to a single attempt.
+        try:
+            async with asyncio.timeout(timeout):
+                resp = await self._request(IOCmd(), timeout=timeout)
+        except TimeoutError:
+            return None
         return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
@@ -1388,6 +1454,7 @@ class AsyncRobotClient(_RobotClientABC):
         end_time = time.monotonic() + timeout
 
         while time.monotonic() < end_time and not self._closed:
+            self._check_protocol()
             self._status_event.clear()
 
             # Check if we already have new data
@@ -1866,13 +1933,18 @@ class AsyncRobotClient(_RobotClientABC):
 
     # --------------- IO / Gripper / Utility ---------------
 
-    async def write_io(self, index: int, value: int) -> int:
+    async def write_io(
+        self, index: int, value: int, *, timeout: float | None = None
+    ) -> int:
         """Set digital output by logical index (0 = first output pin).
 
         The firmware I/O byte layout is ``[in0, in1, out0, out1, estop, ...]``
         so logical output index 0 maps to bit position 2.
 
         Returns the command index (≥ 0) on success, -1 on failure.
+
+        ``timeout`` bounds command acceptance. TimeoutError leaves application
+        unconfirmed; None uses the client defaults.
 
         Category: I/O
 
@@ -1885,8 +1957,14 @@ class AsyncRobotClient(_RobotClientABC):
             raise ValueError("I/O value must be 0 or 1")
         # Firmware bit layout: [in0, in1, out0, out1, estop, ...]
         firmware_index = index + 2
-        result = await self._send(WriteIOCmd(port_index=firmware_index, value=value))
-        return result
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("I/O timeout must be positive and finite")
+        async with asyncio.timeout(timeout):
+            return await self._send(
+                WriteIOCmd(port_index=firmware_index, value=value), timeout=timeout
+            )
 
     async def delay(self, seconds: float) -> int:
         """Insert a non-blocking delay in the motion queue.

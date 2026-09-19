@@ -10,6 +10,13 @@ This package provides:
 - **`parol6-server`** CLI for standalone controller operation
 
 The controller speaks a msgpack-based UDP protocol and can run on the same machine or remotely.
+Every command datagram carries a 4-byte request id ahead of the msgpack body, and the
+OK / ERROR / RESPONSE reply echoes it, so a reply whose caller has already given up is
+dropped instead of answering the next request. An id of 0 asks for no reply, which is
+what streamed motion sends. Status broadcasts carry `PROTO_VERSION` in their second
+slot: a client reading a status from another version raises `ProtocolVersionError`
+naming both, rather than reporting the silence of a failed decode. Client and
+controller are released together — there is no compatibility window between versions.
 
 ---
 
@@ -451,3 +458,13 @@ The existing `set_tcp_offset(x, y, z)` clears user rotation and now returns its
 queued index for confirmation. `tcp_offset()` still reads three translations;
 `tcp_transform()` reads all six values. Both raise `TimeoutError` when no valid
 reply arrives instead of reporting a misleading zero correction.
+
+Digital I/O reads and writes accept an optional per-call `timeout` in seconds:
+`rbt.io(timeout=1.0)` returns `None` without a reply, while
+`rbt.write_io(0, 1, timeout=1.0)` raises `TimeoutError` if acceptance remains
+unconfirmed. The deadline includes transport setup and retries. Omitting it
+retains the configured client timeout. The same options work on the sync client.
+The client advertises `io.digital` for typed named-signal skills, which can be
+imported from `waldo_commander.skills`; mappings are `waldoctl.signals.DigitalSignal`
+values stored in a setup snapshot. Dry-run clients advertise `execution.preview`
+so those skills require explicit observation fixtures during preview.

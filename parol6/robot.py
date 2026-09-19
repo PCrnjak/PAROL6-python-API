@@ -21,6 +21,7 @@ from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any, Literal
 
+import msgspec
 import numpy as np
 from numpy.typing import NDArray
 from pinokin import Robot as PinokinRobot
@@ -52,7 +53,7 @@ from parol6.client.dry_run_client import DryRunRobotClient
 from parol6.client.sync_client import RobotClient as SyncRobotClient
 from parol6.config import HOME_ANGLES_DEG, LIMITS
 from parol6.motion.trajectory import ProfileType
-from parol6.protocol.wire import CmdType, MsgType, decode, encode
+from parol6.protocol.wire import PingCmd, ResponseMsg, decode_message, encode_command
 from parol6.tools import (
     ElectricGripperConfig,
     PneumaticGripperConfig,
@@ -80,20 +81,21 @@ def _is_server_running(
     port: int = 5001,
     timeout: float = 1.0,
 ) -> bool:
-    """Return True if a PAROL6 controller responds to UDP PING at host:port."""
+    """Return True if a PAROL6 controller responds to UDP PING at host:port.
+
+    Through the codec, not a hand-built datagram: the readiness probe has to
+    speak exactly what the controller parses, or a live controller reads as
+    an absent one.
+    """
+    req_id = 1
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
-            ping_msg = encode((CmdType.PING,))
-            sock.sendto(ping_msg, (host, port))
+            sock.sendto(encode_command(PingCmd(), req_id), (host, port))
             data, _ = sock.recvfrom(1024)
-            resp = decode(data)
-            return (
-                isinstance(resp, (list, tuple))
-                and len(resp) >= 1
-                and resp[0] == MsgType.RESPONSE
-            )
-    except (OSError, socket.timeout):
+            reply = decode_message(data)
+            return isinstance(reply, ResponseMsg) and reply.req_id == req_id
+    except (OSError, socket.timeout, msgspec.MsgspecError):
         return False
 
 
