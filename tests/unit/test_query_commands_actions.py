@@ -5,11 +5,10 @@ Tests the ACTIVITY query command without requiring a running server.
 Uses minimal state objects to test command logic in isolation.
 """
 
-from types import SimpleNamespace
-
 from waldoctl import ActionState
 
 from parol6.commands.query_commands import ActivityCommand
+from parol6.server.state import ControllerState
 from parol6.protocol.wire import (
     ActivityCmd,
     CurrentActionResultStruct,
@@ -18,7 +17,7 @@ from parol6.protocol.wire import (
 
 def test_activity_returns_details():
     """Test that ACTIVITY compute() returns correct data."""
-    state = SimpleNamespace(
+    state = ControllerState(
         action_current="MoveJPoseCommand",
         action_state=ActionState.EXECUTING,
         action_next="HomeCommand",
@@ -38,7 +37,7 @@ def test_activity_returns_details():
 
 def test_activity_with_idle_state():
     """Test ACTIVITY when robot is idle."""
-    state = SimpleNamespace(
+    state = ControllerState(
         action_current="",
         action_state=ActionState.IDLE,
         action_next="",

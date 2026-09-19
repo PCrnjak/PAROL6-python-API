@@ -40,7 +40,6 @@ dependencies = [
     "scipy>=1.11.4",
     "ruckig>=0.12.2",
     "toppra>=0.6.3",
-    "interpolatepy>=2.0.0",
     "numpy>=2.0,<2.5",  # numba (0.6x) requires numpy<2.5
     "numba>=0.59",
     "psutil>=5.9",

@@ -8,24 +8,14 @@ rejection while the robot executed it fine (found live: MCP ``motion.home``
 "failing" with a stale self-collision error as the arm visibly homed).
 """
 
-import time
-
 import numpy as np
 import pytest
 
 from parol6 import MotionError, RobotClient
+from tests.conftest import wait_until
 from waldoctl import Box
 
 pytestmark = pytest.mark.integration
-
-
-def _wait_until(pred, timeout: float, msg: str) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return
-        time.sleep(0.02)
-    pytest.fail(msg)
 
 
 def _reject_move(client: RobotClient) -> None:
@@ -63,7 +53,7 @@ def test_streaming_accept_clears_stale_error(client: RobotClient, server_proc):
         _reject_move(client)
         assert client.error() is not None
         assert client.jog_j(0, 0.2, 0.2) >= 0
-        _wait_until(
+        wait_until(
             lambda: client.error() is None,
             2.0,
             "jog accept never cleared the stale error",

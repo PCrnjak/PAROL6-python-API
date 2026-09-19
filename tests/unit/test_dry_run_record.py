@@ -1,24 +1,17 @@
 """The commanded record a parol6 dry run returns: one block per command on
 one row axis, with delays, tool travel and refusals all on it."""
 
-import math
-
 import numpy as np
 import pytest
 from waldoctl import following_error
 
-from parol6.client.dry_run_client import _STRIDE, DryRunRobotClient
-from parol6.config import INTERVAL_S
+from parol6.client.dry_run_client import DryRunRobotClient
+from tests.conftest import rows_for
 from parol6.tools import get_registry
 
 HOME = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 W1 = [80.0, -80.0, 190.0, 10.0, 10.0, 190.0]
 W2 = [70.0, -70.0, 200.0, 20.0, 20.0, 200.0]
-
-
-def _rows_for(seconds: float) -> int:
-    """Rows a hold of *seconds* occupies from the program's first tick."""
-    return math.ceil(round(seconds / INTERVAL_S) / _STRIDE)
 
 
 def _span(record, block):
@@ -30,7 +23,7 @@ def test_delay_holds_the_pose_for_its_rows():
     index = client.delay(2.0)
     record = client.plan()
     block = record.blocks[index]
-    assert block.command == index and block.rows == _rows_for(2.0) == 100
+    assert block.command == index and block.rows == rows_for(2.0) == 100
     held = record.joints_rad[_span(record, block)]
     # Motor-step quantisation moves the pose by well under a hundredth of a
     # degree; what matters is that every row holds the same pose.
@@ -53,7 +46,7 @@ def test_gripper_close_ramps_the_jaws_over_the_tools_travel():
     block = record.blocks[index]
     expected = get_registry().get("SSG-48").estimate_duration("close", [])
     assert expected > 0
-    assert block.rows == pytest.approx(_rows_for(expected), abs=1)
+    assert block.rows == pytest.approx(rows_for(expected), abs=1)
     closed = record.tool_closed[_span(record, block)]
     assert closed[0] == pytest.approx(0.0, abs=0.05)
     assert np.all(np.diff(closed) >= 0) and closed[-1] > 0.9
@@ -121,6 +114,6 @@ def test_budget_truncates_the_record_and_says_so():
     full = client.plan()
     cut = client.plan(max_seconds=1.0)
     assert cut.stop == "budget_exhausted"
-    assert cut.rows == _rows_for(1.0) < full.rows
+    assert cut.rows == rows_for(1.0) < full.rows
     assert cut.blocks[0].rows == cut.rows and cut.blocks[1].rows == 0
     assert full.stop == "completed"

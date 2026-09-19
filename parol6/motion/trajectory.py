@@ -50,6 +50,54 @@ def _rad_to_steps_alloc(rad: NDArray) -> NDArray[np.int32]:
     return out
 
 
+def _trapezoid_duration(distance: float, v_max: float, a_max: float) -> float:
+    """Duration of a trapezoidal profile over ``distance``, starting and ending at rest."""
+    distance = abs(distance)
+    if distance < 1e-12:
+        return 0.0
+    if distance * a_max >= v_max * v_max:
+        return v_max / a_max + distance / v_max
+    return 2.0 * float(np.sqrt(distance / a_max))
+
+
+def _trapezoid_samples(
+    times: NDArray[np.float64], q0: float, q1: float, v_max: float, a_max: float
+) -> NDArray[np.float64]:
+    """Sample a trapezoidal profile from ``q0`` to ``q1``, starting and ending at rest."""
+    distance = abs(q1 - q0)
+    duration = _trapezoid_duration(distance, v_max, a_max)
+    if duration <= 0.0:
+        return np.full(times.shape, q0, dtype=np.float64)
+
+    if distance * a_max >= v_max * v_max:
+        t_accel = v_max / a_max
+        v_peak = v_max
+    else:
+        t_accel = duration / 2.0
+        v_peak = a_max * t_accel
+
+    t = np.clip(times, 0.0, duration)
+    t_decel = duration - t_accel
+    travelled = np.where(
+        t < t_accel,
+        0.5 * a_max * t * t,
+        np.where(
+            t < t_decel,
+            0.5 * v_peak * t_accel + v_peak * (t - t_accel),
+            distance - 0.5 * a_max * (duration - t) ** 2,
+        ),
+    )
+    return q0 + np.sign(q1 - q0) * travelled
+
+
+def _quintic_samples(
+    times: NDArray[np.float64], q0: float, q1: float, duration: float
+) -> NDArray[np.float64]:
+    """Sample a quintic profile from ``q0`` to ``q1``, at rest and unaccelerated at both ends."""
+    s = np.clip(times / duration, 0.0, 1.0)
+    return q0 + (q1 - q0) * s * s * s * (10.0 - 15.0 * s + 6.0 * s * s)
+
+
 class _LinearPath:
     """Piecewise linear path wrapper for TOPPRA compatibility.
 
@@ -742,15 +790,10 @@ class TrajectoryBuilder:
         """
         Compute duration for joint paths using trapezoidal profile.
 
-        For each joint, uses InterpolatePy to compute the minimum duration
-        for its displacement given its velocity/acceleration limits.
+        For each joint, computes the minimum duration for its displacement
+        given its velocity/acceleration limits.
         Returns the maximum (slowest joint determines overall duration).
         """
-        from interpolatepy.trapezoidal import (
-            TrajectoryParams as TrapParams,
-            TrapezoidalTrajectory,
-        )
-
         positions = self.joint_path.positions
         if len(positions) < 2:
             return self.dt * 2
@@ -763,15 +806,7 @@ class TrajectoryBuilder:
             if delta < 1e-6:
                 continue
 
-            params = TrapParams(
-                q0=0.0,
-                q1=delta,
-                v0=0.0,
-                v1=0.0,
-                vmax=self.v_max[j],
-                amax=self.a_max[j],
-            )
-            _, duration = TrapezoidalTrajectory.generate_trajectory(params)
+            duration = _trapezoid_duration(delta, self.v_max[j], self.a_max[j])
             max_duration = max(max_duration, duration)
 
         return max(max_duration, self.dt * 2)
@@ -879,8 +914,6 @@ class TrajectoryBuilder:
         Each joint independently follows a quintic polynomial profile,
         synchronized to finish at the same time.
         """
-        from interpolatepy import BoundaryCondition, PolynomialTrajectory, TimeInterval
-
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
@@ -899,17 +932,9 @@ class TrajectoryBuilder:
                 trajectory_rad[:, j] = start_pos[j]
                 continue
 
-            bc_start = BoundaryCondition(
-                position=start_pos[j], velocity=0.0, acceleration=0.0
+            trajectory_rad[:, j] = _quintic_samples(
+                times, start_pos[j], end_pos[j], duration
             )
-            bc_end = BoundaryCondition(
-                position=end_pos[j], velocity=0.0, acceleration=0.0
-            )
-            interval = TimeInterval(start=0.0, end=duration)
-            traj = PolynomialTrajectory.order_5_trajectory(bc_start, bc_end, interval)
-
-            for i, t in enumerate(times):
-                trajectory_rad[i, j] = traj(t)[0]
 
         trajectory_rad, duration = self._enforce_segment_limits(
             trajectory_rad, duration
@@ -926,8 +951,6 @@ class TrajectoryBuilder:
         TCP follows quintic polynomial profile along the path, with local
         slowdown where velocity limits would be exceeded.
         """
-        from interpolatepy import BoundaryCondition, PolynomialTrajectory, TimeInterval
-
         if self.duration:
             duration = self.duration
         else:
@@ -935,17 +958,10 @@ class TrajectoryBuilder:
             duration = self._compute_cartesian_duration_from_path()
 
         # Quintic profile for the path parameter s, from s=0 to s=1
-        bc_start = BoundaryCondition(position=0.0, velocity=0.0, acceleration=0.0)
-        bc_end = BoundaryCondition(position=1.0, velocity=0.0, acceleration=0.0)
-        interval = TimeInterval(start=0.0, end=duration)
-        traj = PolynomialTrajectory.order_5_trajectory(bc_start, bc_end, interval)
-
         n_output = max(2, int(np.ceil(duration / self.dt)))
         times = np.linspace(0.0, duration, n_output)
 
-        profile_s = np.empty(n_output, dtype=np.float64)
-        for i in range(n_output):
-            profile_s[i] = traj(float(times[i]))[0]
+        profile_s = _quintic_samples(times, 0.0, 1.0, duration)
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
 
@@ -976,11 +992,6 @@ class TrajectoryBuilder:
         Each joint independently follows a trapezoidal velocity profile,
         synchronized to finish at the same time.
         """
-        from interpolatepy.trapezoidal import (
-            TrajectoryParams as TrapParams,
-            TrapezoidalTrajectory,
-        )
-
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
@@ -999,23 +1010,18 @@ class TrajectoryBuilder:
                 trajectory_rad[:, j] = start_pos[j]
                 continue
 
-            params = TrapParams(
-                q0=start_pos[j],
-                q1=end_pos[j],
-                v0=0.0,
-                v1=0.0,
-                vmax=self.v_max[j],
-                amax=self.a_max[j],
-            )
-            traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(
-                params
-            )
+            profile_duration = _trapezoid_duration(delta, self.v_max[j], self.a_max[j])
 
             # Scale this joint's own profile time onto the synchronized duration
             time_scale = profile_duration / duration if duration > 0 else 1.0
 
-            for i, t in enumerate(times):
-                trajectory_rad[i, j] = traj_fn(t * time_scale)[0]
+            trajectory_rad[:, j] = _trapezoid_samples(
+                times * time_scale,
+                start_pos[j],
+                end_pos[j],
+                self.v_max[j],
+                self.a_max[j],
+            )
 
         trajectory_rad, duration = self._enforce_segment_limits(
             trajectory_rad, duration
@@ -1032,11 +1038,6 @@ class TrajectoryBuilder:
         TCP follows trapezoidal velocity profile along the path, with local
         slowdown where velocity limits would be exceeded.
         """
-        from interpolatepy.trapezoidal import (
-            TrajectoryParams as TrapParams,
-            TrapezoidalTrajectory,
-        )
-
         if self.duration:
             duration = self.duration
         else:
@@ -1046,15 +1047,7 @@ class TrajectoryBuilder:
         vmax_s, amax_s, _ = self._compute_s_profile_limits()
 
         # Trapezoidal profile for the path parameter s, from s=0 to s=1
-        params = TrapParams(
-            q0=0.0,
-            q1=1.0,
-            v0=0.0,
-            v1=0.0,
-            vmax=vmax_s,
-            amax=amax_s,
-        )
-        traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(params)
+        profile_duration = _trapezoid_duration(1.0, vmax_s, amax_s)
 
         # If user specified longer duration, scale to match
         if self.duration and self.duration > profile_duration:
@@ -1067,9 +1060,7 @@ class TrajectoryBuilder:
         n_output = max(2, int(np.ceil(duration / self.dt)))
         times = np.linspace(0.0, duration, n_output)
 
-        profile_s = np.array(
-            [traj_fn(t * time_scale)[0] for t in times], dtype=np.float64
-        )
+        profile_s = _trapezoid_samples(times * time_scale, 0.0, 1.0, vmax_s, amax_s)
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
 

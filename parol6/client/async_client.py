@@ -1586,11 +1586,11 @@ class AsyncRobotClient(_RobotClientABC):
             if remaining <= 0:
                 return False
             try:
-                await asyncio.wait_for(
-                    self._status_event.wait(),
-                    timeout=min(remaining, 0.5),
-                )
-            except asyncio.TimeoutError:
+                # asyncio.timeout, not wait_for: on 3.11 wait_for can swallow an
+                # outer cancellation when its child wakes in the same turn.
+                async with asyncio.timeout(min(remaining, 0.5)):
+                    await self._status_event.wait()
+            except (asyncio.TimeoutError, TimeoutError):
                 continue
 
             if self._closed:
@@ -1689,8 +1689,12 @@ class AsyncRobotClient(_RobotClientABC):
             if remaining <= 0:
                 return
             try:
-                await asyncio.wait_for(self._status_event.wait(), remaining)
-            except asyncio.TimeoutError:
+                # asyncio.timeout, not wait_for: on 3.11 wait_for can swallow an
+                # outer cancellation when its child wakes in the same turn, and
+                # the caller's deadline rides on that cancellation.
+                async with asyncio.timeout(remaining):
+                    await self._status_event.wait()
+            except (asyncio.TimeoutError, TimeoutError):
                 return
 
     # --------------- Move commands (queued, pre-computed trajectory) ---------------
