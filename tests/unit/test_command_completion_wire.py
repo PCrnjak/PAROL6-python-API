@@ -26,6 +26,8 @@ def test_completion_history_is_exact_expires_and_resets_through_wire_query():
         command, _, error = create_command(encode(CommandCompletionCmd(index)))
         assert command is not None, error
         command.setup(state)
+        # compute() answers with the typed result; the controller is what puts
+        # it on the wire with the request id it is answering.
         result = decode_message(pack_response(command.compute(state), 7)).result
         assert result.command_index == index
         assert result.session_id == state.status_session_id

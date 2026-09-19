@@ -8,12 +8,14 @@ controller disabled, so a plain "just stop" left the robot rejecting every
 subsequent command.
 """
 
+import socket
 import time
 
 import numpy as np
 import pytest
 
 from parol6 import MotionError, RobotClient
+from parol6.protocol.wire import SelectToolCmd, encode_command
 
 pytestmark = pytest.mark.integration
 
@@ -117,6 +119,31 @@ def test_stop_discards_plans_still_in_the_planner(client: RobotClient, server_pr
     )
     assert client.queue() == []
     assert client.home(wait=True, timeout=30.0) >= 0
+
+
+def test_a_planner_failure_after_a_stop_still_surfaces(
+    client: RobotClient, server_proc, ports
+):
+    """A Stop starts a new planner generation; a command the planner itself
+    fails on afterwards must still report, not vanish as pre-stop work."""
+    assert client.stop() == 1
+    assert client.error() is None
+    # The client uppercases tool names; the worker applies the raw name, so a
+    # lowercase one passes wire validation and fails inside the planner.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as raw:
+        raw.sendto(
+            encode_command(SelectToolCmd(tool_name="none")),
+            (ports.server_ip, ports.server_port),
+        )
+    deadline = time.monotonic() + 5
+    while client.error() is None:
+        assert time.monotonic() < deadline, (
+            "the planner failure never surfaced after a Stop"
+        )
+        time.sleep(0.02)
+    error = client.error()
+    assert error is not None and "Unknown tool" in error.cause
+    assert client.queue() == []
 
 
 def test_stop_discards_a_queued_tcp_transform_from_the_planner_too(

@@ -370,6 +370,15 @@ class SegmentPlayer:
         self._inline_activated = False
         state.executing_command_index = self._active.command_index
         state.action_state = ActionState.EXECUTING
+        # The chain this segment plays is no longer owed: QUEUE lists only
+        # commands not yet started.
+        started = seg.command_index
+        if isinstance(seg, TrajectorySegment):
+            for idx in seg.blend_consumed_indices:
+                if idx > started:
+                    started = idx
+        while state.pending_planned and state.pending_planned[0][0] <= started:
+            state.pending_planned.popleft()
         # Populate action info for trajectory segments (inline segments set these later)
         if isinstance(self._active, TrajectorySegment):
             self._position_rad[:] = self._active.trajectory_rad[0]
@@ -422,14 +431,20 @@ class SegmentPlayer:
 
     def _complete_segment(self, seg: Segment, state: ControllerState) -> None:
         """Mark segment as completed and update tracking indices."""
+        final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
                 if idx != seg.command_index:
                     state.record_completion(idx)
+                if idx > final_idx:
+                    final_idx = idx
             state.queued_duration -= seg.duration
         state.queued_segments -= 1
         state.record_completion(seg.command_index)
+        while state.pending_planned and state.pending_planned[0][0] <= final_idx:
+            state.pending_planned.popleft()
         state.action_current = ""
+        state.executing_command_index = -1
         state.action_params = ""
         state.action_state = ActionState.IDLE
         self._active = None
@@ -498,6 +513,7 @@ class SegmentPlayer:
             # Planned trajectories live here rather than in CommandExecutor.
             # Cancelling its command cannot clear this player's activity.
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
             state.action_state = ActionState.IDLE
         self._active = None
@@ -514,6 +530,7 @@ class SegmentPlayer:
         """Drain any remaining segments from the planner's output queue."""
         while self._planner.poll_segment() is not None:
             pass
+        state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0
         state.plan_received_index = state.plan_submitted_index
