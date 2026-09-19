@@ -3,6 +3,7 @@ Query commands that return immediate status information.
 """
 
 from typing import TYPE_CHECKING
+from math import degrees
 
 import numpy as np
 
@@ -42,6 +43,8 @@ from parol6.protocol.wire import (
     SpeedsResultStruct,
     TcpOffsetCmd,
     TcpOffsetResultStruct,
+    TcpTransformCmd,
+    TcpTransformResultStruct,
     StatusCmd,
     StatusResultStruct,
     TcpSpeedCmd,
@@ -149,6 +152,7 @@ class StatusCommand(QueryCommand[StatusCmd]):
                     ts.fault_code,
                     list(ts.positions),
                     list(ts.channels),
+                    ts.variant_key,
                 ],
             )
         )
@@ -258,6 +262,7 @@ class ToolStatusCommand(QueryCommand[ToolStatusCmd]):
                 fault_code=ts.fault_code,
                 positions=list(ts.positions),
                 channels=list(ts.channels),
+                variant_key=ts.variant_key,
             )
         )
 
@@ -428,5 +433,26 @@ class TcpOffsetCommand(QueryCommand[TcpOffsetCmd]):
                 x=offset[0] * 1000,
                 y=offset[1] * 1000,
                 z=offset[2] * 1000,
+            )
+        )
+
+
+@register_command(CmdType.TCP_TRANSFORM)
+class TcpTransformCommand(QueryCommand[TcpTransformCmd]):
+    PARAMS_TYPE = TcpTransformCmd
+    QUERY_TYPE = QueryType.TCP_TRANSFORM
+    __slots__ = ()
+
+    def compute(self, state: "ControllerState") -> bytes:
+        xyz = state.tcp_offset_m
+        rpy = state.tcp_rotation_rad
+        return pack_response(
+            TcpTransformResultStruct(
+                x=xyz[0] * 1000,
+                y=xyz[1] * 1000,
+                z=xyz[2] * 1000,
+                roll=degrees(rpy[0]),
+                pitch=degrees(rpy[1]),
+                yaw=degrees(rpy[2]),
             )
         )

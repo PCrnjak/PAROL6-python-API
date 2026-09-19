@@ -181,6 +181,7 @@ class ControllerState:
     _current_tool: str = "NONE"
     _current_tool_variant: str = ""
     _tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Robot telemetry and command buffers - using ndarray for efficiency
     Command_out: CommandCode = CommandCode.IDLE  # The command code to send to firmware
@@ -316,6 +317,7 @@ class ControllerState:
     _fkine_last_tool_name: str = ""
     _fkine_last_tool_variant: str = ""
     _fkine_last_tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _fkine_last_tcp_rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _fkine_mat: np.ndarray = field(
         default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
     )
@@ -357,6 +359,7 @@ class ControllerState:
         self._current_tool = "NONE"
         self._current_tool_variant = ""
         self._tcp_offset_m = (0.0, 0.0, 0.0)
+        self._tcp_rotation_rad = (0.0, 0.0, 0.0)
         PAROL6_ROBOT.apply_tool("NONE")
 
         # Command and telemetry buffers - zero out
@@ -433,6 +436,7 @@ class ControllerState:
             self._current_tool = tool_name
             self._current_tool_variant = variant_key
             self._tcp_offset_m = (0.0, 0.0, 0.0)
+            self._tcp_rotation_rad = (0.0, 0.0, 0.0)
             PAROL6_ROBOT.apply_tool(tool_name, variant_key=variant_key)
             label = f"{tool_name}:{variant_key}" if variant_key else tool_name
             logger.info(f"Tool changed to {label}")
@@ -456,12 +460,25 @@ class ControllerState:
 
     def set_tcp_offset(self, offset_m: tuple[float, float, float]) -> None:
         """Set TCP offset and reapply tool transform with the composed offset."""
-        self._tcp_offset_m = offset_m
+        self.set_tcp_transform(offset_m, (0.0, 0.0, 0.0))
+
+    @property
+    def tcp_rotation_rad(self) -> tuple[float, float, float]:
+        return self._tcp_rotation_rad
+
+    def set_tcp_transform(
+        self,
+        offset_m: tuple[float, float, float],
+        rotation_rad: tuple[float, float, float],
+    ) -> None:
         PAROL6_ROBOT.apply_tool(
             self._current_tool,
             variant_key=self._current_tool_variant,
             tcp_offset_m=offset_m,
+            tcp_rotation_rad=rotation_rad,
         )
+        self._tcp_offset_m = offset_m
+        self._tcp_rotation_rad = rotation_rad
         logger.debug(
             "TCP offset set to (%.1f, %.1f, %.1f) mm",
             offset_m[0] * 1000,
@@ -570,6 +587,7 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         state.current_tool != state._fkine_last_tool_name
         or state.current_tool_variant != state._fkine_last_tool_variant
         or state.tcp_offset_m != state._fkine_last_tcp_offset
+        or state.tcp_rotation_rad != state._fkine_last_tcp_rotation
     )
 
     if pos_changed or tool_changed:
@@ -587,6 +605,7 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         state._fkine_last_tool_name = state.current_tool
         state._fkine_last_tool_variant = state.current_tool_variant
         state._fkine_last_tcp_offset = state.tcp_offset_m
+        state._fkine_last_tcp_rotation = state.tcp_rotation_rad
 
 
 def get_fkine_se3(state: ControllerState | None = None) -> np.ndarray:

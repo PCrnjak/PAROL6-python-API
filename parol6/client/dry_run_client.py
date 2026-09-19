@@ -36,6 +36,7 @@ from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
 from pinokin import se3_from_rpy, se3_rpy
 import re as _re
+from math import degrees, radians
 
 import parol6.protocol.wire as _wire
 from waldoctl.commands import CommandKind, command_table
@@ -43,6 +44,7 @@ from ..protocol.wire import (
     HomeCmd,
     SelectToolCmd,
     SetTcpOffsetCmd,
+    SetTcpTransformCmd,
     TeleportCmd,
     ToolActionCmd,
 )
@@ -57,7 +59,8 @@ from ..server.motion_planner import (
 from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
-from parol6.tools import get_registry
+from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig, get_registry
+from waldoctl.tools import ToolType
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
@@ -155,9 +158,6 @@ class _DryRunTool:
 
     @property
     def tool_type(self) -> str:
-        from waldoctl.tools import ToolType
-        from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig
-
         spec = get_registry().get(self.key)
         return (
             ToolType.GRIPPER
@@ -244,7 +244,6 @@ class DryRunRobotClient:
         self._max_snapshot_points = max_snapshot_points
         self._active_tool_key: str = ""
         self._active_variant_key: str = ""
-        self._tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._tool_proxy = _DryRunTool(self)
 
     @property
@@ -260,10 +259,13 @@ class DryRunRobotClient:
     def tcp_offset(self) -> list[float]:
         """Return current TCP offset in mm."""
         return [
-            self._tcp_offset_m[0] * 1000.0,
-            self._tcp_offset_m[1] * 1000.0,
-            self._tcp_offset_m[2] * 1000.0,
+            self._state.tcp_offset_m[0] * 1000.0,
+            self._state.tcp_offset_m[1] * 1000.0,
+            self._state.tcp_offset_m[2] * 1000.0,
         ]
+
+    def tcp_transform(self) -> list[float]:
+        return self.tcp_offset() + [degrees(v) for v in self._state.tcp_rotation_rad]
 
     def flush(self) -> list[DryRunResult]:
         """Flush pending blend buffer. Call after script completion."""
@@ -306,21 +308,22 @@ class DryRunRobotClient:
             # into a planned return move, so the preview renders the path.
         if isinstance(params, TeleportCmd):
             return self._snap_to_angles(params.angles)
+        results: list[DryRunResult] = []
+        if isinstance(params, (SelectToolCmd, SetTcpOffsetCmd, SetTcpTransformCmd)):
+            # Resolve pending paths against their original TCP before changing it.
+            results.extend(self.flush())
         if isinstance(params, SelectToolCmd):
             self._active_tool_key = params.tool_name.strip().upper()
             self._active_variant_key = params.variant_key
-            self._tcp_offset_m = (0.0, 0.0, 0.0)
-        if isinstance(params, SetTcpOffsetCmd):
-            self._tcp_offset_m = (
-                params.x / 1000.0,
-                params.y / 1000.0,
-                params.z / 1000.0,
+            self._state.set_tool(self._active_tool_key, params.variant_key)
+        if isinstance(params, (SetTcpOffsetCmd, SetTcpTransformCmd)):
+            rotation = (
+                (radians(params.roll), radians(params.pitch), radians(params.yaw))
+                if isinstance(params, SetTcpTransformCmd)
+                else (0.0, 0.0, 0.0)
             )
-            self._state._tcp_offset_m = self._tcp_offset_m
-            PAROL6_ROBOT.apply_tool(
-                self._active_tool_key or "NONE",
-                variant_key=self._active_variant_key,
-                tcp_offset_m=self._tcp_offset_m,
+            self._state.set_tcp_transform(
+                (params.x / 1000.0, params.y / 1000.0, params.z / 1000.0), rotation
             )
         # Detect jog/servo commands — planner doesn't handle streaming.
         # Other non-trajectory MotionCommands (SelectTool, Home) fall through
@@ -339,7 +342,6 @@ class DryRunRobotClient:
         segments = self._planner.process(params)
         self._state.Position_in[:] = self._planner.state.Position_in
 
-        results: list[DryRunResult] = []
         for seg in segments:
             r = self._segment_to_result(seg)
             if r is not None:

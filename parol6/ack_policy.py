@@ -11,7 +11,6 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
     CmdType.SIMULATOR,
     CmdType.SELECT_PROFILE,
     CmdType.RESET_STATE,
-    CmdType.SET_TCP_OFFSET,
     CmdType.SET_SHAPES,
     CmdType.SET_STATUS_RATE,
 }
@@ -35,6 +34,7 @@ QUERY_CMD_TYPES: set[CmdType] = {
     CmdType.PING,
     CmdType.IS_SIMULATOR,
     CmdType.TCP_OFFSET,
+    CmdType.TCP_TRANSFORM,
     CmdType.SHAPES,
     CmdType.STATUS_RATE,
 }
@@ -52,6 +52,8 @@ FIRE_AND_FORGET: set[CmdType] = {
 
 # Queued motion commands that return a command index in their ACK
 QUEUED_CMD_TYPES: set[CmdType] = {
+    CmdType.SET_TCP_OFFSET,
+    CmdType.SET_TCP_TRANSFORM,
     CmdType.HOME,
     CmdType.MOVEJ,
     CmdType.MOVEJ_POSE,
