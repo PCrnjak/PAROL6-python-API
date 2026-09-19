@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import secrets
 import sys
 import time
 
@@ -61,6 +62,8 @@ class StatusBroadcaster:
         self._send_failures = 0
         self._max_send_failures = 3
         self._last_fail_log_time = 0.0
+        self._session_id = secrets.randbits(64) or 1
+        self._seq = 0
 
         self._setup_socket()
 
@@ -207,7 +210,10 @@ class StatusBroadcaster:
         if cache.age_s() > self._stale_s:
             return
 
-        payload = cache.to_binary()
+        payload = cache.to_binary(
+            session_id=self._session_id, seq=self._seq, mono_time_ns=time.monotonic_ns()
+        )
+        self._seq += 1
         sock = self._sock
         if sock is None:
             self._switch_to_unicast()
