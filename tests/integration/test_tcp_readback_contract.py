@@ -23,14 +23,24 @@ def _unserved_udp_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def _apply_offset(client, x: float, y: float, z: float) -> None:
+    """Set the TCP offset and wait for it: SET_TCP_OFFSET lands in queue order."""
+    index = client.set_tcp_offset(x, y, z)
+    assert index >= 0, f"set_tcp_offset was not accepted (got {index})"
+    assert client.wait_command(index, timeout=10.0), "set_tcp_offset did not complete"
+
+
 @pytest.mark.integration
 def test_tcp_readbacks_separate_a_real_zero_from_a_silent_controller(client):
     """A deliberate zero reads back as a value; an unanswered readback raises."""
-    assert client.set_tcp_offset(0.0, 0.0, 0.0) == 1
+    _apply_offset(client, 0.0, 0.0, -25.0)
+    assert client.tcp_offset() == pytest.approx([0.0, 0.0, -25.0])
 
-    assert [float(v) for v in client.tcp_offset()] == [0.0, 0.0, 0.0]
+    # Clearing back to zero answers a value, and the readback moved to prove it.
+    _apply_offset(client, 0.0, 0.0, 0.0)
+    assert client.tcp_offset() == pytest.approx([0.0, 0.0, 0.0])
 
-    transform = [float(v) for v in client.tcp_transform()]
+    transform = client.tcp_transform()
     assert len(transform) == 6
     assert all(isfinite(v) for v in transform)
 
