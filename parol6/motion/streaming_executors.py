@@ -10,12 +10,20 @@ since they're already time-optimal (TOPPRA/RUCKIG) or validated (QUINTIC/TRAPEZO
 """
 
 import logging
+import math
 from abc import ABC, abstractmethod
 
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
-from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
+from ruckig import (  # type: ignore[unresolved-import, ty:unresolved-import]
+    ControlInterface,
+    InputParameter,
+    OutputParameter,
+    Result,
+    Ruckig,
+    Synchronization,
+)
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS
@@ -449,11 +457,29 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._target_velocity_arr = np.zeros(6, dtype=np.float64)
         self._target_acceleration_arr = np.zeros(6, dtype=np.float64)
 
+        # Unit direction of the motion the limits are being applied to,
+        # and the tangent the last tick reached. _apply_limits reads the
+        # direction, and super().__init__() calls it, so both exist first.
+        self._direction = np.zeros(6, dtype=np.float64)
+        self._cur_tangent = np.zeros(6, dtype=np.float64)
+        self._delta_tangent = np.zeros(6, dtype=np.float64)
+        self._last_target = np.zeros(6, dtype=np.float64)
+        self._has_target = False
+
         super().__init__(num_dofs=6, dt=dt)  # 6-DOF: [x, y, z, wx, wy, wz]
 
         self._tangent_buf = np.zeros(6, dtype=np.float64)
         self._vel_np_buf = np.zeros(6, dtype=np.float64)
         self._world_vel_buf = np.zeros(6, dtype=np.float64)
+
+        # Ruckig's default (Time) only makes the six components FINISH
+        # together; each still takes its own time-optimal route there, so
+        # the tangent bows and the TCP leaves the straight line by
+        # millimetres. Phase holds them to one shared profile, which is
+        # what makes the interpolation the screw geodesic. Ruckig falls
+        # back to time synchronization by itself when the limits make a
+        # shared profile impossible.
+        self.inp.synchronization = Synchronization.Phase
 
         # SE3 workspace buffers let the JIT pose conversions run with zero allocation.
         self._ref_inv_buf = np.zeros((4, 4), dtype=np.float64)
@@ -485,21 +511,66 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self.inp.target_acceleration = self._zeros
         self._apply_limits()
 
+    def _set_direction(self, vec: np.ndarray) -> None:
+        """Point the envelope along `vec`, leaving it as it was when
+        `vec` is too small to take a direction from.
+
+        A servo stream retargets every tick and the remaining delta
+        shrinks to nothing as the move lands; snapping back to isotropic
+        there would change the limits under a move still running.
+        """
+        norm = 0.0
+        for i in range(6):
+            norm += vec[i] * vec[i]
+        if norm <= 1e-24:
+            return
+        inv = 1.0 / math.sqrt(norm)
+        for i in range(6):
+            self._direction[i] = vec[i] * inv
+
+    def _direction_scale(self, lo: int, hi: int) -> float:
+        """Ratio turning a per-component ceiling into a TCP-norm one.
+
+        The configured ceilings are TCP speeds -- what the tool may
+        travel at, not what each axis may. Ruckig bounds each component
+        on its own, so an isotropic envelope lets a diagonal run the norm
+        up to sqrt(3) times the ceiling: a 200 mm/s limit reaches 269
+        mm/s on a three-axis move. Under phase synchronization the six
+        components share one profile, so the tangent runs along a fixed
+        direction at some scalar rate -- the component Ruckig binds on is
+        the largest |d|, and the norm is |d| over the half. Their ratio
+        makes the two agree.
+        """
+        norm = 0.0
+        largest = 0.0
+        for i in range(lo, hi):
+            v = self._direction[i]
+            norm += v * v
+            a = abs(v)
+            if a > largest:
+                largest = a
+        if norm <= 0.0:
+            return 1.0
+        return largest / math.sqrt(norm)
+
     def _apply_limits(self) -> None:
         """Apply current limits (with scaling) to Ruckig parameters.
 
         Uses pre-allocated numpy arrays to avoid per-tick allocations.
         """
-        self._max_velocity_arr[:3] = self._v_lin_max * self._vel_scale
-        self._max_velocity_arr[3:] = self._v_ang_max * self._vel_scale
+        lin = self._direction_scale(0, 3)
+        ang = self._direction_scale(3, 6)
+
+        self._max_velocity_arr[:3] = self._v_lin_max * self._vel_scale * lin
+        self._max_velocity_arr[3:] = self._v_ang_max * self._vel_scale * ang
         self.inp.max_velocity = self._max_velocity_arr
 
-        self._max_acceleration_arr[:3] = self._a_lin_max * self._acc_scale
-        self._max_acceleration_arr[3:] = self._a_ang_max * self._acc_scale
+        self._max_acceleration_arr[:3] = self._a_lin_max * self._acc_scale * lin
+        self._max_acceleration_arr[3:] = self._a_ang_max * self._acc_scale * ang
         self.inp.max_acceleration = self._max_acceleration_arr
 
-        self._max_jerk_arr[:3] = self._j_lin_max
-        self._max_jerk_arr[3:] = self._j_ang_max
+        self._max_jerk_arr[:3] = self._j_lin_max * lin
+        self._max_jerk_arr[3:] = self._j_ang_max * ang
         self.inp.max_jerk = self._max_jerk_arr
 
     def sync_pose(self, current_pose: np.ndarray) -> None:
@@ -513,6 +584,8 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             current_pose: Current TCP pose as 4x4 SE3 matrix
         """
         self.reference_pose = current_pose.copy()  # avoid aliasing with cached FK
+        self._cur_tangent.fill(0.0)
+        self._has_target = False
         # Reset Ruckig state to origin (relative to reference)
         self.inp.current_position = self._zeros
         self.inp.current_velocity = self._zeros
@@ -584,6 +657,33 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         """
         target_tangent = self._pose_to_tangent(target_pose)
 
+        # Re-planning a target Ruckig is already tracking costs the phase
+        # synchronization that keeps the TCP on its line. A re-plan tests
+        # the current velocity and acceleration against the new profile
+        # and falls back to time synchronization unless they line up
+        # exactly; once it has, the state drifts further out of phase and
+        # the next tick fails the test again. A servo stream repeats its
+        # target at the tick rate, so this is the common case, not an
+        # edge one: the same move retargeted every tick left the line by
+        # 4.7 mm, and left by none at all when set once.
+        if self._has_target:
+            same = True
+            for i in range(6):
+                if self._last_target[i] != target_tangent[i]:
+                    same = False
+                    break
+            if same:
+                self.active = True
+                return
+        self._last_target[:] = target_tangent
+        self._has_target = True
+
+        # The envelope is direction-dependent (see _apply_limits), and
+        # the direction is the one from where the limiter is to the
+        # target, not the target's own bearing from the reference.
+        np.subtract(target_tangent, self._cur_tangent, out=self._delta_tangent)
+        self._set_direction(self._delta_tangent)
+
         self.inp.control_interface = ControlInterface.Position
         self.inp.target_position = target_tangent
         self.inp.target_velocity = self._zeros  # Stop at target
@@ -614,6 +714,8 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         else:
             self._target_velocity_arr[axis] = velocity
 
+        self._has_target = False
+        self._set_direction(self._target_velocity_arr)
         self.inp.control_interface = ControlInterface.Velocity
         self.inp.target_velocity = self._target_velocity_arr
         self._target_acceleration_arr.fill(0.0)
@@ -655,6 +757,8 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
         np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
 
+        self._has_target = False
+        self._set_direction(self._target_velocity_arr)
         self.inp.control_interface = ControlInterface.Velocity
         self.inp.target_velocity = self._target_velocity_arr
         self._target_acceleration_arr.fill(0.0)
@@ -700,6 +804,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             )
 
         smoothed_pose = self._tangent_to_pose(pos)
+        self._cur_tangent[:] = pos
         self._vel_np_buf[:] = vel
 
         # Don't auto-deactivate in velocity mode - caller controls via set_jog_velocity(0)
