@@ -607,14 +607,17 @@ class TrajectoryBuilder:
         Returns:
             Trajectory ready for execution
         """
-        if len(self.joint_path) < 2:
-            steps = _rad_to_steps_alloc(
-                self.joint_path.positions[0:1]  # Keep 2D shape (1, 6)
-            )
+        positions = self.joint_path.positions
+        # A path that goes nowhere is done where it stands: there is no
+        # distance for a timing solver to spread over, and every profile
+        # would either refuse it or divide by it. Nowhere is within a
+        # motor step, the resolution the arm is driven at.
+        if len(self.joint_path) < 2 or self._within_a_step(positions):
+            steps = _rad_to_steps_alloc(positions[0:1])  # Keep 2D shape (1, 6)
             return Trajectory(
                 steps=steps,
                 duration=0.0,
-                positions_rad=self.joint_path.positions[0:1].copy(),
+                positions_rad=positions[0:1].copy(),
             )
 
         if self.joint_path.prefix > 0:
@@ -631,6 +634,11 @@ class TrajectoryBuilder:
             return self._build_trapezoid_trajectory()
         else:
             return self._build_toppra_trajectory()
+
+    @staticmethod
+    def _within_a_step(positions: NDArray[np.float64]) -> bool:
+        steps = _rad_to_steps_alloc(positions)
+        return bool(np.max(np.abs(steps - steps[0])) <= 1)
 
     def _build_with_prefix(self) -> Trajectory:
         """A wrist reconfiguration ahead of the path is its own joint move,

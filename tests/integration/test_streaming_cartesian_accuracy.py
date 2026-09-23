@@ -5,6 +5,8 @@ Tests the servo_l path used for TCP dragging.
 Catches bugs where reference pose gets corrupted (e.g., aliasing with FK cache).
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -13,6 +15,24 @@ def angle_diff(a: float, b: float) -> float:
     """Compute smallest angle difference considering wrapping."""
     diff = (a - b + 180) % 360 - 180
     return abs(diff)
+
+
+def stream_servo_l(client, target: list[float], timeout: float = 10.0) -> None:
+    """Drive ``servo_l`` the way a dragging client does: refresh the target
+    every 50 ms until the tool is on it, then let the stream run out. A
+    stream whose client goes silent brakes and holds, so a single datagram
+    is never a move."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert client.servo_l(target, speed=1.0) > 0
+        time.sleep(0.05)
+        pose = client.pose()
+        on_target = np.linalg.norm(
+            np.array(pose[:3]) - np.array(target[:3])
+        ) < 0.5 and all(angle_diff(pose[3 + i], target[3 + i]) < 0.5 for i in range(3))
+        if on_target:
+            break
+    assert client.wait_motion(timeout=5.0)
 
 
 def assert_pose_accuracy(
@@ -62,12 +82,7 @@ class TestServoCartesianAccuracy:
 
         print(f"Target pose: {target}")
 
-        # Send servo cartesian move (fire-and-forget, no stream mode toggle needed)
-        result = client.servo_l(target, speed=1.0)
-        assert result > 0
-
-        # Wait for motion to settle
-        assert client.wait_motion(timeout=10.0)
+        stream_servo_l(client, target)
 
         # Verify final pose
         final_pose = client.pose()
@@ -107,11 +122,7 @@ class TestServoCartesianAccuracy:
             print(f"\n--- Move {i + 1}/{len(offsets)} ---")
             print(f"Target: {target[:3]}")
 
-            result = client.servo_l(target, speed=1.0)
-            assert result > 0
-
-            # Wait for this move to complete before next
-            assert client.wait_motion(timeout=10.0, settle_window=2.0)
+            stream_servo_l(client, target)
 
             final_pose = client.pose()
             start_pose = final_pose

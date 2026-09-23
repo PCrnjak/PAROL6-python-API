@@ -204,8 +204,19 @@ class JogLCommand(MotionCommand[JogLCmd]):
                     ),
                 )
                 return ExecutionStatusCode.FAILED
+            # The brake's own configurations are gated too: the ones that
+            # would reach the contact are withheld, and the arm holds the
+            # last clear one while the smoother runs down.
             ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
-            if ik_result.success and ik_result.q is not None:
+            checker = PAROL6_ROBOT.collision
+            if (
+                ik_result.success
+                and ik_result.q is not None
+                and (
+                    checker is None
+                    or not collision_blocked(checker, self._q_commanded, ik_result.q)
+                )
+            ):
                 self._track_and_send(state, ik_result.q)
             return ExecutionStatusCode.EXECUTING
 
