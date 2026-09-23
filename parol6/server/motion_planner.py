@@ -33,6 +33,7 @@ from parol6.protocol.wire import (
     SetTcpOffsetCmd,
     SetTcpTransformCmd,
     ToolActionCmd,
+    wire_command_name,
 )
 from parol6.server.command_executor import _format_cmd_params
 from parol6.utils.error_catalog import RobotError, extract_robot_error
@@ -245,6 +246,9 @@ class TrajectoryPlanner:
         self._max_blend_lookahead = MAX_BLEND_LOOKAHEAD
         self._robot_module = PAROL6_ROBOT
         self._blend_buffer: list[tuple[int, TrajectoryMoveCommandBase]] = []
+        # The name each in-flight command is reported under: the wire
+        # command's, so a HOME planned as a joint return still reads "home".
+        self._names: dict[int, str] = {}
         self._output: list[Segment] = []
 
         # Pre-compute home position in steps
@@ -257,6 +261,7 @@ class TrajectoryPlanner:
     def process(self, params: object, command_index: int = 0) -> list[Segment]:
         """Plan a single command. Returns list of resulting segments."""
         self._output.clear()
+        self._names[command_index] = wire_command_name(type(params))
 
         # Fast-path home: an already-referenced robot returns to the standby
         # pose with a normal planned (collision-checked) joint move instead
@@ -399,7 +404,7 @@ class TrajectoryPlanner:
                     trajectory_steps=head_cmd.trajectory_steps.copy(),
                     trajectory_rad=head_cmd.trajectory_rad.copy(),
                     duration=head_cmd._duration,
-                    command_name=type(head_cmd).__name__,
+                    command_name=self._reported_name(head_idx, head_cmd),
                     action_params=_format_cmd_params(head_cmd.p),
                     blend_consumed_indices=consumed_indices,
                 )
@@ -435,11 +440,14 @@ class TrajectoryPlanner:
                 trajectory_steps=cmd.trajectory_steps.copy(),
                 trajectory_rad=cmd.trajectory_rad.copy(),
                 duration=cmd._duration,
-                command_name=type(cmd).__name__,
+                command_name=self._reported_name(command_index, cmd),
                 action_params=_format_cmd_params(params) if params is not None else "",
             )
         )
         self.state.Position_in[:] = cmd.trajectory_steps[-1]
+
+    def _reported_name(self, command_index: int, cmd: TrajectoryMoveCommandBase) -> str:
+        return self._names.pop(command_index, wire_command_name(type(cmd.p)))
 
     def _emit_error(
         self, command_index: int, cmd: TrajectoryMoveCommandBase, exc: Exception

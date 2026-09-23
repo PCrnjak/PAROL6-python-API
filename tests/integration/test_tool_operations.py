@@ -11,6 +11,8 @@ import pytest
 import pytest_asyncio
 
 from parol6.protocol.wire import CommandCompletionCmd, encode_command
+from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import MotionError
 
 from waldoctl import (
     ElectricGripperTool,
@@ -138,7 +140,9 @@ class TestPneumaticGripperMethods:
         assert await client.stop() == 1
         closed = await tool.close(wait=False)
         assert await client.wait_command(closed, timeout=1.0)
-        assert not await client.wait_command(cancelled, timeout=0.05)
+        with pytest.raises(MotionError) as discarded:
+            await client.wait_command(cancelled, timeout=1.0)
+        assert discarded.value.robot_error.code == ErrorCode.MOTN_CANCELLED
 
         # Deliver a real completion reply late, ahead of a different query.
         assert client._transport is not None
@@ -220,6 +224,86 @@ class TestSSG48GripperMethods:
         idx = await tool.set_position(0.5, speed=0.7, current=600)
         assert idx >= 0
         await client.wait_motion(timeout=10.0)
+
+    @pytest.mark.asyncio
+    async def test_a_bad_tool_action_is_refused_before_it_is_acknowledged(
+        self, async_client
+    ):
+        """A malformed action never leaves the client; one the arm cannot
+        run is refused by the controller instead of acknowledged and left
+        to fail — and the control loop keeps ticking through all of it."""
+        robot, client = async_client
+        await client.select_tool("SSG-48")
+        await client.wait_motion(timeout=5.0)
+        tool = client.tool
+
+        with pytest.raises(MotionError, match="not the selected tool"):
+            await client.tool_action("PNEUMATIC", "open")
+
+        for params in (
+            [],
+            [0.5],
+            [0.5, 0.5],
+            [0.5, 0.5, 600, 1],
+            [float("nan"), 0.5, 600],
+            [0.5, float("inf"), 600],
+            [0.5, 0.5, float("-inf")],
+            [-0.1, 0.5, 600],
+            [1.5, 0.5, 600],
+            [0.5, -0.5, 600],
+            [0.5, 1.5, 600],
+            [0.5, 0.5, 0],
+            [0.5, 0.5, 5000],
+            ["0.5", 0.5, 600],
+            [True, 0.5, 600],
+        ):
+            with pytest.raises(ValueError):
+                await client.tool_action("SSG-48", "move", params)
+        for action, params in (
+            ("bogus", []),
+            ("open", []),
+            ("set_position", [0.5]),
+            ("calibrate", [1]),
+            ("stop", [0]),
+            ("idle", [0]),
+        ):
+            with pytest.raises(ValueError):
+                await client.tool_action("SSG-48", action, params)
+        assert await client.status() is not None
+
+        # Tool actions queue in order: the move waits for the calibration
+        # it needs instead of cancelling it.
+        assert await tool.calibrate() >= 0
+        assert await tool.set_position(0.5, wait=True) >= 0
+        assert abs((await tool.status()).positions[0] - 0.5) < 0.05
+
+    @pytest.mark.asyncio
+    async def test_a_stop_halts_the_jaws_where_they_are(self, async_client):
+        """A stop mid-travel fails the move with MOTN_CANCELLED and leaves
+        the jaws where they were, gripping, rather than letting them run on
+        to the target or releasing."""
+        robot, client = async_client
+        await client.select_tool("SSG-48")
+        await client.wait_motion(timeout=5.0)
+        tool = client.tool
+        assert await tool.calibrate(wait=True) >= 0
+        assert await tool.set_position(0.0, wait=True) >= 0
+
+        closing = await tool.set_position(1.0, speed=0.05)
+        assert await client.wait_status(
+            lambda s: 0.15 < s.tool_status.positions[0] < 0.6, timeout=10.0
+        ), "the jaws never got under way"
+        assert await client.stop() == 1
+        with pytest.raises(MotionError) as stopped:
+            await client.wait_command(closing, timeout=1.0)
+        assert stopped.value.robot_error.code == ErrorCode.MOTN_CANCELLED
+
+        held = (await tool.status()).positions[0]
+        await asyncio.sleep(0.3)
+        later = await tool.status()
+        assert 0.1 < held < 0.9, f"the jaws ran on to {held}"
+        assert abs(later.positions[0] - held) < 0.02, "the jaws kept moving"
+        assert later.engaged, "the stop released the grip"
 
 
 # ===========================================================================

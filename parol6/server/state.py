@@ -247,7 +247,7 @@ class ControllerState:
     action_params: str = ""
     # HomeState value of the live HomeCommand (1 signalling, 2 waiting for the
     # firmware to clear the homed bits, 3 waiting for every joint); meaningful
-    # only while action_current is "HomeCommand".
+    # only while action_current is "home".
     homing_step: int = 0
     # Status broadcast rate for this session. Mutable so SET_STATUS_RATE can
     # raise it for a capture or a tuning run and drop it back without a
@@ -267,6 +267,14 @@ class ControllerState:
     status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
     _recent_completions: list[int] = field(default_factory=lambda: [-1] * 1024)
     _completion_cursor: int = 0
+    # Commands that ended as failures (a stop discarded them), with why —
+    # preallocated rings beside the success ring, so the completion query
+    # can answer "failed" instead of leaving a wait to run out its timeout.
+    _recent_failures: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _failure_errors: list[RobotError | None] = field(
+        default_factory=lambda: [None] * 1024
+    )
+    _failure_cursor: int = 0
     last_checkpoint: str = ""
 
     # Planning behavior (stop on first IK failure vs solve all for diagnostic)
@@ -347,6 +355,12 @@ class ControllerState:
 
     # Named wrapper over raw gripper arrays (initialized in __post_init__)
     gripper_hw: GripperHWState = field(init=False, repr=False)
+    # Set when a calibrate action completes; cleared when the transport
+    # (re)connects, since the gripper may have lost power. The firmware
+    # reports no calibrated bit this controller can read, so it is tracked
+    # here. reset() leaves it alone: resetting software state does not
+    # uncalibrate the gripper.
+    gripper_calibrated: bool = False
 
     def __post_init__(self) -> None:
         """Initialize E-stop to released state and named gripper wrapper."""
@@ -369,20 +383,43 @@ class ControllerState:
     def command_completed(self, index: int) -> bool:
         return index >= 0 and index in self._recent_completions
 
+    def record_failure(self, index: int, error: RobotError) -> None:
+        """Retain a command that ended without completing, and why. It is
+        past the completion watermark all the same: nothing more will run
+        for it."""
+        self.completed_command_index = max(self.completed_command_index, index)
+        self._recent_failures[self._failure_cursor] = index
+        self._failure_errors[self._failure_cursor] = error
+        self._failure_cursor = (self._failure_cursor + 1) % len(self._recent_failures)
+
+    def command_failure(self, index: int) -> RobotError | None:
+        if index < 0:
+            return None
+        for slot, recorded in enumerate(self._recent_failures):
+            if recorded == index:
+                return self._failure_errors[slot]
+        return None
+
     def reset(self) -> None:
         """
-        Reset robot state to initial values without losing connection state.
+        Reset the program-level state a script builds up, as ``reset_state``
+        promises: world shapes, tool selection, errors, pause, motion profile
+        and execution speed.
 
-        Preserves: ser, ip, port, start_time, next_command_index
-        Resets: positions, speeds, I/O, queues, tool, errors, etc.
+        Preserves what the contract says it does not touch — the protective
+        stop latch (``enabled`` / ``disabled_reason``; only ``reset()`` clears
+        it), homed state, the digital outputs and the gripper's output frame —
+        and everything the firmware reports (positions, I/O inputs): zeroing
+        those told the simulator the arm stood unhomed at all-zero steps.
+        Also preserves ``next_command_index`` and the completion history, so a
+        wait on a command from before the reset — including one this reset
+        cancelled — still resolves.
         """
         self.invalidate_attachments()
-        # Safety and control flags
-        self.enabled = True
+        # Program flags (the protective-stop latch is deliberately left alone)
         self.execution_paused = False
+        self.execution_speed = 1.0
         self.soft_error = False
-        self.disabled_reason = ""
-        self.e_stop_active = False
         self.motion_profile = "TOPPRA"
 
         # Tool back to none
@@ -392,24 +429,19 @@ class ControllerState:
         self._tcp_rotation_rad = (0.0, 0.0, 0.0)
         PAROL6_ROBOT.apply_tool("NONE")
 
-        # Command and telemetry buffers - zero out
+        # Program-layer world shapes; the installation layer is config and
+        # stays.
+        PAROL6_ROBOT.apply_shapes([])
+        self.shapes = []
+        self.has_attachments = False
+        self.attachments_valid = True
+        self.attachment_motion_stopped = False
+        self.shapes_version += 1
+
+        # Stop commanding motion; the arm holds where it is.
         self.Command_out = CommandCode.IDLE
-        self.Position_out.fill(0)
         self.Speed_out.fill(0)
-        self.Gripper_data_out.fill(0)
-        self.Position_in.fill(0)
-        self.Speed_in.fill(0)
-        self.Timing_data_in.fill(0)
-        self.Gripper_data_in.fill(0)
         self.Affected_joint_out.fill(0)
-        self.InOut_out.fill(0)
-        self.InOut_in.fill(0)
-        self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
-        self.Homed_in.fill(0)
-        self.Temperature_error_in.fill(0)
-        self.Position_error_in.fill(0)
-        self.Timeout_out = 0
-        self.XTR_data = 0
 
         # Action tracking
         self.action_current = ""
@@ -420,15 +452,11 @@ class ControllerState:
         self.queue_nonstreamable.clear()
         self.pending_planned.clear()
 
-        # Queue progress tracking. next_command_index is deliberately NOT
-        # reset: indices must stay monotonic across reset so a stale
-        # pre-reset status frame (its completed_index is a high-water mark)
-        # can never satisfy a wait on a post-reset command.
+        # Queue progress tracking. next_command_index, completed_command_index
+        # and the completion rings are deliberately NOT reset: indices stay
+        # monotonic, and the outcome of every command issued so far stays
+        # readable.
         self.executing_command_index = -1
-        self.completed_command_index = -1
-        for i in range(len(self._recent_completions)):
-            self._recent_completions[i] = -1
-        self._completion_cursor = 0
         self.last_checkpoint = ""
 
         # Error and pipeline depth

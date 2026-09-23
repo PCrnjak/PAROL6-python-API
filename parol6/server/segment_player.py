@@ -29,7 +29,7 @@ from parol6.config import (
     rad_to_steps,
     steps_to_rad,
 )
-from parol6.protocol.wire import CommandCode, DelayCmd
+from parol6.protocol.wire import CommandCode, DelayCmd, wire_command_name
 from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
 from parol6.server.motion_planner import (
@@ -405,7 +405,7 @@ class SegmentPlayer:
         cmd = self._inline_cmd
         if not self._inline_activated:
             cmd.setup(state)
-            state.action_current = type(cmd).__name__
+            state.action_current = wire_command_name(type(cmd.p))
             state.action_params = _format_cmd_params(seg.params)
             self._inline_activated = True
 
@@ -506,6 +506,19 @@ class SegmentPlayer:
             self._drain_planner_queue(state)
             return False
         return True
+
+    def owed_indices(self, state: ControllerState) -> list[int]:
+        """Every command index this pipeline still owes an outcome: the
+        active segment and the commands its blend consumed, and each one
+        submitted but not yet started. Read BEFORE :meth:`cancel`, which
+        forgets them. Stop path only — it allocates."""
+        owed = [idx for idx, _ in state.pending_planned]
+        active = self._active
+        if active is not None:
+            owed.append(active.command_index)
+            if isinstance(active, TrajectorySegment):
+                owed.extend(active.blend_consumed_indices)
+        return owed
 
     def cancel(self, state: ControllerState) -> None:
         """Clear buffer, drain stale segments, and stop playback."""

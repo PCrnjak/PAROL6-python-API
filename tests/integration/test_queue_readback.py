@@ -43,7 +43,7 @@ def test_the_queue_lists_what_is_owed_and_a_stop_clears_it(client: RobotClient):
         )
         listed = client.queue()
         assert listed and all(name for name in listed), listed
-        assert any("MoveJ" in name for name in listed)
+        assert all(name == "move_j" for name in listed), listed
         assert np.allclose(client.angles(), start, atol=0.05)
 
         # Resuming drains it: what the queue reports is what is still owed.

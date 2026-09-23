@@ -13,7 +13,9 @@ from parol6.commands.base import (
     MotionCommand,
 )
 from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
-from parol6.protocol.wire import Command, decode_command
+from parol6.protocol.wire import Command, decode_command, wire_command_name
+from parol6.utils.error_catalog import extract_robot_error
+from parol6.utils.error_codes import ErrorCode
 from waldoctl import ActionState
 
 if TYPE_CHECKING:
@@ -80,7 +82,7 @@ class CommandExecutor:
         state.queue_nonstreamable.clear()
         for qc in self.command_queue:
             if not (isinstance(qc.command, MotionCommand) and qc.command.streamable):
-                state.queue_nonstreamable.append(type(qc.command).__name__)
+                state.queue_nonstreamable.append(wire_command_name(type(qc.command.p)))
         state.action_next = (
             state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
         )
@@ -209,7 +211,7 @@ class CommandExecutor:
             # One-time setup on first activation
             if not ac.activated:
                 self._setup_active(ac, state)
-                state.action_current = type(ac.command).__name__
+                state.action_current = wire_command_name(type(ac.command.p))
                 state.action_params = _format_cmd_params(ac.command.p)
                 state.action_state = ActionState.EXECUTING
                 state.executing_command_index = ac.command_index
@@ -230,11 +232,17 @@ class CommandExecutor:
             self._process_tick_result(ac, code, state)
 
         except Exception as e:
+            # A stream refused in setup (unhomed, off the simulator, a
+            # bad parameter) answers no datagram: the standing error is
+            # how its client learns of it.
             logger.error("Command execution error: %s", e)
+            error = extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+            state.error = error
+            state.record_failure(ac.command_index, error)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.IDLE
+            state.action_state = ActionState.ERROR
             self._update_queue_state(state)
             self.active_command = None
 

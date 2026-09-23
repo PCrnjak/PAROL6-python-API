@@ -339,6 +339,7 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         position_range: tuple[float, float] = (0.0, 1.0),
         speed_range: tuple[float, float] = (0.0, 1.0),
         current_range: tuple[int, int],
+        default_current: int,
         **kwargs: Any,
     ) -> None:
         kwargs.setdefault("action_r_labels", ("Calibrate", "Calibrate"))
@@ -347,16 +348,26 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
             position_range=position_range,
             speed_range=speed_range,
             current_range=current_range,
+            default_current=default_current,
             **kwargs,
         )
 
     async def set_position(self, position: float, **kwargs: float | int) -> int:
-        speed = float(kwargs.get("speed", 0.5))
-        current = int(kwargs.get("current", self.current_range[0]))
-        return await self._cmd("move", [position, speed, current])
+        speed = float(kwargs.pop("speed", 0.5))
+        current = int(kwargs.pop("current", self.default_current))
+        return await self._cmd("move", [position, speed, current], **kwargs)
 
     async def calibrate(self, **kwargs: object) -> int:
-        return await self._cmd("calibrate")
+        return await self._cmd("calibrate", **kwargs)
+
+    async def stop(self, **kwargs: object) -> int:
+        """Halt the jaws in place, keeping the grip. On an uncalibrated
+        gripper, which has no position to hold, this releases instead."""
+        return await self._cmd("stop", **kwargs)
+
+    async def release(self, **kwargs: object) -> int:
+        """Drop the grip, freeing the jaws for manual handling."""
+        return await self._cmd("idle", **kwargs)
 
     async def action_r(self, engaged: bool) -> None:
         await self.calibrate()
@@ -466,6 +477,7 @@ def _build_tools() -> ToolsCollection:
                     position_range=cfg.position_range,
                     speed_range=cfg.speed_range,
                     current_range=cfg.current_range,
+                    default_current=cfg.default_current,
                 )
             )
         else:
@@ -991,5 +1003,8 @@ class Robot(_RobotABC):
         return DryRunRobotClient(
             initial_joints_deg=initial_joints_deg,
             initial_homed=initial_homed,
+            initial_gripper_calibrated=bool(
+                kwargs.get("initial_gripper_calibrated", False)
+            ),
             robot=self,
         )

@@ -41,10 +41,15 @@ def test_delay_holds_the_pose_for_its_rows():
 def test_gripper_close_ramps_the_jaws_over_the_tools_travel():
     client = DryRunRobotClient(initial_joints_deg=HOME)
     assert client.select_tool("SSG-48") == 1
+    # A jaw move before a calibrate previews as the refusal the controller
+    # would give it.
+    refused = client.tool.close()
+    assert client.plan().blocks[refused].error is not None
+    assert client.tool.calibrate() >= 0
     index = client.tool.close()
     record = client.plan()
     block = record.blocks[index]
-    expected = get_registry().get("SSG-48").estimate_duration("close", [])
+    expected = get_registry().get("SSG-48").estimate_duration("move", [1.0, 0.5, 500])
     assert expected > 0
     assert block.rows == pytest.approx(rows_for(expected), abs=1)
     closed = record.tool_closed[_span(record, block)]

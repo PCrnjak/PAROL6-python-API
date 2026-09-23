@@ -6,6 +6,7 @@ executor, and manages serial/simulator transport and status broadcasting.
 """
 
 import logging
+from collections import deque
 import signal
 import sys
 import threading
@@ -23,6 +24,8 @@ from parol6.commands.base import (
     SystemCommand,
 )
 from parol6.commands.shape_commands import SetShapesCommand
+from parol6.commands.tool_action_command import ToolActionCommand
+from parol6.commands.basic_commands import TeleportCommand
 from parol6.commands.system_commands import (
     EstopCommand,
     SelectProfileCommand,
@@ -33,6 +36,7 @@ from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.motion_planner import MotionPlanner, PlanCommand
 from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
+    wire_command_name,
     CommandCode,
     ToolActionCmd,
     pack_error,
@@ -63,6 +67,7 @@ from parol6.server.loop_timer import (
 )
 from parol6.server.status_cache import close_cache, get_cache
 from parol6.server.transport_manager import TransportManager
+from parol6.tools import tool_action_refusal, unselected_tool_refusal
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
@@ -165,9 +170,12 @@ class Controller:
 
         # Tool action side channel — runs concurrently with both streaming
         # and trajectory execution (writes to gripper_hw, not Position_out)
+        # The tool side channel: one action runs at a time, concurrently
+        # with arm motion, and the rest wait their turn in order.
         self._tool_cmd: CommandBase | None = None
         self._tool_cmd_activated: bool = False
         self._tool_cmd_index: int = -1
+        self._tool_queue: deque[tuple[CommandBase, int]] = deque()
 
         self._initialize_components()
 
@@ -331,11 +339,31 @@ class Controller:
         # Serial auto-reconnect when a port is known
         if self._transport_mgr.auto_reconnect():
             state.invalidate_attachments()
+            state.gripper_calibrated = False
             # Flush stale commands so the robot doesn't replay old moves
-            self._segment_player.cancel(state)
-            self._planner.cancel()
-            self._executor.cancel_active_command("Serial reconnect")
-            self._executor.clear_queue("Serial reconnect")
+            self._cancel_pipeline(state, "Serial reconnect", "a serial reconnect")
+
+    def _cancel_pipeline(self, state: ControllerState, reason: str, scope: str) -> None:
+        """Discard all motion — planned, queued, streaming, and the tool
+        action in flight — and fail every command it owed with
+        ``MOTN_CANCELLED``, so a wait on any of them raises instead of
+        running out its timeout. The tool is halted in place, keeping its
+        grip: a stop that let the jaws carry on would report the action
+        cancelled while the gripper went on closing."""
+        owed = self._segment_player.owed_indices(state)
+        active = self._executor.active_command
+        if active is not None:
+            owed.append(active.command_index)
+        owed.extend(q.command_index for q in self._executor.command_queue)
+        owed.extend(self._cancel_tool_actions(state))
+        self._segment_player.cancel(state)
+        self._executor.cancel_active_command(reason)
+        self._executor.clear_queue(reason)
+        for index in sorted(set(owed)):
+            if index >= 0 and not state.command_completed(index):
+                state.record_failure(
+                    index, make_error(ErrorCode.MOTN_CANCELLED, index, scope=scope)
+                )
 
     def _check_attachments(self, state: ControllerState) -> None:
         if not state.has_attachments:
@@ -352,10 +380,9 @@ class Controller:
         if state.error is not None and state.error.code == ErrorCode.SYS_ESTOP_ACTIVE:
             return
         if not state.attachments_valid and not state.attachment_motion_stopped:
-            self._segment_player.cancel(state)
-            self._planner.cancel()
-            self._executor.cancel_active_command("Attachment context changed")
-            self._executor.clear_queue("Attachment context changed")
+            self._cancel_pipeline(
+                state, "Attachment context changed", "an attachment change"
+            )
             state.Speed_out.fill(0)
             state.error = make_error(
                 ErrorCode.COMM_VALIDATION_ERROR,
@@ -375,11 +402,8 @@ class Controller:
             if not self.estop_active:
                 logger.warning("E-STOP activated")
                 self.estop_active = True
-                self._segment_player.cancel(state)
+                self._cancel_pipeline(state, "E-Stop activated", "the e-stop")
                 self._resync_planner(state)
-                if self._executor.active_command:
-                    self._executor.cancel_active_command("E-Stop activated")
-                self._executor.clear_queue("E-Stop activated")
                 state.Command_out = CommandCode.DISABLE
                 state.Speed_out.fill(0)
                 state.enabled = False
@@ -420,16 +444,67 @@ class Controller:
             state.Command_out = CommandCode.IDLE
             state.Speed_out.fill(0)
 
+    def _cancel_tool_actions(self, state: ControllerState) -> list[int]:
+        """Drop the tool action in flight — halted where it is, keeping its
+        grip — and every one waiting behind it. Returns their indices for
+        the caller to fail."""
+        owed: list[int] = []
+        if self._tool_cmd is not None:
+            owed.append(self._tool_cmd_index)
+            if self._tool_cmd_activated and isinstance(
+                self._tool_cmd, ToolActionCommand
+            ):
+                self._tool_cmd.halt(state)
+            self._tool_cmd = None
+            self._tool_cmd_activated = False
+        owed.extend(index for _, index in self._tool_queue)
+        self._tool_queue.clear()
+        return owed
+
+    def _activation_refusal(self, state: ControllerState) -> str | None:
+        """Why the tool action whose turn has come cannot run, or None: a
+        jaw move needs the calibration the action before it may only now
+        have established, so this is judged when the action starts."""
+        cmd = self._tool_cmd
+        if not isinstance(cmd, ToolActionCommand):
+            return None
+        return tool_action_refusal(
+            cmd.p.tool_key,
+            cmd.p.action,
+            current_tool=state.current_tool,
+            gripper_calibrated=state.gripper_calibrated,
+        )
+
     def _tick_tool_cmd(self, state: ControllerState) -> None:
         """Tick tool action side channel (concurrent with motion)."""
         if self._tool_cmd is None:
-            return
+            if not self._tool_queue:
+                return
+            self._tool_cmd, self._tool_cmd_index = self._tool_queue.popleft()
+            self._tool_cmd_activated = False
 
-        if not self._tool_cmd_activated:
-            self._tool_cmd.setup(state)
-            self._tool_cmd_activated = True
-
-        code = self._tool_cmd.tick(state)
+        try:
+            if not self._tool_cmd_activated:
+                refusal = self._activation_refusal(state)
+                if refusal is None:
+                    self._tool_cmd.setup(state)
+                else:
+                    self._tool_cmd.fail(
+                        make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=refusal)
+                    )
+                self._tool_cmd_activated = True
+            code = self._tool_cmd.tick(state)
+        except Exception as e:
+            # A raise here would escape the control loop and stop it ticking.
+            logger.exception("Tool action raised")
+            if not self._tool_cmd.error_state:
+                self._tool_cmd.fail(
+                    make_error(
+                        ErrorCode.MOTN_TICK_FAILED,
+                        detail=f"{type(self._tool_cmd).__name__}: {e}",
+                    )
+                )
+            code = ExecutionStatusCode.FAILED
 
         if code == ExecutionStatusCode.COMPLETED:
             state.record_completion(self._tool_cmd_index)
@@ -451,9 +526,7 @@ class Controller:
             attributed[0] = self._tool_cmd_index
             state.error = RobotError.from_wire(attributed)
             state.action_state = ActionState.ERROR
-            state.completed_command_index = max(
-                state.completed_command_index, self._tool_cmd_index
-            )
+            state.record_failure(self._tool_cmd_index, state.error)
             self._tool_cmd = None
             self._tool_cmd_activated = False
 
@@ -604,9 +677,18 @@ class Controller:
                     tool_tp = state.tool_teleport_pos
                     if tool_tp >= 0:
                         state.tool_teleport_pos = -1.0  # consume
-                        # Cancel in-flight tool action so it doesn't re-arm the ramp
-                        self._tool_cmd = None
-                        self._tool_cmd_activated = False
+                        # A teleported jaw supersedes the actions driving it,
+                        # which would otherwise re-arm the ramp.
+                        for index in self._cancel_tool_actions(state):
+                            if not state.command_completed(index):
+                                state.record_failure(
+                                    index,
+                                    make_error(
+                                        ErrorCode.MOTN_CANCELLED,
+                                        index,
+                                        scope="a tool teleport",
+                                    ),
+                                )
                     self._transport_mgr.tick_simulation(
                         state.current_tool,
                         tool_teleport_pos=tool_tp,
@@ -744,7 +826,7 @@ class Controller:
         req_id: int,
     ) -> None:
         """Queue motion command for execution."""
-        cmd_name = type(command).__name__
+        cmd_name = wire_command_name(type(command.p))
 
         cmd_type = command._cmd_type
         if not state.attachments_valid and cmd_type in ARM_MOTION_CMD_TYPES:
@@ -814,6 +896,16 @@ class Controller:
         # Tool actions bypass planner — execute directly via side channel
         # (writes to gripper_hw, not Position_out, so concurrent with everything)
         if isinstance(command.p, ToolActionCmd):
+            refusal = unselected_tool_refusal(command.p.tool_key, state.current_tool)
+            if refusal is not None:
+                logger.warning("Tool action refused: %s", refusal)
+                if cmd_type and self._ack_policy.requires_ack(cmd_type):
+                    self._reply_error(
+                        req_id,
+                        addr,
+                        make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=refusal),
+                    )
+                return
             # Clear error state from previous failure (same as non-streaming path)
             if state.error is not None:
                 state.error = None
@@ -831,11 +923,21 @@ class Controller:
                         make_error(ErrorCode.COMM_DECODE_ERROR, detail=error_msg or ""),
                     )
                 return
-            # New tool action replaces any in-flight one
-            self._tool_cmd = cmd_obj
-            self._tool_cmd_activated = False
             cmd_index = self._assign_command_index(state)
-            self._tool_cmd_index = cmd_index
+            if command.p.action.strip().lower() == "stop":
+                # A stop is for now, not for after whatever is queued: the
+                # action in flight is halted where it is and the ones
+                # behind it are dropped, each failed as cancelled so a
+                # wait on it raises rather than running out its timeout.
+                for index in self._cancel_tool_actions(state):
+                    if not state.command_completed(index):
+                        state.record_failure(
+                            index,
+                            make_error(
+                                ErrorCode.MOTN_CANCELLED, index, scope="a tool stop"
+                            ),
+                        )
+            self._tool_queue.append((cmd_obj, cmd_index))
             logger.log(
                 TRACE, "Command %s → tool side channel (index=%d)", cmd_name, cmd_index
             )
@@ -925,7 +1027,23 @@ class Controller:
     ) -> None:
         """Execute system command, apply side effects, and send reply."""
         try:
+            # Reset-state discards the pipeline BEFORE the state reset runs:
+            # the reset forgets what was pending, and every command the
+            # pipeline owed has to be failed first.
+            if isinstance(command, ResetStateCommand):
+                self._cancel_pipeline(state, "Reset", "reset_state")
+            if isinstance(command, TeleportCommand):
+                refusal = self._teleport_refusal(state)
+                if refusal is not None:
+                    self._reply_error(req_id, addr, refusal)
+                    return
             command.setup(state)
+            if isinstance(command, TeleportCommand):
+                # The pose jumps: whatever was driving the arm is void, and
+                # a pause held a queue that is gone.
+                self._cancel_pipeline(state, "Teleport", "a teleport")
+                self._resync_planner(state)
+                state.execution_paused = False
             code = command.tick(state)
 
             # This SystemCommand set a real signal (e.g. RESET's ENABLE) for
@@ -944,31 +1062,32 @@ class Controller:
                     if isinstance(command, EstopCommand)
                     else "User requested stop"
                 )
-                self._segment_player.cancel(state)
-                self._executor.cancel_active_command(reason)
-                self._executor.clear_queue(reason)
+                self._cancel_pipeline(
+                    state,
+                    reason,
+                    "estop" if isinstance(command, EstopCommand) else "stop",
+                )
                 self._resync_planner(state)
                 # A pause holds the queue it interrupted; that queue is gone.
                 state.execution_paused = False
 
-            # Reset-state: cancel motion pipeline so stale segments don't play.
-            # Also sync the (now-cleared) tool state to the planner subprocess
-            # so its PAROL6_ROBOT singleton matches the controller's.
+            # Reset-state: sync the (now-cleared) tool state and the restored
+            # profile to the planner subprocess, so its PAROL6_ROBOT singleton
+            # and the profile it plans with match the controller's.
             if isinstance(command, ResetStateCommand):
-                self._segment_player.cancel(state)
-                self._executor.cancel_active_command("Reset")
-                self._executor.clear_queue("Reset")
                 self._resync_planner(state)
+                self._planner.sync_profile(state.motion_profile)
                 state.execution_paused = False
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
                 state.invalidate_attachments()
+                state.gripper_calibrated = False
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
-                self._segment_player.cancel(state)
-                self._executor.cancel_active_command("Simulator mode toggle")
-                self._executor.clear_queue("Simulator mode toggle")
+                self._cancel_pipeline(
+                    state, "Simulator mode toggle", "a simulator toggle"
+                )
                 success, error = self._transport_mgr.switch_simulator_mode(
                     command._switch_simulator, sync_state=state
                 )
@@ -976,9 +1095,8 @@ class Controller:
                     raise RuntimeError(error or "Simulator toggle failed")
             if command._switch_port is not None:
                 state.invalidate_attachments()
+                state.gripper_calibrated = False
                 self._transport_mgr.switch_to_port(command._switch_port)
-            if command._sync_mock:
-                self._transport_mgr.sync_mock_from_state(state)
 
             # Sync motion profile to planner (SelectProfile is a SystemCommand)
             if isinstance(command, SelectProfileCommand):
@@ -1003,6 +1121,21 @@ class Controller:
                 addr,
                 extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e)),
             )
+
+    def _teleport_refusal(self, state: ControllerState) -> RobotError | None:
+        """A teleport moves the arm, so it is gated the way arm motion is:
+        never on a stale attachment context or a disabled controller."""
+        if not state.attachments_valid:
+            return make_error(
+                ErrorCode.COMM_VALIDATION_ERROR,
+                detail="attachment context changed; reconcile the physical scene and reapply",
+            )
+        if not state.enabled:
+            return make_error(
+                ErrorCode.SYS_CONTROLLER_DISABLED,
+                detail=state.disabled_reason or "Controller disabled",
+            )
+        return None
 
     def _assign_command_index(self, state: ControllerState) -> int:
         """Assign a monotonically increasing command index."""

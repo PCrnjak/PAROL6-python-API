@@ -10,38 +10,90 @@ need to be nudged clear of something before it can home), and ``home``
 itself is the way out.
 """
 
+import socket
+
 import pytest
 
-from parol6 import MotionError, RobotClient
+from parol6 import RobotClient
+from parol6.protocol.wire import (
+    HomeCmd,
+    JogJCmd,
+    MoveJCmd,
+    OkMsg,
+    encode_command,
+)
 from parol6.utils.error_codes import ErrorCode
+from tests.integration.controller_loop import address, ready, send, tick_for, tick_until
 
 pytestmark = pytest.mark.integration
 
 
-def test_planned_motion_refused_until_homed(client: RobotClient, server_proc):
-    """move_j from the unhomed boot state raises MOTN_NOT_HOMED (not a
-    garbage collision prediction); after homing the same move is accepted.
+def test_planned_motion_refused_until_homed(controller):
+    """move_j from the unhomed boot state is refused with MOTN_NOT_HOMED (not
+    a garbage collision prediction); after homing the same move is accepted.
     Jog remains available while unhomed."""
+    state = controller.state_manager.get_state()
+    # The boot state: nothing referenced, all-zero steps — exactly how a
+    # controller starts. Nothing a client sends can un-home a simulator.
+    ready(controller, state, homed=False)
+    controller._planner.start()
     target = [90.0, -90.0, 180.0, 0.0, 0.0, 170.0]
 
-    # The autouse fixture homes; reset back to the unhomed boot state
-    # (Homed_in and Position_in zeroed — exactly how a controller starts).
-    client.reset_state()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setblocking(False)
+        queued = send(controller, state, sock, MoveJCmd(angles=target, duration=1.5), 1)
+        assert isinstance(queued, OkMsg), queued
+        tick_for(
+            controller,
+            state,
+            lambda: state.error is not None,
+            "the unhomed move was never refused",
+            seconds=60.0,
+        )
+        assert state.error is not None
+        assert state.error.code == int(ErrorCode.MOTN_NOT_HOMED), state.error
 
-    # The STATUS stream reports the unhomed state (WC feeds it to dry runs).
-    assert client.wait_status(lambda s: not s.homed, timeout=2.0)
+        # Jogging an unhomed robot stays allowed — no planning involved. A
+        # jog datagram is not acknowledged; the arm moving is the answer.
+        sock.sendto(
+            encode_command(
+                JogJCmd(speeds=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0], duration=1.0), 2
+            ),
+            address(controller),
+        )
+        tick_until(
+            controller,
+            state,
+            lambda: state.Position_in[0] != 0,
+            "the unhomed jog never moved the arm",
+            ticks=300,
+        )
 
-    with pytest.raises(MotionError, match="not homed") as exc_info:
-        client.move_j(target, duration=1.5, wait=True)
-    assert exc_info.value.robot_error.code == int(ErrorCode.MOTN_NOT_HOMED)
-
-    # Jogging an unhomed robot stays allowed — no planning involved.
-    assert client.jog_j(0, 0.2, 0.1) >= 0
-
-    # Homing establishes references; the identical move now proceeds.
-    assert client.home(wait=True, timeout=30.0) >= 0
-    assert client.wait_status(lambda s: s.homed, timeout=2.0)
-    assert client.move_j(target, duration=1.5, wait=True) >= 0
+        # Homing establishes references; the identical move now proceeds.
+        homing = send(controller, state, sock, HomeCmd(), 3)
+        assert isinstance(homing, OkMsg) and homing.index is not None, homing
+        homed = homing.index
+        tick_for(
+            controller,
+            state,
+            lambda: all(state.Homed_in[:6]) and state.command_completed(homed),
+            "homing never referenced the robot",
+            seconds=60.0,
+        )
+        accepted = send(
+            controller, state, sock, MoveJCmd(angles=target, duration=1.5), 4
+        )
+        assert isinstance(accepted, OkMsg), accepted
+        assert accepted.index is not None
+        moved = accepted.index
+        tick_for(
+            controller,
+            state,
+            lambda: state.command_completed(moved) or state.error is not None,
+            "the move after homing never completed",
+            seconds=60.0,
+        )
+        assert state.error is None, state.error
 
 
 def test_home_calibrate_rereferences_homed_robot(client: RobotClient, server_proc):

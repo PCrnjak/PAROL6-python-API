@@ -31,14 +31,7 @@ from waldoctl.ticks import TickBlock, TickIndex
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from ..ack_policy import ARM_MOTION_CMD_TYPES
 from ..commands.base import MotionCommand
-from ..commands.cartesian_commands import (
-    JogLCommand,
-    _CART_ANG_JOG_MAX_RAD,
-    _CART_ANG_JOG_MIN_RAD,
-    _CART_LIN_JOG_MAX_MS,
-    _CART_LIN_JOG_MIN_MS,
-    _linmap_frac,
-)
+from ..commands.cartesian_commands import JogLCommand, jog_twist
 from ..commands.basic_commands import JogJCommand
 from ..config import (
     CONTROL_RATE_HZ,
@@ -50,8 +43,7 @@ from ..config import (
 )
 from ..motion.geometry import joint_path_to_tcp_poses
 from ..utils.ik import solve_ik
-from pinokin import se3_from_rpy, se3_rpy
-import re as _re
+from pinokin import se3_rpy
 from math import degrees, radians
 
 import parol6.protocol.wire as _wire
@@ -75,19 +67,19 @@ from ..server.motion_planner import (
     TrajectorySegment,
 )
 from ..server.state import ControllerState, get_fkine_se3
-from ..utils.error_catalog import RobotError
-from parol6.tools import ElectricGripperConfig, PneumaticGripperConfig, get_registry
+from ..utils.error_catalog import RobotError, make_error
+from ..utils.error_codes import ErrorCode
+from ..utils.errors import TrajectoryPlanningError
+from parol6.tools import (
+    ElectricGripperConfig,
+    PneumaticGripperConfig,
+    get_registry,
+    tool_action_refusal,
+)
 from waldoctl.tools import ToolType
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
-
-
-def _pascal_to_snake(name: str) -> str:
-    """Convert PascalCase to snake_case: MoveJPose → move_j_pose"""
-    s = _re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    s = _re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
-    return s.lower()
 
 
 # Auto-derive method_name → struct_class from wire module.
@@ -95,7 +87,7 @@ def _pascal_to_snake(name: str) -> str:
 _CMD_STRUCTS: dict[str, type] = {}
 for _attr in dir(_wire):
     if _attr.endswith("Cmd") and isinstance(getattr(_wire, _attr), type):
-        _CMD_STRUCTS[_pascal_to_snake(_attr.removesuffix("Cmd"))] = getattr(
+        _CMD_STRUCTS[_wire.pascal_to_snake(_attr.removesuffix("Cmd"))] = getattr(
             _wire, _attr
         )
 
@@ -122,6 +114,34 @@ def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _twist_pose(
+    start: np.ndarray, twist: np.ndarray, t: float, wrf: bool
+) -> np.ndarray:
+    """The pose a TCP driven at `twist` for `t` seconds from `start`
+    reaches: the translation and the rotation each integrate on their own
+    axis, in world axes when `wrf` else in the tool's."""
+    omega = twist[3:] * t
+    angle = float(np.linalg.norm(omega))
+    if angle > 1e-12:
+        k = omega / angle
+        kx = np.array(
+            [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
+            dtype=np.float64,
+        )
+        rot = np.eye(3) + math.sin(angle) * kx + (1.0 - math.cos(angle)) * (kx @ kx)
+    else:
+        rot = np.eye(3)
+    out = np.eye(4, dtype=np.float64)
+    r0 = start[:3, :3]
+    if wrf:
+        out[:3, :3] = rot @ r0
+        out[:3, 3] = start[:3, 3] + twist[:3] * t
+    else:
+        out[:3, :3] = r0 @ rot
+        out[:3, 3] = start[:3, 3] + r0 @ (twist[:3] * t)
+    return out
 
 
 #: Row spacing of the commanded record: the rate par6's engine keeps too,
@@ -204,7 +224,11 @@ def _truncated(record: TickIndex, max_seconds: float) -> TickIndex:
 
 
 class _DryRunTool:
-    """Tool proxy for dry-run. Routes actions through the planner."""
+    """Tool proxy for dry-run. Routes actions through the planner, spelling
+    the ToolSpec methods as the live tools do: an electric gripper's
+    ``open``/``close``/``set_position`` are a ``move`` at the tool's default
+    current, ``release`` is ``idle``; a pneumatic ``set_position`` opens
+    below 0.5 and closes at or above it."""
 
     def __init__(self, client: DryRunRobotClient) -> None:
         self._client = client
@@ -224,11 +248,28 @@ class _DryRunTool:
 
     def __getattr__(self, name: str) -> Any:
         def method(*args: Any, **kwargs: Any) -> int:
-            return self._client.tool_action(
-                self._client._active_tool_key, name, list(args), **kwargs
-            )
+            action, params = self._translate(name, list(args), kwargs)
+            return self._client.tool_action(self.key, action, params, **kwargs)
 
         return method
+
+    def _translate(
+        self, name: str, args: list[Any], kwargs: dict[str, Any]
+    ) -> tuple[str, list[Any]]:
+        cfg = get_registry().get(self.key)
+        if isinstance(cfg, ElectricGripperConfig):
+            if name in ("open", "close", "set_position"):
+                position = (
+                    0.0 if name == "open" else 1.0 if name == "close" else args[0]
+                )
+                speed = float(kwargs.pop("speed", 0.5))
+                current = int(kwargs.pop("current", cfg.default_current))
+                return "move", [position, speed, current]
+            if name == "release":
+                return "idle", []
+        elif isinstance(cfg, PneumaticGripperConfig) and name == "set_position":
+            return ("open" if args[0] < 0.5 else "close"), []
+        return name, args
 
 
 class DryRunRobotClient:
@@ -266,6 +307,7 @@ class DryRunRobotClient:
         self,
         initial_joints_deg: list[float] | None = None,
         initial_homed: bool = True,
+        initial_gripper_calibrated: bool = False,
         robot: Robot | None = None,
     ) -> None:
         self._robot = robot
@@ -283,6 +325,9 @@ class DryRunRobotClient:
         register_plugin_tools()
 
         self._state = ControllerState()
+        # Mirror the live gate: an electric gripper's jaw move before a
+        # calibrate is refused here exactly as the controller refuses it.
+        self._state.gripper_calibrated = bool(initial_gripper_calibrated)
         init_deg = np.asarray(
             initial_joints_deg if initial_joints_deg is not None else HOME_ANGLES_DEG,
             dtype=np.float64,
@@ -395,7 +440,7 @@ class DryRunRobotClient:
         return q_rad[at]
 
     def _tool_target(self, action: str, params: list) -> float:
-        if action == "open":
+        if action in ("open", "calibrate", "idle"):
             return 0.0
         if action == "close":
             return 1.0
@@ -407,10 +452,13 @@ class DryRunRobotClient:
         """A tool action holds the arm for the tool's estimated travel while
         the jaws ramp to their target."""
         cfg = get_registry().get(cmd.tool_key.strip().upper())
+        action = cmd.action.strip().lower()
         params = list(cmd.params)
-        seconds = cfg.estimate_duration(cmd.action, params) if cfg is not None else 0.0
+        seconds = cfg.estimate_duration(action, params) if cfg is not None else 0.0
         ticks = int(round(seconds / INTERVAL_S))
-        target = self._tool_target(cmd.action, params)
+        target = self._tool_target(action, params)
+        if action == "calibrate":
+            self._state.gripper_calibrated = True
         q = np.repeat(self._current_q()[np.newaxis], ticks, axis=0)
         closed = (
             np.linspace(self._tool_position, target, ticks, dtype=np.float64)
@@ -568,6 +616,26 @@ class DryRunRobotClient:
         ):
             raise ValueError("attachment context changed; reconcile and reapply")
         idx = self._open(method)
+        if isinstance(params, _wire.StopCmd):
+            # A stop discards the blends still buffered and lifts a pause,
+            # as the controller's does.
+            self._planner.cancel()
+            self._state.execution_paused = False
+            return idx
+        if isinstance(params, ToolActionCmd):
+            refusal = tool_action_refusal(
+                params.tool_key,
+                params.action,
+                current_tool=self._state.current_tool,
+                gripper_calibrated=self._state.gripper_calibrated,
+            )
+            if refusal is not None:
+                self._fill(
+                    idx,
+                    np.empty((0, 6)),
+                    error=make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=refusal),
+                )
+                return idx
         if isinstance(params, (_wire.EstopCmd, _wire.ResetCmd)):
             self._state.invalidate_attachments()
             self._state.enabled = isinstance(params, _wire.ResetCmd)
@@ -621,7 +689,11 @@ class DryRunRobotClient:
             self.flush()
             cmd = cmd_cls(params)
             assert isinstance(cmd, MotionCommand)
-            path = self._simulate_jog(cmd)
+            try:
+                path = self._simulate_jog(cmd)
+            except TrajectoryPlanningError as refused:
+                self._fill(idx, np.empty((0, 6)), error=refused.robot_error)
+                return idx
             if path is not None:
                 self._fill(idx, path)
             self._planner.state.Position_in[:] = self._state.Position_in
@@ -673,62 +745,25 @@ class DryRunRobotClient:
         return radians
 
     def _simulate_cartesian_jog(self, cmd: JogLCommand) -> np.ndarray:
-        """Simulate cartesian jog by displacing along a Cartesian axis and solving IK."""
+        """Simulate a cartesian jog by integrating its TCP twist over the
+        duration and solving IK along the way."""
         duration = cmd.p.duration
         n_points = max(1, int(round(duration * CONTROL_RATE_HZ)))
 
-        current_se3 = get_fkine_se3(self._state)
-        se3_rpy(current_se3, self._rpy_buf)
-        # pose = [x_m, y_m, z_m, rx_rad, ry_rad, rz_rad]
-        pose = np.array(
-            [
-                current_se3[0, 3],
-                current_se3[1, 3],
-                current_se3[2, 3],
-                self._rpy_buf[0],
-                self._rpy_buf[1],
-                self._rpy_buf[2],
-            ],
-            dtype=np.float64,
-        )
-
-        # Compute velocity along dominant axis using same mapping as production
-        vels = cmd.p.velocities
-        speed_mag = abs(vels[cmd._axis_index + (3 if cmd.is_rotation else 0)])
-        if cmd.is_rotation:
-            vel = _linmap_frac(speed_mag, _CART_ANG_JOG_MIN_RAD, _CART_ANG_JOG_MAX_RAD)
-            total_disp = vel * cmd._axis_sign * duration
-        else:
-            vel = _linmap_frac(speed_mag, _CART_LIN_JOG_MIN_MS, _CART_LIN_JOG_MAX_MS)
-            total_disp = vel * cmd._axis_sign * duration
-
-        # Determine which component of the 6-element pose to displace
-        pose_index = (3 + cmd._axis_index) if cmd.is_rotation else cmd._axis_index
+        start_se3 = get_fkine_se3(self._state).copy()
+        twist = np.zeros(6, dtype=np.float64)
+        jog_twist(cmd.p.velocities, twist)
+        wrf = cmd.p.frame == "WRF"
 
         # Get current joint angles for IK seed
         steps_to_rad(self._state.Position_in, self._q_rad_buf)
-        q_current = self._q_rad_buf.copy()
+        last_valid_q = self._q_rad_buf.copy()
         steps_buf = np.zeros_like(self._state.Position_in)
 
-        # Generate trajectory by interpolating and solving IK at each point
         radians = np.empty((n_points, 6), dtype=np.float64)
-        last_valid_q = q_current.copy()
-        target_se3 = np.zeros((4, 4), dtype=np.float64)
-
         for i in range(n_points):
-            t = (i + 1) / n_points
-            target_pose = pose.copy()
-            target_pose[pose_index] += total_disp * t
-
-            se3_from_rpy(
-                target_pose[0],
-                target_pose[1],
-                target_pose[2],
-                target_pose[3],
-                target_pose[4],
-                target_pose[5],
-                target_se3,
-            )
+            t = duration * (i + 1) / n_points
+            target_se3 = _twist_pose(start_se3, twist, t, wrf)
             ik_result = solve_ik(
                 PAROL6_ROBOT.robot, target_se3, last_valid_q, quiet_logging=True
             )

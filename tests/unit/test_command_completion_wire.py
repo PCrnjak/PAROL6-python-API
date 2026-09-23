@@ -43,8 +43,10 @@ def test_completion_history_is_exact_expires_and_resets_through_wire_query():
     assert not completed(10) and completed(9) and completed(1033)
     state.record_completion(1034)
     assert not completed(9) and completed(1034)
+    # The history outlives reset_state: a wait on a command issued before
+    # the reset still resolves, and indices keep counting.
     state.reset()
-    assert not completed(1034)
+    assert completed(1034)
 
 
 def test_completion_packets_reject_invalid_indices_sessions_and_verdicts():

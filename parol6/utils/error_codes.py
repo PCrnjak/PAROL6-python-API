@@ -27,6 +27,9 @@ class ErrorCode(IntEnum):
     MOTN_SETUP_FAILED = 33
     MOTN_TICK_FAILED = 34
     MOTN_NOT_HOMED = 35
+    # par6's number for the same failure, so a client reading either backend
+    # sees one code for a command a stop discarded.
+    MOTN_CANCELLED = 38
 
     # Communication / protocol
     COMM_QUEUE_FULL = 40
@@ -41,3 +44,4 @@ class ErrorCode(IntEnum):
     SYS_PROFILE_INVALID = 53
     SYS_SELF_COLLISION = 54
     SYS_STATUS_RATE_INVALID = 55
+    SYS_NOT_SIMULATOR = 56

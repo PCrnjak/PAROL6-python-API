@@ -22,15 +22,19 @@ from parol6.config import (
 from parol6.protocol.wire import CmdType, ServoJCmd, ServoJPoseCmd, ServoLCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
-from parol6.utils.error_catalog import make_error
+from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError
 from parol6.utils.ik import RateLimitedWarning, solve_ik
 from pinokin import se3_from_rpy
 
-from .base import ExecutionStatusCode, MotionCommand
+from .base import ExecutionStatusCode, MotionCommand, guard_homed
 
 logger = logging.getLogger(__name__)
+
+# A servo stream that goes silent for this long is braked to rest and
+# held, rather than driven on to a target the client stopped refreshing.
+SERVO_GRACE_S: float = 0.25
 
 # Velocity ratio uses hardware limits (jog limits only apply to jog_j/jog_l)
 _JOINT_MAX_STEP_INV = 1.0 / (
@@ -87,8 +91,31 @@ def _streaming_joint_step(
     if not cmd._initialized or not se.active:
         steps_to_rad(state.Position_in, cmd._q_rad_buf)
         se.sync_position(cmd._q_rad_buf)
-        se.set_limits(cmd.p.speed, cmd.p.accel)
         cmd._initialized = True
+        cmd._limits_applied = (-1.0, -1.0)
+    if cmd._limits_applied != (cmd.p.speed, cmd.p.accel):
+        # A stream re-targets through assign_params + do_setup, so a change
+        # of speed or accel mid-stream reaches the limiter here.
+        se.set_limits(cmd.p.speed, cmd.p.accel)
+        cmd._limits_applied = (cmd.p.speed, cmd.p.accel)
+
+    # A target the arm cannot reach, or a client that has gone silent, ends
+    # the stream by braking in joint space and holding where it stops.
+    if cmd._braking or cmd.timer_expired():
+        cmd._braking = True
+        se.set_jog_velocity(cmd._zero_vel)
+        pos_rad, vel, finished = se.tick()
+        cmd._pos_rad_buf[:] = pos_rad
+        rad_to_steps(cmd._pos_rad_buf, cmd._steps_buf)
+        cmd.set_move_position(state, cmd._steps_buf)
+        if finished or np.dot(vel, vel) < 1e-8:
+            se.active = False
+            if cmd._brake_error is not None:
+                cmd.fail(cmd._brake_error)
+                return ExecutionStatusCode.FAILED
+            cmd.finish()
+            return ExecutionStatusCode.COMPLETED
+        return ExecutionStatusCode.EXECUTING
 
     se.set_position_target(cmd._target_rad)
     pos_rad, _vel, finished = se.tick()
@@ -118,6 +145,10 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
 
     __slots__ = (
         "_initialized",
+        "_limits_applied",
+        "_braking",
+        "_brake_error",
+        "_zero_vel",
         "_target_rad",
         "_pos_rad_buf",
     )
@@ -125,13 +156,21 @@ class ServoJCommand(MotionCommand[ServoJCmd]):
     def __init__(self, p: ServoJCmd):
         super().__init__(p)
         self._initialized = False
+        self._limits_applied = (-1.0, -1.0)
+        self._braking = False
+        self._brake_error: RobotError | None = None
+        self._zero_vel = np.zeros(6, dtype=np.float64)
         self._target_rad = [0.0] * 6
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
+        guard_homed(state)
         # Target arrives in degrees; convert into pre-allocated radian buffer
         for i in range(6):
             self._target_rad[i] = math.radians(self.p.angles[i])
+        self.start_timer(SERVO_GRACE_S)
+        self._braking = False
+        self._brake_error = None
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         return _streaming_joint_step(self, state)
@@ -149,6 +188,10 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
 
     __slots__ = (
         "_initialized",
+        "_limits_applied",
+        "_braking",
+        "_brake_error",
+        "_zero_vel",
         "_target_rad",
         "_pos_rad_buf",
         "_target_se3",
@@ -157,11 +200,19 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
     def __init__(self, p: ServoJPoseCmd):
         super().__init__(p)
         self._initialized = False
+        self._limits_applied = (-1.0, -1.0)
+        self._braking = False
+        self._brake_error: RobotError | None = None
+        self._zero_vel = np.zeros(6, dtype=np.float64)
         self._target_rad = [0.0] * 6
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
+        guard_homed(state)
+        self.start_timer(SERVO_GRACE_S)
+        self._braking = False
+        self._brake_error = None
         pose = self.p.pose
 
         # Build target SE3 from [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
@@ -179,12 +230,19 @@ class ServoJPoseCommand(MotionCommand[ServoJPoseCmd]):
         steps_to_rad(state.Position_in, self._q_rad_buf)
         ik_result = solve_ik(PAROL6_ROBOT.robot, self._target_se3, self._q_rad_buf)
         if not ik_result.success or ik_result.q is None:
-            raise IKError(
-                make_error(
-                    ErrorCode.IK_TARGET_UNREACHABLE,
-                    detail=f"SERVOJ_POSE: IK failed for pose {[round(v, 1) for v in pose]}",
-                )
+            # Unreachable: the stream brakes to rest where it is and ends in
+            # error there, as servo_l does, rather than stopping dead on a
+            # setup failure. A stream that was not running has nothing to
+            # brake and is refused outright.
+            error = make_error(
+                ErrorCode.IK_TARGET_UNREACHABLE,
+                detail=f"SERVOJ_POSE: IK failed for pose {[round(v, 1) for v in pose]}",
             )
+            if not state.streaming_executor.active:
+                raise IKError(error)
+            self._braking = True
+            self._brake_error = error
+            return
 
         for i in range(6):
             self._target_rad[i] = float(ik_result.q[i])
@@ -209,6 +267,7 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
     __slots__ = (
         "_initialized",
         "_ik_stopping",
+        "_silent",
         "_target_se3",
         "_pos_rad_buf",
         "_q_commanded",
@@ -220,6 +279,7 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         super().__init__(p)
         self._initialized = False
         self._ik_stopping = False
+        self._silent = False
         self._target_se3 = np.zeros((4, 4), dtype=np.float64)
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
         self._q_commanded = np.zeros(6, dtype=np.float64)
@@ -227,6 +287,9 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
         self._dq_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
+        guard_homed(state)
+        self.start_timer(SERVO_GRACE_S)
+        self._silent = False
         pose = self.p.pose
 
         # Build target SE3 from [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
@@ -251,8 +314,16 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             self._q_ik_seed[:] = self._q_rad_buf
             self._initialized = True
 
-        cse.set_pose_target(self._target_se3)
-        smoothed_pose, vel, finished = cse.tick()
+        # A client that has gone silent stops refreshing its target: the
+        # tool brakes along its line and holds where it stops.
+        if not self._silent and self.timer_expired():
+            self._silent = True
+            cse.stop()
+        if self._ik_stopping or self._silent:
+            smoothed_pose, vel, finished = cse.tick()
+        else:
+            cse.set_pose_target(self._target_se3)
+            smoothed_pose, vel, finished = cse.tick()
 
         # Solve IK seeded from previous IK result (branch continuity)
         ik_result = solve_ik(
@@ -260,15 +331,33 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
             smoothed_pose,
             self._q_ik_seed,
         )
+        if self._silent:
+            if ik_result.success and ik_result.q is not None:
+                self._q_ik_seed[:] = ik_result.q
+                self._q_commanded[:] = ik_result.q
+            self._pos_rad_buf[:] = self._q_commanded
+            rad_to_steps(self._pos_rad_buf, self._steps_buf)
+            self.set_move_position(state, self._steps_buf)
+            if finished or float(np.dot(vel, vel)) < 1e-8:
+                cse.active = False
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
+            return ExecutionStatusCode.EXECUTING
         if ik_result.success and ik_result.q is not None:
             if self._ik_stopping:
-                logger.info("[SERVOL] IK recovered — resuming")
-                steps_to_rad(state.Position_in, self._q_rad_buf)
-                cse.sync_pose(get_fkine_se3(state))
-                self._q_commanded[:] = self._q_rad_buf
-                self._q_ik_seed[:] = self._q_rad_buf
-                self._ik_stopping = False
-                # Let next tick handle normal tracking
+                # The brake ran out with the target still unreachable: the
+                # stream ends in error where it stopped.
+                if finished or float(np.dot(vel, vel)) < 1e-8:
+                    cse.active = False
+                    self.fail(
+                        make_error(
+                            ErrorCode.IK_TARGET_UNREACHABLE,
+                            detail="SERVOL: the target stayed unreachable",
+                        )
+                    )
+                    return ExecutionStatusCode.FAILED
+                self._q_ik_seed[:] = ik_result.q
+                self._q_commanded[:] = ik_result.q
             else:
                 self._q_ik_seed[:] = ik_result.q
 
@@ -296,6 +385,15 @@ class ServoLCommand(MotionCommand[ServoLCmd]):
                 )
                 cse.stop()
                 self._ik_stopping = True
+            elif finished or float(np.dot(vel, vel)) < 1e-8:
+                cse.active = False
+                self.fail(
+                    make_error(
+                        ErrorCode.IK_TARGET_UNREACHABLE,
+                        detail="SERVOL: the target stayed unreachable",
+                    )
+                )
+                return ExecutionStatusCode.FAILED
 
         self._pos_rad_buf[:] = self._q_commanded
         rad_to_steps(self._pos_rad_buf, self._steps_buf)

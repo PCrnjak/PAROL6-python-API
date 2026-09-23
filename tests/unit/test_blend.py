@@ -4,8 +4,12 @@ import numpy as np
 import pytest
 
 from parol6.motion.geometry import (
+    ArcSegment,
+    LineSegment,
     _blend_joint_path_into,
     _linear_joint_segment_into,
+    build_blended_path,
+    build_composite_cartesian_path,
     build_composite_joint_path,
 )
 
@@ -251,3 +255,78 @@ class TestMaxBlendLookahead:
 
         assert isinstance(MAX_BLEND_LOOKAHEAD, int)
         assert MAX_BLEND_LOOKAHEAD >= 1
+
+
+def _se3(xyz_m):
+    m = np.eye(4)
+    m[:3, 3] = xyz_m
+    return m
+
+
+class TestBlendedCartesianPath:
+    """The corner zone between segments: what it is between two lines, and
+    that an arc joins it like a line does."""
+
+    def test_a_line_line_corner_is_the_quadratic_through_the_corner(self):
+        """A chain of straight moves rounds exactly as it always has: the
+        cubic zone is the degree-raised quadratic through the corner."""
+        a, corner, b = (
+            _se3([0.0, 0.0, 0.0]),
+            _se3([0.1, 0.0, 0.0]),
+            _se3([0.1, 0.1, 0.0]),
+        )
+        r_mm = 20.0
+        path = build_composite_cartesian_path(
+            [a, corner, b], [r_mm], samples_per_segment=40
+        )
+        pc, pa, pb = corner[:3, 3], a[:3, 3], b[:3, 3]
+        entry = pc + (pa - pc) / np.linalg.norm(pa - pc) * r_mm / 1000.0
+        exit_ = pc + (pb - pc) / np.linalg.norm(pb - pc) * r_mm / 1000.0
+        # Dense enough that the distance to the nearest sample is the
+        # distance to the curve, well under the tolerance.
+        t = np.linspace(0.0, 1.0, 200_001)[:, None]
+        quadratic = (1 - t) ** 2 * entry + 2 * (1 - t) * t * pc + t**2 * exit_
+        in_zone = 0
+        for pose in path:
+            q = pose[:3, 3]
+            if np.linalg.norm(q - pc) > r_mm / 1000.0 + 1e-12:
+                continue
+            in_zone += 1
+            miss = np.min(np.linalg.norm(quadratic - q, axis=1))
+            assert miss < 1e-6, f"a zone sample left the quadratic by {miss:e} m"
+        assert in_zone > 10
+        # The corner is cut, by less than the zone's radius.
+        closest = min(np.linalg.norm(pose[:3, 3] - pc) for pose in path)
+        assert 0.001 < closest < r_mm / 1000.0
+
+    def test_an_arc_rounds_into_the_line_after_it(self):
+        """line → arc → line with zones at both junctions: the direction of
+        travel never jumps, each corner is cut inside its zone, and the
+        arc is still its circle where no zone reaches."""
+        a = _se3([0.1, 0.0, 0.0])
+        via = _se3([0.16, 0.0, -0.06])
+        b = _se3([0.22, 0.0, 0.0])
+        c = _se3([0.32, 0.0, 0.0])
+        start = _se3([0.0, 0.0, 0.0])
+        segments = [LineSegment(start, a), ArcSegment(a, via, b), LineSegment(b, c)]
+        path = build_blended_path(segments, [20.0, 20.0], samples_per_segment=60)
+        pts = np.array([pose[:3, 3] for pose in path])
+        steps = np.diff(pts, axis=0)
+        lengths = np.linalg.norm(steps, axis=1)
+        keep = lengths > 1e-9
+        dirs = steps[keep] / lengths[keep][:, None]
+        cos = np.clip(np.einsum("ij,ij->i", dirs[:-1], dirs[1:]), -1.0, 1.0)
+        worst_turn = float(np.degrees(np.arccos(cos)).max())
+        assert worst_turn < 12.0, f"the path turned {worst_turn:.1f}° in one step"
+        for corner in (a, b):
+            closest = float(np.min(np.linalg.norm(pts - corner[:3, 3], axis=1)))
+            assert 0.001 < closest <= 0.020 + 1e-9, (
+                f"corner cut by {closest * 1000:.2f} mm"
+            )
+        center = np.array([0.16, 0.0, 0.0])
+        low = pts[pts[:, 2] < -0.03]
+        assert len(low) > 10
+        radial = np.abs(np.linalg.norm(low - center, axis=1) - 0.06)
+        assert radial.max() < 1e-6, f"the arc left its circle by {radial.max():e} m"
+        assert np.allclose(pts[-1], c[:3, 3])
+        assert np.allclose(pts[0], start[:3, 3])

@@ -167,17 +167,22 @@ class SplineMotion(_ShapeGenerator):
             return waypoints_arr
 
         if timestamps is None:
-            total_dist = 0.0
+            # Chord-length knots: uniform knots make the spline overshoot
+            # between unevenly spaced waypoints (the curve has to cover a
+            # long segment and a short one in equal parameter time).
+            chords = np.empty(num_waypoints, dtype=np.float64)
+            chords[0] = 0.0
             for i in range(1, num_waypoints):
                 dist = np.linalg.norm(waypoints_arr[i, :3] - waypoints_arr[i - 1, :3])
-                total_dist += float(dist)
+                chords[i] = chords[i - 1] + max(float(dist), 1e-9)
+            total_dist = float(chords[-1])
 
             if duration is not None:
                 total_time = duration
             else:
                 total_time = max(0.1, total_dist / 50.0)
 
-            timestamps_arr = np.linspace(0, total_time, num_waypoints)
+            timestamps_arr = chords * (total_time / total_dist)
         else:
             timestamps_arr = np.asarray(timestamps, dtype=float)
             if duration is not None:
@@ -197,7 +202,10 @@ class SplineMotion(_ShapeGenerator):
             if velocity_start is not None and velocity_end is not None:
                 bc: Any = ((1, float(velocity_start[i])), (1, float(velocity_end[i])))
             else:
-                bc = "not-a-knot"
+                # The arm starts and ends the path at rest, so the end
+                # curvature carries no information; a natural spline cannot
+                # swing wide of the first and last segments as not-a-knot can.
+                bc = "natural"
             spline = CubicSpline(timestamps_arr, waypoints_arr[:, i], bc_type=bc)
             pos_splines.append(spline)
 
@@ -323,46 +331,149 @@ def compute_circle_from_3_points(
     return center, radius, normal
 
 
-def blend_path_into(
+#: Rotation weight in the multi-segment path metric sqrt(t² + (w·θ)²) [m/rad].
+PATH_ROT_WEIGHT_M_PER_RAD: float = 0.15
+
+
+def _rotation_angle(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
+    """Angle between the rotations of two SE3 poses [rad]."""
+    relative = a[:3, :3].T @ b[:3, :3]
+    cos_angle = (float(np.trace(relative)) - 1.0) / 2.0
+    return float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+
+
+class LineSegment:
+    """A straight cartesian segment: position lerp, orientation geodesic."""
+
+    __slots__ = ("start", "end", "_length_m", "_angle_rad")
+
+    def __init__(self, start: NDArray[np.float64], end: NDArray[np.float64]) -> None:
+        self.start = start
+        self.end = end
+        self._length_m = float(np.linalg.norm(end[:3, 3] - start[:3, 3]))
+        self._angle_rad = _rotation_angle(start, end)
+
+    def length_mm(self) -> float:
+        return self._length_m * 1000.0
+
+    def angle_rad(self) -> float:
+        return self._angle_rad
+
+    def sample_into(
+        self, out: NDArray[np.float64], s_start: float, s_end: float, skip: int
+    ) -> None:
+        _linear_se3_segment_into(self.start, self.end, out, s_start, s_end, skip)
+
+    def sample(self, t: float, out: NDArray[np.float64]) -> None:
+        se3_interp(self.start, self.end, t, out)
+
+    def tangent(self, t: float) -> NDArray[np.float64]:
+        d = self.end[:3, 3] - self.start[:3, 3]
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-12 else np.zeros(3)
+
+
+class ArcSegment:
+    """A circular arc as a segment: position sweeps the circle through the
+    via point from start to end, orientation is the geodesic between the
+    two end poses."""
+
+    __slots__ = (
+        "start",
+        "end",
+        "_center_m",
+        "_r1_m",
+        "_normal",
+        "_sweep",
+        "_angle_rad",
+    )
+
+    def __init__(
+        self,
+        start: NDArray[np.float64],
+        via: NDArray[np.float64],
+        end: NDArray[np.float64],
+    ) -> None:
+        self.start = start
+        self.end = end
+        # The circle fit works in mm: its full-circle threshold is 1 mm.
+        center_mm, _radius, normal = compute_circle_from_3_points(
+            start[:3, 3] * 1000.0, via[:3, 3] * 1000.0, end[:3, 3] * 1000.0
+        )
+        self._center_m = center_mm / 1000.0
+        self._normal = normal
+        r1 = start[:3, 3] - self._center_m
+        r2 = end[:3, 3] - self._center_m
+        n1, n2 = float(np.linalg.norm(r1)), float(np.linalg.norm(r2))
+        if n1 < 1e-9 or n2 < 1e-9:
+            raise ValueError("the arc has no radius")
+        self._r1_m = r1
+        u1, u2 = r1 / n1, r2 / n2
+        sweep = float(np.arccos(np.clip(np.dot(u1, u2), -1.0, 1.0)))
+        if float(np.linalg.norm(end[:3, 3] - start[:3, 3])) < 1e-3:
+            sweep = 2.0 * np.pi
+        elif float(np.dot(np.cross(u1, u2), normal)) < 0.0:
+            sweep = 2.0 * np.pi - sweep
+        self._sweep = sweep
+        self._angle_rad = _rotation_angle(start, end)
+
+    def length_mm(self) -> float:
+        return float(np.linalg.norm(self._r1_m)) * self._sweep * 1000.0
+
+    def angle_rad(self) -> float:
+        return self._angle_rad
+
+    def _position(self, t: float) -> NDArray[np.float64]:
+        rotation = Rotation.from_rotvec(self._normal * (t * self._sweep))
+        return self._center_m + rotation.apply(self._r1_m)
+
+    def sample(self, t: float, out: NDArray[np.float64]) -> None:
+        se3_interp(self.start, self.end, t, out)
+        out[:3, 3] = self._position(t)
+
+    def sample_into(
+        self, out: NDArray[np.float64], s_start: float, s_end: float, skip: int
+    ) -> None:
+        n_total = out.shape[0] + skip
+        t_values = np.linspace(s_start, s_end, n_total)[skip:]
+        batch_se3_interp(self.start, self.end, t_values, out)
+        rotations = Rotation.from_rotvec(np.outer(t_values * self._sweep, self._normal))
+        out[:, :3, 3] = self._center_m + rotations.apply(self._r1_m)
+
+    def tangent(self, t: float) -> NDArray[np.float64]:
+        r = self._position(t) - self._center_m
+        d = np.cross(self._normal, r)
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-12 else np.zeros(3)
+
+
+def _cubic_blend_into(
     entry_pose: NDArray[np.float64],
-    waypoint_pose: NDArray[np.float64],
     exit_pose: NDArray[np.float64],
+    p1: NDArray[np.float64],
+    p2: NDArray[np.float64],
     out: NDArray[np.float64],
     skip: int = 0,
 ) -> None:
-    """Write quadratic Bezier blend zone into pre-allocated buffer.
+    """Write a cubic Bézier blend zone into a pre-allocated buffer.
 
-    The blend zone smoothly rounds a corner between two linear Cartesian
-    segments. It is tangent to the incoming segment at t=0 and to the outgoing
-    segment at t=1.
-
-    Position follows a quadratic Bezier curve::
-
-        P(t) = (1-t)^2*E + 2t(1-t)*W + t^2*X
-
-    Orientation is geodesic (SLERP) from entry to exit.
-
-    Args:
-        entry_pose: SE3 pose at blend zone entry (4x4)
-        waypoint_pose: SE3 pose at the corner being rounded (4x4)
-        exit_pose: SE3 pose at blend zone exit (4x4)
-        out: Output array, shape (n_samples, 4, 4). Written in-place.
-        skip: Number of initial samples to skip (for junction dedup).
+    Position follows the cubic through the control points
+    (entry, p1, p2, exit); orientation is the geodesic from entry to exit.
     """
     E = entry_pose[:3, 3]
-    W = waypoint_pose[:3, 3]
     X = exit_pose[:3, 3]
 
     n_total = out.shape[0] + skip
     t = np.linspace(0.0, 1.0, n_total)[skip:]
 
-    # Batch SLERP for orientation (entry -> exit)
     batch_se3_interp(entry_pose, exit_pose, t, out)
 
-    # Override translation with quadratic Bezier position
     omt = 1.0 - t
     out[:, :3, 3] = (
-        np.outer(omt * omt, E) + np.outer(2.0 * omt * t, W) + np.outer(t * t, X)
+        np.outer(omt * omt * omt, E)
+        + np.outer(3.0 * omt * omt * t, p1)
+        + np.outer(3.0 * omt * t * t, p2)
+        + np.outer(t * t * t, X)
     )
 
 
@@ -371,48 +482,63 @@ def build_composite_cartesian_path(
     blend_radii: list[float],
     samples_per_segment: int = PATH_SAMPLES,
 ) -> NDArray[np.float64]:
-    """Build a composite Cartesian path with blend zones at intermediate waypoints.
-
-    Concatenates linear Cartesian segments connected by quadratic Bezier blend
-    zones. Implements ABB-style zone overlap clamping: if two adjacent blend
-    zones would overlap, both radii are proportionally reduced so they don't
-    exceed half the segment length.
+    """A polyline through SE3 waypoints with its interior corners rounded:
+    :func:`build_blended_path` over straight segments.
 
     Args:
-        waypoints: List of SE3 poses (4x4) defining the path corners.
-            Must have at least 2 waypoints.
-        blend_radii: Blend radius (mm) for each intermediate waypoint.
-            Length must equal ``len(waypoints) - 2`` (no blend at start/end).
-            ``r=0`` means stop at the waypoint (no blending).
-        samples_per_segment: Number of linear interpolation samples per segment
-
-    Returns:
-        (M, 4, 4) ndarray of SE3 poses forming the complete path.
-
-    Raises:
-        ValueError: If inputs are inconsistent.
+        waypoints: SE3 poses (4x4) defining the path corners, at least 2.
+        blend_radii: Blend radius (mm) for each intermediate waypoint,
+            ``len(waypoints) - 2`` of them; ``0`` means stop at the waypoint.
+        samples_per_segment: Interpolation samples per segment.
     """
     n = len(waypoints)
     if n < 2:
         raise ValueError("Need at least 2 waypoints")
-    if len(blend_radii) != max(0, n - 2):
-        raise ValueError(
-            f"Expected {max(0, n - 2)} blend radii, got {len(blend_radii)}"
-        )
+    segments = [LineSegment(waypoints[i], waypoints[i + 1]) for i in range(n - 1)]
+    return build_blended_path(segments, blend_radii, samples_per_segment)
 
-    # No blending for 2-waypoint path
-    if n == 2:
+
+def build_blended_path(
+    segments: list[LineSegment | ArcSegment],
+    blend_radii: list[float],
+    samples_per_segment: int = PATH_SAMPLES,
+) -> NDArray[np.float64]:
+    """Build a composite cartesian path from straight and circular segments
+    whose junctions are rounded by blend zones.
+
+    Each zone trims both adjoining segments by its radius, measured along
+    the segment (arc length on an arc), and joins the two trim points with
+    a cubic Bézier whose handles lie along the segments' directions of
+    travel there, two thirds of the trim long: the zone is tangent to the
+    incoming segment where it starts and to the outgoing one where it
+    ends. Between two lines the cubic is exactly the degree-raised
+    quadratic through the corner point, so a chain of straight moves
+    rounds as it always has; an arc's zone follows its curvature into and
+    out of the corner. The ABB zone rule applies: a radius never eats more
+    than half of either adjoining segment, and two zones sharing a segment
+    are scaled down together until they fit.
+
+    Args:
+        segments: The path's segments in order, at least one.
+        blend_radii: Blend radius (mm) for each junction, ``len(segments) - 1``
+            of them; ``0`` means stop at the junction.
+        samples_per_segment: Interpolation samples per segment.
+
+    Returns:
+        (M, 4, 4) ndarray of SE3 poses forming the complete path.
+    """
+    n_seg = len(segments)
+    if n_seg < 1:
+        raise ValueError("Need at least 1 segment")
+    if len(blend_radii) != n_seg - 1:
+        raise ValueError(f"Expected {n_seg - 1} blend radii, got {len(blend_radii)}")
+
+    if n_seg == 1:
         out = np.empty((samples_per_segment, 4, 4), dtype=np.float64)
-        _linear_se3_segment_into(waypoints[0], waypoints[1], out)
+        segments[0].sample_into(out, 0.0, 1.0, 0)
         return out
 
-    # Segment lengths in mm (FK transforms are in meters)
-    seg_lengths: list[float] = [0.0] * (n - 1)
-    for i in range(n - 1):
-        seg_lengths[i] = (
-            float(np.linalg.norm(waypoints[i + 1][:3, 3] - waypoints[i][:3, 3]))
-            * 1000.0
-        )
+    seg_lengths = [seg.length_mm() for seg in segments]
 
     # Clamp blend radii (zone overlap prevention)
     clamped = list(blend_radii)
@@ -431,8 +557,8 @@ def build_composite_cartesian_path(
             clamped[i + 1] *= scale
 
     # Pre-compute per-segment trim fractions
-    seg_exit_frac = [0.0] * (n - 1)
-    seg_entry_frac = [0.0] * (n - 1)
+    seg_exit_frac = [0.0] * n_seg
+    seg_entry_frac = [0.0] * n_seg
     for i in range(len(clamped)):
         if clamped[i] > 0:
             if seg_lengths[i] > 0:
@@ -440,9 +566,9 @@ def build_composite_cartesian_path(
             if seg_lengths[i + 1] > 0:
                 seg_entry_frac[i + 1] = clamped[i] / seg_lengths[i + 1]
 
-    # Interleaved precompute: count linear segments and blend zones in order
+    # Interleaved precompute: count runs and blend zones in order
     total_rows = 0
-    for seg_idx in range(n - 1):
+    for seg_idx in range(n_seg):
         s_start = seg_entry_frac[seg_idx]
         s_end = 1.0 - seg_exit_frac[seg_idx]
         if s_end > s_start + 1e-9:
@@ -466,49 +592,60 @@ def build_composite_cartesian_path(
     entry_buf = np.zeros((4, 4), dtype=np.float64)
     exit_buf = np.zeros((4, 4), dtype=np.float64)
 
-    for seg_idx in range(n - 1):
-        start = waypoints[seg_idx]
-        end = waypoints[seg_idx + 1]
-
+    for seg_idx in range(n_seg):
+        seg = segments[seg_idx]
         s_start = seg_entry_frac[seg_idx]
         s_end = 1.0 - seg_exit_frac[seg_idx]
 
-        # Linear segment
+        # The run of this segment between its zones
         if s_end > s_start + 1e-9:
             skip = 1 if (row > 0 and seg_idx > 0) else 0
             n_write = samples_per_segment - skip
-            _linear_se3_segment_into(
-                start,
-                end,
-                out[row : row + n_write],
-                s_start,
-                s_end,
-                skip=skip,
-            )
+            seg.sample_into(out[row : row + n_write], s_start, s_end, skip)
             row += n_write
 
-        # Blend zone at end of this segment
+        # Blend zone at the end of this segment
         if seg_idx < len(clamped) and clamped[seg_idx] > 0:
-            se3_interp(start, end, 1.0 - seg_exit_frac[seg_idx], entry_buf)
-            corner = end
-            next_end = waypoints[seg_idx + 2]
-            se3_interp(end, next_end, seg_entry_frac[seg_idx + 1], exit_buf)
+            nxt = segments[seg_idx + 1]
+            t_in = 1.0 - seg_exit_frac[seg_idx]
+            t_out = seg_entry_frac[seg_idx + 1]
+            seg.sample(t_in, entry_buf)
+            nxt.sample(t_out, exit_buf)
+            handle_m = 2.0 / 3.0 * clamped[seg_idx] / 1000.0
+            p1 = entry_buf[:3, 3] + handle_m * seg.tangent(t_in)
+            p2 = exit_buf[:3, 3] - handle_m * nxt.tangent(t_out)
 
             avg_seg_len = (seg_lengths[seg_idx] + seg_lengths[seg_idx + 1]) / 2.0
             frac = clamped[seg_idx] / avg_seg_len if avg_seg_len > 1e-6 else 0.0
             bs = _blend_sample_count(frac, samples_per_segment)
             skip = 1 if row > 0 else 0
             n_write = bs - skip
-            blend_path_into(
-                entry_buf,
-                corner,
-                exit_buf,
-                out[row : row + n_write],
-                skip=skip,
+            _cubic_blend_into(
+                entry_buf, exit_buf, p1, p2, out[row : row + n_write], skip=skip
             )
             row += n_write
 
     return out[:row]
+
+
+def cartesian_path_knots(cart_poses: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Normalized cumulative tool distance along an SE3 pose chain, on the
+    metric sqrt(translation² + (w·rotation)²): the path parameter a timing
+    solver should key the poses to, so that a constant ``ds/dt`` is a
+    constant tool speed. Repeated poses share a knot value; the caller
+    drops them."""
+    n = len(cart_poses)
+    knots = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        d_trans = float(np.linalg.norm(cart_poses[i][:3, 3] - cart_poses[i - 1][:3, 3]))
+        d_rot = _rotation_angle(cart_poses[i - 1], cart_poses[i])
+        knots[i] = knots[i - 1] + float(
+            np.hypot(d_trans, PATH_ROT_WEIGHT_M_PER_RAD * d_rot)
+        )
+    total = float(knots[-1])
+    if total > 1e-12:
+        knots /= total
+    return knots
 
 
 def _linear_se3_segment_into(

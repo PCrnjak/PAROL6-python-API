@@ -16,6 +16,7 @@ import pytest
 
 from parol6 import MotionError, RobotClient
 from parol6.protocol.wire import SelectToolCmd, encode_command
+from parol6.utils.error_codes import ErrorCode
 
 pytestmark = pytest.mark.integration
 
@@ -172,3 +173,30 @@ def test_stop_discards_a_queued_tcp_transform_from_the_planner_too(
     assert np.allclose(after, start, atol=0.5), (
         f"the planner kept the cancelled TCP: {start} -> {after}"
     )
+
+
+def test_a_stop_fails_every_discarded_command_with_motn_cancelled(
+    client: RobotClient, server_proc
+):
+    """Every command a stop discards — the one playing, the ones queued behind
+    it — completes as a failure with MOTN_CANCELLED, so a wait on any of
+    them raises at once instead of running out its timeout."""
+    away = [45.0, -60.0, 150.0, 0.0, 30.0, 90.0]
+    queued = [90.0, -45.0, 120.0, 10.0, 20.0, 90.0]
+    start = client.angles()
+    assert start is not None
+
+    first = client.move_j(away, duration=4.0, wait=False)
+    second = client.move_j(queued, duration=2.0, wait=False)
+    third = client.delay(0.5)
+    assert min(first, second, third) >= 0
+    _wait_until_moving(client, start)
+
+    assert client.stop() == 1
+    for index in (first, second, third):
+        with pytest.raises(MotionError) as cancelled:
+            client.wait_command(index, timeout=0.5)
+        assert cancelled.value.robot_error.code == ErrorCode.MOTN_CANCELLED
+        assert cancelled.value.command_index == index
+    _assert_frozen(client, away)
+    assert client.home(wait=True, timeout=30.0) >= 0

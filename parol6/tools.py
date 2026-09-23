@@ -63,6 +63,21 @@ class ToolSimulator(Protocol):
         ...
 
 
+def _require_numbers(action: str, params: list, names: tuple[str, ...]) -> None:
+    if len(params) != len(names):
+        raise ValueError(f"{action} takes [{', '.join(names)}], got {params!r}")
+    for name, v in zip(names, params):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"{name} must be a number, got {v!r}")
+        if not math.isfinite(v):
+            raise ValueError(f"{name} must be finite, got {v!r}")
+
+
+def _require_within(name: str, v: float, lo: float, hi: float) -> None:
+    if not lo <= v <= hi:
+        raise ValueError(f"{name} = {v} is outside [{lo}, {hi}]")
+
+
 # ---------------------------------------------------------------------------
 # Base config
 # ---------------------------------------------------------------------------
@@ -87,8 +102,14 @@ class ToolConfig:
     def populate_status(self, hw: ControllerState, out: ToolStatus) -> None:
         """Fill *out* from hardware state. Override in subclasses."""
 
+    def validate_action(self, action: str, params: list) -> None:
+        """Raise ``ValueError`` unless *action* with *params* is one this tool
+        can run. Checked when the command is decoded, so a bad action is
+        refused before it is acknowledged."""
+        raise ValueError(f"Tool '{self.name}' takes no actions")
+
     def create_command(self, action: str, params: list) -> MotionCommand | None:
-        """Create a command engine for this tool action. Returns None if not supported."""
+        """Create a command engine for a validated tool action. Returns None if not supported."""
         return None
 
     def create_simulator(self) -> ToolSimulator | None:
@@ -130,14 +151,23 @@ class PneumaticGripperConfig(ToolConfig):
         out.engaged = bool(hw.InOut_out[port_idx])
         out.state = ToolState.IDLE
 
+    def validate_action(self, action: str, params: list) -> None:
+        if action not in self.valid_actions:
+            raise ValueError(
+                f"Pneumatic gripper has no action '{action}' "
+                f"({' | '.join(self.valid_actions)})"
+            )
+        if action in ("move", "set_position"):
+            _require_numbers(action, params, ("position",))
+            _require_within("position", params[0], 0.0, 1.0)
+        elif params:
+            raise ValueError(f"{action} takes no parameters")
+
     def create_command(self, action: str, params: list) -> PneumaticGripperCommand:
         from parol6.commands.gripper_commands import PneumaticGripperCommand
 
-        if action not in self.valid_actions:
-            raise ValueError(f"Invalid action '{action}' for pneumatic gripper")
         if action in ("move", "set_position"):
-            position = float(params[0]) if params and len(params) > 0 else 0.0
-            action = "open" if position < 0.5 else "close"
+            action = "open" if float(params[0]) < 0.5 else "close"
         return PneumaticGripperCommand.from_tool_action(
             action=action, port=self.io_port
         )
@@ -157,15 +187,10 @@ class ElectricGripperConfig(ToolConfig):
     """Configuration for electric grippers controlled via the serial gripper bus."""
 
     current_range: tuple[int, int] = (0, 0)
+    default_current: int = 500
     position_range: tuple[float, float] = (0.0, 1.0)
     speed_range: tuple[float, float] = (0.0, 1.0)
-    valid_actions: tuple[str, ...] = (
-        "move",
-        "open",
-        "close",
-        "set_position",
-        "calibrate",
-    )
+    valid_actions: tuple[str, ...] = ("move", "calibrate", "stop", "idle")
 
     # Motor controller / mechanical properties
     encoder_cpr: int = 16_384  # encoder counts per revolution
@@ -184,37 +209,38 @@ class ElectricGripperConfig(ToolConfig):
         out.engaged = bool(hw.Gripper_data_in[2])  # speed > 0
         out.state = ToolState.IDLE
 
+    def validate_action(self, action: str, params: list) -> None:
+        if action not in self.valid_actions:
+            raise ValueError(
+                f"Electric gripper has no action '{action}' "
+                f"({' | '.join(self.valid_actions)})"
+            )
+        if action != "move":
+            if params:
+                raise ValueError(f"{action} takes no parameters")
+            return
+        _require_numbers(action, params, ("position", "speed", "current_ma"))
+        _require_within("position", params[0], *self.position_range)
+        _require_within("speed", params[1], *self.speed_range)
+        _require_within("current_ma", params[2], *self.current_range)
+
     def create_command(self, action: str, params: list) -> ElectricGripperCommand:
         from parol6.commands.gripper_commands import ElectricGripperCommand
 
-        if action not in self.valid_actions:
-            raise ValueError(f"Invalid action '{action}' for electric gripper")
-        # Translate Python-level method names to wire-level "move" action
-        if action == "open":
-            params = [0.0] + params[1:]
-            action = "move"
-        elif action == "close":
-            params = [1.0] + params[1:]
-            action = "move"
-        elif action == "set_position":
-            action = "move"
-        position = float(params[0]) if len(params) > 0 else 0.0
-        speed = float(params[1]) if len(params) > 1 else 0.5
-        current = int(params[2]) if len(params) > 2 else 500
+        if action != "move":
+            return ElectricGripperCommand.from_tool_action(action=action)
         return ElectricGripperCommand.from_tool_action(
-            action=action, position=position, speed=speed, current=current
+            action=action,
+            position=float(params[0]),
+            speed=float(params[1]),
+            current=int(round(params[2])),
         )
 
     def estimate_duration(self, action: str, params: list) -> float:
-        # Resolve position delta from action + params (same logic as create_command)
-        if action in ("open", "close"):
-            target = 0.0 if action == "open" else 1.0
-            speed = float(params[0]) if len(params) > 0 else 0.5
-        elif action in ("move", "set_position"):
-            target = float(params[0]) if len(params) > 0 else 0.0
-            speed = float(params[1]) if len(params) > 1 else 0.5
-        else:
+        if action != "move" or len(params) != 3:
             return 0.0
+        target = float(params[0])
+        speed = float(params[1])
 
         # Assume worst-case full travel (0→target or 1→target)
         pos_delta = max(target, 1.0 - target)
@@ -357,6 +383,35 @@ class ElectricGripperSimulator:
             self._min_speed,
             self._max_speed,
         )
+
+
+def unselected_tool_refusal(tool_key: str, current_tool: str) -> str | None:
+    """Why a tool action naming *tool_key* is refused on acceptance, or
+    None: only the selected tool takes actions."""
+    key = tool_key.strip().upper()
+    if key != current_tool:
+        return f"tool '{key}' is not the selected tool ('{current_tool}')"
+    return None
+
+
+def tool_action_refusal(
+    tool_key: str, action: str, *, current_tool: str, gripper_calibrated: bool
+) -> str | None:
+    """Why a decoded tool action cannot run on the arm as it stands, or
+    None. The action and its parameters were validated on decode; these
+    checks need the controller's state at the moment the action's turn
+    comes, and the dry run applies them to its own so a script previews
+    the refusal it would get live."""
+    refusal = unselected_tool_refusal(tool_key, current_tool)
+    if refusal is not None:
+        return refusal
+    if (
+        isinstance(get_registry().get(tool_key.strip().upper()), ElectricGripperConfig)
+        and action.strip().lower() == "move"
+        and not gripper_calibrated
+    ):
+        return "the gripper is not calibrated: run the calibrate action first"
+    return None
 
 
 # ---------------------------------------------------------------------------

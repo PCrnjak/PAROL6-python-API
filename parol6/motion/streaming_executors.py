@@ -301,7 +301,8 @@ class StreamingExecutor(RuckigExecutorBase):
         if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
             self._apply_cart_velocity_limit(q_target)
         else:
-            self._max_vel_buf[:] = self._hardware_v_max
+            for i in range(self.num_dofs):
+                self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
             self.inp.max_velocity = self._max_vel_buf
 
         self.inp.control_interface = ControlInterface.Position
@@ -361,15 +362,17 @@ class StreamingExecutor(RuckigExecutorBase):
             for j in range(self.num_dofs):
                 # Joint velocity = dq[j] * scale, so max joint vel = |dq[j]| * max_scale.
                 q_dot_max = min(
-                    abs(self._dq_buf[j]) * max_scale, self._hardware_v_max[j]
+                    abs(self._dq_buf[j]) * max_scale,
+                    self._hardware_v_max[j] * self._vel_scale,
                 )
                 # Non-zero minimum avoids Ruckig issues with zero limits.
                 self._max_vel_buf[j] = max(q_dot_max, 1e-6)
 
             self.inp.max_velocity = self._max_vel_buf
         else:
-            # Near-zero motion: fall back to hardware limits.
-            self._max_vel_buf[:] = self._hardware_v_max
+            # Near-zero motion: fall back to the scaled hardware limits.
+            for j in range(self.num_dofs):
+                self._max_vel_buf[j] = self._hardware_v_max[j] * self._vel_scale
             self.inp.max_velocity = self._max_vel_buf
 
     def tick(self) -> tuple[np.ndarray, np.ndarray, bool]:
@@ -434,7 +437,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
     Key features:
     - Jerk-limited smoothing via Ruckig in Cartesian space
     - Position mode for MOVECART (straight-line TCP motion)
-    - Velocity mode for CARTJOG (1-DOF jogging)
+    - Velocity mode for JOGL (6-DOF twist jogging)
     - WRF/TRF frame support for jogging
     """
 
@@ -691,71 +694,38 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._apply_limits()
         self.active = True
 
-    def set_jog_velocity_1dof(
-        self, axis: int, velocity: float, is_rotation: bool
-    ) -> None:
-        """
-        Set 1-DOF jog velocity in body frame (TRF - Tool Reference Frame).
+    def set_jog_twist(self, twist: np.ndarray, wrf: bool) -> None:
+        """Drive the TCP at a 6-DOF velocity `[vx, vy, vz, wx, wy, wz]`
+        (m/s, rad/s), in world axes when `wrf` else in the tool's.
 
-        The tangent space is relative to reference_pose, so velocities are
-        naturally in body/tool frame. Use this for TRF jogging.
-
-        Uses velocity mode - Ruckig smoothly accelerates/decelerates
-        to reach target velocity. Call with velocity=0 to stop.
-
-        Args:
-            axis: Axis index (0=X, 1=Y, 2=Z)
-            velocity: Target velocity (m/s for linear, rad/s for rotation)
-            is_rotation: True for rotation axes (RX, RY, RZ)
-        """
-        self._target_velocity_arr.fill(0.0)
-        if is_rotation:
-            self._target_velocity_arr[3 + axis] = velocity
-        else:
-            self._target_velocity_arr[axis] = velocity
-
-        self._has_target = False
-        self._set_direction(self._target_velocity_arr)
-        self.inp.control_interface = ControlInterface.Velocity
-        self.inp.target_velocity = self._target_velocity_arr
-        self._target_acceleration_arr.fill(0.0)
-        self.inp.target_acceleration = self._target_acceleration_arr
-
-        self._apply_limits()
-        self.active = True
-
-    def set_jog_velocity_1dof_wrf(
-        self,
-        axis: int,
-        velocity: float,
-        is_rotation: bool,
-    ) -> None:
-        """
-        Set 1-DOF jog velocity in world reference frame (WRF).
-
-        Transforms the velocity from world frame to body frame (tangent space)
-        before applying to Ruckig. Requires reference_pose to be set.
-
-        Args:
-            axis: Axis index (0=X, 1=Y, 2=Z)
-            velocity: Target velocity (m/s for linear, rad/s for rotation)
-            is_rotation: True for rotation axes (RX, RY, RZ)
+        Velocity mode: Ruckig ramps to the twist under the envelope,
+        which follows the twist's direction so a diagonal runs at the
+        configured TCP ceiling rather than sqrt(3) times it; a twist
+        asking for more than the ceiling is scaled down to it, direction
+        kept, since Ruckig's velocity interface does not bound the
+        target itself. An all-zero twist is a brake. Needs
+        `reference_pose`, which `sync_pose` sets.
         """
         if self.reference_pose is None:
-            logger.warning("set_jog_velocity_1dof_wrf called without reference_pose")
+            logger.warning("set_jog_twist called without reference_pose")
             return
-
-        self._world_vel_buf.fill(0.0)
-        if is_rotation:
-            self._world_vel_buf[3 + axis] = velocity
+        if wrf:
+            # The tangent space is the tool's: body velocity = Rᵀ · world.
+            self._world_vel_buf[:] = twist
+            R = self.reference_pose[:3, :3]
+            np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
+            np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
         else:
-            self._world_vel_buf[axis] = velocity
-
-        # Transform world frame to body frame (tangent space): body velocity = R^T @ world velocity.
-        R = self.reference_pose[:3, :3]
-
-        np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
-        np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
+            self._target_velocity_arr[:] = twist
+        t = self._target_velocity_arr
+        lin = math.sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2])
+        lin_cap = self._v_lin_max * self._vel_scale
+        if lin > lin_cap:
+            t[:3] *= lin_cap / lin
+        ang = math.sqrt(t[3] * t[3] + t[4] * t[4] + t[5] * t[5])
+        ang_cap = self._v_ang_max * self._vel_scale
+        if ang > ang_cap:
+            t[3:] *= ang_cap / ang
 
         self._has_target = False
         self._set_direction(self._target_velocity_arr)

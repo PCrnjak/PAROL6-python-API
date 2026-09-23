@@ -5,6 +5,7 @@ Async UDP client for PAROL6 robot control.
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass
 import math
 import random
 import socket
@@ -26,7 +27,7 @@ from waldoctl.status import (
     StatusRate,
     ToolResult,
 )
-from waldoctl.tools import ToolSpec
+from waldoctl.tools import ToolSpec, ToolState
 
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 
@@ -134,6 +135,18 @@ from waldoctl import PingResult
 from pinokin import so3_rpy
 
 logger = logging.getLogger(__name__)
+
+
+def _no_wait_kwargs(wait_kwargs: dict[str, Any]) -> None:
+    """A planned move's ``**wait_kwargs`` exists for keywords its wait
+    accepts, and the wait accepts none beyond ``timeout``: anything else
+    (``rel`` on a move that has no such parameter, a misspelled keyword) is
+    a TypeError, never silently ignored."""
+    if wait_kwargs:
+        raise TypeError(
+            f"unexpected keyword argument(s): {', '.join(sorted(wait_kwargs))}"
+        )
+
 
 _AXIS_MAP: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
 _ACTION_STATE_MAP: dict[str, ActionState] = {
@@ -272,6 +285,19 @@ class _StatusProtocol(asyncio.DatagramProtocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         pass
+
+
+@dataclass(frozen=True, slots=True)
+class StatusSnapshot:
+    """One ``status()`` reading: the TCP transform (flattened row-major 4×4,
+    translation in mm), joint angles (deg), joint velocities (rad/s), digital
+    I/O, and the fitted tool's status."""
+
+    pose: list[float]
+    angles: list[float]
+    speeds: list[float]
+    io: list[int]
+    tool_status: ToolStatus
 
 
 class AsyncRobotClient(_RobotClientABC):
@@ -786,6 +812,7 @@ class AsyncRobotClient(_RobotClientABC):
             calibrate: If True, always run the referencing sequence
             timeout: Maximum time to wait in seconds (only used when wait=True)
         """
+        _no_wait_kwargs(wait_kwargs)
         index = await self._send(HomeCmd(calibrate=calibrate))
         assert isinstance(index, int)
         if wait and index >= 0:
@@ -865,11 +892,25 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Instantly set joint angles and optional tool positions (simulator only).
 
+        The pose is exact, so the arm counts as homed afterwards and
+        planned motion may follow. Whatever was driving the arm is
+        cancelled with ``MOTN_CANCELLED``.
+
         Category: Control
 
         Example:
             rbt.teleport([0, -90, 0, 0, 0, 0])
             rbt.teleport([0, -90, 0, 0, 0, 0], tool_positions=[1.0])
+
+        Returns:
+            1 once the pose is applied, 0 when no reply arrives.
+
+        Raises:
+            ValueError: for a non-finite angle, one outside the hard joint
+                limits, or a tool position outside ``[0, 1]``.
+            MotionError: off the simulator (``SYS_NOT_SIMULATOR``), when the
+                tool positions do not match the fitted tool's DOF count, or
+                while the controller is disabled.
         """
         return await self._send(
             TeleportCmd(angles=angles_deg, tool_positions=tool_positions)
@@ -958,7 +999,8 @@ class AsyncRobotClient(_RobotClientABC):
         return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
-        """Current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
+        """Current joint velocities in rad/s [J1, J2, J3, J4, J5, J6], the
+        units of ``StatusBuffer.speeds``.
 
         Category: Query
 
@@ -1002,8 +1044,10 @@ class AsyncRobotClient(_RobotClientABC):
         except (ValueError, IndexError):
             return None
 
-    async def status(self) -> StatusResultStruct | None:
+    async def status(self) -> StatusSnapshot | None:
         """Aggregate status snapshot (pose, angles, speeds, io, tool_status).
+        Its ``tool_status`` is always a ``ToolStatus``, key ``"NONE"`` when
+        no tool is fitted.
 
         Category: Query
 
@@ -1011,7 +1055,34 @@ class AsyncRobotClient(_RobotClientABC):
             status = rbt.status()
         """
         resp = await self._request(StatusCmd())
-        return resp if isinstance(resp, StatusResultStruct) else None
+        if not isinstance(resp, StatusResultStruct):
+            return None
+        (
+            key,
+            tool_state,
+            engaged,
+            part_detected,
+            fault_code,
+            positions,
+            channels,
+            variant,
+        ) = resp.tool_status
+        return StatusSnapshot(
+            pose=resp.pose,
+            angles=resp.angles,
+            speeds=resp.speeds,
+            io=resp.io,
+            tool_status=ToolStatus(
+                key=key,
+                state=ToolState(tool_state),
+                engaged=bool(engaged),
+                part_detected=bool(part_detected),
+                fault_code=int(fault_code),
+                positions=tuple(positions),
+                channels=tuple(channels),
+                variant_key=variant,
+            ),
+        )
 
     async def loop_stats(self) -> LoopStatsResult | None:
         """Fetch control-loop runtime metrics.
@@ -1172,11 +1243,12 @@ class AsyncRobotClient(_RobotClientABC):
         Returns:
             Command index (>= 0) if queued, 0 on failure.
         """
-        self._active_tool_key = tool_name.upper()
-        self._active_variant_key = variant_key
-        return await self._send(
-            SelectToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
-        )
+        key = tool_name.upper()
+        index = await self._send(SelectToolCmd(tool_name=key, variant_key=variant_key))
+        if index >= 0:
+            self._active_tool_key = key
+            self._active_variant_key = variant_key
+        return index
 
     async def set_tcp_offset(self, x: float = 0, y: float = 0, z: float = 0) -> int:
         """Set TCP offset in mm, composed on top of the current tool transform.
@@ -1307,7 +1379,10 @@ class AsyncRobotClient(_RobotClientABC):
                 Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
-            True if successful
+            1 once the profile is selected, 0 when no reply arrives.
+
+        Raises:
+            MotionError: when ``profile`` is not a profile name.
         """
         return await self._send(SelectProfileCmd(profile=profile.upper()))
 
@@ -1434,7 +1509,7 @@ class AsyncRobotClient(_RobotClientABC):
             return io_status[4] == 0  # E-stop at index 4, 0 means pressed
         return False
 
-    async def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
+    async def is_robot_stopped(self, threshold_speed: float = 0.01) -> bool:
         """Check if robot has stopped moving.
 
         Category: Query
@@ -1447,7 +1522,7 @@ class AsyncRobotClient(_RobotClientABC):
             stopped = rbt.is_robot_stopped()
 
         Args:
-            threshold_speed: Speed threshold in steps/sec
+            threshold_speed: Speed threshold in rad/s
 
         Returns:
             True if all joints below threshold
@@ -1609,8 +1684,10 @@ class AsyncRobotClient(_RobotClientABC):
 
         Queries exact success in the controller's last 1024 completions.
         A concurrent tool finishing does not complete an unfinished arm command.
-        Unknown, cancelled, or expired results are never inferred successful
-        from the status high-water mark. Pipeline failures raise MotionError.
+        Unknown or expired results are never inferred successful from the
+        status high-water mark. A command that ended as a failure — cancelled
+        by ``stop()``/``estop()`` (``MOTN_CANCELLED``) or failed by the
+        pipeline — raises MotionError.
 
         Args:
             command_index: The command index to wait for (returned by motion commands).
@@ -1667,6 +1744,8 @@ class AsyncRobotClient(_RobotClientABC):
                         check_session(result.session_id)
                         if result.completed:
                             return True
+                        if result.error is not None:
+                            raise MotionError(RobotError.from_wire(result.error))
                     err = _blocking_error(self._shared_status)
                     if err is not None:
                         raise MotionError(err)
@@ -1732,6 +1811,7 @@ class AsyncRobotClient(_RobotClientABC):
             rel: If True, angles are relative to current position
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
         if pose is not None:
             index = await self._send(
                 MoveJPoseCmd(
@@ -1786,6 +1866,7 @@ class AsyncRobotClient(_RobotClientABC):
             rel: If True, pose is relative delta
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
         cmd = MoveLCmd(
             pose=pose,
             frame=frame,
@@ -1833,6 +1914,7 @@ class AsyncRobotClient(_RobotClientABC):
             r: Blend radius in mm
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
         cmd = MoveCCmd(
             via=via,
             end=end,
@@ -1876,6 +1958,7 @@ class AsyncRobotClient(_RobotClientABC):
             accel: Acceleration fraction 0-1
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
         cmd = MoveSCmd(
             waypoints=waypoints,
             frame=frame,
@@ -1917,6 +2000,7 @@ class AsyncRobotClient(_RobotClientABC):
             accel: Acceleration fraction 0-1
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
         cmd = MovePCmd(
             waypoints=waypoints,
             frame=frame,
@@ -2082,9 +2166,11 @@ class AsyncRobotClient(_RobotClientABC):
             speeds_list: List of signed speed fractions for multi-axis jog
             accel: Acceleration fraction 0-1
         """
+        if frame not in ("WRF", "TRF"):
+            raise ValueError(f"jog_l frame must be 'WRF' or 'TRF', got {frame!r}")
         vel = [0.0] * 6
         if axes is not None and speeds_list is not None:
-            for a, s in zip(axes, speeds_list):
+            for a, s in zip(axes, speeds_list, strict=True):
                 vel[_AXIS_MAP[a]] = s
         elif axis is not None:
             vel[_AXIS_MAP[axis]] = speed
@@ -2150,12 +2236,21 @@ class AsyncRobotClient(_RobotClientABC):
         action: str,
         params: list | None = None,
         *,
-        wait: bool = True,
+        wait: bool = False,
         timeout: float = 10.0,
     ) -> int:
         """Send a generic tool action command.
 
-        Returns the command index (>= 0) on success, -1 on failure.
+        Returns the command index (>= 0) on success, -1 on failure. The
+        action and its parameters are checked before anything is sent: a
+        malformed one raises ``ValueError``. A key naming a tool other than
+        the selected one, or a ``move`` before a completed ``calibrate``, is
+        refused by the controller.
+
+        Electric grippers take ``move [position, speed, current_ma]``
+        (exactly three numbers), ``calibrate``, ``stop`` (halt in place,
+        keep grip) and ``idle`` (release). Pneumatic grippers take ``open``,
+        ``close``, and ``move``/``set_position [position]``.
 
         Category: I/O
 

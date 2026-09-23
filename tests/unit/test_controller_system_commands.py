@@ -2,7 +2,7 @@
 Unit tests for system command side-effect signaling.
 
 Tests verify that system commands set typed side-effect attributes
-(_switch_simulator, _switch_port, _sync_mock) which the controller
+(_switch_simulator, _switch_port) which the controller
 reads to trigger infrastructure changes.
 """
 
@@ -68,16 +68,3 @@ class TestSystemCommandSideEffects:
 
         assert code == ExecutionStatusCode.FAILED
         assert cmd._switch_port is None
-
-    def test_reset_command_sets_sync_mock(self):
-        """Verify RESET_STATE command sets _sync_mock attribute."""
-        from parol6.commands.utility_commands import ResetStateCommand
-        from parol6.protocol.wire import ResetStateCmd
-
-        cmd = ResetStateCommand(ResetStateCmd())
-        state = ControllerState()
-
-        code = cmd.execute_step(state)
-
-        assert code == ExecutionStatusCode.COMPLETED
-        assert cmd._sync_mock is True

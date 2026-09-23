@@ -116,7 +116,7 @@ class IOCommand(QueryCommand[IOCmd]):
 
 @register_command(CmdType.JOINT_SPEEDS)
 class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
-    """Get current joint speeds."""
+    """Current joint velocities in rad/s, the units of the status stream."""
 
     PARAMS_TYPE = JointSpeedsCmd
     QUERY_TYPE = QueryType.SPEEDS
@@ -124,7 +124,9 @@ class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> Response:
-        return SpeedsResultStruct(speeds=state.Speed_in.tolist())
+        cache = get_cache()
+        cache.update_from_state(state)
+        return SpeedsResultStruct(speeds=cache.speeds_rad_s.tolist())
 
 
 @register_command(CmdType.STATUS)
@@ -283,10 +285,12 @@ class CommandCompletionCommand(QueryCommand[CommandCompletionCmd]):
     __slots__ = ()
 
     def compute(self, state: "ControllerState") -> Response:
+        failure = state.command_failure(self.p.command_index)
         return CommandCompletionResultStruct(
             command_index=self.p.command_index,
             session_id=state.status_session_id,
             completed=state.command_completed(self.p.command_index),
+            error=None if failure is None else failure.to_wire(),
         )
 
 
