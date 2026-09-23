@@ -167,7 +167,9 @@ class SimulatorCommand(SystemCommand[SimulatorCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
+VALID_PROFILES = frozenset(
+    ("TOPPRA", "RUCKIG", "QUINTIC", "SEPTIC", "TRAPEZOID", "LINEAR")
+)
 
 
 @register_command(CmdType.SELECT_PROFILE)
@@ -181,6 +183,7 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
         TOPPRA    - Time-optimal path parameterization (default)
         RUCKIG    - Time-optimal jerk-limited (point-to-point only, joint moves only)
         QUINTIC   - C² smooth polynomial trajectories
+        SEPTIC    - C³ smooth polynomial: jerk also zero at both ends, jerk-limited
         TRAPEZOID - Linear segments with parabolic blends
         LINEAR    - Direct interpolation (no smoothing)
 

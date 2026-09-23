@@ -24,7 +24,7 @@ class TestProfileCommands:
 
     def test_select_and_get_profile_roundtrip(self, client, server_proc):
         """Test setting a profile and getting it back."""
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             assert client.select_profile(p) > 0
             assert client.profile() == p
 
@@ -48,9 +48,9 @@ class TestProfileMotionBehavior:
         target_angles = [10, -50, 190, 5, 10, 15]
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Teleport to the standby pose: each profile starts from the same
-            # spot without paying for five planned home moves (home() on a
+            # spot without paying for a planned home move per profile (home() on a
             # referenced robot is a real planned move now, not a firmware
             # re-home — slow CI runners blew the per-test timeout on it).
             assert client.teleport(standby) == 1
@@ -96,8 +96,8 @@ class TestProfileMotionBehavior:
 
         # All profiles should work for Cartesian moves
         # RUCKIG falls back to TOPPRA automatically
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Teleport, don't drive: five planned home moves blow the
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+            # Teleport, don't drive: a planned home move per profile blows the
             # per-test timeout on slow runners.
             assert client.teleport(standby) == 1
 
@@ -231,7 +231,9 @@ class TestServoCartesian:
 class TestCartesianPrecision:
     """Test Cartesian move precision with different profiles."""
 
-    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
+    @pytest.mark.parametrize(
+        "profile", ["TOPPRA", "LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID"]
+    )
     def test_cartesian_simple_sequence(self, client, server_proc, profile):
         """
         Test precision of simple Cartesian moves with all profiles.
@@ -342,7 +344,9 @@ def _extract_position_from_pose_matrix(pose_flat: list[float]) -> np.ndarray:
 class TestTCPPathAccuracy:
     """Test that Cartesian moves follow straight-line TCP paths."""
 
-    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
+    @pytest.mark.parametrize(
+        "profile", ["TOPPRA", "LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID"]
+    )
     def test_cartesian_follows_straight_line(self, client, server_proc, profile):
         """
         Verify TCP follows a straight line during Cartesian moves.

@@ -175,7 +175,7 @@ class ControllerState:
     disabled_reason: str = ""
     e_stop_active: bool = False
 
-    # Motion profile for all moves (TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR)
+    # Motion profile for all moves (TOPPRA, RUCKIG, QUINTIC, SEPTIC, TRAPEZOID, LINEAR)
     # Note: RUCKIG is point-to-point only; Cartesian moves fall back to TOPPRA
     motion_profile: str = "TOPPRA"
 

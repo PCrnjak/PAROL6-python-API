@@ -179,6 +179,7 @@ class TestTrajectoryBuilder:
         [
             ProfileType.LINEAR,
             ProfileType.QUINTIC,
+            ProfileType.SEPTIC,
             ProfileType.TRAPEZOID,
             ProfileType.TOPPRA,
             ProfileType.RUCKIG,
@@ -215,6 +216,49 @@ class TestTrajectoryBuilder:
             f"Profile {profile.name}: velocity exceeded limits by "
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
+
+    def test_septic_holds_its_limits_and_starts_and_stops_without_a_jerk_step(
+        self, simple_joint_path
+    ):
+        """SEPTIC stays inside the velocity, acceleration and jerk limits, and
+        its jerk ramps in and out where QUINTIC's steps straight to its peak."""
+
+        def derivatives(profile):
+            traj = TrajectoryBuilder(
+                joint_path=simple_joint_path, profile=profile, dt=INTERVAL_S
+            ).build()
+            q = traj.positions_rad
+            dt = INTERVAL_S
+            # At rest before and after, so the differences see both ends.
+            q = np.vstack([q[:1], q[:1], q, q[-1:], q[-1:]])
+            v = np.diff(q, axis=0) / dt
+            a = np.diff(v, axis=0) / dt
+            return v, a, np.diff(a, axis=0) / dt
+
+        v, a, j = derivatives(ProfileType.SEPTIC)
+        hard = LIMITS.joint.hard
+        for name, x, limit in [
+            ("velocity", v, hard.velocity),
+            ("acceleration", a, hard.acceleration),
+            ("jerk", j, hard.jerk),
+        ]:
+            ratio = float(np.max(np.abs(x) / limit))
+            assert ratio <= 1.0, f"SEPTIC {name} at {ratio:.3f}x its limit"
+
+        moving = np.abs(
+            simple_joint_path.positions[-1] - simple_joint_path.positions[0]
+        )
+        joint = int(np.argmax(moving))
+        peak = np.max(np.abs(j[:, joint]))
+        for at, edge in [("start", j[:2, joint]), ("end", j[-2:, joint])]:
+            assert np.max(np.abs(edge)) < 0.1 * peak, (
+                f"SEPTIC jerk at the {at} is {np.max(np.abs(edge)):.3f} "
+                f"against a peak of {peak:.3f}"
+            )
+        # The control: the quintic's jerk is at its peak on the first sample,
+        # so the assertion above discriminates rather than merely passes.
+        _, _, jq = derivatives(ProfileType.QUINTIC)
+        assert np.max(np.abs(jq[:2, joint])) > 0.5 * np.max(np.abs(jq[:, joint]))
 
 
 class TestTrajectory:

@@ -6,7 +6,7 @@ Provides jerk-limited motion execution for real-time control:
 - CartesianStreamingExecutor: Cartesian-space jogging and streaming
 
 Precomputed trajectories bypass these executors and go directly to the controller,
-since they're already time-optimal (TOPPRA/RUCKIG) or validated (QUINTIC/TRAPEZOID).
+since they're already time-optimal (TOPPRA/RUCKIG) or validated (QUINTIC/SEPTIC/TRAPEZOID).
 """
 
 import logging

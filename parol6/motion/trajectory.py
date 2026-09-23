@@ -107,6 +107,12 @@ def _quintic_samples(
 _QUINTIC_PEAK_VEL = 1.875
 _QUINTIC_PEAK_ACC = 10.0 / math.sqrt(3.0)
 
+# Peaks of the unit septic s(u) = 35u⁴ − 84u⁵ + 70u⁶ − 20u⁷ on u ∈ [0, 1]:
+# ds/du and |d³s/du³| at u = 1/2, |d²s/du²| at u = (5 ∓ √5)/10.
+_SEPTIC_PEAK_VEL: float = 35.0 / 16.0
+_SEPTIC_PEAK_ACC: float = 84.0 * math.sqrt(5.0) / 25.0
+_SEPTIC_PEAK_JERK: float = 52.5
+
 # A timing solver's duration can land a hair past a whole number of ticks.
 _TICK_ROUNDING = 1e-6
 
@@ -152,6 +158,7 @@ class ProfileType(Enum):
     TOPPRA = "toppra"  # Time-optimal path following (default)
     RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
+    SEPTIC = "septic"  # Septic polynomial (C³ smooth: jerk also zero at the ends)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
     LINEAR = "linear"  # Direct linear interpolation (no smoothing)
 
@@ -722,7 +729,7 @@ class TrajectoryBuilder:
         that is not a straight run between them is timed by TOPP-RA
         instead. QUINTIC and TRAPEZOID run each joint on its own profile
         from end to end on a straight run, and the path coordinate along
-        any other path.
+        any other path. SEPTIC runs the path coordinate on every path.
 
         Returns:
             Trajectory ready for execution, its rows one control tick apart
@@ -746,6 +753,7 @@ class TrajectoryBuilder:
         if self.path_knots is not None and self.profile in (
             ProfileType.LINEAR,
             ProfileType.QUINTIC,
+            ProfileType.SEPTIC,
             ProfileType.TRAPEZOID,
         ):
             # These profiles time a path coordinate spaced by row; spaced
@@ -763,6 +771,8 @@ class TrajectoryBuilder:
             if along_path:
                 return self._build_quintic_trajectory_along_path()
             return self._build_quintic_trajectory_joint()
+        elif self.profile == ProfileType.SEPTIC:
+            return self._build_septic_trajectory()
         elif self.profile == ProfileType.TRAPEZOID:
             if along_path:
                 # A trapezoid of the path coordinate is what LINEAR runs.
@@ -1284,6 +1294,40 @@ class TrajectoryBuilder:
         profile_s = _quintic_samples(times, 0.0, 1.0, duration)
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
+
+        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
+
+        return self._trajectory(trajectory_rad)
+
+    def _build_septic_trajectory(self) -> Trajectory:
+        """
+        Build trajectory with a septic polynomial on the path coordinate.
+
+        Velocity, acceleration and jerk are all zero at both ends, so unlike
+        the quintic the move neither starts nor stops with a jerk step. One
+        scalar profile times the whole path, joint and cartesian alike, so
+        every joint arrives together and a joint move stays on its straight
+        joint-space line. On a cartesian path the profile's peak keeps the
+        tool under its ceiling.
+        """
+        positions = self.joint_path.positions
+        # Steepest dq/ds of each joint over the path's segments. A joint move
+        # has one slope, its displacement; a cartesian path bends in joint
+        # space, and its steepest segment is what the limits have to cover.
+        slope = np.max(np.abs(np.diff(positions, axis=0)), axis=0) * (
+            len(positions) - 1
+        )
+        fastest = max(
+            float(np.max(_SEPTIC_PEAK_VEL * slope / self.v_max)),
+            float(np.max(np.sqrt(_SEPTIC_PEAK_ACC * slope / self.a_max))),
+            float(np.max(np.cbrt(_SEPTIC_PEAK_JERK * slope / self.j_max))),
+            _SEPTIC_PEAK_VEL / self._cruise_cap(),
+            self.dt * 2,
+        )
+        intervals = _tick_intervals(self._requested_or(fastest), self.dt)
+        u = np.linspace(0.0, 1.0, intervals + 1)
+        s = u**4 * (35.0 - 84.0 * u + 70.0 * u**2 - 20.0 * u**3)
+        trajectory_rad = self.joint_path.sample_many(s)
 
         trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
