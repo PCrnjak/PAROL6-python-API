@@ -309,6 +309,7 @@ class SegmentPlayer:
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
+                self._fail_dropped(state, active.command_index)
                 self._buffer.clear()
                 self._planner.cancel()
                 self._drain_planner_queue(state)
@@ -463,7 +464,7 @@ class SegmentPlayer:
         self._drain_planner_queue(state)
 
     def _world_guard(
-        self, seg: Segment, steps: np.ndarray, state: ControllerState
+        self, seg: TrajectorySegment, steps: np.ndarray, state: ControllerState
     ) -> bool:
         """Validate trajectory waypoints (motor steps) against the current
         collision world; on violation, halt playback like an ErrorSegment.
@@ -501,11 +502,34 @@ class SegmentPlayer:
             state.action_current = ""
             state.action_params = ""
             self._active = None
+            # The moves its blend absorbed were the same path, and fail
+            # with it.
+            for index in seg.blend_consumed_indices:
+                state.record_failure(index, exc.robot_error)
+            self._fail_dropped(state, seg.command_index)
             self._buffer.clear()
             self._planner.cancel()
             self._drain_planner_queue(state)
             return False
         return True
+
+    @staticmethod
+    def _fail_dropped(state: ControllerState, failed_index: int) -> None:
+        """The commands queued behind a failed one are dropped with it: each
+        fails as cancelled, so a wait on it raises instead of running out its
+        timeout. Failure path only — it allocates."""
+        for index, _ in state.pending_planned:
+            if (
+                index != failed_index
+                and index >= 0
+                and not state.command_completed(index)
+            ):
+                state.record_failure(
+                    index,
+                    make_error(
+                        ErrorCode.MOTN_CANCELLED, index, scope="the failure ahead of it"
+                    ),
+                )
 
     def owed_indices(self, state: ControllerState) -> list[int]:
         """Every command index this pipeline still owes an outcome: the
@@ -534,6 +558,9 @@ class SegmentPlayer:
         self._phase = -1.0
         self._inline_cmd = None
         self._inline_activated = False
+        # A seek cut short leaves no step running for the next "home" to
+        # report as its own.
+        state.homing_step = 0
         self._buffer.clear()
         self._planner.cancel()
         # Drain stale segments from planner output queue

@@ -11,6 +11,8 @@ depending on controller state or executing any motion.
 import logging
 from typing import TYPE_CHECKING, Any
 
+import math
+
 import numpy as np
 from numpy.typing import NDArray
 from pinokin import batch_se3_interp, se3_from_rpy, se3_interp, so3_rpy
@@ -209,9 +211,12 @@ class SplineMotion(_ShapeGenerator):
             spline = CubicSpline(timestamps_arr, waypoints_arr[:, i], bc_type=bc)
             pos_splines.append(spline)
 
-        # Batch convert euler angles to rotations (vectorized)
+        # Orientation slerps between the waypoints' rotations, read in the
+        # wire's intrinsic XYZ convention (se3_from_rpy's): the extrinsic
+        # reading of the same numbers names other rotations, and the path
+        # between those leaves the geodesic between the real ones.
         euler_angles = waypoints_arr[:, 3:]
-        key_rots = Rotation.from_euler("xyz", euler_angles, degrees=True)
+        key_rots = Rotation.from_euler("XYZ", euler_angles, degrees=True)
         slerp = Slerp(timestamps_arr, key_rots)
 
         total_time = float(timestamps_arr[-1])
@@ -221,7 +226,7 @@ class SplineMotion(_ShapeGenerator):
         trajectory = np.empty((num_points, 6), dtype=np.float64)
         for i, spline in enumerate(pos_splines):
             trajectory[:, i] = spline(t_eval)
-        trajectory[:, 3:] = slerp(t_eval).as_euler("xyz", degrees=True)
+        trajectory[:, 3:] = slerp(t_eval).as_euler("XYZ", degrees=True)
 
         return trajectory
 
@@ -336,28 +341,31 @@ PATH_ROT_WEIGHT_M_PER_RAD: float = 0.15
 
 
 def _rotation_angle(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
-    """Angle between the rotations of two SE3 poses [rad]."""
-    relative = a[:3, :3].T @ b[:3, :3]
-    cos_angle = (float(np.trace(relative)) - 1.0) / 2.0
-    return float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+    """Angle between the rotations of two SE3 poses [rad].
+
+    The atan2 of the relative rotation's sine and cosine: exact to rounding
+    at zero, where the arccos of a rounded cosine reads a repeated pose as
+    turned by up to 3e-8 rad."""
+    r = a[:3, :3].T @ b[:3, :3]
+    sine = 0.5 * math.sqrt(
+        (r[2, 1] - r[1, 2]) ** 2 + (r[0, 2] - r[2, 0]) ** 2 + (r[1, 0] - r[0, 1]) ** 2
+    )
+    cosine = (r[0, 0] + r[1, 1] + r[2, 2] - 1.0) / 2.0
+    return math.atan2(sine, cosine)
 
 
 class LineSegment:
     """A straight cartesian segment: position lerp, orientation geodesic."""
 
-    __slots__ = ("start", "end", "_length_m", "_angle_rad")
+    __slots__ = ("start", "end", "_length_m")
 
     def __init__(self, start: NDArray[np.float64], end: NDArray[np.float64]) -> None:
         self.start = start
         self.end = end
         self._length_m = float(np.linalg.norm(end[:3, 3] - start[:3, 3]))
-        self._angle_rad = _rotation_angle(start, end)
 
     def length_mm(self) -> float:
         return self._length_m * 1000.0
-
-    def angle_rad(self) -> float:
-        return self._angle_rad
 
     def sample_into(
         self, out: NDArray[np.float64], s_start: float, s_end: float, skip: int
@@ -385,7 +393,6 @@ class ArcSegment:
         "_r1_m",
         "_normal",
         "_sweep",
-        "_angle_rad",
     )
 
     def __init__(
@@ -415,13 +422,9 @@ class ArcSegment:
         elif float(np.dot(np.cross(u1, u2), normal)) < 0.0:
             sweep = 2.0 * np.pi - sweep
         self._sweep = sweep
-        self._angle_rad = _rotation_angle(start, end)
 
     def length_mm(self) -> float:
         return float(np.linalg.norm(self._r1_m)) * self._sweep * 1000.0
-
-    def angle_rad(self) -> float:
-        return self._angle_rad
 
     def _position(self, t: float) -> NDArray[np.float64]:
         rotation = Rotation.from_rotvec(self._normal * (t * self._sweep))
@@ -512,9 +515,8 @@ def build_blended_path(
     travel there, two thirds of the trim long: the zone is tangent to the
     incoming segment where it starts and to the outgoing one where it
     ends. Between two lines the cubic is exactly the degree-raised
-    quadratic through the corner point, so a chain of straight moves
-    rounds as it always has; an arc's zone follows its curvature into and
-    out of the corner. The ABB zone rule applies: a radius never eats more
+    quadratic through the corner point; an arc's zone follows its
+    curvature into and out of the corner. The ABB zone rule applies: a radius never eats more
     than half of either adjoining segment, and two zones sharing a segment
     are scaled down together until they fit.
 

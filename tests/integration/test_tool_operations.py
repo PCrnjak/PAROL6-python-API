@@ -278,6 +278,36 @@ class TestSSG48GripperMethods:
         assert abs((await tool.status()).positions[0] - 0.5) < 0.05
 
     @pytest.mark.asyncio
+    async def test_a_script_drives_the_tool_it_just_selected(self, async_client):
+        """A tool action sent right behind the ``select_tool`` that fits the
+        tool is judged against that selection, not the tool still fitted,
+        and queues behind it; a jaw move that names no current grips at
+        the middle of the tool's current range."""
+        robot, client = async_client
+        spec = robot.tools["SSG-48"]
+        assert isinstance(spec, ElectricGripperTool)
+        lo, hi = spec.current_range
+
+        assert await client.select_tool("SSG-48") >= 0
+        tool = client.tool
+        calibrating = await tool.calibrate()
+        assert calibrating >= 0
+        assert await client.wait_command(calibrating, timeout=10.0)
+
+        closing = await tool.set_position(1.0, speed=0.05)
+        assert closing >= 0
+        assert await client.wait_status(
+            lambda s: s.tool_status.channels and s.tool_status.channels[0] > 0,
+            timeout=5.0,
+        ), "the jaws never got under way"
+        commanded = (await tool.status()).channels[0]
+        assert commanded == lo + (hi - lo) // 2, (
+            f"a move naming no current sent {commanded} mA, not the middle of "
+            f"{spec.current_range}"
+        )
+        assert await client.stop() == 1
+
+    @pytest.mark.asyncio
     async def test_a_stop_halts_the_jaws_where_they_are(self, async_client):
         """A stop mid-travel fails the move with MOTN_CANCELLED and leaves
         the jaws where they were, gripping, rather than letting them run on

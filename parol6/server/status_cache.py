@@ -17,7 +17,7 @@ from numba import njit
 from pinokin import arrays_equal_6
 from waldoctl import ActionState, ToolState, ToolStatus
 
-from parol6.config import speed_steps_to_rad, steps_to_deg, steps_to_rad
+from parol6.config import INTERVAL_S, speed_steps_to_rad, steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
 from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError
@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 # window of 50 ms, which holds the loop's millisecond of jitter to a few
 # percent of the estimate.
 _TCP_SPEED_WINDOW: int = 6
+# A TCP whose newest moving sample is this old is at rest: a window of
+# control ticks, so a slow move that changes the step count only every few
+# frames still reads as moving, whatever the status rate.
+_TCP_STILL_S: float = _TCP_SPEED_WINDOW * INTERVAL_S
 
 
 def _cleanup_shm(shm: SharedMemory | None) -> None:
@@ -211,19 +215,15 @@ class StatusCache:
         # it, so the gap being differentiated is measured, not assumed from
         # the broadcast period; differentiating across the ring rather than
         # to the sample before keeps the loop's jitter out of the estimate.
-        self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
         self._tcp_hist_pos: np.ndarray = np.zeros(
             (_TCP_SPEED_WINDOW, 3), dtype=np.float64
         )
         self._tcp_hist_t: np.ndarray = np.zeros(_TCP_SPEED_WINDOW, dtype=np.float64)
         self._tcp_hist_n: int = 0
         self._tcp_hist_i: int = 0
-        # The frame the last refresh saw, and how many fresh frames in a
-        # row left the TCP where it was: a refresh within the same frame
-        # (a query between two broadcasts) says nothing about motion, and a
-        # slow move changes the step count only every few frames.
+        # The frame the last refresh saw: a refresh within the same frame
+        # (a query between two broadcasts) says nothing about motion.
         self._tcp_frame_s: float = 0.0
-        self._tcp_still_frames: int = 0
 
         # Per-joint drive faults, one bit per condition. One entry per joint
         # always — an all-clear list of empty tuples is how a consumer tells
@@ -470,15 +470,13 @@ class StatusCache:
         self._tcp_frame_s = self.last_serial_s
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
-            self._tcp_still_frames = 0
 
             # TCP speed (mm/s) across the sample ring; pose is row-major
             # 4x4: translation at indices 3,7,11
-            self._tcp_pos_buf[0] = self.pose[3]
-            self._tcp_pos_buf[1] = self.pose[7]
-            self._tcp_pos_buf[2] = self.pose[11]
             i = self._tcp_hist_i
-            self._tcp_hist_pos[i] = self._tcp_pos_buf
+            self._tcp_hist_pos[i, 0] = self.pose[3]
+            self._tcp_hist_pos[i, 1] = self.pose[7]
+            self._tcp_hist_pos[i, 2] = self.pose[11]
             self._tcp_hist_t[i] = self.last_serial_s
             self._tcp_hist_i = (i + 1) % _TCP_SPEED_WINDOW
             self._tcp_hist_n = min(self._tcp_hist_n + 1, _TCP_SPEED_WINDOW)
@@ -486,18 +484,19 @@ class StatusCache:
                 oldest = (self._tcp_hist_i - self._tcp_hist_n) % _TCP_SPEED_WINDOW
                 dt = self.last_serial_s - self._tcp_hist_t[oldest]
                 if dt > 0.0:
-                    dx = self._tcp_pos_buf[0] - self._tcp_hist_pos[oldest, 0]
-                    dy = self._tcp_pos_buf[1] - self._tcp_hist_pos[oldest, 1]
-                    dz = self._tcp_pos_buf[2] - self._tcp_hist_pos[oldest, 2]
+                    dx = self.pose[3] - self._tcp_hist_pos[oldest, 0]
+                    dy = self.pose[7] - self._tcp_hist_pos[oldest, 1]
+                    dz = self.pose[11] - self._tcp_hist_pos[oldest, 2]
                     self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
-        elif fresh_frame:
-            # A window of frames without motion is a robot at rest: speed
+        else:
+            # No motion for a window of ticks is a robot at rest: speed
             # zero, and the ring dropped so a restart is not differentiated
             # against the hold.
-            self._tcp_still_frames += 1
-            if self._tcp_still_frames >= _TCP_SPEED_WINDOW:
-                self.tcp_speed = 0.0
-                self._tcp_hist_n = 0
+            if fresh_frame and self._tcp_hist_n:
+                newest = (self._tcp_hist_i - 1) % _TCP_SPEED_WINDOW
+                if self.last_serial_s - self._tcp_hist_t[newest] >= _TCP_STILL_S:
+                    self.tcp_speed = 0.0
+                    self._tcp_hist_n = 0
 
             # Submit IK request asynchronously
             try:

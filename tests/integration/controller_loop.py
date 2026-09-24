@@ -5,9 +5,10 @@ its real UDP socket."""
 import socket
 import time
 
+import numpy as np
 import pytest
 
-from parol6.config import INTERVAL_S
+from parol6.config import INTERVAL_S, deg_to_steps
 from parol6.protocol.wire import ErrorMsg, OkMsg, decode_message, encode_command
 from parol6.server.controller import Controller
 
@@ -70,14 +71,19 @@ def send(controller: Controller, state, sock: socket.socket, cmd, req_id: int):
     pytest.fail(f"no reply to {type(cmd).__name__}")
 
 
-def ready(controller: Controller, state, *, homed: bool) -> None:
-    """Bring the fake serial up enabled, referenced or in the boot state."""
+def ready(
+    controller: Controller, state, *, homed: bool, at_deg: list[float] | None = None
+) -> None:
+    """Bring the fake serial up enabled, referenced or in the boot state,
+    at ``at_deg`` when given."""
     from parol6.server.transports.mock_serial_transport import MockSerialTransport
 
     robot = controller._transport_mgr.transport
     assert isinstance(robot, MockSerialTransport)
     state.Homed_in[:] = 1 if homed else 0
-    if not homed:
+    if at_deg is not None:
+        deg_to_steps(np.asarray(at_deg, dtype=np.float64), state.Position_in)
+    elif not homed:
         state.Position_in[:] = 0
     robot.sync_from_controller_state(state)
     tick_until(

@@ -27,7 +27,7 @@ from ruckig import (  # type: ignore[unresolved-import, ty:unresolved-import]
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS
-from pinokin import se3_exp_ws, se3_inverse, se3_log_ws, se3_mul
+from pinokin import so3_exp, so3_log
 
 logger = logging.getLogger(__name__)
 
@@ -39,57 +39,91 @@ _IDENTITY_SE3.flags.writeable = False
 def _pose_to_tangent_jit(
     ref_pose: np.ndarray,
     pose: np.ndarray,
-    ref_inv: np.ndarray,
-    delta: np.ndarray,
+    rel_rot: np.ndarray,
     out: np.ndarray,
     omega_ws: np.ndarray,
-    R_ws: np.ndarray,
-    V_inv_ws: np.ndarray,
 ) -> None:
-    """Convert SE3 pose to 6D tangent vector relative to reference.
-
-    Uses workspace variants for zero internal allocation.
+    """Coordinates of ``pose`` against ``ref_pose``: its translation in the
+    reference's axes, then the axis-angle of its rotation relative to the
+    reference. The two are independent, so a straight line in these
+    coordinates is a straight line for the TCP with the tool turning about
+    one fixed axis — not the screw an SE3 twist traces when both change.
 
     Args:
         ref_pose: Reference pose (4x4 SE3)
         pose: Pose to convert (4x4 SE3)
-        ref_inv: Workspace buffer for reference inverse (4x4)
-        delta: Workspace buffer for delta transform (4x4)
-        out: Output tangent vector (6,) [vx, vy, vz, wx, wy, wz]
-        omega_ws: Workspace buffer for axis-angle (3,)
-        R_ws: Workspace buffer for rotation matrix (3,3)
-        V_inv_ws: Workspace buffer for V inverse matrix (3,3)
+        rel_rot: Workspace for the relative rotation (3x3)
+        out: Output coordinates (6,) [x, y, z, wx, wy, wz]
+        omega_ws: Workspace for the axis-angle (3,)
     """
-    se3_inverse(ref_pose, ref_inv)
-    se3_mul(ref_inv, pose, delta)
-    se3_log_ws(delta, out, omega_ws, R_ws, V_inv_ws)
+    for i in range(3):
+        acc = 0.0
+        for k in range(3):
+            acc += ref_pose[k, i] * (pose[k, 3] - ref_pose[k, 3])
+        out[i] = acc
+        for j in range(3):
+            acc = 0.0
+            for k in range(3):
+                acc += ref_pose[k, i] * pose[k, j]
+            rel_rot[i, j] = acc
+    so3_log(rel_rot, omega_ws)
+    out[3] = omega_ws[0]
+    out[4] = omega_ws[1]
+    out[5] = omega_ws[2]
 
 
 @njit(cache=True)
 def _tangent_to_pose_jit(
     ref_pose: np.ndarray,
     tangent: np.ndarray,
-    delta: np.ndarray,
+    rel_rot: np.ndarray,
     out: np.ndarray,
     omega_ws: np.ndarray,
-    R_ws: np.ndarray,
-    V_ws: np.ndarray,
 ) -> None:
-    """Convert 6D tangent vector back to SE3 pose.
-
-    Uses workspace variants for zero internal allocation.
+    """The pose at ``tangent`` against ``ref_pose``; the inverse of
+    :func:`_pose_to_tangent_jit`.
 
     Args:
         ref_pose: Reference pose (4x4 SE3)
-        tangent: Tangent vector (6,) [vx, vy, vz, wx, wy, wz]
-        delta: Workspace buffer for delta transform (4x4)
+        tangent: Coordinates (6,) [x, y, z, wx, wy, wz]
+        rel_rot: Workspace for the relative rotation (3x3)
         out: Output pose (4x4 SE3)
-        omega_ws: Workspace buffer for axis-angle (3,)
-        R_ws: Workspace buffer for rotation matrix (3,3)
-        V_ws: Workspace buffer for V matrix (3,3)
+        omega_ws: Workspace for the axis-angle (3,)
     """
-    se3_exp_ws(tangent, delta, omega_ws, R_ws, V_ws)
-    se3_mul(ref_pose, delta, out)
+    omega_ws[0] = tangent[3]
+    omega_ws[1] = tangent[4]
+    omega_ws[2] = tangent[5]
+    so3_exp(omega_ws, rel_rot)
+    for i in range(3):
+        acc = ref_pose[i, 3]
+        for k in range(3):
+            acc += ref_pose[i, k] * tangent[k]
+        out[i, 3] = acc
+        for j in range(3):
+            acc = 0.0
+            for k in range(3):
+                acc += ref_pose[i, k] * rel_rot[k, j]
+            out[i, j] = acc
+    out[3, 0] = 0.0
+    out[3, 1] = 0.0
+    out[3, 2] = 0.0
+    out[3, 3] = 1.0
+
+
+def cap_twist(twist: np.ndarray, linear_max: float, angular_max: float) -> None:
+    """Scale a twist's linear and angular parts down to their ceilings in
+    place, each keeping its direction. The live jog and its preview cap
+    alike through this."""
+    lin = math.sqrt(twist[0] * twist[0] + twist[1] * twist[1] + twist[2] * twist[2])
+    if lin > linear_max:
+        k = linear_max / lin
+        for i in range(3):
+            twist[i] *= k
+    ang = math.sqrt(twist[3] * twist[3] + twist[4] * twist[4] + twist[5] * twist[5])
+    if ang > angular_max:
+        k = angular_max / ang
+        for i in range(3, 6):
+            twist[i] *= k
 
 
 # Module-level constant avoids tuple creation per error check.
@@ -177,10 +211,11 @@ class RuckigExecutorBase(ABC):
 
     def stop(self) -> None:
         """Request graceful stop - decelerate to zero velocity."""
+        # Whole-array assignment: ruckig hands out a copy of its targets, so
+        # writing into an element of one changes nothing.
         self.inp.control_interface = ControlInterface.Velocity
-        for i in range(self.num_dofs):
-            self.inp.target_velocity[i] = 0.0
-            self.inp.target_acceleration[i] = 0.0
+        self.inp.target_velocity = self._zeros
+        self.inp.target_acceleration = self._zeros
 
 
 # =============================================================================
@@ -250,13 +285,17 @@ class StreamingExecutor(RuckigExecutorBase):
 
     def _apply_limits(self) -> None:
         """Apply current limits (with scaling) to Ruckig parameters."""
+        self._apply_scaled_vel_limit()
         for i in range(self.num_dofs):
-            self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
             self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
             self._max_jerk_buf[i] = self._hardware_j_max[i]
-        self.inp.max_velocity = self._max_vel_buf
         self.inp.max_acceleration = self._max_acc_buf
         self.inp.max_jerk = self._max_jerk_buf
+
+    def _apply_scaled_vel_limit(self) -> None:
+        for i in range(self.num_dofs):
+            self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
+        self.inp.max_velocity = self._max_vel_buf
 
     def set_cart_velocity_limit(self, limit_mm_s: float | None) -> None:
         """
@@ -301,10 +340,9 @@ class StreamingExecutor(RuckigExecutorBase):
         if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
             self._apply_cart_velocity_limit(q_target)
         else:
-            for i in range(self.num_dofs):
-                self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
-            self.inp.max_velocity = self._max_vel_buf
+            self._apply_scaled_vel_limit()
 
+        self.inp.synchronization = Synchronization.Time
         self.inp.control_interface = ControlInterface.Position
         self._sync_pos_buf[:] = q_target
         self.inp.target_position = self._sync_pos_buf
@@ -328,6 +366,11 @@ class StreamingExecutor(RuckigExecutorBase):
         self.inp.max_velocity = self._max_vel_buf
         self.inp.max_acceleration = self._max_acc_buf
 
+        # Each joint brakes on its own profile: synchronized, a joint whose
+        # limit stops it would be stretched to finish with one still
+        # ramping, and carried past the stopping distance its lookahead
+        # measured.
+        self.inp.synchronization = Synchronization.No
         self.inp.control_interface = ControlInterface.Velocity
         self._target_vel_buf[:] = joint_velocities
         self.inp.target_velocity = self._target_vel_buf
@@ -371,9 +414,7 @@ class StreamingExecutor(RuckigExecutorBase):
             self.inp.max_velocity = self._max_vel_buf
         else:
             # Near-zero motion: fall back to the scaled hardware limits.
-            for j in range(self.num_dofs):
-                self._max_vel_buf[j] = self._hardware_v_max[j] * self._vel_scale
-            self.inp.max_velocity = self._max_vel_buf
+            self._apply_scaled_vel_limit()
 
     def tick(self) -> tuple[np.ndarray, np.ndarray, bool]:
         """
@@ -473,24 +514,20 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
         self._tangent_buf = np.zeros(6, dtype=np.float64)
         self._vel_np_buf = np.zeros(6, dtype=np.float64)
-        self._world_vel_buf = np.zeros(6, dtype=np.float64)
 
         # Ruckig's default (Time) only makes the six components FINISH
         # together; each still takes its own time-optimal route there, so
-        # the tangent bows and the TCP leaves the straight line by
-        # millimetres. Phase holds them to one shared profile, which is
-        # what makes the interpolation the screw geodesic. Ruckig falls
-        # back to time synchronization by itself when the limits make a
-        # shared profile impossible.
+        # the coordinates bow and the TCP leaves the straight line by
+        # millimetres. Phase holds them to one shared profile, which keeps
+        # the TCP on its line and the tool on its axis. Ruckig falls back
+        # to time synchronization by itself when the limits make a shared
+        # profile impossible.
         self.inp.synchronization = Synchronization.Phase
 
-        # SE3 workspace buffers let the JIT pose conversions run with zero allocation.
-        self._ref_inv_buf = np.zeros((4, 4), dtype=np.float64)
-        self._delta_buf = np.zeros((4, 4), dtype=np.float64)
+        # Workspace buffers let the JIT pose conversions run with zero allocation.
         self._result_pose_buf = np.zeros((4, 4), dtype=np.float64)
         self._omega_ws = np.zeros(3, dtype=np.float64)
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
-        self._V_ws = np.zeros((3, 3), dtype=np.float64)  # Reused for V and V_inv
 
     def _init_limits(self) -> None:
         """Initialize Cartesian velocity/acceleration/jerk limits from centralized config."""
@@ -598,10 +635,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
     def _pose_to_tangent(self, pose: np.ndarray) -> np.ndarray:
         """
-        Convert SE3 pose to 6D tangent vector relative to reference.
-
-        The tangent vector is the Lie algebra representation (twist):
-        [vx, vy, vz, wx, wy, wz] where v is linear and w is angular.
+        Coordinates of an SE3 pose relative to the reference:
+        [x, y, z, wx, wy, wz], the translation in the reference's axes and
+        the relative rotation's axis-angle (see ``_pose_to_tangent_jit``).
 
         Args:
             pose: 4x4 SE3 matrix to convert
@@ -615,12 +651,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         _pose_to_tangent_jit(
             self.reference_pose,
             pose,
-            self._ref_inv_buf,
-            self._delta_buf,
+            self._R_ws,
             self._tangent_buf,
             self._omega_ws,
-            self._R_ws,
-            self._V_ws,
         )
         return self._tangent_buf
 
@@ -640,11 +673,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         _tangent_to_pose_jit(
             self.reference_pose,
             self._tangent_buf,
-            self._delta_buf,
+            self._R_ws,
             self._result_pose_buf,
             self._omega_ws,
-            self._R_ws,
-            self._V_ws,
         )
         return self._result_pose_buf
 
@@ -709,23 +740,18 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         if self.reference_pose is None:
             logger.warning("set_jog_twist called without reference_pose")
             return
-        if wrf:
-            # The tangent space is the tool's: body velocity = Rᵀ · world.
-            self._world_vel_buf[:] = twist
-            R = self.reference_pose[:3, :3]
-            np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
-            np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
-        else:
-            self._target_velocity_arr[:] = twist
         t = self._target_velocity_arr
-        lin = math.sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2])
-        lin_cap = self._v_lin_max * self._vel_scale
-        if lin > lin_cap:
-            t[:3] *= lin_cap / lin
-        ang = math.sqrt(t[3] * t[3] + t[4] * t[4] + t[5] * t[5])
-        ang_cap = self._v_ang_max * self._vel_scale
-        if ang > ang_cap:
-            t[3:] *= ang_cap / ang
+        if wrf:
+            # The coordinates are in the reference's axes: Rᵀ · world.
+            R = self.reference_pose
+            for i in range(3):
+                t[i] = R[0, i] * twist[0] + R[1, i] * twist[1] + R[2, i] * twist[2]
+                t[3 + i] = R[0, i] * twist[3] + R[1, i] * twist[4] + R[2, i] * twist[5]
+        else:
+            t[:] = twist
+        cap_twist(
+            t, self._v_lin_max * self._vel_scale, self._v_ang_max * self._vel_scale
+        )
 
         self._has_target = False
         self._set_direction(self._target_velocity_arr)

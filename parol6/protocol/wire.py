@@ -478,6 +478,18 @@ class ServoJCmd(
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
+    def __post_init__(self) -> None:
+        _check_finite("SERVOJ angles", self.angles)
+        for i in range(6):
+            if not (
+                LIMITS.joint.position.deg[i, 0]
+                <= self.angles[i]
+                <= LIMITS.joint.position.deg[i, 1]
+            ):
+                raise ValueError(
+                    f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
+                )
+
 
 class ServoJPoseCmd(
     msgspec.Struct,
@@ -492,6 +504,9 @@ class ServoJPoseCmd(
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
+    def __post_init__(self) -> None:
+        _check_finite("SERVOJ_POSE pose", self.pose)
+
 
 class ServoLCmd(
     msgspec.Struct,
@@ -505,6 +520,9 @@ class ServoLCmd(
     pose: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
+
+    def __post_init__(self) -> None:
+        _check_finite("SERVOL pose", self.pose)
 
 
 # -- Streaming commands: jog (velocity) --
@@ -1149,18 +1167,25 @@ def pascal_to_snake(name: str) -> str:
 _COMMAND_STRUCTS = _collect_command_structs()
 STRUCT_TO_CMDTYPE: dict[type, CmdType] = _build_struct_to_cmdtype(_COMMAND_STRUCTS)
 
-#: Wire struct → the snake_case command name the waldoctl method spells
+#: Pose targets are the ``move_j`` / ``servo_j`` calls that sent them:
+#: waldoctl has no ``move_j_pose`` method for the name to point at.
+_REPORTED_AS: dict[str, str] = {"MoveJPoseCmd": "move_j", "ServoJPoseCmd": "servo_j"}
+
+#: Wire struct → the snake_case name of the waldoctl method that sends it
 #: (``MoveJCmd`` → ``"move_j"``, ``HomeCmd`` → ``"home"``). What ``queue()``
 #: and ``activity()`` report, so the same name reads across backends.
 WIRE_COMMAND_NAMES: dict[type, str] = {
-    struct_cls: pascal_to_snake(struct_cls.__name__.removesuffix("Cmd"))
+    struct_cls: _REPORTED_AS.get(
+        struct_cls.__name__, pascal_to_snake(struct_cls.__name__.removesuffix("Cmd"))
+    )
     for struct_cls in _COMMAND_STRUCTS
 }
 
 
 def wire_command_name(struct_cls: type) -> str:
     """The reported name of a command, from its wire struct type."""
-    return WIRE_COMMAND_NAMES.get(struct_cls, pascal_to_snake(struct_cls.__name__))
+    name = WIRE_COMMAND_NAMES.get(struct_cls)
+    return name if name is not None else pascal_to_snake(struct_cls.__name__)
 
 
 # Build Command union dynamically from collected structs

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
-from parol6.commands._collision_guard import guard_joint_path
+from parol6.commands._collision_guard import guard_cartesian_path
 from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
 from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import CircularMotion, JointPath, SplineMotion, TrajectoryBuilder
@@ -24,8 +24,8 @@ from parol6.protocol.wire import (
 )
 from parol6.commands.cartesian_commands import (
     CartesianChainLink,
+    pose6_to_se3,
     resolve_pose,
-    setup_cartesian_chain,
 )
 from parol6.motion.geometry import (
     ArcSegment,
@@ -107,16 +107,8 @@ _dist_se3_b: np.ndarray = np.zeros((4, 4), dtype=np.float64)
 def _pose6_distance_mm(a: Sequence[float], b: Sequence[float]) -> float:
     """Distance between two [x, y, z, rx, ry, rz] poses (mm, degrees) on the
     combined metric sqrt(translation² + (w·rotation)²)."""
-    for pose, out in ((a, _dist_se3_a), (b, _dist_se3_b)):
-        se3_from_rpy(
-            pose[0] / 1000.0,
-            pose[1] / 1000.0,
-            pose[2] / 1000.0,
-            np.radians(pose[3]),
-            np.radians(pose[4]),
-            np.radians(pose[5]),
-            out,
-        )
+    pose6_to_se3(a, _dist_se3_a)
+    pose6_to_se3(b, _dist_se3_b)
     translation = (
         float(np.linalg.norm(_dist_se3_a[:3, 3] - _dist_se3_b[:3, 3])) * 1000.0
     )
@@ -134,15 +126,7 @@ def _se3_chain(trajectory: np.ndarray) -> np.ndarray:
         return trajectory
     poses = np.empty((len(trajectory), 4, 4), dtype=np.float64)
     for row, out in zip(trajectory, poses, strict=True):
-        se3_from_rpy(
-            row[0] / 1000.0,
-            row[1] / 1000.0,
-            row[2] / 1000.0,
-            np.radians(row[3]),
-            np.radians(row[4]),
-            np.radians(row[5]),
-            out,
-        )
+        pose6_to_se3(row, out)
     return poses
 
 
@@ -224,7 +208,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
                 )
             )
 
-        guard_joint_path(joint_path.positions)
+        guard_cartesian_path(joint_path)
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -256,7 +240,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
 
 @register_command(CmdType.MOVEC)
-class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd], CartesianChainLink):
+class MoveCCommand(CartesianChainLink, BaseSmoothMotionCommand[MoveCCmd]):
     """Execute circular arc motion through current → via → end (3-point arc).
 
     Via and end resolve against the pose the move starts from: absolute in
@@ -310,14 +294,6 @@ class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd], CartesianChainLink):
             raise TrajectoryPlanningError(
                 make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=str(e))
             ) from e
-
-    def do_setup_with_blend(
-        self,
-        state: "ControllerState",
-        next_cmds: "list[TrajectoryMoveCommandBase]",
-    ) -> int:
-        guard_homed(state)
-        return setup_cartesian_chain(self, state, next_cmds)
 
 
 @register_command(CmdType.MOVES)
@@ -410,19 +386,7 @@ class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
         else:
             all_waypoints = np.vstack([effective_start_pose[np.newaxis], wps[1:]])
 
-        poses = []
-        for wp in all_waypoints:
-            se3 = np.zeros((4, 4), dtype=np.float64)
-            se3_from_rpy(
-                wp[0] / 1000.0,
-                wp[1] / 1000.0,
-                wp[2] / 1000.0,
-                np.radians(wp[3]),
-                np.radians(wp[4]),
-                np.radians(wp[5]),
-                se3,
-            )
-            poses.append(se3)
+        poses = list(_se3_chain(all_waypoints))
         lengths = [
             float(np.linalg.norm(poses[i + 1][:3, 3] - poses[i][:3, 3])) * 1000.0
             for i in range(len(poses) - 1)

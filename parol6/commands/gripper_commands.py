@@ -151,12 +151,16 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         re-target the reported position with the move bit still set, so the
         firmware is already in tolerance and holds there. Clearing the bit
         would release a part the jaws are holding. A calibration has no
-        position to hold and is simply ended."""
+        position to hold and is simply ended; an uncalibrated gripper has
+        none either and is released, as its own stop action releases it."""
         if self.state in (
             ElectricGripperState.SEND_CALIBRATE,
             ElectricGripperState.WAITING_CALIBRATION,
         ):
             state.gripper_hw.mode = 0
+            return
+        if not state.gripper_calibrated:
+            self._release(state)
             return
         self._hold_in_place(state)
 

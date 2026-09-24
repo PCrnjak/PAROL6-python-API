@@ -20,6 +20,15 @@ from parol6.utils.errors import TrajectoryPlanningError
 logger = logging.getLogger(__name__)
 
 
+def arm_homed(state: ControllerState) -> bool:
+    """Whether every arm joint holds its reference; a loop rather than a
+    slice, so a per-tick caller allocates no view."""
+    for i in range(6):
+        if not state.Homed_in[i]:
+            return False
+    return True
+
+
 def guard_homed(state: ControllerState) -> None:
     """Refuse motion that works from the reported pose while the robot is
     not homed.

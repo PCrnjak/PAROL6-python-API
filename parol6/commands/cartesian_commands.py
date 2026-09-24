@@ -4,12 +4,17 @@ Contains commands for Cartesian space movements: CartesianJog, MovePose, MoveCar
 """
 
 import logging
+from collections.abc import Sequence
 from typing import cast
 
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands._collision_guard import collision_blocked, guard_joint_path
+from parol6.commands._collision_guard import (
+    _format_pairs,
+    collision_blocked,
+    guard_cartesian_path,
+)
 from parol6.config import (
     INTERVAL_S,
     LIMITS,
@@ -33,7 +38,7 @@ from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.errors import TrajectoryPlanningError
+from parol6.utils.errors import IKError, TrajectoryPlanningError
 from parol6.utils.ik import RateLimitedWarning, solve_ik
 from pinokin import se3_from_rpy, se3_interp, se3_rpy
 
@@ -112,12 +117,13 @@ class JogLCommand(MotionCommand[JogLCmd]):
         self._pos_rad_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Resolve the twist and start the timer."""
+        """Resolve the twist and start the timer. A collision stop stays
+        latched across the datagrams that keep the stream alive: the jog
+        ends where it braked, like a refused planned move."""
         guard_homed(state)
         jog_twist(self.p.velocities, self._twist)
         self.start_timer(self.p.duration)
         self._ik_stopping = False
-        self._collision_stopping = False
 
     def _track_and_send(self, state: "ControllerState", ik_q: np.ndarray) -> None:
         """Velocity-clamp IK result, update tracked position, send MOVE."""
@@ -136,6 +142,19 @@ class JogLCommand(MotionCommand[JogLCmd]):
         self._pos_rad_buf[:] = self._q_commanded
         rad_to_steps(self._pos_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
+
+    def _send_if_clear(self, state: "ControllerState", pose: np.ndarray) -> None:
+        """Solve *pose* and send it, unless the step there would reach a
+        contact: a brake's configurations are gated like the jog's own, and
+        the arm holds the last clear one instead."""
+        ik_result = solve_ik(PAROL6_ROBOT.robot, pose, self._q_ik_seed)
+        if not ik_result.success or ik_result.q is None:
+            return
+        checker = PAROL6_ROBOT.collision
+        if checker is None or not collision_blocked(
+            checker, self._q_commanded, ik_result.q
+        ):
+            self._track_and_send(state, ik_result.q)
 
     def _command_twist(self, cse, scale: float) -> None:
         """Re-command the twist, held back by the factor the joints were:
@@ -159,6 +178,28 @@ class JogLCommand(MotionCommand[JogLCmd]):
             self._q_ik_seed[:] = self._q_rad_buf
             self._vel_ratio = 1.0
 
+        if self._collision_stopping:
+            # Braking to rest with the collision latched, whatever the timer
+            # says; the jog ends there in error and does not resume on its
+            # own, like a refused planned move.
+            smoothed_pose, smoothed_vel, _finished = cse.tick()
+            np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
+            if self._dot_buf < 1e-8:
+                cse.sync_pose(get_fkine_se3(state))
+                cse.active = False
+                self.fail_and_idle(
+                    state,
+                    make_error(
+                        ErrorCode.SYS_SELF_COLLISION,
+                        sample="1",
+                        total="1",
+                        pairs=_format_pairs(list(state.collision_pairs)),
+                    ),
+                )
+                return ExecutionStatusCode.FAILED
+            self._send_if_clear(state, smoothed_pose)
+            return ExecutionStatusCode.EXECUTING
+
         # Handle timer expiry - stop smoothly
         if self.timer_expired():
             cse.stop()
@@ -166,15 +207,9 @@ class JogLCommand(MotionCommand[JogLCmd]):
 
             np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
             if not finished and self._dot_buf > 1e-8:
-                ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
-                if ik_result.success and ik_result.q is not None:
-                    # Keep streaming while escaping from inside a keep-out,
-                    # else the target freezes at release and the arm jerks.
-                    checker = PAROL6_ROBOT.collision
-                    if checker is None or not collision_blocked(
-                        checker, self._q_commanded, ik_result.q
-                    ):
-                        self._track_and_send(state, ik_result.q)
+                # Keep streaming while escaping from inside a keep-out,
+                # else the target freezes at release and the arm jerks.
+                self._send_if_clear(state, smoothed_pose)
                 return ExecutionStatusCode.EXECUTING
 
             cse.active = False
@@ -184,41 +219,10 @@ class JogLCommand(MotionCommand[JogLCmd]):
 
         # While stopping, leave the CSE target at zero — re-commanding the
         # twist every tick would defeat cse.stop()'s deceleration.
-        if not self._ik_stopping and not self._collision_stopping:
+        if not self._ik_stopping:
             self._command_twist(cse, 1.0 / self._vel_ratio)
 
         smoothed_pose, smoothed_vel, _finished = cse.tick()
-
-        if self._collision_stopping:
-            # Braking to rest with the collision latched; the jog ends there
-            # and does not resume on its own, like a refused planned move.
-            np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
-            if self._dot_buf < 1e-8:
-                cse.sync_pose(get_fkine_se3(state))
-                cse.active = False
-                self.fail_and_idle(
-                    state,
-                    make_error(
-                        ErrorCode.SYS_SELF_COLLISION,
-                        detail="jog_l stopped short of a predicted collision",
-                    ),
-                )
-                return ExecutionStatusCode.FAILED
-            # The brake's own configurations are gated too: the ones that
-            # would reach the contact are withheld, and the arm holds the
-            # last clear one while the smoother runs down.
-            ik_result = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_ik_seed)
-            checker = PAROL6_ROBOT.collision
-            if (
-                ik_result.success
-                and ik_result.q is not None
-                and (
-                    checker is None
-                    or not collision_blocked(checker, self._q_commanded, ik_result.q)
-                )
-            ):
-                self._track_and_send(state, ik_result.q)
-            return ExecutionStatusCode.EXECUTING
 
         ik_result = solve_ik(
             PAROL6_ROBOT.robot,
@@ -281,6 +285,21 @@ class JogLCommand(MotionCommand[JogLCmd]):
         return ExecutionStatusCode.EXECUTING
 
 
+def pose6_to_se3(pose: Sequence[float], out: np.ndarray) -> np.ndarray:
+    """Write the SE3 of a wire pose ``[x, y, z, rx, ry, rz]`` (mm, degrees)
+    into ``out`` and return it."""
+    se3_from_rpy(
+        pose[0] / 1000.0,
+        pose[1] / 1000.0,
+        pose[2] / 1000.0,
+        np.radians(pose[3]),
+        np.radians(pose[4]),
+        np.radians(pose[5]),
+        out,
+    )
+    return out
+
+
 def resolve_pose(
     start: np.ndarray, pose: "list[float]", frame: str, rel: bool
 ) -> np.ndarray:
@@ -292,16 +311,7 @@ def resolve_pose(
     case its rotation is applied about the TCP and its translation is added
     in world coordinates.
     """
-    delta_se3 = np.zeros((4, 4), dtype=np.float64)
-    se3_from_rpy(
-        pose[0] / 1000.0,
-        pose[1] / 1000.0,
-        pose[2] / 1000.0,
-        np.radians(pose[3]),
-        np.radians(pose[4]),
-        np.radians(pose[5]),
-        delta_se3,
-    )
+    delta_se3 = pose6_to_se3(pose, np.zeros((4, 4), dtype=np.float64))
     if frame == "TRF":
         return start @ delta_se3
     if rel:
@@ -322,6 +332,17 @@ class CartesianChainLink:
         """The segment this move traces from ``previous``, and its end pose."""
         raise NotImplementedError
 
+    def do_setup_with_blend(
+        self,
+        state: "ControllerState",
+        next_cmds: "list[TrajectoryMoveCommandBase]",
+    ) -> int:
+        """Build one cartesian trajectory through the moves blended behind
+        this one, straight or circular, with the junctions rounded."""
+        assert isinstance(self, TrajectoryMoveCommandBase)
+        guard_homed(state)
+        return setup_cartesian_chain(self, state, next_cmds)
+
 
 def setup_cartesian_chain(
     head: "TrajectoryMoveCommandBase",
@@ -333,26 +354,21 @@ def setup_cartesian_chain(
     consumed; the head's trajectory covers them all. Falls back to the
     head's own setup when there is nothing to chain."""
     assert isinstance(head, CartesianChainLink)
-    if head.blend_radius <= 0 or not next_cmds:
-        head.do_setup(state)
-        return 0
-
     chain: list[TrajectoryMoveCommandBase] = [head]
-    for cmd in next_cmds:
-        if isinstance(cmd, CartesianChainLink):
+    if head.blend_radius > 0:
+        for cmd in next_cmds:
+            if not isinstance(cmd, CartesianChainLink):
+                break
             chain.append(cmd)
             if cmd.blend_radius <= 0:
                 break
-        else:
-            break
     if len(chain) < 2:
         head.do_setup(state)
         return 0
 
-    initial_pose = get_fkine_se3(state).copy()
     segments: list[LineSegment | ArcSegment] = []
     blend_radii: list[float] = []
-    previous = initial_pose
+    previous = get_fkine_se3(state).copy()
     for i, cmd in enumerate(chain):
         assert isinstance(cmd, CartesianChainLink)
         segment, end = cmd.chain_segment(previous, state)
@@ -379,24 +395,16 @@ def setup_cartesian_chain(
                 total=str(len(joint_path)),
             )
         )
-    guard_joint_path(joint_path.positions)
+    guard_cartesian_path(joint_path)
 
     # The chain runs under the slowest speed and acceleration fraction in
     # it; durations add up when every move carries one.
-    min_speed = head.p.resolved_speed
-    min_accel = head.p.accel
-    total_duration = head.p.resolved_duration
-    all_have_duration = total_duration is not None
-    for cmd in chain[1:]:
-        min_speed = min(min_speed, cmd.p.resolved_speed)
-        min_accel = min(min_accel, cmd.p.accel)
-        d = cmd.p.resolved_duration
-        if all_have_duration and d is not None:
-            assert total_duration is not None
-            total_duration += d
-        else:
-            all_have_duration = False
-            total_duration = None
+    min_speed = min(c.p.resolved_speed for c in chain)
+    min_accel = min(c.p.accel for c in chain)
+    durations = [c.p.resolved_duration for c in chain]
+    total_duration = (
+        sum(cast(list[float], durations)) if None not in durations else None
+    )
 
     builder = TrajectoryBuilder(
         joint_path=joint_path,
@@ -417,7 +425,7 @@ def setup_cartesian_chain(
 
 
 @register_command(CmdType.MOVEL)
-class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd], CartesianChainLink):
+class MoveLCommand(CartesianChainLink, TrajectoryMoveCommandBase[MoveLCmd]):
     """Move the robot's end-effector in a straight line to a Cartesian pose.
 
     Supports absolute and relative modes via the `rel` field, and WRF/TRF frames.
@@ -448,8 +456,6 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd], CartesianChainLink):
 
     def _precompute_trajectory(self, state: "ControllerState") -> None:
         """Pre-compute joint trajectory that follows straight-line Cartesian path."""
-        from parol6.utils.errors import IKError
-
         assert self.initial_pose is not None and self.target_pose is not None
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
@@ -468,7 +474,7 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd], CartesianChainLink):
         )
 
         if not joint_path.is_partial:
-            guard_joint_path(joint_path.positions)
+            guard_cartesian_path(joint_path)
 
         if joint_path.is_partial:
             ik_valid = joint_path.valid
@@ -527,13 +533,3 @@ class MoveLCommand(TrajectoryMoveCommandBase[MoveLCmd], CartesianChainLink):
     ) -> tuple[LineSegment | ArcSegment, np.ndarray]:
         end = resolve_pose(previous, self.p.pose, self.p.frame, self.p.rel)
         return LineSegment(previous, end), end
-
-    def do_setup_with_blend(
-        self,
-        state: "ControllerState",
-        next_cmds: "list[TrajectoryMoveCommandBase]",
-    ) -> int:
-        """Build one cartesian trajectory through the moves blended behind
-        this one, straight or circular, with the junctions rounded."""
-        guard_homed(state)
-        return setup_cartesian_chain(self, state, next_cmds)

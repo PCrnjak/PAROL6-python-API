@@ -200,3 +200,29 @@ def test_a_stop_fails_every_discarded_command_with_motn_cancelled(
         assert cancelled.value.command_index == index
     _assert_frozen(client, away)
     assert client.home(wait=True, timeout=30.0) >= 0
+
+
+def test_a_stream_that_preempts_planned_motion_fails_what_it_discarded(
+    client: RobotClient, server_proc
+):
+    """A jog sent while planned moves play takes the arm: the move playing
+    and the ones queued behind it are discarded, each failed as cancelled,
+    so a wait on any of them raises at once instead of running out its
+    timeout."""
+    away = [45.0, -60.0, 150.0, 0.0, 30.0, 90.0]
+    queued = [90.0, -45.0, 120.0, 10.0, 20.0, 90.0]
+    start = client.angles()
+    assert start is not None
+
+    first = client.move_j(away, duration=4.0, wait=False)
+    second = client.move_j(queued, duration=2.0, wait=False)
+    assert min(first, second) >= 0
+    _wait_until_moving(client, start)
+
+    assert client.jog_j(0, 0.2, duration=0.2) == 1
+    for index in (first, second):
+        with pytest.raises(MotionError) as cancelled:
+            client.wait_command(index, timeout=0.5)
+        assert cancelled.value.robot_error.code == ErrorCode.MOTN_CANCELLED
+        assert cancelled.value.command_index == index
+    assert client.home(wait=True, timeout=30.0) >= 0

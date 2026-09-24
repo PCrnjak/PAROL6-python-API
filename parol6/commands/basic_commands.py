@@ -29,8 +29,6 @@ from parol6.commands._collision_guard import collision_blocked
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.config import deg_to_steps
-from parol6.server.transports.transport_factory import is_simulation_mode
-from parol6.tools import get_registry
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT  # noqa: N811
 
@@ -38,6 +36,7 @@ from .base import (
     ExecutionStatusCode,
     MotionCommand,
     SystemCommand,
+    arm_homed,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +69,10 @@ _JOG_STOP_MARGIN: float = 1.05
 # The measured position trails the commanded one by this many ticks
 # (write, firmware, read back); the lookahead counts that travel too.
 _JOG_LAG_TICKS: float = 2.0
+# Joint travel the jog lookahead stops short of, read once: slicing the
+# limits table every tick would allocate a view each time.
+_POS_LO_RAD = LIMITS.joint.position.rad[:, 0]
+_POS_HI_RAD = LIMITS.joint.position.rad[:, 1]
 
 
 class HomeState(Enum):
@@ -125,6 +128,7 @@ class HomeCommand(MotionCommand[HomeCmd]):
                 self.state = HomeState.WAITING_FOR_HOMED
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
+                state.homing_step = 0
                 self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.FAILED
@@ -134,11 +138,13 @@ class HomeCommand(MotionCommand[HomeCmd]):
             state.Command_out = CommandCode.IDLE
             if np.all(state.Homed_in[:6] == 1):
                 self.log_info("Homing sequence complete. All joints reported home.")
+                state.homing_step = 0
                 self.finish()
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.COMPLETED
             self.timeout_counter -= 1
             if self.timeout_counter <= 0:
+                state.homing_step = 0
                 self.fail(make_error(ErrorCode.MOTN_HOME_TIMEOUT))
                 self.stop_and_idle(state)
                 return ExecutionStatusCode.FAILED
@@ -216,8 +222,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
         reverses at the jerk limit, peaking the speed, then the ramp runs
         at the acceleration limit and rounds off at the jerk limit again.
         """
-        lo = LIMITS.joint.position.rad[:, 0]
-        hi = LIMITS.joint.position.rad[:, 1]
+        lo = _POS_LO_RAD
+        hi = _POS_HI_RAD
         accel = LIMITS.joint.hard.acceleration
         jerk = LIMITS.joint.hard.jerk
         driving = False
@@ -236,16 +242,13 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 jk = jerk[j]
                 speed = abs(v)
                 a0 = max(self._acc_prev[j] * sgn, 0.0)
-                if a > 0.0 and jk > 0.0:
-                    v_peak = speed + a0 * a0 / (2.0 * jk)
-                    stop = (
-                        speed * a0 / jk
-                        + a0 * a0 * a0 / (3.0 * jk * jk)
-                        + v_peak * v_peak / (2.0 * a)
-                        + v_peak * a / (2.0 * jk)
-                    )
-                else:
-                    stop = 0.0
+                v_peak = speed + a0 * a0 / (2.0 * jk)
+                stop = (
+                    speed * a0 / jk
+                    + a0 * a0 * a0 / (3.0 * jk * jk)
+                    + v_peak * v_peak / (2.0 * a)
+                    + v_peak * a / (2.0 * jk)
+                )
                 stop = _JOG_STOP_MARGIN * stop + _JOG_LAG_TICKS * speed * dt
                 if stop + _JOG_LIMIT_MARGIN_RAD >= remaining:
                     self._blocked[j] = sgn
@@ -260,14 +263,17 @@ class JogJCommand(MotionCommand[JogJCmd]):
         """Execute one tick of joint jogging via StreamingExecutor."""
         se = state.streaming_executor
 
-        # Sync position on first tick
+        # A jog starting from rest syncs to the arm; one continued by the
+        # next datagram keeps the motion it is in, and the lookahead keeps
+        # the speed and acceleration it has measured of it.
         if not self._jog_initialized:
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-            se.sync_position(self._q_rad_buf)
+            if not se.active:
+                steps_to_rad(state.Position_in, self._q_rad_buf)
+                se.sync_position(self._q_rad_buf)
+                self._vel_prev.fill(0.0)
+                self._acc_prev.fill(0.0)
+                self._blocked.fill(0)
             se.set_limits(1.0, self.p.accel)
-            self._vel_prev.fill(0.0)
-            self._acc_prev.fill(0.0)
-            self._blocked.fill(0)
             self._jog_initialized = True
 
         # The lookahead measures the remaining travel: the arm is what
@@ -295,7 +301,7 @@ class JogJCommand(MotionCommand[JogJCmd]):
         # configuration to check: the jog that nudges it clear before it
         # can home runs unchecked, as does par6's.
         checker = PAROL6_ROBOT.collision
-        if checker is not None and not at_rest_wanted and state.Homed_in[:6].all():
+        if checker is not None and not at_rest_wanted and arm_homed(state):
             # In-place to keep the hot path allocation-free; clamped to joint
             # limits so a pose past the mechanical stop can't phantom-trip.
             la = self._lookahead_buf
@@ -362,35 +368,17 @@ class TeleportCommand(SystemCommand[TeleportCmd]):
 
     PARAMS_TYPE = TeleportCmd
 
-    __slots__ = ("_target_steps", "_deg_buf")
+    __slots__ = ("_target_steps",)
 
     def __init__(self, p: TeleportCmd):
         super().__init__(p)
         self._target_steps = np.empty(6, dtype=np.int32)
-        self._deg_buf = np.empty(6, dtype=np.float64)
 
     def do_setup(self, state: ControllerState) -> None:
-        if not is_simulation_mode():
-            err = RuntimeError("teleport is only available on the simulator")
-            err.robot_error = make_error(  # type: ignore[attr-defined, ty:unresolved-attribute]
-                ErrorCode.SYS_NOT_SIMULATOR, detail="teleport"
-            )
-            raise err
-        tool_positions = self.p.tool_positions
-        if tool_positions is not None:
-            cfg = get_registry().get(state.current_tool)
-            dof = len(cfg.motions) if cfg is not None else 0
-            if len(tool_positions) != dof:
-                err = ValueError(
-                    f"tool_positions has {len(tool_positions)} entries; the fitted "
-                    f"tool {state.current_tool} has {dof} degrees of freedom"
-                )
-                err.robot_error = make_error(  # type: ignore[attr-defined, ty:unresolved-attribute]
-                    ErrorCode.COMM_VALIDATION_ERROR, detail=str(err)
-                )
-                raise err
-        self._deg_buf[:] = self.p.angles
-        deg_to_steps(self._deg_buf, self._target_steps)
+        # The controller refuses what the simulator cannot apply before
+        # setup runs (off the simulator, tool positions the fitted tool has
+        # no degrees of freedom for).
+        deg_to_steps(np.asarray(self.p.angles, dtype=np.float64), self._target_steps)
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         state.Position_out[:] = self._target_steps

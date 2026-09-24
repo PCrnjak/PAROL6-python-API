@@ -304,7 +304,7 @@ class RobotClient:
         return _run(self._inner.io(timeout=timeout))
 
     def joint_speeds(self) -> list[float] | None:
-        """Current joint speeds in steps per second.
+        """Current joint velocities in rad/s.
 
         Returns:
             List of 6 joint velocities [J1-J6] in rad/s, or None on timeout.
@@ -581,8 +581,8 @@ class RobotClient:
         self,
         angles: list[float],
         *,
-        duration: float = ...,
-        speed: float = ...,
+        duration: float | None = ...,
+        speed: float | None = ...,
         accel: float = ...,
         r: float = ...,
         rel: bool = ...,
@@ -596,8 +596,8 @@ class RobotClient:
         angles: list[float] | None = ...,
         *,
         pose: list[float],
-        duration: float = ...,
-        speed: float = ...,
+        duration: float | None = ...,
+        speed: float | None = ...,
         accel: float = ...,
         r: float = ...,
         wait: bool = ...,
@@ -609,8 +609,8 @@ class RobotClient:
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,
@@ -625,6 +625,7 @@ class RobotClient:
                     speed=speed,
                     accel=accel,
                     r=r,
+                    rel=rel,
                     wait=wait,
                     timeout=timeout,
                 )
@@ -647,8 +648,8 @@ class RobotClient:
         pose: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,

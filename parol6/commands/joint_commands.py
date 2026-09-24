@@ -165,6 +165,9 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         for i, cmd in enumerate(chain):
             target_rad = cmd._get_target_rad(state, current_rad)
+            # A relative target resolves against the one before it, so the
+            # limit check a lone move makes has to run on every link.
+            _require_inside_limits(target_rad)
             waypoints_rad.append(target_rad)
             if i < len(chain) - 1:
                 blend_radii_mm.append(cmd.blend_radius)

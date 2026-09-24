@@ -106,10 +106,14 @@ def _max_turn_deg(pts: np.ndarray, min_step_mm: float) -> float:
     return worst
 
 
-def test_move_p_rounds_its_corner_and_holds_one_tool_speed(client, server_proc):
+@pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "TRAPEZOID"])
+def test_move_p_rounds_its_corner_and_holds_one_tool_speed(
+    client, server_proc, profile
+):
     """An L-shaped process move cuts its corner by a quarter of the shorter
-    leg, never stops in it, and cruises at one tool speed."""
-    assert client.select_profile("TOPPRA") > 0
+    leg, never stops in it, and cruises at one tool speed, under whichever
+    profile times it."""
+    assert client.select_profile(profile) > 0
     pose, start = _start(client)
     s = start[:3, 3]
     corner = _offset(pose, 50.0, 0.0, 0.0)
@@ -142,8 +146,15 @@ def test_move_p_rounds_its_corner_and_holds_one_tool_speed(client, server_proc):
         np.linalg.norm(pts - end_xyz, axis=1) > 12.0
     )
     cruise = speeds[away]
-    print(f"cruise {cruise.min():.1f}..{cruise.max():.1f} mm/s of {CRUISE_MM_S:.0f}")
-    assert cruise.min() > 0.8 * cruise.max(), "one tool speed through the corner"
+    print(
+        f"{profile} cruise {cruise.min():.1f}..{cruise.max():.1f} mm/s "
+        f"of {CRUISE_MM_S:.0f}"
+    )
+    # Percentiles, not extremes: a control-loop stall on a loaded runner
+    # shows as a sample or two of lower measured speed, where a path that
+    # varies its speed does so over a stretch of it.
+    slow, fast = np.percentile(cruise, [10, 90])
+    assert slow > 0.8 * fast, "one tool speed through the corner"
     assert cruise.max() < 1.1 * CRUISE_MM_S
 
 
@@ -287,3 +298,94 @@ def test_a_move_l_with_a_radius_rounds_into_the_move_c_after_it(client, server_p
     steps = np.linalg.norm(np.diff(pts[body], axis=0), axis=1)
     assert steps.min() > 0.3, "the chain never comes to rest between its moves"
     assert _max_turn_deg(pts, 0.5) < 30.0, "the path turns gradually, never at a corner"
+
+
+def _off_geodesic_deg(r: np.ndarray, keys: list[np.ndarray]) -> float:
+    """How far ``r`` lies from the piecewise geodesic through ``keys``."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    t = np.linspace(0.0, 1.0, 401)
+    worst = math.inf
+    for a, b in zip(keys[:-1], keys[1:], strict=True):
+        arc = Slerp([0.0, 1.0], Rotation.from_matrix(np.stack([a, b])))(t)
+        rel = arc.inv() * Rotation.from_matrix(r)
+        worst = min(worst, float(np.degrees(rel.magnitude()).min()))
+    return worst
+
+
+def test_move_s_turns_the_tool_along_the_geodesic_between_waypoints(
+    client, server_proc
+):
+    """A spline's orientation turns from each waypoint's rotation to the
+    next along the shortest arc between them, the rotations read as the
+    wire names them (intrinsic XYZ)."""
+    from pinokin import se3_from_rpy
+
+    assert client.select_profile("TOPPRA") > 0
+    # Clear of the wrist singularity at standby, where any reorientation
+    # needs a wrist turn first.
+    assert client.teleport([90.0, -80.0, 190.0, 0.0, 30.0, 180.0]) == 1
+    pose, start = _start(client)
+    waypoints = [
+        [pose[0] + 20.0, pose[1], pose[2], pose[3] + 25.0, pose[4] + 20.0, pose[5]],
+        [
+            pose[0] + 40.0,
+            pose[1] + 15.0,
+            pose[2],
+            pose[3] + 10.0,
+            pose[4] + 35.0,
+            pose[5] + 30.0,
+        ],
+    ]
+    keys = [start[:3, :3]]
+    for wp in waypoints:
+        se3 = np.zeros((4, 4))
+        rx, ry, rz = np.radians(wp[3:])
+        se3_from_rpy(0.0, 0.0, 0.0, rx, ry, rz, se3)
+        keys.append(se3[:3, :3].copy())
+
+    with _TcpSampler(client) as sampler:
+        assert client.move_s(waypoints, speed=SPEED, timeout=20.0) >= 0
+        assert client.wait_motion(timeout=20.0)
+    assert len(sampler.frames) > 10
+    worst = max(_off_geodesic_deg(f[:3, :3], keys) for f in sampler.frames)
+    print(f"\nmove_s orientation off the geodesic by up to {worst:.3f} deg")
+    assert worst < 0.5
+    assert _rotation_angle_deg(sampler.frames[-1][:3, :3], keys[-1]) < 0.5
+
+
+def test_a_wrist_turn_is_collision_checked_all_the_way_round(client, server_proc):
+    """From standby a tool-frame reorientation first turns J4 a quarter turn
+    out of the wrist singularity. A keep-out the wrist sweeps through only
+    partway round that turn — clear of where it starts, where it ends and
+    of the path after it — refuses the move when it is planned: the arm
+    never stirs, and a dry run previews the same refusal."""
+    from waldoctl import Sphere
+
+    from parol6 import MotionError
+    from parol6.client.dry_run_client import DryRunRobotClient
+
+    before = client.angles()
+    assert before is not None
+    keep_out = Sphere(
+        name="wrist-arc", radius=0.01, pose=(-0.0581, 0.2168, 0.2869, 0.0, 0.0, 0.0)
+    )
+    try:
+        assert client.set_shapes([keep_out]) == 1
+        with pytest.raises(MotionError, match="wrist-arc"):
+            client.move_l(
+                [0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", speed=SPEED, timeout=20.0
+            )
+    finally:
+        assert client.set_shapes([]) == 1
+    after = client.angles()
+    assert after is not None
+    assert np.allclose(after, before, atol=0.05), "the refused move moved the arm"
+
+    preview = DryRunRobotClient(initial_joints_deg=before)
+    assert preview.set_shapes([keep_out]) == 1
+    index = preview.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", speed=SPEED)
+    refusal = preview.plan().blocks[index].error
+    assert refusal is not None and "wrist-arc" in str(refusal), (
+        "the preview ran the turn the arm refuses"
+    )

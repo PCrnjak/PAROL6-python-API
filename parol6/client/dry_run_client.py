@@ -33,17 +33,20 @@ from ..ack_policy import ARM_MOTION_CMD_TYPES
 from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import JogLCommand, jog_twist
 from ..commands.basic_commands import JogJCommand
+from ..commands.system_commands import VALID_PROFILES
 from ..config import (
     CONTROL_RATE_HZ,
     HOME_ANGLES_DEG,
     INTERVAL_S,
+    LIMITS,
     deg_to_steps,
     rad_to_steps,
     steps_to_rad,
 )
 from ..motion.geometry import joint_path_to_tcp_poses
+from ..motion.streaming_executors import cap_twist
 from ..utils.ik import solve_ik
-from pinokin import se3_rpy
+from pinokin import se3_rpy, so3_exp
 from math import degrees, radians
 
 import parol6.protocol.wire as _wire
@@ -97,12 +100,26 @@ _COMMANDS = command_table()
 _AXIS_INDEX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
 
 
+#: Planned moves, whose keywords are the struct's own plus the wait's: the
+#: live client refuses anything else with a TypeError, and so does this.
+_PLANNED_MOVES = frozenset(
+    {"home", "move_j", "move_j_pose", "move_l", "move_c", "move_s", "move_p"}
+)
+_WAIT_KEYWORDS = frozenset({"wait", "timeout"})
+
+
 def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
     """Build a command struct by method name."""
     struct_cls = _CMD_STRUCTS.get(name)
     if struct_cls is None:
         raise ValueError(f"Unknown command: {name}")
     struct_fields: tuple[str, ...] = getattr(struct_cls, "__struct_fields__", ())
+    if name in _PLANNED_MOVES:
+        unknown = sorted(
+            k for k in kwargs if k not in struct_fields and k not in _WAIT_KEYWORDS
+        )
+        if unknown:
+            raise TypeError(f"unexpected keyword argument(s): {', '.join(unknown)}")
     filtered = {}
     for k, v in kwargs.items():
         if v is None or k not in struct_fields:
@@ -122,17 +139,8 @@ def _twist_pose(
     """The pose a TCP driven at `twist` for `t` seconds from `start`
     reaches: the translation and the rotation each integrate on their own
     axis, in world axes when `wrf` else in the tool's."""
-    omega = twist[3:] * t
-    angle = float(np.linalg.norm(omega))
-    if angle > 1e-12:
-        k = omega / angle
-        kx = np.array(
-            [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
-            dtype=np.float64,
-        )
-        rot = np.eye(3) + math.sin(angle) * kx + (1.0 - math.cos(angle)) * (kx @ kx)
-    else:
-        rot = np.eye(3)
+    rot = np.empty((3, 3), dtype=np.float64)
+    so3_exp(twist[3:] * t, rot)
     out = np.eye(4, dtype=np.float64)
     r0 = start[:3, :3]
     if wrf:
@@ -263,7 +271,10 @@ class _DryRunTool:
                     0.0 if name == "open" else 1.0 if name == "close" else args[0]
                 )
                 speed = float(kwargs.pop("speed", 0.5))
-                current = int(kwargs.pop("current", cfg.default_current))
+                # Half the range when none is named, as waldoctl's
+                # ElectricGripperTool.default_current has it.
+                lo, hi = cfg.current_range
+                current = int(kwargs.pop("current", lo + (hi - lo) // 2))
                 return "move", [position, speed, current]
             if name == "release":
                 return "idle", []
@@ -647,6 +658,23 @@ class DryRunRobotClient:
             self._state.reset()
             self._planner.state.Position_in[:] = self._state.Position_in
             self._planner.state.Homed_in[:] = self._state.Homed_in
+            self._planner.state.motion_profile = self._state.motion_profile
+            return idx
+        if isinstance(params, _wire.SelectProfileCmd):
+            profile = params.profile.upper()
+            if profile not in VALID_PROFILES:
+                self._fill(
+                    idx,
+                    np.empty((0, 6)),
+                    error=make_error(
+                        ErrorCode.SYS_PROFILE_INVALID, detail=params.profile
+                    ),
+                )
+                return idx
+            # The moves after it are planned with it, as the controller
+            # hands the planner the profile it selects.
+            self._state.motion_profile = profile
+            self._planner.state.motion_profile = profile
             return idx
         if isinstance(params, (_wire.SimulatorCmd, _wire.ConnectHardwareCmd)):
             self._state.invalidate_attachments()
@@ -712,7 +740,7 @@ class DryRunRobotClient:
     def _simulate_jog(self, cmd: MotionCommand) -> np.ndarray | None:
         """Simulate jog commands by computing linear displacement, one row
         per control tick."""
-        # Run do_setup so speeds_out / _axis_index / etc. are computed
+        # Run setup so the jog's gates apply and speeds_out is computed
         cmd.setup(self._state)
 
         if isinstance(cmd, JogJCommand):
@@ -726,9 +754,8 @@ class DryRunRobotClient:
         duration = cmd.p.duration
         n_points = max(1, int(round(duration * CONTROL_RATE_HZ)))
 
-        # Compute total displacement (steps/tick * ticks_in_duration)
-        ticks = duration * CONTROL_RATE_HZ
-        displacements = cmd.speeds_out.astype(np.int64) * int(ticks)
+        # The jog speeds are steps per second, held for the duration.
+        displacements = np.round(cmd.speeds_out * duration).astype(np.int64)
 
         start_pos = self._state.Position_in.copy()
         fracs = np.arange(1, n_points + 1, dtype=np.float64) / n_points
@@ -753,6 +780,11 @@ class DryRunRobotClient:
         start_se3 = get_fkine_se3(self._state).copy()
         twist = np.zeros(6, dtype=np.float64)
         jog_twist(cmd.p.velocities, twist)
+        # The ceilings the live executor holds the tool to, at the full
+        # velocity scale a jog runs at.
+        cap_twist(
+            twist, LIMITS.cart.jog.velocity.linear, LIMITS.cart.jog.velocity.angular
+        )
         wrf = cmd.p.frame == "WRF"
 
         # Get current joint angles for IK seed
@@ -826,6 +858,11 @@ class DryRunRobotClient:
         **kwargs: Any,
     ) -> int:
         if pose is not None:
+            if kwargs.pop("rel", False):
+                raise ValueError(
+                    "move_j(pose=..., rel=True) is not supported: a pose target is "
+                    "absolute. Use move_j(angles, rel=True) for a relative joint move."
+                )
             return self._dispatch(build_cmd("move_j_pose", pose, **kwargs), "move_j")
         return self._dispatch(build_cmd("move_j", angles or [], **kwargs), "move_j")
 

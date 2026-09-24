@@ -136,3 +136,64 @@ class TestServoCartesianAccuracy:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+@pytest.mark.integration
+def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(
+    client, server_proc
+):
+    """A jog_l is a straight TCP line: with an angular part as well, the tool
+    turns about the TCP while the TCP holds its line. The dry run previews
+    the pose a full-scale diagonal ends at, held to the same speed ceiling
+    as on the arm. (Near the wrist singularity at standby the joint speed
+    ceilings slow the tool on the arm, which a preview does not model, so
+    the diagonal starts clear of it.)"""
+    import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+    from parol6.client.dry_run_client import DryRunRobotClient
+    from parol6.config import LIMITS
+
+    standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+    linear = float(LIMITS.cart.jog.velocity.linear)
+    angular = float(LIMITS.cart.jog.velocity.angular)
+    clear_of_the_wrist = [90.0, -80.0, 190.0, 0.0, 30.0, 180.0]
+    for begin, axes, speeds, duration, previewed in (
+        (standby, ["X", "RZ"], [0.05 / linear, 0.5 / angular], 2.0, False),
+        (clear_of_the_wrist, ["X", "Y", "Z"], [1.0, -1.0, -1.0], 0.6, True),
+    ):
+        preview = DryRunRobotClient(initial_joints_deg=begin)
+        assert preview.jog_l("WRF", axes=axes, speeds_list=speeds, duration=duration)
+        assert preview.plan().blocks[0].error is None
+        expected = preview.pose()
+
+        assert client.teleport(begin) == 1
+        start = np.asarray(client.pose()[:3])
+        direction = np.zeros(3)
+        for axis, speed in zip(axes, speeds):
+            if axis in ("X", "Y", "Z"):
+                direction["XYZ".index(axis)] = speed
+        direction /= np.linalg.norm(direction)
+
+        assert (
+            client.jog_l("WRF", axes=axes, speeds_list=speeds, duration=duration) == 1
+        )
+        worst = 0.0
+        # The jog runs its duration, then brakes: sample the whole of it.
+        end = time.monotonic() + duration + 1.0
+        while time.monotonic() < end:
+            offset = np.asarray(client.pose()[:3]) - start
+            worst = max(
+                worst,
+                float(np.linalg.norm(offset - np.dot(offset, direction) * direction)),
+            )
+            time.sleep(0.02)
+        assert worst < 1.0, (
+            f"{axes} at {speeds}: the TCP left its line by {worst:.1f} mm"
+        )
+        if previewed:
+            assert_pose_accuracy(
+                client.pose(),
+                expected,
+                pos_tol_mm=2.0,
+                ori_tol_deg=1.0,
+                context=f"{axes} at {speeds}, previewed vs run: ",
+            )

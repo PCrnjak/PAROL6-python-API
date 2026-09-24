@@ -17,10 +17,6 @@ Geometry generators provide path geometry for visualization and preview.
 from parol6.motion.geometry import (
     CircularMotion,
     SplineMotion,
-    ArcSegment,
-    LineSegment,
-    build_blended_path,
-    cartesian_path_knots,
     build_composite_cartesian_path,
     build_composite_joint_path,
     compute_circle_from_3_points,
@@ -53,10 +49,6 @@ __all__ = [
     "SplineMotion",
     "joint_path_to_tcp_poses",
     # Blend infrastructure
-    "ArcSegment",
-    "LineSegment",
-    "build_blended_path",
-    "cartesian_path_knots",
     "build_composite_cartesian_path",
     "build_composite_joint_path",
     "compute_circle_from_3_points",

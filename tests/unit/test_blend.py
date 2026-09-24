@@ -268,8 +268,8 @@ class TestBlendedCartesianPath:
     that an arc joins it like a line does."""
 
     def test_a_line_line_corner_is_the_quadratic_through_the_corner(self):
-        """A chain of straight moves rounds exactly as it always has: the
-        cubic zone is the degree-raised quadratic through the corner."""
+        """A chain of straight moves rounds on the quadratic through the
+        corner: the cubic zone is that quadratic, degree-raised."""
         a, corner, b = (
             _se3([0.0, 0.0, 0.0]),
             _se3([0.1, 0.0, 0.0]),

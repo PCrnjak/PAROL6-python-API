@@ -261,7 +261,6 @@ class TrajectoryPlanner:
     def process(self, params: object, command_index: int = 0) -> list[Segment]:
         """Plan a single command. Returns list of resulting segments."""
         self._output.clear()
-        self._names[command_index] = wire_command_name(type(params))
 
         # Fast-path home: an already-referenced robot returns to the standby
         # pose with a normal planned (collision-checked) joint move instead
@@ -273,6 +272,8 @@ class TrajectoryPlanner:
             and bool(self.state.Homed_in[:6].all())
         ):
             params = MoveJCmd(angles=self._home_deg, speed=self._home_return_speed)
+            # Reported as the home it answers, not the move it plans.
+            self._names[command_index] = "home"
 
         cmd_class = self._registry.get_command_for_struct(type(params))
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
@@ -447,12 +448,14 @@ class TrajectoryPlanner:
         self.state.Position_in[:] = cmd.trajectory_steps[-1]
 
     def _reported_name(self, command_index: int, cmd: TrajectoryMoveCommandBase) -> str:
-        return self._names.pop(command_index, wire_command_name(type(cmd.p)))
+        name = self._names.pop(command_index, None)
+        return name if name is not None else wire_command_name(type(cmd.p))
 
     def _emit_error(
         self, command_index: int, cmd: TrajectoryMoveCommandBase, exc: Exception
     ) -> None:
         """Append an ErrorSegment to output, with diagnostic data if available."""
+        self._names.pop(command_index, None)
         cartesian_path = None
         ik_valid = None
         if self._diagnostic:

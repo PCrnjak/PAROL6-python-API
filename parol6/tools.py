@@ -187,7 +187,6 @@ class ElectricGripperConfig(ToolConfig):
     """Configuration for electric grippers controlled via the serial gripper bus."""
 
     current_range: tuple[int, int] = (0, 0)
-    default_current: int = 500
     position_range: tuple[float, float] = (0.0, 1.0)
     speed_range: tuple[float, float] = (0.0, 1.0)
     valid_actions: tuple[str, ...] = ("move", "calibrate", "stop", "idle")
@@ -237,7 +236,7 @@ class ElectricGripperConfig(ToolConfig):
         )
 
     def estimate_duration(self, action: str, params: list) -> float:
-        if action != "move" or len(params) != 3:
+        if action != "move":
             return 0.0
         target = float(params[0])
         speed = float(params[1])

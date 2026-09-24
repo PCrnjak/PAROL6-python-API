@@ -30,12 +30,13 @@ from toppra.interpolator import SplineInterpolator
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
+from parol6.motion.geometry import _rotation_angle
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
-from parol6.utils.errors import TrajectoryPlanningError
+from parol6.utils.errors import IKError, TrajectoryPlanningError
 
 
-from pinokin import Damping, IKSolver, se3_from_rpy
+from pinokin import Damping, IKSolver
 
 
 logger = logging.getLogger(__name__)
@@ -192,19 +193,14 @@ _WRIST_TURNS_RAD: tuple[float, ...] = (
 def _wrist_turn(
     q_from: NDArray[np.float64], turn: float, pose_from: NDArray[np.float64]
 ) -> NDArray[np.float64] | None:
-    """``q_from`` with its wrist turned by ``turn``: J4 forward, J6 back,
-    on J6's winding nearest where it stands. None when the turn leaves
-    the joint window or moves the tool, which it does not at the
-    singularity and does a little near it."""
+    """``q_from`` with its wrist turned by ``turn``: J4 forward, J6 back.
+    None when the turn leaves the joint window or moves the tool, which it
+    does not at the singularity and does a little near it."""
     bridge = q_from.copy()
     bridge[3] += turn
     bridge[5] -= turn
     lo = LIMITS.joint.position.rad[:, 0]
     hi = LIMITS.joint.position.rad[:, 1]
-    if bridge[5] < lo[5]:
-        bridge[5] += 2.0 * np.pi
-    elif bridge[5] > hi[5]:
-        bridge[5] -= 2.0 * np.pi
     if np.any(bridge < lo) or np.any(bridge > hi):
         return None
     robot = PAROL6_ROBOT.robot
@@ -212,10 +208,15 @@ def _wrist_turn(
         pose = robot.fkine(q_from + frac * (bridge - q_from))
         if np.linalg.norm(pose[:3, 3] - pose_from[:3, 3]) > _WRIST_NULL_MOTION_POS_M:
             return None
-        cos_angle = (np.trace(pose_from[:3, :3].T @ pose[:3, :3]) - 1.0) / 2.0
-        if np.arccos(np.clip(cos_angle, -1.0, 1.0)) > _WRIST_NULL_MOTION_ROT_RAD:
+        if _rotation_angle(pose_from, pose) > _WRIST_NULL_MOTION_ROT_RAD:
             return None
     return bridge
+
+
+# Largest joint step between the rows of a wrist turn: the collision guard
+# checks rows, so the turn carries enough of them to be checked along its
+# sweep and not only at its ends.
+_WRIST_TURN_ROW_RAD = np.radians(5.0)
 
 
 def _leave_wrist_singularity(
@@ -223,10 +224,11 @@ def _leave_wrist_singularity(
     se3_poses: list[NDArray[np.float64]],
     q_from: NDArray[np.float64],
     q_hint: NDArray[np.float64] | None,
-) -> NDArray[np.float64] | None:
+) -> tuple[NDArray[np.float64], int] | None:
     """The joint chain for ``se3_poses`` from a wrist standing at its
-    singularity, led by the turn of the wrist the chain needs; None when
-    no turn gives one.
+    singularity, led by the turn of the wrist the chain needs, and the
+    number of rows the turn adds ahead of the path; None when no turn
+    gives one.
 
     With J5 at zero, J4 and J6 share an axis: turning J4 by an angle and J6
     back by the same angle leaves the tool where it is. A pose a hair off
@@ -249,15 +251,13 @@ def _leave_wrist_singularity(
         result = solver.batch_ik(se3_poses[1:], bridge, stop_on_failure=True)
         if not result.all_valid:
             continue
-        chain = np.concatenate(
-            [
-                q_from[np.newaxis],
-                bridge[np.newaxis],
-                np.asarray(result.joint_positions, dtype=np.float64),
-            ]
-        )
-        if _ik_branch_hop(chain[1:]) is None:
-            return chain
+        path = np.asarray(result.joint_positions, dtype=np.float64)
+        if _ik_branch_hop(np.concatenate([bridge[np.newaxis], path])) is not None:
+            continue
+        rows = max(1, int(np.ceil(abs(turn) / _WRIST_TURN_ROW_RAD)))
+        fractions = np.arange(1, rows + 1, dtype=np.float64)[:, np.newaxis] / rows
+        sweep = q_from + fractions * (bridge - q_from)
+        return np.concatenate([q_from[np.newaxis], sweep, path]), rows
     return None
 
 
@@ -295,7 +295,7 @@ class JointPath:
     @classmethod
     def from_poses(
         cls,
-        poses: NDArray[np.float64] | list[np.ndarray],
+        poses: NDArray[np.float64],
         seed_q: NDArray[np.float64],
         stop_on_failure: bool = True,
     ) -> JointPath:
@@ -305,8 +305,7 @@ class JointPath:
         Each IK solve uses the previous solution as seed, maintaining continuity.
 
         Args:
-            poses: Either (N, 6) array of [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
-                   or list of SE3 poses
+            poses: (N, 4, 4) SE3 poses
             seed_q: Initial joint angles for IK seeding (radians)
             stop_on_failure: If True, stop solving after first IK failure
                 (real controller). If False, solve all poses (diagnostic).
@@ -318,28 +317,7 @@ class JointPath:
         Raises:
             IKError: If fewer than 2 consecutive valid poses from the start.
         """
-        from parol6.utils.error_catalog import make_error
-        from parol6.utils.error_codes import ErrorCode
-        from parol6.utils.errors import IKError
-
-        # Convert to list of SE3 (4x4) matrices for batch_ik
-        if isinstance(poses, np.ndarray) and poses.ndim == 3:
-            se3_poses = [poses[i] for i in range(len(poses))]
-        elif isinstance(poses, np.ndarray):
-            n = len(poses)
-            se3_poses = [np.empty((4, 4), dtype=np.float64) for _ in range(n)]
-            for i, p in enumerate(poses):
-                se3_from_rpy(
-                    p[0] / 1000.0,
-                    p[1] / 1000.0,
-                    p[2] / 1000.0,
-                    np.radians(p[3]),
-                    np.radians(p[4]),
-                    np.radians(p[5]),
-                    se3_poses[i],
-                )
-        else:
-            se3_poses = poses
+        se3_poses = [poses[i] for i in range(len(poses))]
 
         solver = IKSolver(
             PAROL6_ROBOT.robot,
@@ -362,11 +340,11 @@ class JointPath:
                 return cls(positions=positions)
             if hop == 1:
                 # A path leaving a wrist singularity turns the wrist first.
-                chain = _leave_wrist_singularity(
+                turned = _leave_wrist_singularity(
                     solver, se3_poses, positions[0], positions[1]
                 )
-                if chain is not None:
-                    return cls(positions=chain, prefix=1)
+                if turned is not None:
+                    return cls(positions=turned[0], prefix=turned[1])
             raise IKError(
                 make_error(
                     ErrorCode.IK_PARTIAL_PATH,
@@ -377,17 +355,19 @@ class JointPath:
 
         valid = np.array(result.valid, dtype=np.bool_)
         first_fail = int(np.argmin(valid))  # first False index
-        if first_fail == 1 and stop_on_failure:
+        if first_fail == 1:
             # A seed at a wrist singularity can leave the solver no step
-            # to take; the turned wrist is a seed it can solve from.
-            chain = _leave_wrist_singularity(
+            # to take; the turned wrist is a seed it can solve from. The
+            # preview takes the same way out, or it would refuse a move
+            # the controller runs.
+            turned = _leave_wrist_singularity(
                 solver,
                 se3_poses,
                 np.asarray(result.joint_positions, dtype=np.float64)[0],
                 None,
             )
-            if chain is not None:
-                return cls(positions=chain, prefix=1)
+            if turned is not None:
+                return cls(positions=turned[0], prefix=turned[1])
         if first_fail < 2:
             if stop_on_failure:
                 raise IKError(
@@ -623,6 +603,17 @@ class TrajectoryBuilder:
         if self.joint_path.prefix > 0:
             return self._build_with_prefix()
 
+        if self.path_knots is not None and self.profile in (
+            ProfileType.LINEAR,
+            ProfileType.QUINTIC,
+            ProfileType.TRAPEZOID,
+        ):
+            # These profiles time a path coordinate spaced by row; spaced
+            # by the tool's own distance instead, their cruise is one tool
+            # speed, as TOPPRA holds it through the knots.
+            self.joint_path = self._resampled_by_knots(self.path_knots)
+            self.path_knots = None
+
         if self.profile == ProfileType.RUCKIG:
             # Point-to-point jerk-limited motion; ignores intermediate waypoints
             return self._build_ruckig_trajectory()
@@ -635,17 +626,35 @@ class TrajectoryBuilder:
         else:
             return self._build_toppra_trajectory()
 
+    def _resampled_by_knots(self, knots: NDArray[np.float64]) -> JointPath:
+        """The joint path resampled at even steps of the path parameter the
+        knots give each row (the tool's normalized distance), as many rows
+        as it had. Repeated knots keep their first row."""
+        positions = self.joint_path.positions
+        knots = np.asarray(knots, dtype=np.float64)
+        keep = np.concatenate(([True], np.diff(knots) > 1e-12))
+        at = np.linspace(0.0, 1.0, len(positions))
+        resampled = np.empty_like(positions)
+        for j in range(positions.shape[1]):
+            resampled[:, j] = np.interp(at, knots[keep], positions[keep, j])
+        return JointPath(positions=resampled)
+
     @staticmethod
     def _within_a_step(positions: NDArray[np.float64]) -> bool:
+        """The path ends on the step it starts on and strays no more than a
+        step between: a move of even one step still goes there."""
         steps = _rad_to_steps_alloc(positions)
-        return bool(np.max(np.abs(steps - steps[0])) <= 1)
+        return bool(
+            np.array_equal(steps[-1], steps[0])
+            and np.max(np.abs(steps - steps[0])) <= 1
+        )
 
     def _build_with_prefix(self) -> Trajectory:
         """A wrist reconfiguration ahead of the path is its own joint move,
         timed by the joint limits alone, and the path follows it from
         rest: the cartesian timing (knots, tool ceiling, constant tool
-        speed, a requested duration) applies to the path, which starts at
-        the reconfigured pose."""
+        speed) applies to the path, which starts at the reconfigured pose,
+        and a requested duration covers the two together."""
         p = self.joint_path.prefix
         turn = TrajectoryBuilder(
             joint_path=JointPath(positions=self.joint_path.positions[: p + 1]),
@@ -655,13 +664,20 @@ class TrajectoryBuilder:
             jerk_frac=self.jerk_frac,
             dt=self.dt,
         ).build()
+        # A requested duration is the whole move's: the path gets what the
+        # turn leaves of it, and runs as fast as it can when the turn left
+        # none, as any request shorter than the move can be does.
+        path_duration = None
+        if self.duration:
+            remaining = self.duration - turn.duration
+            path_duration = remaining if remaining > 0 else None
         path = TrajectoryBuilder(
             joint_path=JointPath(positions=self.joint_path.positions[p:]),
             profile=self.profile,
             velocity_frac=self.velocity_frac,
             accel_frac=self.accel_frac,
             jerk_frac=self.jerk_frac,
-            duration=self.duration,
+            duration=path_duration,
             dt=self.dt,
             cart_vel_limit=self.cart_vel_limit,
             cart_acc_limit=self.cart_acc_limit,
@@ -723,7 +739,7 @@ class TrajectoryBuilder:
             if cart_constraint is not None:
                 constraints.append(cart_constraint)
         if self.constant_tool_speed:
-            constraints.append(self._build_path_speed_cap(path, c[0]))
+            constraints.append(self._build_path_speed_cap(path, positions, c[0]))
 
         try:
             # Use evenly-spaced gridpoints - TOPPRA docs recommend "at least a few times
@@ -811,6 +827,10 @@ class TrajectoryBuilder:
             amax_by_length = np.where(length > 1e-9, self.a_max / length, np.inf)
         vmax_s = min(vmax_s, float(np.min(vmax_by_length)))
         amax_s = min(amax_s, float(np.min(amax_by_length)))
+        if self.constant_tool_speed:
+            # The cruise is one tool speed: no faster than the steepest
+            # stretch and the tool ceiling allow.
+            vmax_s = min(vmax_s, self._row_speed_cap())
         if not np.isfinite(vmax_s) or not np.isfinite(amax_s):
             vmax_s, amax_s = 1.0, 1.0
 
@@ -1103,6 +1123,10 @@ class TrajectoryBuilder:
         else:
             # Use per-segment analysis to handle singularities and wrist flips
             duration = self._compute_cartesian_duration_from_path()
+        if self.constant_tool_speed:
+            # A quintic from rest to rest peaks at 15/8 of its mean ds/dt,
+            # which the steepest stretch and the tool ceiling bound.
+            duration = max(duration, 1.875 / self._row_speed_cap())
 
         # Quintic profile for the path parameter s, from s=0 to s=1
         n_output = max(2, int(np.ceil(duration / self.dt)))
@@ -1192,6 +1216,10 @@ class TrajectoryBuilder:
             duration = self._compute_cartesian_duration_from_path()
 
         vmax_s, amax_s, _ = self._compute_s_profile_limits()
+        if self.constant_tool_speed:
+            # The cruise is one tool speed: no faster than the steepest
+            # stretch and the tool ceiling allow.
+            vmax_s = min(vmax_s, self._row_speed_cap())
 
         # Trapezoidal profile for the path parameter s, from s=0 to s=1
         profile_duration = _trapezoid_duration(1.0, vmax_s, amax_s)
@@ -1312,35 +1340,15 @@ class TrajectoryBuilder:
             return None
 
     def _build_path_speed_cap(
-        self, path: _LinearPath, slopes: NDArray[np.float64]
+        self,
+        path: _LinearPath,
+        positions: NDArray[np.float64],
+        slopes: NDArray[np.float64],
     ) -> constraint.Constraint:
-        """One ``ds/dt`` ceiling for the whole path: the fastest constant the
-        steepest stretch allows under the joint limits, and under the
-        cartesian ceiling wherever the tool moves fastest per unit of
-        path. Holding every stretch to it is what a constant tool speed
-        costs; on a process move that is the point rather than the price.
-        """
-        with np.errstate(divide="ignore", invalid="ignore"):
-            per_joint = np.where(
-                np.abs(slopes) > 1e-9, self.v_max / np.abs(slopes), np.inf
-            )
-        cap = float(np.min(per_joint))
-        if self.cart_vel_limit is not None and self.cart_vel_limit > 0:
-            robot = PAROL6_ROBOT.robot
-            jac = np.zeros((6, 6), dtype=np.float64, order="F")
-            fastest = 0.0
-            for i in range(len(slopes)):
-                robot.jacob0_into(self.joint_path.positions[i], jac)
-                fastest = max(fastest, float(np.linalg.norm(jac[:3, :] @ slopes[i])))
-            if fastest > 1e-9:
-                cap = min(cap, self.cart_vel_limit / fastest)
-        if not np.isfinite(cap) or cap <= 0.0:
-            raise TrajectoryPlanningError(
-                make_error(
-                    ErrorCode.TRAJ_NO_STEPS,
-                    detail="the path covers no tool distance to hold a speed along",
-                )
-            )
+        """:meth:`_path_speed_cap` as a TOPP-RA constraint. Holding every
+        stretch to it is what a constant tool speed costs; on a process
+        move that is the point rather than the price."""
+        cap = self._path_speed_cap(positions, slopes)
         vlim_buffer = np.empty((6, 2), dtype=np.float64)
 
         def vlim_func(s: float) -> NDArray:
@@ -1351,6 +1359,44 @@ class TrajectoryBuilder:
             return vlim_buffer.copy()
 
         return constraint.JointVelocityConstraintVarying(vlim_func)
+
+    def _row_speed_cap(self) -> float:
+        """:meth:`_path_speed_cap` of a path whose rows are evenly spaced in
+        its parameter, as the profiles that time ``s`` directly take it."""
+        positions = self.joint_path.positions
+        slopes = np.diff(positions, axis=0) * (len(positions) - 1)
+        return self._path_speed_cap(positions[:-1], slopes)
+
+    def _path_speed_cap(
+        self, positions: NDArray[np.float64], slopes: NDArray[np.float64]
+    ) -> float:
+        """One ``ds/dt`` ceiling for the whole path: the fastest constant the
+        steepest stretch allows under the joint limits, and under the
+        cartesian ceiling wherever the tool moves fastest per unit of
+        path. ``positions`` are the rows the path runs through, one per
+        segment start in ``slopes``."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            per_joint = np.where(
+                np.abs(slopes) > 1e-9, self.v_max / np.abs(slopes), np.inf
+            )
+        cap = float(np.min(per_joint))
+        if self.cart_vel_limit is not None and self.cart_vel_limit > 0:
+            robot = PAROL6_ROBOT.robot
+            jac = np.zeros((6, 6), dtype=np.float64, order="F")
+            fastest = 0.0
+            for i in range(len(slopes)):
+                robot.jacob0_into(positions[i], jac)
+                fastest = max(fastest, float(np.linalg.norm(jac[:3, :] @ slopes[i])))
+            if fastest > 1e-9:
+                cap = min(cap, self.cart_vel_limit / fastest)
+        if not np.isfinite(cap) or cap <= 0.0:
+            raise TrajectoryPlanningError(
+                make_error(
+                    ErrorCode.TRAJ_NO_STEPS,
+                    detail="the path covers no tool distance to hold a speed along",
+                )
+            )
+        return cap
 
     def _build_ruckig_trajectory(self) -> Trajectory:
         """

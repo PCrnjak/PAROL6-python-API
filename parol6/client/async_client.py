@@ -138,10 +138,8 @@ logger = logging.getLogger(__name__)
 
 
 def _no_wait_kwargs(wait_kwargs: dict[str, Any]) -> None:
-    """A planned move's ``**wait_kwargs`` exists for keywords its wait
-    accepts, and the wait accepts none beyond ``timeout``: anything else
-    (``rel`` on a move that has no such parameter, a misspelled keyword) is
-    a TypeError, never silently ignored."""
+    """Refuse keywords the wait does not take; it takes none beyond
+    ``timeout``."""
     if wait_kwargs:
         raise TypeError(
             f"unexpected keyword argument(s): {', '.join(sorted(wait_kwargs))}"
@@ -1783,8 +1781,8 @@ class AsyncRobotClient(_RobotClientABC):
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,
@@ -1813,17 +1811,29 @@ class AsyncRobotClient(_RobotClientABC):
         """
         _no_wait_kwargs(wait_kwargs)
         if pose is not None:
+            if rel:
+                # A pose target is absolute on the wire; planning it as
+                # though the offset had been honoured would send the arm
+                # to a world pose near the origin.
+                raise ValueError(
+                    "move_j(pose=..., rel=True) is not supported: a pose target is "
+                    "absolute. Use move_j(angles, rel=True) for a relative joint move."
+                )
             index = await self._send(
                 MoveJPoseCmd(
-                    pose=pose, duration=duration, speed=speed, accel=accel, r=r
+                    pose=pose,
+                    duration=duration or 0.0,
+                    speed=speed or 0.0,
+                    accel=accel,
+                    r=r,
                 )
             )
         else:
             index = await self._send(
                 MoveJCmd(
                     angles=angles or [],
-                    duration=duration,
-                    speed=speed,
+                    duration=duration or 0.0,
+                    speed=speed or 0.0,
                     accel=accel,
                     r=r,
                     rel=rel,
@@ -1838,8 +1848,8 @@ class AsyncRobotClient(_RobotClientABC):
         pose: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,
@@ -1870,8 +1880,8 @@ class AsyncRobotClient(_RobotClientABC):
         cmd = MoveLCmd(
             pose=pose,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or 0.0,
+            speed=speed or 0.0,
             accel=accel,
             r=r,
             rel=rel,

@@ -339,7 +339,6 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         position_range: tuple[float, float] = (0.0, 1.0),
         speed_range: tuple[float, float] = (0.0, 1.0),
         current_range: tuple[int, int],
-        default_current: int,
         **kwargs: Any,
     ) -> None:
         kwargs.setdefault("action_r_labels", ("Calibrate", "Calibrate"))
@@ -348,7 +347,6 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
             position_range=position_range,
             speed_range=speed_range,
             current_range=current_range,
-            default_current=default_current,
             **kwargs,
         )
 
@@ -477,7 +475,6 @@ def _build_tools() -> ToolsCollection:
                     position_range=cfg.position_range,
                     speed_range=cfg.speed_range,
                     current_range=cfg.current_range,
-                    default_current=cfg.default_current,
                 )
             )
         else:

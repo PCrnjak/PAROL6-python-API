@@ -18,6 +18,13 @@ from parol6.protocol.wire import CommandCode
 from parol6.utils.error_catalog import RobotError
 from waldoctl import ActionState
 
+# How many exact outcomes (successes, failures) the completion query retains.
+_OUTCOME_RING = 1024
+
+ATTACHMENT_CHANGED = (
+    "attachment context changed; reconcile the physical scene and reapply"
+)
+
 
 class GripperHWState:
     """Named wrapper over the raw gripper numpy arrays.
@@ -181,6 +188,9 @@ class ControllerState:
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
+    # The tool the newest accepted select_tool names: the fitted tool once
+    # the queue reaches it, and what a tool action sent behind it acts on.
+    accepted_tool: str = "NONE"
     _current_tool_variant: str = ""
     _tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -265,14 +275,14 @@ class ControllerState:
     executing_command_index: int = -1
     completed_command_index: int = -1
     status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
-    _recent_completions: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _recent_completions: list[int] = field(default_factory=lambda: [-1] * _OUTCOME_RING)
     _completion_cursor: int = 0
     # Commands that ended as failures (a stop discarded them), with why —
     # preallocated rings beside the success ring, so the completion query
     # can answer "failed" instead of leaving a wait to run out its timeout.
-    _recent_failures: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _recent_failures: list[int] = field(default_factory=lambda: [-1] * _OUTCOME_RING)
     _failure_errors: list[RobotError | None] = field(
-        default_factory=lambda: [None] * 1024
+        default_factory=lambda: [None] * _OUTCOME_RING
     )
     _failure_cursor: int = 0
     last_checkpoint: str = ""
@@ -395,10 +405,10 @@ class ControllerState:
     def command_failure(self, index: int) -> RobotError | None:
         if index < 0:
             return None
-        for slot, recorded in enumerate(self._recent_failures):
-            if recorded == index:
-                return self._failure_errors[slot]
-        return None
+        try:
+            return self._failure_errors[self._recent_failures.index(index)]
+        except ValueError:
+            return None
 
     def reset(self) -> None:
         """
@@ -409,8 +419,7 @@ class ControllerState:
         Preserves what the contract says it does not touch — the protective
         stop latch (``enabled`` / ``disabled_reason``; only ``reset()`` clears
         it), homed state, the digital outputs and the gripper's output frame —
-        and everything the firmware reports (positions, I/O inputs): zeroing
-        those told the simulator the arm stood unhomed at all-zero steps.
+        and everything the firmware reports (positions, I/O inputs).
         Also preserves ``next_command_index`` and the completion history, so a
         wait on a command from before the reset — including one this reset
         cancelled — still resolves.
@@ -424,6 +433,7 @@ class ControllerState:
 
         # Tool back to none
         self._current_tool = "NONE"
+        self.accepted_tool = "NONE"
         self._current_tool_variant = ""
         self._tcp_offset_m = (0.0, 0.0, 0.0)
         self._tcp_rotation_rad = (0.0, 0.0, 0.0)
@@ -516,9 +526,7 @@ class ControllerState:
         """
         attached = [s for s in shapes if s.attachment is not None]
         if any(s.attachment.epoch != self.attachment_epoch for s in attached):
-            raise ValueError(
-                "attachment context changed; reconcile the physical scene and reapply"
-            )
+            raise ValueError(ATTACHMENT_CHANGED)
         if (attached or self.has_attachments) and (
             self.action_state == ActionState.EXECUTING
             or self.queued_segments

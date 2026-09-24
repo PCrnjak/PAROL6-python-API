@@ -8,21 +8,30 @@ import socket
 
 import pytest
 
-from parol6.protocol.wire import OkMsg, ToolActionCmd
+from parol6.protocol.wire import OkMsg, SelectToolCmd, ToolActionCmd
 from parol6.utils.error_codes import ErrorCode
-from tests.integration.controller_loop import ready, send, tick_until
+from tests.integration.controller_loop import ready, send, tick_for, tick_until
 
 pytestmark = pytest.mark.integration
 
 
 def test_a_jaw_move_waits_for_the_calibrate_ahead_of_it(controller):
     state = controller.state_manager.get_state()
+    controller._planner.start()
     ready(controller, state, homed=True)
-    state.set_tool("SSG-48")
     move = ToolActionCmd(tool_key="SSG-48", action="move", params=[0.5, 0.5, 600])
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setblocking(False)
+        selected = send(controller, state, sock, SelectToolCmd(tool_name="SSG-48"), 9)
+        assert isinstance(selected, OkMsg), selected
+        tick_for(
+            controller,
+            state,
+            lambda: state.current_tool == "SSG-48",
+            "the select_tool never ran",
+            seconds=30.0,
+        )
         never = send(controller, state, sock, move, 1)
         assert isinstance(never, OkMsg) and never.index is not None, never
         tick_until(

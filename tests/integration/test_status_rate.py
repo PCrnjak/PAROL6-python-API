@@ -9,10 +9,12 @@ it by rejection.
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from parol6 import AsyncRobotClient
+from parol6.server import status_cache
 from parol6.server.state import ControllerState
 from parol6.server.status_cache import _TCP_SPEED_WINDOW, StatusCache
 from parol6.utils.error_codes import ErrorCode
@@ -155,7 +157,11 @@ def test_the_speed_derivative_follows_the_frames_it_was_sampled_from(monkeypatch
     change in the reported speed is timing alone.
     """
     clock = [100.0]
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        status_cache,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     cache = StatusCache()
     try:
         state = ControllerState()
@@ -189,5 +195,16 @@ def test_the_speed_derivative_follows_the_frames_it_was_sampled_from(monkeypatch
         for _ in range(_TCP_SPEED_WINDOW):
             frame(0.02, steps=0)
         assert cache.tcp_speed == 0.0
+
+        # At a 5 Hz broadcast the cache is refreshed every twentieth frame.
+        # The first refresh after the arm stops finds its last movement a
+        # fifth of a second old: at rest, not a window of refreshes later.
+        for _ in range(3):
+            moving = frame(0.2, steps=4000)
+        assert moving > 0.0, "a moving arm has to report a speed at 5 Hz too"
+        assert frame(0.2, steps=0) == 0.0, (
+            "the speed outlived the motion by a window of 5 Hz refreshes"
+        )
     finally:
+        monkeypatch.undo()
         cache.close()

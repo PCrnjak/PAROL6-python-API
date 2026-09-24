@@ -17,7 +17,6 @@ from typing import Any
 
 from parol6.ack_policy import ARM_MOTION_CMD_TYPES, AckPolicy
 from parol6.commands.base import (
-    CommandBase,
     ExecutionStatusCode,
     MotionCommand,
     QueryCommand,
@@ -38,6 +37,7 @@ from parol6.server.segment_player import SegmentPlayer
 from parol6.protocol.wire import (
     wire_command_name,
     CommandCode,
+    SelectToolCmd,
     ToolActionCmd,
     pack_error,
     pack_ok,
@@ -54,7 +54,7 @@ from parol6.server.command_registry import (
     create_command_from_struct,
     discover_commands,
 )
-from parol6.server.state import ControllerState, StateManager
+from parol6.server.state import ATTACHMENT_CHANGED, ControllerState, StateManager
 from waldoctl import ActionState
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.async_logging import AsyncLogHandler
@@ -67,7 +67,8 @@ from parol6.server.loop_timer import (
 )
 from parol6.server.status_cache import close_cache, get_cache
 from parol6.server.transport_manager import TransportManager
-from parol6.tools import tool_action_refusal, unselected_tool_refusal
+from parol6.tools import get_registry, tool_action_refusal, unselected_tool_refusal
+from parol6.server.transports.transport_factory import is_simulation_mode
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
 from parol6.config import (
@@ -168,14 +169,13 @@ class Controller:
         self._planner = MotionPlanner()
         self._segment_player = SegmentPlayer(self._planner)
 
-        # Tool action side channel — runs concurrently with both streaming
-        # and trajectory execution (writes to gripper_hw, not Position_out)
-        # The tool side channel: one action runs at a time, concurrently
-        # with arm motion, and the rest wait their turn in order.
-        self._tool_cmd: CommandBase | None = None
+        # Tool side channel: one action runs at a time, concurrently with arm
+        # motion (it writes gripper_hw, not Position_out); the rest wait in
+        # order.
+        self._tool_cmd: ToolActionCommand | None = None
         self._tool_cmd_activated: bool = False
         self._tool_cmd_index: int = -1
-        self._tool_queue: deque[tuple[CommandBase, int]] = deque()
+        self._tool_queue: deque[tuple[ToolActionCommand, int]] = deque()
 
         self._initialize_components()
 
@@ -359,6 +359,14 @@ class Controller:
         self._segment_player.cancel(state)
         self._executor.cancel_active_command(reason)
         self._executor.clear_queue(reason)
+        # A selection still queued went with the queue.
+        state.accepted_tool = state.current_tool
+        self._fail_cancelled(state, owed, scope)
+
+    @staticmethod
+    def _fail_cancelled(state: ControllerState, owed: list[int], scope: str) -> None:
+        """Fail every index in *owed* not already finished with
+        ``MOTN_CANCELLED``. Cancel paths only — it allocates."""
         for index in sorted(set(owed)):
             if index >= 0 and not state.command_completed(index):
                 state.record_failure(
@@ -386,7 +394,7 @@ class Controller:
             state.Speed_out.fill(0)
             state.error = make_error(
                 ErrorCode.COMM_VALIDATION_ERROR,
-                detail="attachment context changed; reconcile the physical scene and reapply",
+                detail=ATTACHMENT_CHANGED,
             )
             state.attachment_motion_stopped = True
 
@@ -451,9 +459,7 @@ class Controller:
         owed: list[int] = []
         if self._tool_cmd is not None:
             owed.append(self._tool_cmd_index)
-            if self._tool_cmd_activated and isinstance(
-                self._tool_cmd, ToolActionCommand
-            ):
+            if self._tool_cmd_activated:
                 self._tool_cmd.halt(state)
             self._tool_cmd = None
             self._tool_cmd_activated = False
@@ -466,7 +472,7 @@ class Controller:
         jaw move needs the calibration the action before it may only now
         have established, so this is judged when the action starts."""
         cmd = self._tool_cmd
-        if not isinstance(cmd, ToolActionCommand):
+        if cmd is None:
             return None
         return tool_action_refusal(
             cmd.p.tool_key,
@@ -485,6 +491,9 @@ class Controller:
 
         try:
             if not self._tool_cmd_activated:
+                if state.accepted_tool != state.current_tool:
+                    # The selection it was sent behind has not landed yet.
+                    return
                 refusal = self._activation_refusal(state)
                 if refusal is None:
                     self._tool_cmd.setup(state)
@@ -679,16 +688,9 @@ class Controller:
                         state.tool_teleport_pos = -1.0  # consume
                         # A teleported jaw supersedes the actions driving it,
                         # which would otherwise re-arm the ramp.
-                        for index in self._cancel_tool_actions(state):
-                            if not state.command_completed(index):
-                                state.record_failure(
-                                    index,
-                                    make_error(
-                                        ErrorCode.MOTN_CANCELLED,
-                                        index,
-                                        scope="a tool teleport",
-                                    ),
-                                )
+                        self._fail_cancelled(
+                            state, self._cancel_tool_actions(state), "a tool teleport"
+                        )
                     self._transport_mgr.tick_simulation(
                         state.current_tool,
                         tool_teleport_pos=tool_tp,
@@ -836,7 +838,7 @@ class Controller:
                     addr,
                     make_error(
                         ErrorCode.COMM_VALIDATION_ERROR,
-                        detail="attachment context changed; reconcile the physical scene and reapply",
+                        detail=ATTACHMENT_CHANGED,
                     ),
                 )
             elif self._stale_attachment_logged_epoch != state.attachment_epoch:
@@ -844,8 +846,9 @@ class Controller:
                 # anyway is dequeued by the client's next unrelated request.
                 self._stale_attachment_logged_epoch = state.attachment_epoch
                 logger.warning(
-                    "Dropping streamed %s: attachment context changed; reconcile the physical scene and reapply",
+                    "Dropping streamed %s: %s",
                     cmd_name,
+                    ATTACHMENT_CHANGED,
                 )
             return
         if not state.enabled:
@@ -863,7 +866,12 @@ class Controller:
 
         # Streaming commands: cancel segment playback + existing streamable handling
         if getattr(command, "streamable", False):
+            # Planned motion yields to the stream, and every command it owed
+            # fails as cancelled; the tool side channel carries on, since a
+            # gripper closing under a jog is the overlap it exists for.
+            owed = self._segment_player.owed_indices(state)
             self._segment_player.cancel(state)
+            self._fail_cancelled(state, owed, "a streamed command")
             # Unconditional: a jog self-collision sets the viz but no state.error.
             state.clear_collision()
             # Coalesce decoded motion only: unread UDP packets can contain
@@ -896,7 +904,10 @@ class Controller:
         # Tool actions bypass planner — execute directly via side channel
         # (writes to gripper_hw, not Position_out, so concurrent with everything)
         if isinstance(command.p, ToolActionCmd):
-            refusal = unselected_tool_refusal(command.p.tool_key, state.current_tool)
+            # Judged against the newest selection, not the fitted tool: a
+            # select_tool still queued is what the script meant this for,
+            # and activation waits for it to land.
+            refusal = unselected_tool_refusal(command.p.tool_key, state.accepted_tool)
             if refusal is not None:
                 logger.warning("Tool action refused: %s", refusal)
                 if cmd_type and self._ack_policy.requires_ack(cmd_type):
@@ -929,14 +940,10 @@ class Controller:
                 # action in flight is halted where it is and the ones
                 # behind it are dropped, each failed as cancelled so a
                 # wait on it raises rather than running out its timeout.
-                for index in self._cancel_tool_actions(state):
-                    if not state.command_completed(index):
-                        state.record_failure(
-                            index,
-                            make_error(
-                                ErrorCode.MOTN_CANCELLED, index, scope="a tool stop"
-                            ),
-                        )
+                self._fail_cancelled(
+                    state, self._cancel_tool_actions(state), "a tool stop"
+                )
+            assert isinstance(cmd_obj, ToolActionCommand)
             self._tool_queue.append((cmd_obj, cmd_index))
             logger.log(
                 TRACE, "Command %s → tool side channel (index=%d)", cmd_name, cmd_index
@@ -980,6 +987,8 @@ class Controller:
         )
         state.pending_planned.append((cmd_index, cmd_name))
         state.plan_submitted_index = cmd_index
+        if isinstance(command.p, SelectToolCmd):
+            state.accepted_tool = command.p.tool_name.strip().upper()
         if cmd_type and self._ack_policy.requires_ack(cmd_type):
             self._reply_ok_index(req_id, addr, cmd_index)
 
@@ -1033,7 +1042,7 @@ class Controller:
             if isinstance(command, ResetStateCommand):
                 self._cancel_pipeline(state, "Reset", "reset_state")
             if isinstance(command, TeleportCommand):
-                refusal = self._teleport_refusal(state)
+                refusal = self._teleport_refusal(state, command)
                 if refusal is not None:
                     self._reply_error(req_id, addr, refusal)
                     return
@@ -1077,7 +1086,6 @@ class Controller:
             if isinstance(command, ResetStateCommand):
                 self._resync_planner(state)
                 self._planner.sync_profile(state.motion_profile)
-                state.execution_paused = False
 
             # Infrastructure side effects (only 2-3 commands trigger these)
             if command._switch_simulator is not None:
@@ -1122,13 +1130,31 @@ class Controller:
                 extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e)),
             )
 
-    def _teleport_refusal(self, state: ControllerState) -> RobotError | None:
-        """A teleport moves the arm, so it is gated the way arm motion is:
-        never on a stale attachment context or a disabled controller."""
+    def _teleport_refusal(
+        self, state: ControllerState, command: TeleportCommand
+    ) -> RobotError | None:
+        """Why a teleport cannot be applied, or None. It moves the arm, so it
+        is gated the way arm motion is — never on a stale attachment context
+        or a disabled controller — and it is the simulator's alone, with
+        tool positions for the degrees of freedom the fitted tool has."""
+        if not is_simulation_mode():
+            return make_error(ErrorCode.SYS_NOT_SIMULATOR, detail="teleport")
+        tool_positions = command.p.tool_positions
+        if tool_positions is not None:
+            cfg = get_registry().get(state.current_tool)
+            dof = len(cfg.motions) if cfg is not None else 0
+            if len(tool_positions) != dof:
+                return make_error(
+                    ErrorCode.COMM_VALIDATION_ERROR,
+                    detail=(
+                        f"tool_positions has {len(tool_positions)} entries; the fitted "
+                        f"tool {state.current_tool} has {dof} degrees of freedom"
+                    ),
+                )
         if not state.attachments_valid:
             return make_error(
                 ErrorCode.COMM_VALIDATION_ERROR,
-                detail="attachment context changed; reconcile the physical scene and reapply",
+                detail=ATTACHMENT_CHANGED,
             )
         if not state.enabled:
             return make_error(
