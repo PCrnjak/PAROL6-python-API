@@ -347,7 +347,7 @@ class JointPath:
         )
 
         if result.all_valid:
-            positions = np.ascontiguousarray(result.joint_positions, dtype=np.float64)
+            positions = np.asarray(result.joint_positions, dtype=np.float64)
             hop = _ik_branch_hop(positions)
             if hop is None:
                 return cls(positions=positions)
@@ -391,17 +391,9 @@ class JointPath:
                     )
                 )
             # Diagnostic mode: return partial data for visualization
-            return cls(
-                positions=np.ascontiguousarray(
-                    result.joint_positions, dtype=np.float64
-                ),
-                valid=valid,
-            )
+            return cls(positions=result.joint_positions, valid=valid)
 
-        return cls(
-            positions=np.ascontiguousarray(result.joint_positions, dtype=np.float64),
-            valid=valid,
-        )
+        return cls(positions=result.joint_positions, valid=valid)
 
     @classmethod
     def interpolate(

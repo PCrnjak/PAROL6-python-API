@@ -101,20 +101,22 @@ class TestCurvedMotionCommands:
         assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped()
 
-    def test_move_p_basic(self, client, server_proc, robot_api_env, home_pose):
+    def test_move_p_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test process move through waypoints with constant TCP speed."""
+        # A process move runs at the one speed its slowest row allows, and
+        # at the home pose's wrist singularity that row is the wrist's: the
+        # move starts clear of it.
+        assert client.teleport([90.0, -80.0, 190.0, 0.0, 30.0, 180.0]) == 1
+        start = client.pose()
+        assert start is not None
         waypoints = [
-            self._offset(home_pose, dz=-5),
-            self._offset(home_pose, dx=10, dy=5, dz=-5),
-            self._offset(home_pose, dz=-5),
+            self._offset(start, dz=-5),
+            self._offset(start, dx=10, dy=5, dz=-5),
+            self._offset(start, dz=-5),
         ]
-        # One tool speed along the whole path, the slowest row's: both ends
-        # of this path sit at the wrist singularity, so the wrist sets it.
-        result = client.move_p(
-            waypoints=waypoints, speed=0.3, frame="WRF", timeout=20.0
-        )
+        result = client.move_p(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0
-        assert client.wait_motion(timeout=20.0)
+        assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped()
 
     def test_move_p_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):

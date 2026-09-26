@@ -109,6 +109,9 @@ def warmup_jit() -> float:
     steps_to_deg(dummy_6i, out_6f)
     steps_to_deg_scalar(0, 0)
     rad_to_steps(dummy_6f, out_6i)
+    # A row of the IK solver's (N, 6) joint path: the solver returns it
+    # Fortran-ordered, so each row is a strided array.
+    rad_to_steps(np.zeros((2, 6), dtype=np.float64, order="F")[0], out_6i)
     rad_to_steps_scalar(0.0, 0)
     steps_to_rad(dummy_6i, out_6f)
     steps_to_rad_scalar(0, 0)
