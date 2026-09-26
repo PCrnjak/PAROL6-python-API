@@ -18,9 +18,9 @@ from parol6.protocol.wire import (
 def test_activity_returns_details():
     """Test that ACTIVITY compute() returns correct data."""
     state = ControllerState(
-        action_current="MoveJPoseCommand",
+        action_current="move_j",
         action_state=ActionState.EXECUTING,
-        action_next="HomeCommand",
+        action_next="home",
         action_params="angles=[10,20,30,40,50,60]",
     )
 
@@ -29,9 +29,9 @@ def test_activity_returns_details():
     result = cmd.compute(state)
 
     assert isinstance(result, CurrentActionResultStruct)
-    assert result.current == "MoveJPoseCommand"
+    assert result.current == "move_j"
     assert result.state == "EXECUTING"
-    assert result.next == "HomeCommand"
+    assert result.next == "home"
     assert result.params == "angles=[10,20,30,40,50,60]"
 
 

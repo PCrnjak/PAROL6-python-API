@@ -49,7 +49,7 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=9.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_c_with_orientation(
         self, client, server_proc, robot_api_env, home_pose
@@ -63,7 +63,7 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_c_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_c with frame=TRF is accepted and completes."""
@@ -75,7 +75,7 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_s_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test spline motion through waypoints."""
@@ -87,7 +87,7 @@ class TestCurvedMotionCommands:
         result = client.move_s(waypoints=waypoints, duration=3.0, frame="WRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_s_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_s with frame=TRF is accepted and completes."""
@@ -99,7 +99,7 @@ class TestCurvedMotionCommands:
         result = client.move_s(waypoints=waypoints, duration=3.0, frame="TRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_p_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test process move through waypoints with constant TCP speed."""
@@ -111,7 +111,7 @@ class TestCurvedMotionCommands:
         result = client.move_p(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_p_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_p with frame=TRF is accepted and completes."""
@@ -123,7 +123,7 @@ class TestCurvedMotionCommands:
         result = client.move_p(waypoints=waypoints, speed=0.3, frame="TRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
 
 class TestComputeCircleFrom3Points:

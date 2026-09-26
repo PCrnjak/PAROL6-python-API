@@ -17,7 +17,7 @@ from numba import njit
 from pinokin import arrays_equal_6
 from waldoctl import ActionState, ToolState, ToolStatus
 
-from parol6.config import speed_steps_to_rad, steps_to_deg, steps_to_rad
+from parol6.config import INTERVAL_S, speed_steps_to_rad, steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
 from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError
@@ -37,7 +37,6 @@ from parol6.server.ik_worker import (
 )
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
 from parol6.tools import compose_tcp_transform, get_tool_transform
-from parol6 import config as _cfg
 
 # Drive-fault labels indexed by (overtemperature | following-error << 1).
 # Built once: the bits are read every control tick, and the repo's hot path
@@ -50,6 +49,15 @@ _DRIVE_FAULT_LABELS: tuple[tuple[str, ...], ...] = (
 )
 
 logger = logging.getLogger(__name__)
+
+# TCP samples the speed is differentiated across: at the control rate a
+# window of 50 ms, which holds the loop's millisecond of jitter to a few
+# percent of the estimate.
+_TCP_SPEED_WINDOW: int = 6
+# A TCP whose newest moving sample is this old is at rest: a window of
+# control ticks, so a slow move that changes the step count only every few
+# frames still reads as moving, whatever the status rate.
+_TCP_STILL_S: float = _TCP_SPEED_WINDOW * INTERVAL_S
 
 
 def _cleanup_shm(shm: SharedMemory | None) -> None:
@@ -201,18 +209,21 @@ class StatusCache:
         # Dirty-check: last q_rad submitted to the IK worker
         self._ik_last_q_rad: np.ndarray = np.full(6, np.nan, dtype=np.float64)
 
-        # TCP speed computation state
-        self._prev_tcp_pos: np.ndarray = np.zeros(3, dtype=np.float64)
-        self._tcp_pos_buf: np.ndarray = np.zeros(3, dtype=np.float64)
-        self._tcp_pos_initialized: bool = False
-
-        # Broadcast period the last TCP sample was taken at. The rate is a
-        # session knob, and the gap being differentiated was governed by the
-        # period in force when the earlier sample was taken, not by the one
-        # that has just replaced it.
-        self._tcp_sample_period_s: float = (
-            _cfg.INTERVAL_S * _cfg.status_broadcast_interval(_cfg.STATUS_RATE_HZ)
+        # TCP speed computation state: a ring of the last TCP samples, each
+        # stamped with the time its serial frame was observed. The cache
+        # refreshes on every status broadcast and on every query that reads
+        # it, so the gap being differentiated is measured, not assumed from
+        # the broadcast period; differentiating across the ring rather than
+        # to the sample before keeps the loop's jitter out of the estimate.
+        self._tcp_hist_pos: np.ndarray = np.zeros(
+            (_TCP_SPEED_WINDOW, 3), dtype=np.float64
         )
+        self._tcp_hist_t: np.ndarray = np.zeros(_TCP_SPEED_WINDOW, dtype=np.float64)
+        self._tcp_hist_n: int = 0
+        self._tcp_hist_i: int = 0
+        # The frame the last refresh saw: a refresh within the same frame
+        # (a query between two broadcasts) says nothing about motion.
+        self._tcp_frame_s: float = 0.0
 
         # Per-joint drive faults, one bit per condition. One entry per joint
         # always — an all-clear list of empty tuples is how a consumer tells
@@ -434,9 +445,7 @@ class StatusCache:
             self._last_tool_variant = state.current_tool_variant
             self._last_tcp_offset = state.tcp_offset_m
             self._last_tcp_rotation = state.tcp_rotation_rad
-            self._tcp_pos_initialized = (
-                False  # avoid speed spike from TCP offset change
-            )
+            self._tcp_hist_n = 0  # avoid speed spike from TCP offset change
             # Sync tool transform to IK worker
             T_tool = get_tool_transform(
                 state.current_tool, variant_key=state.current_tool_variant
@@ -457,29 +466,37 @@ class StatusCache:
             self._last_shapes_version = state.shapes_version
             self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
 
+        fresh_frame = self.last_serial_s != self._tcp_frame_s
+        self._tcp_frame_s = self.last_serial_s
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
 
-            # Compute TCP speed from consecutive FK positions (mm/s)
-            # pose is row-major 4x4: translation at indices 3,7,11
-            self._tcp_pos_buf[0] = self.pose[3]
-            self._tcp_pos_buf[1] = self.pose[7]
-            self._tcp_pos_buf[2] = self.pose[11]
-            if self._tcp_pos_initialized:
-                dt = self._tcp_sample_period_s
-                dx = self._tcp_pos_buf[0] - self._prev_tcp_pos[0]
-                dy = self._tcp_pos_buf[1] - self._prev_tcp_pos[1]
-                dz = self._tcp_pos_buf[2] - self._prev_tcp_pos[2]
-                self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
-            else:
-                self._tcp_pos_initialized = True
-            self._prev_tcp_pos[:] = self._tcp_pos_buf
-            self._tcp_sample_period_s = (
-                _cfg.INTERVAL_S * _cfg.status_broadcast_interval(state.status_rate_hz)
-            )
+            # TCP speed (mm/s) across the sample ring; pose is row-major
+            # 4x4: translation at indices 3,7,11
+            i = self._tcp_hist_i
+            self._tcp_hist_pos[i, 0] = self.pose[3]
+            self._tcp_hist_pos[i, 1] = self.pose[7]
+            self._tcp_hist_pos[i, 2] = self.pose[11]
+            self._tcp_hist_t[i] = self.last_serial_s
+            self._tcp_hist_i = (i + 1) % _TCP_SPEED_WINDOW
+            self._tcp_hist_n = min(self._tcp_hist_n + 1, _TCP_SPEED_WINDOW)
+            if self._tcp_hist_n >= 2:
+                oldest = (self._tcp_hist_i - self._tcp_hist_n) % _TCP_SPEED_WINDOW
+                dt = self.last_serial_s - self._tcp_hist_t[oldest]
+                if dt > 0.0:
+                    dx = self.pose[3] - self._tcp_hist_pos[oldest, 0]
+                    dy = self.pose[7] - self._tcp_hist_pos[oldest, 1]
+                    dz = self.pose[11] - self._tcp_hist_pos[oldest, 2]
+                    self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
         else:
-            # Robot not moving — reset TCP speed to zero
-            self.tcp_speed = 0.0
+            # No motion for a window of ticks is a robot at rest: speed
+            # zero, and the ring dropped so a restart is not differentiated
+            # against the hold.
+            if fresh_frame and self._tcp_hist_n:
+                newest = (self._tcp_hist_i - 1) % _TCP_SPEED_WINDOW
+                if self.last_serial_s - self._tcp_hist_t[newest] >= _TCP_STILL_S:
+                    self.tcp_speed = 0.0
+                    self._tcp_hist_n = 0
 
             # Submit IK request asynchronously
             try:
@@ -566,9 +583,7 @@ class StatusCache:
 
         # Only a live HomeCommand owns homing_step; any cancel path that drops
         # the command clears action_current, so derive "idle" from that.
-        self._homing_step = (
-            state.homing_step if state.action_current == "HomeCommand" else 0
-        )
+        self._homing_step = state.homing_step if state.action_current == "home" else 0
 
         collision_changed = (
             self._collision_active != state.collision_active

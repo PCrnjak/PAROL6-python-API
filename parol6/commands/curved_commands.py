@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
-from parol6.commands._collision_guard import guard_joint_path
+from parol6.commands._collision_guard import guard_cartesian_path
 from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
 from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import CircularMotion, JointPath, SplineMotion, TrajectoryBuilder
@@ -22,13 +22,24 @@ from parol6.protocol.wire import (
     MovePCmd,
     MoveSCmd,
 )
-from parol6.motion.geometry import compute_circle_from_3_points
+from parol6.commands.cartesian_commands import (
+    CartesianChainLink,
+    pose6_to_se3,
+    resolve_pose,
+)
+from parol6.motion.geometry import (
+    ArcSegment,
+    LineSegment,
+    build_composite_cartesian_path,
+    cartesian_path_knots,
+    compute_circle_from_3_points,
+)
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
-from pinokin import se3_from_rpy, se3_interp, se3_rpy
+from pinokin import se3_from_rpy, se3_rpy
 
 _MP = TypeVar("_MP", bound=MotionParamsMixin)
 
@@ -83,6 +94,42 @@ def _transform_waypoints_trf_to_wrf(
     return result
 
 
+#: Rotation weight in the combined pose metric [mm/rad]: a reorientation in
+#: place still covers distance (par6's ``path_rot_weight_m_per_rad``).
+PATH_ROT_WEIGHT_MM_PER_RAD: float = 150.0
+#: A waypoint list's first entry stands in for the start pose within this.
+WAYPOINT_SNAP_MM: float = 5.0
+
+_dist_se3_a: np.ndarray = np.zeros((4, 4), dtype=np.float64)
+_dist_se3_b: np.ndarray = np.zeros((4, 4), dtype=np.float64)
+
+
+def _pose6_distance_mm(a: Sequence[float], b: Sequence[float]) -> float:
+    """Distance between two [x, y, z, rx, ry, rz] poses (mm, degrees) on the
+    combined metric sqrt(translation² + (w·rotation)²)."""
+    pose6_to_se3(a, _dist_se3_a)
+    pose6_to_se3(b, _dist_se3_b)
+    translation = (
+        float(np.linalg.norm(_dist_se3_a[:3, 3] - _dist_se3_b[:3, 3])) * 1000.0
+    )
+    relative = _dist_se3_a[:3, :3].T @ _dist_se3_b[:3, :3]
+    cos_angle = (float(np.trace(relative)) - 1.0) / 2.0
+    rotation = float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+    return float(np.hypot(translation, PATH_ROT_WEIGHT_MM_PER_RAD * rotation))
+
+
+def _se3_chain(trajectory: np.ndarray) -> np.ndarray:
+    """The generated geometry as an (N, 4, 4) SE3 chain: a spline comes
+    back as [x, y, z, rx, ry, rz] rows (mm, degrees), an arc or a process
+    path already as poses."""
+    if trajectory.ndim == 3:
+        return trajectory
+    poses = np.empty((len(trajectory), 4, 4), dtype=np.float64)
+    for row, out in zip(trajectory, poses, strict=True):
+        pose6_to_se3(row, out)
+    return poses
+
+
 # =============================================================================
 # Smooth Motion Command Base
 # =============================================================================
@@ -94,6 +141,10 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
     Subclasses implement generate_main_trajectory() to create Cartesian geometry.
     This base class handles IK conversion and trajectory building.
     """
+
+    #: Hold the tool to one speed along the whole path (a process move)
+    #: rather than as fast as the joints allow under the cartesian ceiling.
+    constant_tool_speed: bool = False
 
     __slots__ = (
         "_rpy_rad_buf",
@@ -132,6 +183,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
                     ErrorCode.TRAJ_EMPTY_RESULT, detail="empty cartesian trajectory"
                 )
             )
+        cartesian_trajectory = _se3_chain(cartesian_trajectory)
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
 
@@ -156,7 +208,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
                 )
             )
 
-        guard_joint_path(joint_path.positions)
+        guard_cartesian_path(joint_path)
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -167,6 +219,8 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             dt=INTERVAL_S,
             cart_vel_limit=LIMITS.cart.hard.velocity.linear * self.p.resolved_speed,
             cart_acc_limit=LIMITS.cart.hard.acceleration.linear * self.p.accel,
+            path_knots=cartesian_path_knots(cartesian_trajectory),
+            constant_tool_speed=self.constant_tool_speed,
         )
 
         trajectory = builder.build()
@@ -186,11 +240,12 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
 
 
 @register_command(CmdType.MOVEC)
-class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd]):
+class MoveCCommand(CartesianChainLink, BaseSmoothMotionCommand[MoveCCmd]):
     """Execute circular arc motion through current → via → end (3-point arc).
 
-    Computes circle center and normal from the 3 points, then delegates to
-    CircularMotion.generate_arc().
+    Via and end resolve against the pose the move starts from: absolute in
+    WRF, tool-frame offsets in TRF. With a blend radius the arc joins a
+    cartesian blend chain and rounds into the move after it.
     """
 
     PARAMS_TYPE = MoveCCmd
@@ -228,6 +283,18 @@ class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd]):
             clockwise=False,
         )
 
+    def chain_segment(
+        self, previous: np.ndarray, state: "ControllerState"
+    ) -> tuple[LineSegment | ArcSegment, np.ndarray]:
+        via = resolve_pose(previous, self.p.via, self.p.frame, False)
+        end = resolve_pose(previous, self.p.end, self.p.frame, False)
+        try:
+            return ArcSegment(previous, via, end), end
+        except ValueError as e:
+            raise TrajectoryPlanningError(
+                make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=str(e))
+            ) from e
+
 
 @register_command(CmdType.MOVES)
 class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
@@ -255,9 +322,9 @@ class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
         wps = self._waypoints
         motion_gen = SplineMotion()
 
-        first_wp_error = float(np.linalg.norm(wps[0, :3] - effective_start_pose[:3]))
+        first_wp_error = _pose6_distance_mm(wps[0], effective_start_pose)
 
-        if first_wp_error > 5.0:
+        if first_wp_error > WAYPOINT_SNAP_MM:
             modified_waypoints = np.vstack([effective_start_pose[np.newaxis], wps])
             logger.info(
                 f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)"
@@ -277,27 +344,27 @@ class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
         return trajectory
 
 
-# Number of SE3 samples per linear segment for move_p
+#: Each interior corner of a process move is rounded with this fraction of
+#: the shorter adjoining segment.
+MOVEP_AUTO_BLEND_FRAC: float = 0.25
+#: SE3 samples per straight segment of a process move.
 _MOVEP_SAMPLES_PER_SEGMENT: int = 20
 
 
 @register_command(CmdType.MOVEP)
 class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
-    """Process move — constant TCP speed through waypoints with piecewise linear segments.
-
-    Phase 3 will add auto-blending at corners (Bézier blend zones).
-    Currently uses sharp piecewise-linear interpolation.
-    """
+    """Process move — the waypoint list as straight segments with every
+    interior corner rounded, run at one constant tool speed: the TCP sweeps
+    the path without stopping at a single waypoint."""
 
     PARAMS_TYPE = MovePCmd
+    constant_tool_speed = True
 
-    __slots__ = ("_waypoints", "_se3_buf_a", "_se3_buf_b")
+    __slots__ = ("_waypoints",)
 
     def __init__(self, p: MovePCmd) -> None:
         super().__init__(p)
         self._waypoints: np.ndarray | None = None
-        self._se3_buf_a = np.zeros((4, 4), dtype=np.float64)
-        self._se3_buf_b = np.zeros((4, 4), dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Transform parameters if TRF, build trajectory with constant TCP speed."""
@@ -307,61 +374,35 @@ class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
         return super().do_setup(state)
 
     def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
-        """Generate piecewise-linear Cartesian path through waypoints.
-
-        Each segment is linearly interpolated in SE3 space.
-        Phase 3 adds Bézier blend zones at corner points.
-        """
+        """The polyline through the waypoints with each interior corner
+        rounded by a quarter of the shorter adjoining segment."""
         assert self._waypoints is not None
 
         wps = self._waypoints
 
-        first_wp_error = float(np.linalg.norm(wps[0, :3] - effective_start_pose[:3]))
-        if first_wp_error > 5.0:
+        first_wp_error = _pose6_distance_mm(wps[0], effective_start_pose)
+        if first_wp_error > WAYPOINT_SNAP_MM:
             all_waypoints = np.vstack([effective_start_pose[np.newaxis], wps])
         else:
             all_waypoints = np.vstack([effective_start_pose[np.newaxis], wps[1:]])
 
-        # Pre-compute total SE3 poses for single allocation
-        n = _MOVEP_SAMPLES_PER_SEGMENT
-        n_segs = len(all_waypoints) - 1
-        total = n_segs * n - (n_segs - 1)  # first segment full, rest skip junction
-        cart_poses = np.empty((total, 4, 4), dtype=np.float64)
-        cursor = 0
-
-        for seg_idx in range(n_segs):
-            wp_a = all_waypoints[seg_idx]
-            wp_b = all_waypoints[seg_idx + 1]
-
-            se3_from_rpy(
-                wp_a[0] / 1000.0,
-                wp_a[1] / 1000.0,
-                wp_a[2] / 1000.0,
-                np.radians(wp_a[3]),
-                np.radians(wp_a[4]),
-                np.radians(wp_a[5]),
-                self._se3_buf_a,
-            )
-            se3_from_rpy(
-                wp_b[0] / 1000.0,
-                wp_b[1] / 1000.0,
-                wp_b[2] / 1000.0,
-                np.radians(wp_b[3]),
-                np.radians(wp_b[4]),
-                np.radians(wp_b[5]),
-                self._se3_buf_b,
-            )
-
-            start_i = 0 if seg_idx == 0 else 1
-            for i in range(start_i, n):
-                s = i / (n - 1)
-                se3_interp(self._se3_buf_a, self._se3_buf_b, s, cart_poses[cursor])
-                cursor += 1
+        poses = list(_se3_chain(all_waypoints))
+        lengths = [
+            float(np.linalg.norm(poses[i + 1][:3, 3] - poses[i][:3, 3])) * 1000.0
+            for i in range(len(poses) - 1)
+        ]
+        radii = [
+            MOVEP_AUTO_BLEND_FRAC * min(lengths[i], lengths[i + 1])
+            for i in range(len(lengths) - 1)
+        ]
+        cart_poses = build_composite_cartesian_path(
+            poses, radii, samples_per_segment=_MOVEP_SAMPLES_PER_SEGMENT
+        )
 
         logger.debug(
             "    Generated process move path with %d SE3 poses across %d segments",
-            cursor,
-            n_segs,
+            len(cart_poses),
+            len(lengths),
         )
 
-        return cart_poses[:cursor]
+        return cart_poses

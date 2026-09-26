@@ -584,10 +584,8 @@ if np.any(LIMITS.joint.hard.velocity <= 0) or np.any(
 ):
     raise ValueError("Joint limits must be positive. Check PAROL6_ROBOT config.")
 
-# Jog min speeds - derived from control rate (1 step per tick minimum)
+# Jog min speed - derived from control rate (1 step per tick minimum)
 JOG_MIN_STEPS: int = int(CONTROL_RATE_HZ)  # steps/s
-CART_LIN_JOG_MIN: float = CONTROL_RATE_HZ / 100  # mm/s (scales with control rate)
-CART_ANG_JOG_MIN: float = 1.0  # deg/s
 
 # Per-joint IK safety margins (radians) - [min_margin, max_margin] per joint
 # Direction-aware: J3 backwards bend (max) is a trap, but inward (min) is safe

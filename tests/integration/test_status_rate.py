@@ -9,12 +9,14 @@ it by rejection.
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from parol6 import AsyncRobotClient
+from parol6.server import status_cache
 from parol6.server.state import ControllerState
-from parol6.server.status_cache import StatusCache
+from parol6.server.status_cache import _TCP_SPEED_WINDOW, StatusCache
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import MotionError
 
@@ -144,44 +146,65 @@ async def test_an_unachievable_rate_is_refused_with_the_rule(server_proc, ports)
 
 
 @pytest.mark.integration
-def test_the_speed_derivative_follows_the_rate_it_was_sampled_at():
-    """TCP speed is a difference over the broadcast period, so the period the
-    cache divides by has to be the one the controller is actually broadcasting
-    at — and the sample that straddles a rate change spans the period it was
-    taken at, not the one that has just replaced it. Get either wrong and a
-    steady arm appears to change speed the moment somebody changes the rate.
+def test_the_speed_derivative_follows_the_frames_it_was_sampled_from(monkeypatch):
+    """TCP speed is displacement over the time between the serial frames the
+    samples came from: not over the broadcast period, which a query
+    refreshing the cache between broadcasts would halve, and not over the
+    refresh interval, which the loop's jitter would scatter.
 
     Only J1 moves, so equal step increments are equal chords of one circle
-    about the base axis: the displacement is the same every sample, and any
-    change in the reported speed is the period alone.
+    about the base axis: the displacement is the same every frame, and any
+    change in the reported speed is timing alone.
     """
+    clock = [100.0]
+    monkeypatch.setattr(
+        status_cache,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     cache = StatusCache()
     try:
         state = ControllerState()
 
-        def advance() -> float:
-            state.Position_in[0] += 200
+        def frame(dt: float, steps: int = 200) -> float:
+            clock[0] += dt
+            state.Position_in[0] += steps
+            cache.mark_serial_observed()
             cache.update_from_state(state)
             return cache.tcp_speed
 
-        advance()  # first difference has nothing to difference against
-        started = advance()
+        for _ in range(2 * _TCP_SPEED_WINDOW):
+            started = frame(0.01)
         assert started > 0.0, "a moving arm has to report a speed"
 
-        # Halve whatever rate this environment configured, rather than
-        # assuming the 50 Hz default: the cache reads its period from the
-        # state, so a shell with PAROL6_STATUS_RATE_HZ set would otherwise
-        # fail the ratio for reasons that have nothing to do with the code.
-        state.status_rate_hz = state.status_rate_hz / 2
-        straddling = advance()
-        settled = advance()
+        # A refresh between frames (a query) sees the frame the broadcast
+        # saw: no new information, and the speed stands.
+        cache.update_from_state(state)
+        assert cache.tcp_speed == started
 
-        assert straddling == pytest.approx(started, rel=1e-3), (
-            "the sample taken before the rate changed spans the old period"
-        )
+        # Frames at half the rate carry the same chord over twice the
+        # time: half the speed, once the window has turned over.
+        for _ in range(2 * _TCP_SPEED_WINDOW):
+            settled = frame(0.02)
         assert settled == pytest.approx(started / 2, rel=1e-3), (
-            "half the broadcast rate is twice the period, so the same "
-            f"movement per frame is half the speed: {settled} vs {started}"
+            f"the same movement per frame over twice the time is half the speed: "
+            f"{settled} vs {started}"
+        )
+
+        # A window of frames that leave the arm where it is: at rest.
+        for _ in range(_TCP_SPEED_WINDOW):
+            frame(0.02, steps=0)
+        assert cache.tcp_speed == 0.0
+
+        # At a 5 Hz broadcast the cache is refreshed every twentieth frame.
+        # The first refresh after the arm stops finds its last movement a
+        # fifth of a second old: at rest, not a window of refreshes later.
+        for _ in range(3):
+            moving = frame(0.2, steps=4000)
+        assert moving > 0.0, "a moving arm has to report a speed at 5 Hz too"
+        assert frame(0.2, steps=0) == 0.0, (
+            "the speed outlived the motion by a window of 5 Hz refreshes"
         )
     finally:
+        monkeypatch.undo()
         cache.close()

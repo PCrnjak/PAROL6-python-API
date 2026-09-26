@@ -19,6 +19,7 @@ import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
 from parol6.config import (
+    LIMITS,
     INTERVAL_S,
     MAX_BLEND_LOOKAHEAD,
     steps_to_rad,
@@ -38,6 +39,25 @@ if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 logger = logging.getLogger(__name__)
+
+
+def _require_inside_limits(target_rad: np.ndarray) -> None:
+    """Refuse a joint target outside a joint's travel rather than plan a
+    move into the stop (par6's ``require_inside_soft``)."""
+    lo = LIMITS.joint.position.rad[:, 0]
+    hi = LIMITS.joint.position.rad[:, 1]
+    for j in range(6):
+        q = float(target_rad[j])
+        if not (lo[j] <= q <= hi[j]):
+            raise TrajectoryPlanningError(
+                make_error(
+                    ErrorCode.COMM_VALIDATION_ERROR,
+                    detail=(
+                        f"joint {j + 1} target {np.degrees(q):.2f} deg is outside "
+                        f"[{np.degrees(lo[j]):.2f}, {np.degrees(hi[j]):.2f}] deg"
+                    ),
+                )
+            )
 
 
 class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
@@ -83,6 +103,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
         steps_to_rad(state.Position_in, self._q_rad_buf)
         target_rad = self._get_target_rad(state, self._q_rad_buf)
         current_rad = self._q_rad_buf
+        _require_inside_limits(target_rad)
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
         guard_joint_path(joint_path.positions)
@@ -144,6 +165,9 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):
 
         for i, cmd in enumerate(chain):
             target_rad = cmd._get_target_rad(state, current_rad)
+            # A relative target resolves against the one before it, so the
+            # limit check a lone move makes has to run on every link.
+            _require_inside_limits(target_rad)
             waypoints_rad.append(target_rad)
             if i < len(chain) - 1:
                 blend_radii_mm.append(cmd.blend_radius)

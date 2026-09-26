@@ -22,6 +22,7 @@ Wire format uses msgpack arrays with integer type codes:
 
 import logging
 import math
+import re as _re
 from dataclasses import dataclass, field
 from collections.abc import Sequence
 from enum import IntEnum, auto
@@ -71,7 +72,7 @@ _decoder = msgspec.msgpack.Decoder()
 
 
 #: Bumped on any change to the command envelope, a reply or the STATUS layout.
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 _REQ_ID_BYTES = 4
 MAX_REQ_ID = 2**32 - 1
 
@@ -206,6 +207,14 @@ class CmdType(IntEnum):
 # =============================================================================
 
 
+def _check_finite(name: str, values: Sequence[float]) -> None:
+    """A pose or joint target with a NaN or an infinity in it plans nothing
+    sensible; refuse it at the wire."""
+    for v in values:
+        if isinstance(v, bool) or not math.isfinite(v):
+            raise ValueError(f"{name} must be finite numbers, got {list(values)!r}")
+
+
 def _check_speed_accel(speed: float, accel: float, *, signed: bool = False) -> None:
     """Validate speed/accel are in the expected fractional range."""
     lo = -1.0 if signed else 0.0
@@ -277,6 +286,7 @@ class MoveJCmd(
         if has_duration and has_speed:
             raise ValueError("MOVEJ requires only one of duration or speed")
         _check_speed_accel(self.speed, self.accel)
+        _check_finite("MOVEJ angles", self.angles)
         if not self.rel:
             for i in range(6):
                 if not (
@@ -313,6 +323,7 @@ class MoveJPoseCmd(
         if has_duration and has_speed:
             raise ValueError("MOVEJ_POSE requires only one of duration or speed")
         _check_speed_accel(self.speed, self.accel)
+        _check_finite("MOVEJ_POSE pose", self.pose)
 
 
 class MoveLCmd(
@@ -341,6 +352,7 @@ class MoveLCmd(
         if has_duration and has_speed:
             raise ValueError("MOVEL requires only one of duration or speed")
         _check_speed_accel(self.speed, self.accel)
+        _check_finite("MOVEL pose", self.pose)
 
 
 class MoveCCmd(
@@ -368,6 +380,8 @@ class MoveCCmd(
             raise ValueError("MOVEC requires either duration > 0 or speed > 0")
         if has_duration and has_speed:
             raise ValueError("MOVEC requires only one of duration or speed")
+        _check_finite("MOVEC via", self.via)
+        _check_finite("MOVEC end", self.end)
         if self.speed is not None:
             _check_speed_accel(self.speed, self.accel)
 
@@ -401,6 +415,7 @@ class MoveSCmd(
         for i in range(len(waypoints)):
             if len(waypoints[i]) != 6:
                 raise ValueError(f"Waypoint {i} must have 6 values (x,y,z,rx,ry,rz)")
+            _check_finite(f"MOVES waypoint {i}", waypoints[i])
 
 
 class MovePCmd(
@@ -432,6 +447,7 @@ class MovePCmd(
         for i in range(len(waypoints)):
             if len(waypoints[i]) != 6:
                 raise ValueError(f"Waypoint {i} must have 6 values (x,y,z,rx,ry,rz)")
+            _check_finite(f"MOVEP waypoint {i}", waypoints[i])
 
 
 class CheckpointCmd(
@@ -462,6 +478,18 @@ class ServoJCmd(
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
+    def __post_init__(self) -> None:
+        _check_finite("SERVOJ angles", self.angles)
+        for i in range(6):
+            if not (
+                LIMITS.joint.position.deg[i, 0]
+                <= self.angles[i]
+                <= LIMITS.joint.position.deg[i, 1]
+            ):
+                raise ValueError(
+                    f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
+                )
+
 
 class ServoJPoseCmd(
     msgspec.Struct,
@@ -476,6 +504,9 @@ class ServoJPoseCmd(
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
+    def __post_init__(self) -> None:
+        _check_finite("SERVOJ_POSE pose", self.pose)
+
 
 class ServoLCmd(
     msgspec.Struct,
@@ -489,6 +520,9 @@ class ServoLCmd(
     pose: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
     speed: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
+
+    def __post_init__(self) -> None:
+        _check_finite("SERVOL pose", self.pose)
 
 
 # -- Streaming commands: jog (velocity) --
@@ -601,10 +635,31 @@ class ResetLoopStatsCmd(
 class TeleportCmd(
     msgspec.Struct, tag=int(CmdType.TELEPORT), array_like=True, frozen=True, gc=False
 ):
-    """TELEPORT: instantly set joint angles in degrees (simulator only)."""
+    """TELEPORT: instantly set joint angles in degrees (simulator only).
+
+    A system command: the controller answers OK once the pose is applied,
+    or an error when it is refused. The angles must be finite and inside
+    the hard joint limits; each tool position must be finite and within
+    ``[0, 1]``.
+    """
 
     angles: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
     tool_positions: list[float] | None = None
+
+    def __post_init__(self) -> None:
+        _check_finite("angles", self.angles)
+        limits = LIMITS.joint.position.deg
+        for i, deg in enumerate(self.angles):
+            if not (limits[i, 0] <= deg <= limits[i, 1]):
+                raise ValueError(
+                    f"angles[{i}]={deg} is outside the hard limits "
+                    f"[{limits[i, 0]}, {limits[i, 1]}] deg"
+                )
+        if self.tool_positions is not None:
+            _check_finite("tool_positions", self.tool_positions)
+            for i, p in enumerate(self.tool_positions):
+                if not (0.0 <= p <= 1.0):
+                    raise ValueError(f"tool_positions[{i}]={p} is outside [0, 1]")
 
 
 class WriteIOCmd(
@@ -756,8 +811,10 @@ class ToolActionCmd(
 ):
     """TOOL_ACTION: [CmdType.TOOL_ACTION, tool_key, action, params]
 
-    Generic tool action command.  The controller validates *tool_key*
-    against the registry and delegates to the appropriate 100 Hz command.
+    Generic tool action command.  *tool_key*, *action* and *params* are
+    validated against the tool's config on decode, so a malformed action is
+    refused before it is acknowledged; the controller then delegates to the
+    tool's 100 Hz command.
     """
 
     tool_key: Annotated[str, msgspec.Meta(min_length=1, max_length=64)]
@@ -767,8 +824,10 @@ class ToolActionCmd(
     def __post_init__(self) -> None:
         key = self.tool_key.strip().upper()
         registry = get_registry()
-        if key not in registry:
+        cfg = registry.get(key)
+        if cfg is None:
             raise ValueError(f"Unknown tool '{key}'. Available: {list(registry)}")
+        cfg.validate_action(self.action.strip().lower(), self.params)
 
 
 class ToolStatusCmd(
@@ -1097,9 +1156,37 @@ def _build_struct_to_cmdtype(structs: list[type]) -> dict[type, CmdType]:
     return mapping
 
 
+def pascal_to_snake(name: str) -> str:
+    """``MoveJPose`` → ``move_j_pose``, ``IsSimulator`` → ``is_simulator``."""
+    s = _re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    s = _re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    return s.lower()
+
+
 # Build at import time
 _COMMAND_STRUCTS = _collect_command_structs()
 STRUCT_TO_CMDTYPE: dict[type, CmdType] = _build_struct_to_cmdtype(_COMMAND_STRUCTS)
+
+#: Pose targets are the ``move_j`` / ``servo_j`` calls that sent them:
+#: waldoctl has no ``move_j_pose`` method for the name to point at.
+_REPORTED_AS: dict[str, str] = {"MoveJPoseCmd": "move_j", "ServoJPoseCmd": "servo_j"}
+
+#: Wire struct → the snake_case name of the waldoctl method that sends it
+#: (``MoveJCmd`` → ``"move_j"``, ``HomeCmd`` → ``"home"``). What ``queue()``
+#: and ``activity()`` report, so the same name reads across backends.
+WIRE_COMMAND_NAMES: dict[type, str] = {
+    struct_cls: _REPORTED_AS.get(
+        struct_cls.__name__, pascal_to_snake(struct_cls.__name__.removesuffix("Cmd"))
+    )
+    for struct_cls in _COMMAND_STRUCTS
+}
+
+
+def wire_command_name(struct_cls: type) -> str:
+    """The reported name of a command, from its wire struct type."""
+    name = WIRE_COMMAND_NAMES.get(struct_cls)
+    return name if name is not None else pascal_to_snake(struct_cls.__name__)
+
 
 # Build Command union dynamically from collected structs
 Command: TypeAlias = Union[tuple(_COMMAND_STRUCTS)]
@@ -1435,6 +1522,9 @@ class CommandCompletionResultStruct(
     command_index: int
     session_id: int
     completed: bool
+    # The command finished as a FAILURE — cancelled by a stop, or the
+    # pipeline gave up on it — as RobotError wire form; None otherwise.
+    error: list | None = None
 
     def __post_init__(self) -> None:
         if type(self.command_index) is not int or not 0 <= self.command_index < 2**63:

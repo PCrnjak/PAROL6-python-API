@@ -20,15 +20,26 @@ from parol6.utils.errors import TrajectoryPlanningError
 logger = logging.getLogger(__name__)
 
 
+def arm_homed(state: ControllerState) -> bool:
+    """Whether every arm joint holds its reference; a loop rather than a
+    slice, so a per-tick caller allocates no view."""
+    for i in range(6):
+        if not state.Homed_in[i]:
+            return False
+    return True
+
+
 def guard_homed(state: ControllerState) -> None:
-    """Refuse planned motion while the robot is not homed.
+    """Refuse motion that works from the reported pose while the robot is
+    not homed.
 
     Reported joint positions are unreferenced until homing (the boot state is
-    all-zeros steps — outside J2/J3's limits), so building or collision-checking
-    a trajectory from them is meaningless. Called at the top of every planned
-    command's ``do_setup``, like ``guard_joint_path``. Jog/servo/home are
-    deliberately not gated: they don't plan a path from the reported pose, and
-    an unhomed arm may need to be jogged clear of an obstruction before homing.
+    all-zeros steps — outside J2/J3's limits), so a trajectory, an IK solve
+    or a collision check built from them is meaningless. Called at the top
+    of every planned command's ``do_setup``, like ``guard_joint_path``, and
+    of every cartesian or servo stream's. Only ``jog_j`` and ``home`` stay
+    open: neither needs the pose, and an unhomed arm may need to be jogged
+    clear of an obstruction before homing.
     """
     for i in range(6):
         if not state.Homed_in[i]:
@@ -355,14 +366,13 @@ class SystemCommand(CommandBase[P]):
     and can execute even when the controller is disabled.
 
     Side-effect signaling: commands that need infrastructure changes (simulator toggle,
-    port switch, mock sync) set the corresponding attribute. The controller reads these
+    port switch) set the corresponding attribute. The controller reads these
     after tick() and orchestrates the actual change.
     """
 
-    __slots__ = ("_switch_simulator", "_switch_port", "_sync_mock")
+    __slots__ = ("_switch_simulator", "_switch_port")
 
     def __init__(self, p: P) -> None:
         super().__init__(p)
         self._switch_simulator: bool | None = None
         self._switch_port: str | None = None
-        self._sync_mock: bool = False

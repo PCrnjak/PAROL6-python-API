@@ -342,6 +342,7 @@ def test_jogl_release_decel_streams_while_escaping():
     from parol6.config import deg_to_steps
 
     state = ControllerState()
+    state.Homed_in[:] = 1  # a cartesian jog is refused unreferenced
     # IK-friendly physical home (wrist at ~(0.237, 0, 0.334)); q=zeros is an
     # IK danger zone where the jog never streams.
     q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
@@ -397,6 +398,7 @@ def test_jogl_escape_never_streams_into_a_second_keepout():
     from parol6.server.state import ControllerState
 
     state = ControllerState()
+    state.Homed_in[:] = 1  # a cartesian jog is refused unreferenced
     q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
     deg_to_steps(q_home_deg, state.Position_in)
     state.Position_out[:] = state.Position_in

@@ -10,6 +10,8 @@ Subsystem ranges (10 codes each):
 
 from enum import IntEnum
 
+from waldoctl.errors import MOTN_CANCELLED as _WALDOCTL_MOTN_CANCELLED
+
 
 class ErrorCode(IntEnum):
     # IK subsystem
@@ -27,6 +29,9 @@ class ErrorCode(IntEnum):
     MOTN_SETUP_FAILED = 33
     MOTN_TICK_FAILED = 34
     MOTN_NOT_HOMED = 35
+    # waldoctl's shared number, so a client reading either backend sees one
+    # code for a command a stop discarded.
+    MOTN_CANCELLED = _WALDOCTL_MOTN_CANCELLED
 
     # Communication / protocol
     COMM_QUEUE_FULL = 40
@@ -41,3 +46,4 @@ class ErrorCode(IntEnum):
     SYS_PROFILE_INVALID = 53
     SYS_SELF_COLLISION = 54
     SYS_STATUS_RATE_INVALID = 55
+    SYS_NOT_SIMULATOR = 56

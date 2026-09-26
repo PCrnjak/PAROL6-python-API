@@ -66,17 +66,16 @@ class TestGetEndpoints:
 
     def test_status_aggregate(self, client, server_proc):
         """Test STATUS aggregate command."""
-        from parol6.protocol.wire import StatusResultStruct
+        from waldoctl import ToolStatus
 
         status = client.status()
         assert status is not None
-        assert isinstance(status, StatusResultStruct)
-
-        # Should contain all status components (as struct attributes)
-        assert hasattr(status, "pose")
-        assert hasattr(status, "angles")
-        assert hasattr(status, "io")
-        assert hasattr(status, "tool_status")
+        assert len(status.pose) == 16
+        assert len(status.angles) == 6
+        assert len(status.speeds) == 6
+        assert len(status.io) == 5
+        assert isinstance(status.tool_status, ToolStatus)
+        assert status.tool_status.key == "NONE"
 
 
 @pytest.mark.integration

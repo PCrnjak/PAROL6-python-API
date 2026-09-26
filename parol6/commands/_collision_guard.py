@@ -10,6 +10,8 @@ Disabled-by-config or unloaded-checker scenarios are no-ops.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -18,6 +20,9 @@ from parol6.config import COLLISION_PATH_SAMPLES
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
+
+if TYPE_CHECKING:
+    from parol6.motion.trajectory import JointPath
 
 # Escape-check tolerance (m): min-distance drops within this count as "not
 # deeper" (absorbs signed-distance jitter).
@@ -131,3 +136,12 @@ def guard_joint_path(positions: NDArray[np.float64]) -> None:
                 sorted(new_pairs) if new_pairs else checker.colliding_pairs(pos[sample])
             )
             _raise(sample, pairs)
+
+
+def guard_cartesian_path(joint_path: JointPath) -> None:
+    """``guard_joint_path`` over a cartesian move's joints, with the wrist
+    turn ahead of it checked on its own: the turn's rows are few and close
+    together, and sampling the whole path could step over all of them."""
+    if joint_path.prefix:
+        guard_joint_path(joint_path.positions[: joint_path.prefix + 1])
+    guard_joint_path(joint_path.positions)

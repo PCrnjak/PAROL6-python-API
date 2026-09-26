@@ -13,7 +13,9 @@ from parol6.commands.base import (
     MotionCommand,
 )
 from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
-from parol6.protocol.wire import Command, decode_command
+from parol6.protocol.wire import Command, decode_command, wire_command_name
+from parol6.utils.error_catalog import RobotError, extract_robot_error
+from parol6.utils.error_codes import ErrorCode
 from waldoctl import ActionState
 
 if TYPE_CHECKING:
@@ -73,6 +75,9 @@ class CommandExecutor:
 
         self.command_queue: deque[QueuedCommand] = deque(maxlen=MAX_COMMAND_QUEUE_SIZE)
         self.active_command: QueuedCommand | None = None
+        # The last refusal logged and when, so a stream refused at 50 Hz
+        # logs once a second rather than every datagram.
+        self._refusal_logged: tuple[int, float] = (-1, 0.0)
 
     def _update_queue_state(self, state: "ControllerState") -> None:
         """Update queue snapshot and next action in state."""
@@ -80,7 +85,7 @@ class CommandExecutor:
         state.queue_nonstreamable.clear()
         for qc in self.command_queue:
             if not (isinstance(qc.command, MotionCommand) and qc.command.streamable):
-                state.queue_nonstreamable.append(type(qc.command).__name__)
+                state.queue_nonstreamable.append(wire_command_name(type(qc.command.p)))
         state.action_next = (
             state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
         )
@@ -209,7 +214,7 @@ class CommandExecutor:
             # One-time setup on first activation
             if not ac.activated:
                 self._setup_active(ac, state)
-                state.action_current = type(ac.command).__name__
+                state.action_current = wire_command_name(type(ac.command.p))
                 state.action_params = _format_cmd_params(ac.command.p)
                 state.action_state = ActionState.EXECUTING
                 state.executing_command_index = ac.command_index
@@ -230,11 +235,22 @@ class CommandExecutor:
             self._process_tick_result(ac, code, state)
 
         except Exception as e:
-            logger.error("Command execution error: %s", e)
+            # A stream refused in setup (unhomed, off the simulator, a
+            # bad parameter) answers no datagram: the standing error is
+            # how its client learns of it.
+            error = extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+            now = time.monotonic()
+            if (
+                error.code != self._refusal_logged[0]
+                or now - self._refusal_logged[1] >= 1.0
+            ):
+                logger.error("Command execution error: %s", e)
+                self._refusal_logged = (error.code, now)
+            self._latch_failure(ac, error, state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.IDLE
+            state.action_state = ActionState.ERROR
             self._update_queue_state(state)
             self.active_command = None
 
@@ -289,9 +305,13 @@ class CommandExecutor:
                 time.time(),
             )
 
+            error = ac.command.robot_error
+            if error is not None:
+                self._latch_failure(ac, error, state)
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.IDLE
+            state.action_state = ActionState.ERROR
 
             # Drop queued streamable commands so they don't pile up after a failure.
             if isinstance(ac.command, MotionCommand) and ac.command.streamable:
@@ -306,6 +326,20 @@ class CommandExecutor:
 
             self._update_queue_state(state)
             self.active_command = None
+
+    @staticmethod
+    def _latch_failure(
+        ac: QueuedCommand, error: RobotError, state: "ControllerState"
+    ) -> None:
+        """A command that ends in error leaves it standing, as a planned
+        move's does: a stream answers no datagram, so ``error()`` and STATUS
+        are how its client hears of a brake-out or a refusal. Only a command
+        a client can wait on has its index failed; a stream's is never
+        waited on, and would crowd real outcomes out of the ring."""
+        state.error = error
+        command = ac.command
+        if not (isinstance(command, MotionCommand) and command.streamable):
+            state.record_failure(ac.command_index, error)
 
     # ---- Cancellation and queue management ----
 

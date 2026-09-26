@@ -95,6 +95,12 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Motion command rejected before dispatch.",
         remedy="Run home() first. Jogging remains available.",
     ),
+    ErrorCode.MOTN_CANCELLED: _ErrorTemplate(
+        title="Command cancelled",
+        cause="The command was cancelled by {scope} before it finished.",
+        effect="The motion did not run to completion.",
+        remedy="Re-issue the command if the motion is still wanted.",
+    ),
     # -- Communication --
     ErrorCode.COMM_QUEUE_FULL: _ErrorTemplate(
         title="Command queue full",
@@ -151,6 +157,12 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         cause="Unrecognized motion profile: {detail}",
         effect="Profile not changed.",
         remedy="Use one of: TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR.",
+    ),
+    ErrorCode.SYS_NOT_SIMULATOR: _ErrorTemplate(
+        title="Simulator-only command",
+        cause="{detail} is only available on the simulator.",
+        effect="Command rejected; the arm is unchanged.",
+        remedy="Switch to the simulator with simulator(True), or drive the arm with a planned move.",
     ),
     ErrorCode.SYS_SELF_COLLISION: _ErrorTemplate(
         title="Self-collision predicted",

@@ -151,11 +151,13 @@ def _simulate_motion_jit(
             speed_in.fill(0)
 
     elif command_out == CommandCode.TELEPORT:
-        # Instant position set — no ramping
+        # Instant position set — no ramping; the pose is exact, so the arm
+        # is referenced there.
         for i in range(6):
             position_in[i] = position_out[i]
             position_f[i] = float(position_out[i])
             speed_in[i] = 0
+        homed_in.fill(1)
         command_out = CommandCode.IDLE
 
     else:

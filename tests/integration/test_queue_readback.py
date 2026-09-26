@@ -43,7 +43,7 @@ def test_the_queue_lists_what_is_owed_and_a_stop_clears_it(client: RobotClient):
         )
         listed = client.queue()
         assert listed and all(name for name in listed), listed
-        assert any("MoveJ" in name for name in listed)
+        assert all(name == "move_j" for name in listed), listed
         assert np.allclose(client.angles(), start, atol=0.05)
 
         # Resuming drains it: what the queue reports is what is still owed.
@@ -91,14 +91,20 @@ def test_the_queue_lists_what_is_owed_and_a_stop_clears_it(client: RobotClient):
         )
         assert client.wait_command(trailing, timeout=25)
 
-        # Stop clears what was owed, and the readback says so immediately.
+        # Stop clears what was owed, and the readback says so immediately. A
+        # joint move to a pose is listed by the method that sent it, as
+        # every command is.
         assert client.pause() == 1
+        here = client.pose()
+        assert here is not None
         client.move_j(first, duration=2, wait=False)
         client.move_j(second, duration=2, wait=False)
+        client.move_j(pose=here, duration=2, wait=False)
         _wait(
-            lambda: len(client.queue() or []) >= 2,
+            lambda: len(client.queue() or []) >= 3,
             "the paused queue never listed the commands a Stop must clear",
         )
+        assert client.queue() == ["move_j", "move_j", "move_j"], client.queue()
         assert client.stop() == 1
         _wait(lambda: client.queue() == [], "Stop left work in the queue")
         assert not client.execution_speed().paused, (

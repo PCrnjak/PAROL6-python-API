@@ -7,7 +7,7 @@ from waldoctl import following_error
 
 from parol6.client.dry_run_client import DryRunRobotClient
 from tests.conftest import rows_for
-from parol6.tools import get_registry
+from parol6.tools import ElectricGripperConfig, get_registry
 
 HOME = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 W1 = [80.0, -80.0, 190.0, 10.0, 10.0, 190.0]
@@ -40,11 +40,19 @@ def test_delay_holds_the_pose_for_its_rows():
 
 def test_gripper_close_ramps_the_jaws_over_the_tools_travel():
     client = DryRunRobotClient(initial_joints_deg=HOME)
-    assert client.select_tool("SSG-48") == 1
+    assert client.select_tool("SSG-48") >= 0
+    # A jaw move before a calibrate previews as the refusal the controller
+    # would give it.
+    refused = client.tool.close()
+    assert client.plan().blocks[refused].error is not None
+    assert client.tool.calibrate() >= 0
     index = client.tool.close()
     record = client.plan()
     block = record.blocks[index]
-    expected = get_registry().get("SSG-48").estimate_duration("close", [])
+    spec = get_registry().get("SSG-48")
+    assert isinstance(spec, ElectricGripperConfig)
+    lo, hi = spec.current_range
+    expected = spec.estimate_duration("move", [1.0, 0.5, lo + (hi - lo) // 2])
     assert expected > 0
     assert block.rows == pytest.approx(rows_for(expected), abs=1)
     closed = record.tool_closed[_span(record, block)]
@@ -117,3 +125,14 @@ def test_budget_truncates_the_record_and_says_so():
     assert cut.rows == rows_for(1.0) < full.rows
     assert cut.blocks[0].rows == cut.rows and cut.blocks[1].rows == 0
     assert full.stop == "completed"
+
+
+def test_a_move_that_starts_with_a_wrist_turn_takes_the_duration_it_names():
+    """From standby a tool-frame reorientation first turns the wrist out of
+    its singularity; a duration names the whole move, turn included."""
+    client = DryRunRobotClient(initial_joints_deg=HOME)
+    index = client.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", duration=2.0)
+    record = client.plan()
+    block = record.blocks[index]
+    assert block.error is None, block.error
+    assert block.rows * record.row_dt_s == pytest.approx(2.0, abs=record.row_dt_s)

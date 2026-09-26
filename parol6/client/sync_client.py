@@ -26,10 +26,9 @@ from waldoctl.types import Axis, Frame
 from ..protocol.wire import (
     EnablementResultStruct,
     StatusBuffer,
-    StatusResultStruct,
 )
 from ..utils.error_catalog import RobotError
-from .async_client import AsyncRobotClient
+from .async_client import AsyncRobotClient, StatusSnapshot
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
@@ -305,10 +304,10 @@ class RobotClient:
         return _run(self._inner.io(timeout=timeout))
 
     def joint_speeds(self) -> list[float] | None:
-        """Current joint speeds in steps per second.
+        """Current joint velocities in rad/s.
 
         Returns:
-            List of 6 joint speeds [J1-J6] in steps/sec, or None on timeout.
+            List of 6 joint velocities [J1-J6] in rad/s, or None on timeout.
         """
         return _run(self._inner.joint_speeds())
 
@@ -323,11 +322,12 @@ class RobotClient:
         """
         return _run(self._inner.pose(frame=frame))
 
-    def status(self) -> StatusResultStruct | None:
+    def status(self) -> StatusSnapshot | None:
         """Aggregate status snapshot.
 
         Returns:
-            StatusResultStruct with pose, angles, speeds, io, tool_status, or None on timeout.
+            StatusSnapshot with pose, angles, speeds, io and a ToolStatus
+            (key ``"NONE"`` when no tool is fitted), or None on timeout.
         """
         return _run(self._inner.status())
 
@@ -430,7 +430,10 @@ class RobotClient:
                 Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
-            True if successful
+            1 once the profile is selected, 0 when no reply arrives.
+
+        Raises:
+            MotionError: when ``profile`` is not a profile name.
         """
         return _run(self._inner.select_profile(profile))
 
@@ -496,7 +499,7 @@ class RobotClient:
         """
         return _run(self._inner.is_estop_pressed())
 
-    def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
+    def is_robot_stopped(self, threshold_speed: float = 0.01) -> bool:
         """Check if robot has stopped moving.
 
         Prefer ``wait_command()`` for waiting on specific commands.
@@ -504,7 +507,7 @@ class RobotClient:
         diagnostics or manual stopping logic.
 
         Args:
-            threshold_speed: Speed threshold in steps/sec.
+            threshold_speed: Speed threshold in rad/s.
 
         Returns:
             True if all joints below threshold.
@@ -578,8 +581,8 @@ class RobotClient:
         self,
         angles: list[float],
         *,
-        duration: float = ...,
-        speed: float = ...,
+        duration: float | None = ...,
+        speed: float | None = ...,
         accel: float = ...,
         r: float = ...,
         rel: bool = ...,
@@ -593,8 +596,8 @@ class RobotClient:
         angles: list[float] | None = ...,
         *,
         pose: list[float],
-        duration: float = ...,
-        speed: float = ...,
+        duration: float | None = ...,
+        speed: float | None = ...,
         accel: float = ...,
         r: float = ...,
         wait: bool = ...,
@@ -606,8 +609,8 @@ class RobotClient:
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,
@@ -622,6 +625,7 @@ class RobotClient:
                     speed=speed,
                     accel=accel,
                     r=r,
+                    rel=rel,
                     wait=wait,
                     timeout=timeout,
                 )
@@ -644,8 +648,8 @@ class RobotClient:
         pose: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float = 0.0,
-        speed: float = 0.0,
+        duration: float | None = None,
+        speed: float | None = None,
         accel: float = 1.0,
         r: float = 0.0,
         rel: bool = False,

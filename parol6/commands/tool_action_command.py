@@ -5,6 +5,7 @@ Generic tool action command — dispatches to gripper commands by config type.
 import logging
 
 from parol6.commands.base import ExecutionStatusCode, MotionCommand
+from parol6.commands.gripper_commands import ElectricGripperCommand
 from parol6.protocol.wire import CmdType, ToolActionCmd
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
@@ -42,6 +43,13 @@ class ToolActionCommand(MotionCommand[ToolActionCmd]):
 
         delegate.setup(state)
         self._delegate = delegate
+
+    def halt(self, state: ControllerState) -> None:
+        """Stop the tool where it is, for a stop or e-stop. Only an electric
+        gripper has motion in flight to halt; a pneumatic valve switches
+        within the tick it was commanded."""
+        if isinstance(self._delegate, ElectricGripperCommand):
+            self._delegate.halt(state)
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         if self._delegate is None:

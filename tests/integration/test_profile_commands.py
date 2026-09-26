@@ -115,6 +115,43 @@ class TestProfileMotionBehavior:
                 f"(expected {target_pose[0]:.1f}, got {pose[0]:.1f})"
             )
 
+    def test_a_dry_run_times_a_move_as_the_selected_profile_runs_it(
+        self, client, server_proc
+    ):
+        """A preview is only worth its rows if it is timed as the arm will run
+        the move: after ``select_profile`` the dry run plans with that profile,
+        as the controller does."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        target = [40.0, -60.0, 200.0, 30.0, 20.0, 150.0]
+
+        def previewed(profile: str) -> float:
+            preview = DryRunRobotClient(initial_joints_deg=standby)
+            assert preview.select_profile(profile) == 1
+            index = preview.move_j(target, speed=0.5)
+            record = preview.plan()
+            assert record.blocks[index].error is None
+            return record.blocks[index].rows * record.row_dt_s
+
+        quintic = previewed("QUINTIC")
+        assert quintic > previewed("TOPPRA") + 0.3, (
+            "the preview timed the move under QUINTIC as it does under TOPPRA"
+        )
+
+        assert client.select_profile("QUINTIC") > 0
+        # The first run pays for planning a profile nothing has used yet.
+        for _ in range(2):
+            assert client.teleport(standby) == 1
+            start = time.monotonic()
+            assert client.move_j(target, speed=0.5, wait=True, timeout=10.0) >= 0
+            ran = time.monotonic() - start
+        assert abs(ran - quintic) < 0.25, (
+            f"previewed {quintic:.2f} s under QUINTIC, the arm took {ran:.2f} s"
+        )
+
 
 @pytest.mark.integration
 class TestServoCartesian:

@@ -10,32 +10,12 @@ import socket
 import pytest
 
 from parol6.protocol.wire import SetShapesCmd, ShapeWire, encode_command
-from parol6.server.controller import Controller
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.utils.error_codes import ErrorCode
+from tests.integration.controller_loop import tick, tick_until
 from waldoctl import Sphere
 
 pytestmark = pytest.mark.integration
-
-
-def _tick(controller: Controller, state) -> None:
-    controller._read_from_firmware(state)
-    controller._check_attachments(state)
-    controller._poll_commands(state)
-    controller._handle_estop(state)
-    controller._check_attachments(state)
-    if not controller.estop_active:
-        controller._execute_commands(state)
-    controller._write_to_firmware(state)
-    controller._transport_mgr.tick_simulation(state.current_tool, tool_teleport_pos=-1)
-
-
-def _tick_until(controller: Controller, state, condition, message: str) -> None:
-    for _ in range(50):
-        _tick(controller, state)
-        if condition():
-            return
-    pytest.fail(message)
 
 
 def test_estop_owns_the_error_until_release_then_the_attachment_latches(controller):
@@ -44,7 +24,7 @@ def test_estop_owns_the_error_until_release_then_the_attachment_latches(controll
     assert isinstance(robot, MockSerialTransport)
     state.Homed_in[:] = 1
     robot.sync_from_controller_state(state)
-    _tick_until(
+    tick_until(
         controller,
         state,
         lambda: state.enabled and all(state.Homed_in[:6]),
@@ -60,7 +40,7 @@ def test_estop_owns_the_error_until_release_then_the_attachment_latches(controll
         sender.sendto(
             encode_command(SetShapesCmd(shapes=[ShapeWire(*part.to_wire())])), address
         )
-        _tick_until(
+        tick_until(
             controller,
             state,
             lambda: state.has_attachments,
@@ -68,20 +48,20 @@ def test_estop_owns_the_error_until_release_then_the_attachment_latches(controll
         )
 
     robot.press_estop(True)
-    _tick_until(
+    tick_until(
         controller,
         state,
         lambda: controller.estop_active,
         "the E-stop press was never seen",
     )
     for _ in range(5):
-        _tick(controller, state)
+        tick(controller, state)
         assert state.error is not None
         assert state.error.code == ErrorCode.SYS_ESTOP_ACTIVE, state.error
     assert not state.attachments_valid
 
     robot.press_estop(False)
-    _tick_until(
+    tick_until(
         controller,
         state,
         lambda: state.error is not None

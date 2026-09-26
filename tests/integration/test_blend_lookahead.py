@@ -11,6 +11,30 @@ import pytest
 class TestJointBlendLookahead:
     """Joint-space blending with N-command lookahead."""
 
+    def test_a_blended_relative_chain_past_a_joint_limit_is_refused(
+        self, client, server_proc
+    ):
+        """Relative moves blended into one path are held to the joint limits
+        at every target, as a single move is: two +25° steps of J1 from
+        standby end past its limit, so the chain is refused and the arm
+        stays inside it."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        from parol6 import MotionError
+        from parol6.config import LIMITS
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        hi = float(LIMITS.joint.position.deg[0, 1])
+        assert standby[0] + 50.0 > hi > standby[0] + 25.0
+        step = [25.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        first = client.move_j(step, speed=0.5, rel=True, r=5.0, wait=False)
+        second = client.move_j(step, speed=0.5, rel=True, wait=False)
+        assert min(first, second) >= 0
+        with pytest.raises(MotionError):
+            client.wait_command(second, timeout=10.0)
+        angles = client.angles()
+        assert angles is not None
+        assert angles[0] < hi, f"J1 ran to {angles[0]:.1f}°, past its {hi:.1f}° limit"
+
     def test_three_move_j_blended_reaches_final_target(self, client, server_proc):
         """Three move_j with blend zones should reach the last target."""
         targets = [

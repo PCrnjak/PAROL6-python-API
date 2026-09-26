@@ -34,7 +34,6 @@ from parol6.motion.streaming_executors import (
     _pose_to_tangent_jit,
     _tangent_to_pose_jit,
 )
-from parol6.motion.trajectory import _smooth_singularity_outliers
 from parol6.protocol.wire import (
     _pack_bitfield,
     _pack_positions,
@@ -298,40 +297,15 @@ def warmup_jit() -> float:
     )
     _progress("simulator & I/O")
 
-    # Workspace arrays for jit functions below (SE3 funcs already warmed by pinokin)
+    # parol6/motion/streaming_executors.py
     dummy_twist = np.zeros(6, dtype=np.float64)
     omega_ws = np.zeros(3, dtype=np.float64)
-    R_ws = np.zeros((3, 3), dtype=np.float64)
-    V_ws = np.zeros((3, 3), dtype=np.float64)
-    V_inv_ws = np.zeros((3, 3), dtype=np.float64)
-
-    # parol6/motion/streaming_executors.py
-    ref_inv = np.zeros((4, 4), dtype=np.float64)
-    delta_4x4 = np.zeros((4, 4), dtype=np.float64)
-    _pose_to_tangent_jit(
-        dummy_4x4,
-        dummy_4x4_b,
-        ref_inv,
-        delta_4x4,
-        dummy_twist,
-        omega_ws,
-        R_ws,
-        V_inv_ws,
-    )
-    _tangent_to_pose_jit(
-        dummy_4x4, dummy_twist, delta_4x4, dummy_4x4_out, omega_ws, R_ws, V_ws
-    )
+    rel_rot = np.zeros((3, 3), dtype=np.float64)
+    _pose_to_tangent_jit(dummy_4x4, dummy_4x4_b, rel_rot, dummy_twist, omega_ws)
+    _tangent_to_pose_jit(dummy_4x4, dummy_twist, rel_rot, dummy_4x4_out, omega_ws)
 
     # parol6/commands/servo_commands.py
     _max_vel_ratio_jit(dummy_6f, dummy_6f)
-
-    # parol6/motion/trajectory.py — non-trivial array exercises every branch
-    # (diff loop, median, bad-detection, interp loop).
-    dummy_chain = np.zeros((10, 6), dtype=np.float64)
-    for i in range(10):
-        dummy_chain[i] = i * 0.01
-    dummy_chain[5, 3] += 1.0  # synthetic outlier so the interp loop compiles
-    _smooth_singularity_outliers(dummy_chain)
 
     elapsed = time.perf_counter() - start
     logger.info("JIT warmup complete (%.1fs).", elapsed)
