@@ -160,7 +160,12 @@ def test_the_speed_derivative_follows_the_frames_it_was_sampled_from(monkeypatch
     monkeypatch.setattr(
         status_cache,
         "time",
-        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+        SimpleNamespace(
+            monotonic=lambda: clock[0],
+            perf_counter=lambda: clock[0],
+            time=time.time,
+            sleep=time.sleep,
+        ),
     )
     cache = StatusCache()
     try:
@@ -204,6 +209,43 @@ def test_the_speed_derivative_follows_the_frames_it_was_sampled_from(monkeypatch
         assert moving > 0.0, "a moving arm has to report a speed at 5 Hz too"
         assert frame(0.2, steps=0) == 0.0, (
             "the speed outlived the motion by a window of 5 Hz refreshes"
+        )
+    finally:
+        monkeypatch.undo()
+        cache.close()
+
+
+def test_tcp_speed_is_steady_on_a_clock_that_ticks_every_15_ms(monkeypatch):
+    """Windows before Python 3.13 advances ``time.monotonic`` in 15.6 ms
+    ticks. Frames 10 ms apart carrying equal chords read one speed, not
+    one scattered by a fifth as the window's ends fall on either side of
+    a tick: the samples are stamped with the fine clock."""
+    clock = [100.0]
+    tick_s = 0.0156
+    monkeypatch.setattr(
+        status_cache,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: (clock[0] // tick_s) * tick_s,
+            perf_counter=lambda: clock[0],
+            time=time.time,
+            sleep=time.sleep,
+        ),
+    )
+    cache = StatusCache()
+    try:
+        state = ControllerState()
+        readings: list[float] = []
+        for frame_no in range(4 * _TCP_SPEED_WINDOW):
+            clock[0] += 0.01
+            state.Position_in[0] += 200
+            cache.mark_serial_observed()
+            cache.update_from_state(state)
+            if frame_no > _TCP_SPEED_WINDOW:
+                readings.append(cache.tcp_speed)
+        assert readings[0] > 0.0
+        assert max(readings) == pytest.approx(min(readings), rel=1e-3), (
+            f"the same chord per frame read {min(readings):.1f}..{max(readings):.1f} mm/s"
         )
     finally:
         monkeypatch.undo()

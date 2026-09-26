@@ -237,13 +237,19 @@ def _leave_wrist_singularity(
     the solver can find no step at all from a seed whose jacobian has
     lost a rank. The turn is made first, as a joint move of its own, and
     the chain is solved again from the turned wrist. The turns are tried
-    in a fixed order so the same move always turns the wrist the same
-    way; ``q_hint``, the solver's own answer for the first pose when it
-    gave one, lends its J4 as the last resort.
+    in a fixed order, the solver's own answer for the first pose
+    (``q_hint``) last, and the first whose chain steps no joint further
+    between two rows than the turn's own rows do is taken, so the same
+    move always turns the wrist the same way. The split the turn settles
+    on decides whether the solver snaps the wrist round in one row
+    further along, where the tool has barely left the singularity; when
+    every chain snaps, the one that snaps least is taken.
     """
     turns: list[float] = list(_WRIST_TURNS_RAD)
     if q_hint is not None:
         turns.append(float(q_hint[3] - q_from[3]))
+    least: tuple[NDArray[np.float64], int] | None = None
+    least_step = np.inf
     for turn in turns:
         bridge = _wrist_turn(q_from, turn, se3_poses[0])
         if bridge is None:
@@ -252,13 +258,20 @@ def _leave_wrist_singularity(
         if not result.all_valid:
             continue
         path = np.asarray(result.joint_positions, dtype=np.float64)
-        if _ik_branch_hop(np.concatenate([bridge[np.newaxis], path])) is not None:
+        chain = np.concatenate([bridge[np.newaxis], path])
+        if _ik_branch_hop(chain) is not None:
+            continue
+        step = float(np.max(np.abs(np.diff(chain, axis=0)))) if len(chain) > 1 else 0.0
+        if step > _WRIST_TURN_ROW_RAD and step >= least_step:
             continue
         rows = max(1, int(np.ceil(abs(turn) / _WRIST_TURN_ROW_RAD)))
         fractions = np.arange(1, rows + 1, dtype=np.float64)[:, np.newaxis] / rows
         sweep = q_from + fractions * (bridge - q_from)
-        return np.concatenate([q_from[np.newaxis], sweep, path]), rows
-    return None
+        least = (np.concatenate([q_from[np.newaxis], sweep, path]), rows)
+        least_step = step
+        if step <= _WRIST_TURN_ROW_RAD:
+            break
+    return least
 
 
 @dataclass
@@ -334,7 +347,7 @@ class JointPath:
         )
 
         if result.all_valid:
-            positions = np.asarray(result.joint_positions, dtype=np.float64)
+            positions = np.ascontiguousarray(result.joint_positions, dtype=np.float64)
             hop = _ik_branch_hop(positions)
             if hop is None:
                 return cls(positions=positions)
@@ -378,9 +391,17 @@ class JointPath:
                     )
                 )
             # Diagnostic mode: return partial data for visualization
-            return cls(positions=result.joint_positions, valid=valid)
+            return cls(
+                positions=np.ascontiguousarray(
+                    result.joint_positions, dtype=np.float64
+                ),
+                valid=valid,
+            )
 
-        return cls(positions=result.joint_positions, valid=valid)
+        return cls(
+            positions=np.ascontiguousarray(result.joint_positions, dtype=np.float64),
+            valid=valid,
+        )
 
     @classmethod
     def interpolate(

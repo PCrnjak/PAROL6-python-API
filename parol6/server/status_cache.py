@@ -164,6 +164,9 @@ class StatusCache:
         self.tool_status: ToolStatus = ToolStatus()
 
         self.last_serial_s: float = 0.0  # last time a fresh serial frame was observed
+        # The same instant on perf_counter, for differentiating: monotonic
+        # ticks every 15.6 ms on Windows before Python 3.13.
+        self.last_serial_pc: float = 0.0
         self._last_tool_name: str = "NONE"  # Track tool changes
         self._last_tool_variant: str = ""  # Track variant changes
         self._last_tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -465,8 +468,8 @@ class StatusCache:
             self._last_shapes_version = state.shapes_version
             self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
 
-        fresh_frame = self.last_serial_s != self._tcp_frame_s
-        self._tcp_frame_s = self.last_serial_s
+        fresh_frame = self.last_serial_pc != self._tcp_frame_s
+        self._tcp_frame_s = self.last_serial_pc
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
 
@@ -476,12 +479,12 @@ class StatusCache:
             self._tcp_hist_pos[i, 0] = self.pose[3]
             self._tcp_hist_pos[i, 1] = self.pose[7]
             self._tcp_hist_pos[i, 2] = self.pose[11]
-            self._tcp_hist_t[i] = self.last_serial_s
+            self._tcp_hist_t[i] = self.last_serial_pc
             self._tcp_hist_i = (i + 1) % _TCP_SPEED_WINDOW
             self._tcp_hist_n = min(self._tcp_hist_n + 1, _TCP_SPEED_WINDOW)
             if self._tcp_hist_n >= 2:
                 oldest = (self._tcp_hist_i - self._tcp_hist_n) % _TCP_SPEED_WINDOW
-                dt = self.last_serial_s - self._tcp_hist_t[oldest]
+                dt = self.last_serial_pc - self._tcp_hist_t[oldest]
                 if dt > 0.0:
                     dx = self.pose[3] - self._tcp_hist_pos[oldest, 0]
                     dy = self.pose[7] - self._tcp_hist_pos[oldest, 1]
@@ -493,7 +496,7 @@ class StatusCache:
             # against the hold.
             if fresh_frame and self._tcp_hist_n:
                 newest = (self._tcp_hist_i - 1) % _TCP_SPEED_WINDOW
-                if self.last_serial_s - self._tcp_hist_t[newest] >= _TCP_STILL_S:
+                if self.last_serial_pc - self._tcp_hist_t[newest] >= _TCP_STILL_S:
                     self.tcp_speed = 0.0
                     self._tcp_hist_n = 0
 
@@ -656,6 +659,7 @@ class StatusCache:
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""
         self.last_serial_s = time.monotonic()
+        self.last_serial_pc = time.perf_counter()
 
     def age_s(self) -> float:
         """Seconds since last fresh serial observation (used to gate broadcasting)."""

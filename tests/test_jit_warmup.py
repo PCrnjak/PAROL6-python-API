@@ -87,6 +87,12 @@ def test_no_recompile_during_motion() -> None:
     client.move_j(_W1, speed=0.5, r=5.0)  # blended
     client.move_j(_W2, speed=0.5, r=5.0)  # blended
     client.move_j(_HOME, speed=0.5)
+    # A cartesian move's joint path is the IK solver's own array, in the
+    # solver's layout, and from the standby pose it starts with a wrist
+    # turn: both go through the planner's rad-to-steps conversion.
+    pose = client.pose()
+    pose[1] += 15.0
+    client.move_l(pose, speed=0.5)
     client.wait_motion(timeout=10.0)
 
     recompiled = sorted(

@@ -33,15 +33,33 @@ def tick_until(controller: Controller, state, condition, message: str, ticks=50)
     pytest.fail(message)
 
 
+class Pacer:
+    """Holds a ticking loop to the control rate on any OS: ``wait()``
+    returns at the next tick boundary, sleeping most of the interval and
+    spinning the last two milliseconds. ``time.sleep`` alone overshoots
+    by tens of milliseconds on the macOS runners, and the commands' timers
+    (a jog's duration, a stream's grace) run on the wall clock."""
+
+    def __init__(self) -> None:
+        self._next = time.perf_counter()
+
+    def wait(self) -> None:
+        self._next += INTERVAL_S
+        while (remaining := self._next - time.perf_counter()) > 0.0:
+            if remaining > 0.002:
+                time.sleep(remaining - 0.002)
+
+
 def tick_for(controller: Controller, state, condition, message: str, seconds: float):
     """Tick at the control rate until *condition* holds, for up to *seconds*
     of wall time (a cold planner JITs its motion pipeline)."""
     deadline = time.monotonic() + seconds
+    pacer = Pacer()
     while time.monotonic() < deadline:
         tick(controller, state)
         if condition():
             return
-        time.sleep(INTERVAL_S)
+        pacer.wait()
     pytest.fail(message)
 
 

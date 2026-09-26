@@ -274,6 +274,27 @@ def test_a_relative_pose_move_j_is_refused_in_preview_and_live():
         asyncio.run(live())
 
 
+def test_a_move_out_of_the_wrist_singularity_is_timed_by_its_length_not_a_snap():
+    """The turn a chain takes out of the singularity is the one whose
+    chain stays continuous. With the split between J4 and J6 settled a
+    hair wrong, the solver snaps the wrist round in one row once the
+    tool has barely left the singularity; TOPP-RA slows over that row,
+    but a profile that times the path by its rows stretches a 5 mm move
+    to many times its length."""
+    for profile in ("LINEAR", "TRAPEZOID"):
+        client = DryRunRobotClient(initial_joints_deg=HOME)
+        assert client.select_profile(profile) == 1
+        client.set_tcp_transform(5.0, -3.0, 20.0, 20.0, 25.0, -10.0)
+        index = client.move_l(
+            [0.0, 0.0, 5.0, 0.0, 0.0, 0.0], frame="TRF", rel=True, speed=0.2
+        )
+        record = client.plan()
+        block = record.blocks[index]
+        assert block.error is None, block.error
+        planned = block.rows * record.row_dt_s
+        assert planned < 3.0, f"{profile}: a 5 mm move planned as {planned:.2f} s"
+
+
 def test_a_move_that_leaves_the_wrist_singularity_previews_as_it_runs():
     """From standby the wrist is singular; a tool-frame reorientation leaves
     it through a turn of J4 on the arm, and the preview plans the same turn

@@ -19,7 +19,7 @@ def test_a_jaw_move_waits_for_the_calibrate_ahead_of_it(controller):
     state = controller.state_manager.get_state()
     controller._planner.start()
     ready(controller, state, homed=True)
-    move = ToolActionCmd(tool_key="SSG-48", action="move", params=[0.5, 0.5, 600])
+    move = ToolActionCmd(tool_key="SSG-48", action="move", params=[0.5, 0.5, 0.4])
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setblocking(False)

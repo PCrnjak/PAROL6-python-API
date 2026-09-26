@@ -37,16 +37,15 @@ def _point_to_segment_mm(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
 
 
 class _TcpSampler:
-    """Samples the TCP transform and speed from ``status()``/``tcp_speed()``
-    on a background thread; ``positions`` drops the repeats the status
-    cache serves between its updates."""
+    """Samples the TCP transform from ``status()`` on a background thread;
+    ``positions`` drops the repeats the status cache serves between its
+    updates."""
 
     def __init__(self, client):
         self._client = client
         self._done = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self.frames: list[np.ndarray] = []
-        self.speeds: list[float] = []
 
     def __enter__(self):
         self._thread.start()
@@ -59,12 +58,10 @@ class _TcpSampler:
     def _run(self):
         while not self._done.is_set():
             status = self._client.status()
-            speed = self._client.tcp_speed()
             if status is not None:
                 self.frames.append(
                     np.asarray(status.pose, dtype=np.float64).reshape(4, 4)
                 )
-                self.speeds.append(float(speed) if speed is not None else 0.0)
             time.sleep(0.02)
 
     def positions(self) -> np.ndarray:
@@ -74,15 +71,6 @@ class _TcpSampler:
             if np.linalg.norm(p - kept[-1]) > 1e-6:
                 kept.append(p)
         return np.asarray(kept)
-
-    def positions_and_speeds(self) -> tuple[np.ndarray, np.ndarray]:
-        pts = [f[:3, 3] for f in self.frames]
-        kept_p, kept_v = [pts[0]], [self.speeds[0]]
-        for p, v in zip(pts[1:], self.speeds[1:], strict=True):
-            if np.linalg.norm(p - kept_p[-1]) > 1e-6:
-                kept_p.append(p)
-                kept_v.append(v)
-        return np.asarray(kept_p), np.asarray(kept_v)
 
 
 def _start(client) -> tuple[list[float], np.ndarray]:
@@ -112,7 +100,11 @@ def test_move_p_rounds_its_corner_and_holds_one_tool_speed(
 ):
     """An L-shaped process move cuts its corner by a quarter of the shorter
     leg, never stops in it, and cruises at one tool speed, under whichever
-    profile times it."""
+    profile times it. The geometry is read off the arm; the speed off the
+    plan the arm plays row by row, which a status sample rate cannot
+    scatter."""
+    from parol6.client.dry_run_client import DryRunRobotClient
+
     assert client.select_profile(profile) > 0
     pose, start = _start(client)
     s = start[:3, 3]
@@ -121,10 +113,22 @@ def test_move_p_rounds_its_corner_and_holds_one_tool_speed(
     corner_xyz, end_xyz = np.array(corner[:3]), np.array(end[:3])
     radius = 0.25 * 50.0
 
+    preview = DryRunRobotClient(initial_joints_deg=client.angles())
+    assert preview.select_profile(profile) == 1
+    index = preview.move_p([corner, end], speed=SPEED)
+    record = preview.plan()
+    block = record.blocks[index]
+    assert block.error is None, block.error
+    planned = (
+        np.asarray(record.tcp[block.start_row : block.start_row + block.rows, :3])
+        * 1000.0
+    )
+    speeds = np.linalg.norm(np.diff(planned, axis=0), axis=1) / record.row_dt_s
+
     with _TcpSampler(client) as sampler:
         assert client.move_p([corner, end], speed=SPEED, timeout=20.0) >= 0
         assert client.wait_motion(timeout=20.0)
-    pts, speeds = sampler.positions_and_speeds()
+    pts = sampler.positions()
     assert len(pts) > 10
 
     assert np.linalg.norm(pts[-1] - end_xyz) < 0.5
@@ -142,17 +146,14 @@ def test_move_p_rounds_its_corner_and_holds_one_tool_speed(
     ]
     assert max(on_legs) < 0.5, "outside the corner zone the path is the polyline"
 
-    away = (np.linalg.norm(pts - s, axis=1) > 12.0) & (
-        np.linalg.norm(pts - end_xyz, axis=1) > 12.0
+    away = (np.linalg.norm(planned[1:] - s, axis=1) > 12.0) & (
+        np.linalg.norm(planned[1:] - end_xyz, axis=1) > 12.0
     )
     cruise = speeds[away]
     print(
         f"{profile} cruise {cruise.min():.1f}..{cruise.max():.1f} mm/s "
         f"of {CRUISE_MM_S:.0f}"
     )
-    # Percentiles, not extremes: a control-loop stall on a loaded runner
-    # shows as a sample or two of lower measured speed, where a path that
-    # varies its speed does so over a stretch of it.
     slow, fast = np.percentile(cruise, [10, 90])
     assert slow > 0.8 * fast, "one tool speed through the corner"
     assert cruise.max() < 1.1 * CRUISE_MM_S
@@ -183,8 +184,17 @@ def test_move_s_never_reverses_along_unevenly_spaced_waypoints(client, server_pr
     assert along.max() < 60.0 + 0.3, "the spline never overshoots its end"
     assert np.all(np.diff(along) > -0.3), "the tool never turns back along the line"
     assert lateral.max() < 0.5
+    # Between two status samples the tool covers a few millimetres: a
+    # waypoint is passed when the sampled polyline runs within 1 mm of it.
     for wp in waypoints:
-        assert np.min(np.linalg.norm(pts - np.array(wp[:3]), axis=1)) < 1.0
+        w = np.array(wp[:3])
+        assert (
+            min(
+                _point_to_segment_mm(w, a, b)
+                for a, b in zip(pts[:-1], pts[1:], strict=True)
+            )
+            < 1.0
+        )
     assert np.linalg.norm(pts[-1] - end_xyz) < 0.5
 
 

@@ -142,17 +142,27 @@ class TestProfileMotionBehavior:
         )
 
         assert client.select_profile("QUINTIC") > 0
-        # The first run pays for planning a profile nothing has used yet.
-        for _ in range(2):
-            assert client.teleport(standby) == 1
-            start = time.monotonic()
-            assert (
-                client.move_j(target, speed=0.5, accel=1.0, wait=True, timeout=10.0)
-                >= 0
-            )
-            ran = time.monotonic() - start
-        assert abs(ran - quintic) < 0.25, (
-            f"previewed {quintic:.2f} s under QUINTIC, the arm took {ran:.2f} s"
+        assert client.teleport(standby) == 1
+        planned: list[float] = []
+
+        def holds_the_move(status) -> bool:
+            if status.queued_segments != 1:
+                return False
+            planned.append(float(status.queued_duration))
+            return True
+
+        # Paused, the controller plans the move and holds it, and the status
+        # stream carries the duration it planned, whatever rate the loop
+        # then plays it at.
+        try:
+            assert client.pause() == 1
+            assert client.move_j(target, speed=0.5, accel=1.0, wait=False) >= 0
+            assert client.wait_status(holds_the_move, timeout=10.0)
+        finally:
+            assert client.stop() == 1
+        assert abs(planned[-1] - quintic) < 0.02, (
+            f"previewed {quintic:.2f} s under QUINTIC, the controller planned "
+            f"{planned[-1]:.2f} s"
         )
 
 

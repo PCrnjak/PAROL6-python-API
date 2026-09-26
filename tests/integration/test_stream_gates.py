@@ -24,7 +24,14 @@ from parol6.protocol.wire import (
 from parol6.server.state import get_fkine_se3
 from parol6.utils.error_codes import ErrorCode
 from pinokin import se3_rpy
-from tests.integration.controller_loop import push, ready, send, tick, tick_until
+from tests.integration.controller_loop import (
+    Pacer,
+    push,
+    ready,
+    send,
+    tick,
+    tick_until,
+)
 from waldoctl import Box
 
 pytestmark = pytest.mark.integration
@@ -160,12 +167,13 @@ def test_a_servo_stream_runs_at_its_speed_and_holds_when_its_client_goes_silent(
         peak = 0.0
         prev = start.copy()
         deadline = time.monotonic() + 3.0
+        pacer = Pacer()
         while time.monotonic() < deadline:
             tick(controller, state)
             q = _q_rad(state)
             peak = max(peak, abs(q[0] - prev[0]) / INTERVAL_S)
             prev = q
-            time.sleep(INTERVAL_S)
+            pacer.wait()
         assert peak <= LIMITS.joint.hard.velocity[0] * 0.3 * 1.05, (
             f"J1 ran at {peak:.3f} rad/s against a 30% ceiling of "
             f"{LIMITS.joint.hard.velocity[0] * 0.3:.3f} rad/s"
@@ -211,6 +219,14 @@ def test_a_jog_l_braked_short_of_a_keep_out_ends_in_error(controller):
         assert state.error.code == int(ErrorCode.SYS_SELF_COLLISION), state.error
         assert "slab" in state.error.cause, state.error.cause
         assert controller._executor.active_command is None
+        # The datagram pushed just before the stop may still be in flight:
+        # its acceptance clears the error and the jog brakes again at
+        # once. Once the client is silent, the error latches.
+        for _ in range(10):
+            tick(controller, state)
+        assert state.error is not None, "the collision error did not latch"
+        assert state.error.code == int(ErrorCode.SYS_SELF_COLLISION), state.error
+        assert controller._executor.active_command is None
         held = state.Position_in.copy()
         for _ in range(50):
             tick(controller, state)
@@ -218,6 +234,81 @@ def test_a_jog_l_braked_short_of_a_keep_out_ends_in_error(controller):
         assert np.abs(state.Position_in - held).max() <= 1, (
             "the arm moved on after the jog ended"
         )
+
+
+def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(controller):
+    """A jog_l is a straight TCP line: with an angular part as well, the tool
+    turns about the TCP while the TCP holds its line. The dry run previews
+    the pose a full-scale diagonal ends at, held to the same speed ceiling
+    as on the arm. (Near the wrist singularity at standby the joint speed
+    ceilings slow the tool on the arm, which a preview does not model, so
+    the diagonal starts clear of it.) The jog's duration runs on the wall
+    clock, so the ticks are paced to the control rate the preview models."""
+    import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+    from parol6.client.dry_run_client import DryRunRobotClient
+
+    standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+    linear = float(LIMITS.cart.jog.velocity.linear)
+    angular = float(LIMITS.cart.jog.velocity.angular)
+    clear_of_the_wrist = [90.0, -80.0, 190.0, 0.0, 30.0, 180.0]
+    axes = ("X", "Y", "Z", "RX", "RY", "RZ")
+    state = controller.state_manager.get_state()
+    rpy = np.zeros(3)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for begin, velocities, duration, previewed in (
+            (standby, [0.05 / linear, 0.0, 0.0, 0.0, 0.0, 0.5 / angular], 2.0, False),
+            (clear_of_the_wrist, [1.0, -1.0, -1.0, 0.0, 0.0, 0.0], 0.6, True),
+        ):
+            preview = DryRunRobotClient(initial_joints_deg=begin)
+            assert preview.jog_l(
+                "WRF",
+                axes=[a for a, v in zip(axes, velocities, strict=True) if v],
+                speeds_list=[v for v in velocities if v],
+                duration=duration,
+                accel=1.0,
+            )
+            assert preview.plan().blocks[0].error is None
+            expected = preview.pose()
+
+            ready(controller, state, homed=True, at_deg=begin)
+            start = get_fkine_se3(state)[:3, 3].copy()
+            direction = np.asarray(velocities[:3], dtype=np.float64)
+            direction /= np.linalg.norm(direction)
+            # Full acceleration reaches the jog's speed well inside its
+            # duration, where the preview, which does not model the ramps,
+            # holds it all along.
+            push(
+                controller,
+                sock,
+                JogLCmd(velocities=velocities, duration=duration, accel=1.0),
+            )
+            worst = 0.0
+            pacer = Pacer()
+            # The jog runs its duration, then brakes: tick through the whole of it.
+            for _ in range(int(round((duration + 1.0) / INTERVAL_S))):
+                tick(controller, state)
+                offset = get_fkine_se3(state)[:3, 3] - start
+                worst = max(
+                    worst,
+                    float(
+                        np.linalg.norm(offset - np.dot(offset, direction) * direction)
+                    ),
+                )
+                pacer.wait()
+            assert worst * 1000.0 < 1.0, (
+                f"{velocities}: the TCP left its line by {worst * 1000.0:.1f} mm"
+            )
+            if previewed:
+                final = get_fkine_se3(state)
+                se3_rpy(final, rpy)
+                miss = np.linalg.norm(final[:3, 3] * 1000.0 - np.asarray(expected[:3]))
+                turned = np.abs(
+                    (np.degrees(rpy) - np.asarray(expected[3:]) + 180.0) % 360.0 - 180.0
+                ).max()
+                assert miss < 3.0 and turned < 1.0, (
+                    f"previewed {expected}, the arm ended {miss:.1f} mm and "
+                    f"{turned:.2f}° away"
+                )
 
 
 def test_a_servo_l_stream_through_an_unreachable_pose_resumes(controller):
