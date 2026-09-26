@@ -51,8 +51,7 @@ def test_gripper_close_ramps_the_jaws_over_the_tools_travel():
     block = record.blocks[index]
     spec = get_registry().get("SSG-48")
     assert isinstance(spec, ElectricGripperConfig)
-    lo, hi = spec.current_range
-    expected = spec.estimate_duration("move", [1.0, 0.5, lo + (hi - lo) // 2])
+    expected = spec.estimate_duration("move", [1.0, 0.5, 0.5])
     assert expected > 0
     assert block.rows == pytest.approx(rows_for(expected), abs=1)
     closed = record.tool_closed[_span(record, block)]

@@ -116,7 +116,7 @@ class IOCommand(QueryCommand[IOCmd]):
 
 @register_command(CmdType.JOINT_SPEEDS)
 class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
-    """Current joint velocities in rad/s, the units of the status stream."""
+    """Current joint velocities in deg/s, the units of the status stream."""
 
     PARAMS_TYPE = JointSpeedsCmd
     QUERY_TYPE = QueryType.SPEEDS
@@ -126,7 +126,7 @@ class JointSpeedsCommand(QueryCommand[JointSpeedsCmd]):
     def compute(self, state: "ControllerState") -> Response:
         cache = get_cache()
         cache.update_from_state(state)
-        return SpeedsResultStruct(speeds=cache.speeds_rad_s.tolist())
+        return SpeedsResultStruct(speeds=cache.speeds_deg_s.tolist())
 
 
 @register_command(CmdType.STATUS)
@@ -145,7 +145,7 @@ class StatusCommand(QueryCommand[StatusCmd]):
         return StatusResultStruct(
             pose=cache.pose.tolist(),
             angles=cache.angles_deg.tolist(),
-            speeds=cache.speeds_rad_s.tolist(),
+            speeds=cache.speeds_deg_s.tolist(),
             io=cache.io.tolist(),
             tool_status=[
                 ts.key,

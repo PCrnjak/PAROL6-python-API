@@ -129,6 +129,7 @@ from ..protocol.wire import (
     decode_message,
     encode_command,
     encode_command_into,
+    planned_move_timing,
 )
 from waldoctl.types import Axis, Frame
 from waldoctl import PingResult
@@ -288,7 +289,7 @@ class _StatusProtocol(asyncio.DatagramProtocol):
 @dataclass(frozen=True, slots=True)
 class StatusSnapshot:
     """One ``status()`` reading: the TCP transform (flattened row-major 4×4,
-    translation in mm), joint angles (deg), joint velocities (rad/s), digital
+    translation in mm), joint angles (deg), joint velocities (deg/s), digital
     I/O, and the fitted tool's status."""
 
     pose: list[float]
@@ -997,7 +998,7 @@ class AsyncRobotClient(_RobotClientABC):
         return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
-        """Current joint velocities in rad/s [J1, J2, J3, J4, J5, J6], the
+        """Current joint velocities in deg/s [J1, J2, J3, J4, J5, J6], the
         units of ``StatusBuffer.speeds``.
 
         Category: Query
@@ -1507,7 +1508,7 @@ class AsyncRobotClient(_RobotClientABC):
             return io_status[4] == 0  # E-stop at index 4, 0 means pressed
         return False
 
-    async def is_robot_stopped(self, threshold_speed: float = 0.01) -> bool:
+    async def is_robot_stopped(self, threshold_speed: float = 0.5) -> bool:
         """Check if robot has stopped moving.
 
         Category: Query
@@ -1520,7 +1521,7 @@ class AsyncRobotClient(_RobotClientABC):
             stopped = rbt.is_robot_stopped()
 
         Args:
-            threshold_speed: Speed threshold in rad/s
+            threshold_speed: Speed threshold in deg/s
 
         Returns:
             True if all joints below threshold
@@ -1534,7 +1535,7 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
-        speed_threshold: float = 0.01,
+        speed_threshold: float = 0.5,
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
         **kwargs: Any,
@@ -1554,7 +1555,7 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             timeout: Maximum time to wait in seconds
             settle_window: How long robot must be stable to be considered stopped
-            speed_threshold: Max joint speed to be considered stopped (rad/s)
+            speed_threshold: Max joint speed to be considered stopped (deg/s)
             angle_threshold: Max angle change to be considered stopped (degrees)
             motion_start_timeout: Max time to wait for motion to start (seconds)
 
@@ -1781,9 +1782,9 @@ class AsyncRobotClient(_RobotClientABC):
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
@@ -1802,14 +1803,15 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             angles: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target [x,y,z,rx,ry,rz] — dispatches to MOVEJ_POSE
-            duration: Motion duration in seconds (mutually exclusive with speed)
-            speed: Speed fraction 0-1 (mutually exclusive with duration)
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm (0 = stop at target)
             rel: If True, angles are relative to current position
             wait: If True, block until motion completes
         """
         _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         if pose is not None:
             if rel:
                 # A pose target is absolute on the wire; planning it as
@@ -1822,8 +1824,8 @@ class AsyncRobotClient(_RobotClientABC):
             index = await self._send(
                 MoveJPoseCmd(
                     pose=pose,
-                    duration=duration or 0.0,
-                    speed=speed or 0.0,
+                    duration=duration,
+                    speed=speed,
                     accel=accel,
                     r=r,
                 )
@@ -1832,8 +1834,8 @@ class AsyncRobotClient(_RobotClientABC):
             index = await self._send(
                 MoveJCmd(
                     angles=angles or [],
-                    duration=duration or 0.0,
-                    speed=speed or 0.0,
+                    duration=duration,
+                    speed=speed,
                     accel=accel,
                     r=r,
                     rel=rel,
@@ -1848,9 +1850,9 @@ class AsyncRobotClient(_RobotClientABC):
         pose: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
@@ -1869,19 +1871,20 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
             frame: Reference frame ("WRF" or "TRF")
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm
             rel: If True, pose is relative delta
             wait: If True, block until motion completes
         """
         _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MoveLCmd(
             pose=pose,
             frame=frame,
-            duration=duration or 0.0,
-            speed=speed or 0.0,
+            duration=duration,
+            speed=speed,
             accel=accel,
             r=r,
             rel=rel,
@@ -1897,9 +1900,9 @@ class AsyncRobotClient(_RobotClientABC):
         end: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         wait: bool = False,
         timeout: float = 10.0,
@@ -1918,19 +1921,21 @@ class AsyncRobotClient(_RobotClientABC):
             via: Via-point pose [x,y,z,rx,ry,rz]
             end: End-point pose [x,y,z,rx,ry,rz]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm
             wait: If True, block until motion completes
         """
         _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
+        # The arc and spline wires mark their unused timing field None, not 0.
         cmd = MoveCCmd(
             via=via,
             end=end,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
             r=r,
         )
@@ -1944,9 +1949,9 @@ class AsyncRobotClient(_RobotClientABC):
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = False,
         timeout: float = 10.0,
         **wait_kwargs: Any,
@@ -1963,17 +1968,18 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             wait: If True, block until motion completes
         """
         _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MoveSCmd(
             waypoints=waypoints,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
         )
         index = await self._send(cmd)
@@ -1986,9 +1992,9 @@ class AsyncRobotClient(_RobotClientABC):
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = False,
         timeout: float = 10.0,
         **wait_kwargs: Any,
@@ -2005,17 +2011,18 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             wait: If True, block until motion completes
         """
         _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MovePCmd(
             waypoints=waypoints,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
         )
         index = await self._send(cmd)
@@ -2063,8 +2070,8 @@ class AsyncRobotClient(_RobotClientABC):
         angles: list[float],
         *,
         pose: list[float] | None = None,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         """Streaming joint position target. Fire-and-forget.
 
@@ -2087,8 +2094,8 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         pose: list[float],
         *,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         """Streaming linear Cartesian position target. Fire-and-forget.
 
@@ -2114,7 +2121,7 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         joints: list[int] | None = None,
         speeds: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         """Joint velocity jog. Single-joint or multi-joint.
 
@@ -2155,7 +2162,7 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         axes: list[Axis] | None = None,
         speeds_list: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         """Cartesian velocity jog. Single-axis or multi-axis.
 
@@ -2257,9 +2264,11 @@ class AsyncRobotClient(_RobotClientABC):
         the selected one, or a ``move`` before a completed ``calibrate``, is
         refused by the controller.
 
-        Electric grippers take ``move [position, speed, current_ma]``
-        (exactly three numbers), ``calibrate``, ``stop`` (halt in place,
-        keep grip) and ``idle`` (release). Pneumatic grippers take ``open``,
+        Electric grippers take ``move [position, speed, current]``
+        (exactly three fractions in ``[0, 1]``; current spans the tool's
+        ``current_range``), ``calibrate``, ``stop`` (halt in place, keep
+        grip) and ``idle`` (release); ``set_position``/``open``/``close``
+        map onto ``move``. Pneumatic grippers take ``open``,
         ``close``, and ``move``/``set_position [position]``.
 
         Category: I/O

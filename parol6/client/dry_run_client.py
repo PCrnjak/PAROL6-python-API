@@ -60,6 +60,7 @@ from ..protocol.wire import (
     WriteIOCmd,
     TeleportCmd,
     ToolActionCmd,
+    planned_move_timing,
 )
 from ..server.command_registry import CommandRegistry
 from ..server.motion_planner import (
@@ -234,9 +235,9 @@ def _truncated(record: TickIndex, max_seconds: float) -> TickIndex:
 class _DryRunTool:
     """Tool proxy for dry-run. Routes actions through the planner, spelling
     the ToolSpec methods as the live tools do: an electric gripper's
-    ``open``/``close``/``set_position`` are a ``move`` at the tool's default
-    current, ``release`` is ``idle``; a pneumatic ``set_position`` opens
-    below 0.5 and closes at or above it."""
+    ``open``/``close``/``set_position`` are a ``move`` with the current
+    fraction turned into mA, ``release`` is ``idle``; a pneumatic
+    ``set_position`` opens below 0.5 and closes at or above it."""
 
     def __init__(self, client: DryRunRobotClient) -> None:
         self._client = client
@@ -270,11 +271,8 @@ class _DryRunTool:
                 position = (
                     0.0 if name == "open" else 1.0 if name == "close" else args[0]
                 )
-                speed = float(kwargs.pop("speed", 0.5))
-                # Half the range when none is named, as waldoctl's
-                # ElectricGripperTool.default_current has it.
-                lo, hi = cfg.current_range
-                current = int(kwargs.pop("current", lo + (hi - lo) // 2))
+                speed = kwargs.pop("speed", 0.5)
+                current = kwargs.pop("current", 0.5)
                 return "move", [position, speed, current]
             if name == "release":
                 return "idle", []
@@ -855,33 +853,134 @@ class DryRunRobotClient:
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         **kwargs: Any,
     ) -> int:
+        duration, speed = planned_move_timing(duration, speed, accel)
         if pose is not None:
             if kwargs.pop("rel", False):
                 raise ValueError(
                     "move_j(pose=..., rel=True) is not supported: a pose target is "
                     "absolute. Use move_j(angles, rel=True) for a relative joint move."
                 )
-            return self._dispatch(build_cmd("move_j_pose", pose, **kwargs), "move_j")
-        return self._dispatch(build_cmd("move_j", angles or [], **kwargs), "move_j")
+            cmd = build_cmd(
+                "move_j_pose",
+                pose,
+                duration=duration,
+                speed=speed,
+                accel=accel,
+                **kwargs,
+            )
+            return self._dispatch(cmd, "move_j")
+        cmd = build_cmd(
+            "move_j",
+            angles or [],
+            duration=duration,
+            speed=speed,
+            accel=accel,
+            **kwargs,
+        )
+        return self._dispatch(cmd, "move_j")
 
-    def move_l(self, pose: list[float], **kwargs: Any) -> int:
-        return self._dispatch(build_cmd("move_l", pose, **kwargs), "move_l")
+    def move_l(
+        self,
+        pose: list[float],
+        *,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
+        **kwargs: Any,
+    ) -> int:
+        duration, speed = planned_move_timing(duration, speed, accel)
+        cmd = build_cmd(
+            "move_l", pose, duration=duration, speed=speed, accel=accel, **kwargs
+        )
+        return self._dispatch(cmd, "move_l")
+
+    def move_c(
+        self,
+        via: list[float],
+        end: list[float],
+        *,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
+        **kwargs: Any,
+    ) -> int:
+        return self._path_move("move_c", [via, end], duration, speed, accel, kwargs)
+
+    def move_s(
+        self,
+        waypoints: list[list[float]],
+        *,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
+        **kwargs: Any,
+    ) -> int:
+        return self._path_move("move_s", [waypoints], duration, speed, accel, kwargs)
+
+    def move_p(
+        self,
+        waypoints: list[list[float]],
+        *,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
+        **kwargs: Any,
+    ) -> int:
+        return self._path_move("move_p", [waypoints], duration, speed, accel, kwargs)
+
+    def _path_move(
+        self,
+        name: str,
+        args: list[Any],
+        duration: float,
+        speed: float,
+        accel: float,
+        kwargs: dict[str, Any],
+    ) -> int:
+        duration, speed = planned_move_timing(duration, speed, accel)
+        # The arc and spline wires mark their unused timing field None, not 0.
+        cmd = build_cmd(
+            name,
+            *args,
+            duration=duration or None,
+            speed=speed or None,
+            accel=accel,
+            **kwargs,
+        )
+        return self._dispatch(cmd, name)
 
     def servo_j(
         self,
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
+        speed: float = 0.5,
+        accel: float = 0.5,
         **kwargs: Any,
     ) -> int:
         if pose is not None:
-            idx = self._dispatch(build_cmd("servo_j_pose", pose, **kwargs), "servo_j")
+            cmd = build_cmd("servo_j_pose", pose, speed=speed, accel=accel, **kwargs)
         else:
-            idx = self._dispatch(
-                build_cmd("servo_j", angles or [], **kwargs), "servo_j"
-            )
+            cmd = build_cmd("servo_j", angles or [], speed=speed, accel=accel, **kwargs)
+        idx = self._dispatch(cmd, "servo_j")
+        return -1 if self._failed(idx) else 1
+
+    def servo_l(
+        self,
+        pose: list[float],
+        *,
+        speed: float = 0.5,
+        accel: float = 0.5,
+        **kwargs: Any,
+    ) -> int:
+        idx = self._dispatch(
+            build_cmd("servo_l", pose, speed=speed, accel=accel, **kwargs), "servo_l"
+        )
         return -1 if self._failed(idx) else 1
 
     def checkpoint(self, label: str) -> int:
@@ -957,7 +1056,7 @@ class DryRunRobotClient:
         *,
         joints: list[int] | None = None,
         speeds: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         """The live client's signature, so a script's jog previews as written."""
         speed_arr = [0.0] * 6
@@ -982,7 +1081,7 @@ class DryRunRobotClient:
         *,
         axes: list[str] | None = None,
         speeds_list: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         vel = [0.0] * 6
         if axes is not None and speeds_list is not None:

@@ -221,7 +221,7 @@ class TestSSG48GripperMethods:
         await client.wait_motion(timeout=10.0)
 
         # Move to half position
-        idx = await tool.set_position(0.5, speed=0.7, current=600)
+        idx = await tool.set_position(0.5, speed=0.7, current=0.4)
         assert idx >= 0
         await client.wait_motion(timeout=10.0)
 
@@ -244,18 +244,19 @@ class TestSSG48GripperMethods:
             [],
             [0.5],
             [0.5, 0.5],
-            [0.5, 0.5, 600, 1],
-            [float("nan"), 0.5, 600],
-            [0.5, float("inf"), 600],
+            [0.5, 0.5, 0.5, 1],
+            [float("nan"), 0.5, 0.5],
+            [0.5, float("inf"), 0.5],
             [0.5, 0.5, float("-inf")],
-            [-0.1, 0.5, 600],
-            [1.5, 0.5, 600],
-            [0.5, -0.5, 600],
-            [0.5, 1.5, 600],
-            [0.5, 0.5, 0],
-            [0.5, 0.5, 5000],
-            ["0.5", 0.5, 600],
-            [True, 0.5, 600],
+            [-0.1, 0.5, 0.5],
+            [1.5, 0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 1.5, 0.5],
+            [0.5, 0.5, -0.1],
+            [0.5, 0.5, 1.5],
+            [0.5, 0.5, 600],
+            ["0.5", 0.5, 0.5],
+            [True, 0.5, 0.5],
         ):
             with pytest.raises(ValueError):
                 await client.tool_action("SSG-48", "move", params)
@@ -269,6 +270,10 @@ class TestSSG48GripperMethods:
         ):
             with pytest.raises(ValueError):
                 await client.tool_action("SSG-48", action, params)
+        # The jaw methods take current as a fraction of the current range.
+        for current in (-0.1, 1.5, 600, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                await tool.set_position(0.5, current=current)
         assert await client.status() is not None
 
         # Tool actions queue in order: the move waits for the calibration
@@ -281,8 +286,8 @@ class TestSSG48GripperMethods:
     async def test_a_script_drives_the_tool_it_just_selected(self, async_client):
         """A tool action sent right behind the ``select_tool`` that fits the
         tool is judged against that selection, not the tool still fitted,
-        and queues behind it; a jaw move that names no current grips at
-        the middle of the tool's current range."""
+        and queues behind it; a jaw move's current fraction grips at that
+        fraction of the tool's current range."""
         robot, client = async_client
         spec = robot.tools["SSG-48"]
         assert isinstance(spec, ElectricGripperTool)
@@ -294,15 +299,16 @@ class TestSSG48GripperMethods:
         assert calibrating >= 0
         assert await client.wait_command(calibrating, timeout=10.0)
 
-        closing = await tool.set_position(1.0, speed=0.05)
+        fraction = 0.3
+        closing = await tool.set_position(1.0, speed=0.05, current=fraction)
         assert closing >= 0
         assert await client.wait_status(
             lambda s: s.tool_status.channels and s.tool_status.channels[0] > 0,
             timeout=5.0,
         ), "the jaws never got under way"
         commanded = (await tool.status()).channels[0]
-        assert commanded == lo + (hi - lo) // 2, (
-            f"a move naming no current sent {commanded} mA, not the middle of "
+        assert commanded == round(lo + fraction * (hi - lo)), (
+            f"a move at current {fraction} sent {commanded} mA across "
             f"{spec.current_range}"
         )
         assert await client.stop() == 1
@@ -364,7 +370,7 @@ class TestMSGGripperMethods:
         await client.wait_motion(timeout=10.0)
 
         # Move to position
-        idx = await tool.set_position(0.3, speed=0.5, current=500)
+        idx = await tool.set_position(0.3, speed=0.5, current=0.2)
         assert idx >= 0
         await client.wait_motion(timeout=10.0)
 

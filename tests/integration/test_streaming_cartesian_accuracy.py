@@ -161,7 +161,9 @@ def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(
         (clear_of_the_wrist, ["X", "Y", "Z"], [1.0, -1.0, -1.0], 0.6, True),
     ):
         preview = DryRunRobotClient(initial_joints_deg=begin)
-        assert preview.jog_l("WRF", axes=axes, speeds_list=speeds, duration=duration)
+        assert preview.jog_l(
+            "WRF", axes=axes, speeds_list=speeds, duration=duration, accel=1.0
+        )
         assert preview.plan().blocks[0].error is None
         expected = preview.pose()
 
@@ -173,8 +175,13 @@ def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(
                 direction["XYZ".index(axis)] = speed
         direction /= np.linalg.norm(direction)
 
+        # Full acceleration reaches the jog's speed well inside its duration,
+        # where the preview, which does not model the ramps, holds it all along.
         assert (
-            client.jog_l("WRF", axes=axes, speeds_list=speeds, duration=duration) == 1
+            client.jog_l(
+                "WRF", axes=axes, speeds_list=speeds, duration=duration, accel=1.0
+            )
+            == 1
         )
         worst = 0.0
         # The jog runs its duration, then brakes: sample the whole of it.

@@ -218,21 +218,22 @@ class ElectricGripperConfig(ToolConfig):
             if params:
                 raise ValueError(f"{action} takes no parameters")
             return
-        _require_numbers(action, params, ("position", "speed", "current_ma"))
+        _require_numbers(action, params, ("position", "speed", "current"))
         _require_within("position", params[0], *self.position_range)
         _require_within("speed", params[1], *self.speed_range)
-        _require_within("current_ma", params[2], *self.current_range)
+        _require_within("current", params[2], 0.0, 1.0)
 
     def create_command(self, action: str, params: list) -> ElectricGripperCommand:
         from parol6.commands.gripper_commands import ElectricGripperCommand
 
         if action != "move":
             return ElectricGripperCommand.from_tool_action(action=action)
+        lo, hi = self.current_range
         return ElectricGripperCommand.from_tool_action(
             action=action,
             position=float(params[0]),
             speed=float(params[1]),
-            current=int(round(params[2])),
+            current=round(lo + float(params[2]) * (hi - lo)),
         )
 
     def estimate_duration(self, action: str, params: list) -> float:

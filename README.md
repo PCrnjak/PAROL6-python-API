@@ -301,12 +301,15 @@ Note: RUCKIG is point-to-point only and cannot follow Cartesian paths. When RUCK
 ### Speed and acceleration
 
 ```python
-client.moveJ(target, speed=0.5, accel=0.5)   # 50% of joint limits
-client.moveL(target, speed=0.25, accel=1.0)   # 25% cart speed, full accel
-client.moveL(target, duration=2.0)             # Fixed duration (uses TOPPRA)
+client.move_j(target)                          # default speed=0.5, accel=0.5
+client.move_l(target, speed=0.25, accel=1.0)   # 25% cart speed, full accel
+client.move_l(target, duration=2.0)            # Fixed duration; speed is unused
 ```
 
-Speed and accel are fractions of maximum (0.0–1.0), not percentages.
+Speed and accel are fractions of maximum in (0, 1], not percentages. A
+`duration` > 0 times the move and `speed` is ignored; otherwise `speed` times
+it. `servo_j`/`servo_l` default to `speed=0.5, accel=0.5`, and jogs to
+`accel=0.5`.
 
 For Cartesian moves, joint limits stay at 100% as hard bounds—the speed fraction only affects the Cartesian velocity constraint.
 

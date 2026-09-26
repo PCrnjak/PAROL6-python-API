@@ -17,7 +17,7 @@ from numba import njit
 from pinokin import arrays_equal_6
 from waldoctl import ActionState, ToolState, ToolStatus
 
-from parol6.config import INTERVAL_S, speed_steps_to_rad, steps_to_deg, steps_to_rad
+from parol6.config import INTERVAL_S, speed_steps_to_deg, steps_to_deg, steps_to_rad
 from parol6.protocol.wire import pack_status
 from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError
@@ -155,7 +155,7 @@ class StatusCache:
         # Public snapshots (materialized only when they change)
         self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
-        self.speeds_rad_s: np.ndarray = np.zeros((6,), dtype=np.float64)
+        self.speeds_deg_s: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.io: np.ndarray = np.zeros((5,), dtype=np.uint8)
         self.pose: np.ndarray = np.zeros((16,), dtype=np.float64)
         self.tcp_speed: float = 0.0  # TCP linear velocity in mm/s
@@ -436,9 +436,8 @@ class StatusCache:
             or state.tcp_rotation_rad != self._last_tcp_rotation
         )
 
-        # Convert speeds from steps/s to rad/s when they change
         if spd_changed:
-            speed_steps_to_rad(self.speeds, self.speeds_rad_s)
+            speed_steps_to_deg(self.speeds, self.speeds_deg_s)
 
         if tool_changed:
             self._last_tool_name = state.current_tool
@@ -621,7 +620,7 @@ class StatusCache:
         return pack_status(
             self.pose,
             self.angles_deg,
-            self.speeds_rad_s,
+            self.speeds_deg_s,
             self.io,
             self._action_current,
             self._action_state,

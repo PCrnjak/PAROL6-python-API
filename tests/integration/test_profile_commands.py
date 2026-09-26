@@ -131,7 +131,7 @@ class TestProfileMotionBehavior:
         def previewed(profile: str) -> float:
             preview = DryRunRobotClient(initial_joints_deg=standby)
             assert preview.select_profile(profile) == 1
-            index = preview.move_j(target, speed=0.5)
+            index = preview.move_j(target, speed=0.5, accel=1.0)
             record = preview.plan()
             assert record.blocks[index].error is None
             return record.blocks[index].rows * record.row_dt_s
@@ -146,7 +146,10 @@ class TestProfileMotionBehavior:
         for _ in range(2):
             assert client.teleport(standby) == 1
             start = time.monotonic()
-            assert client.move_j(target, speed=0.5, wait=True, timeout=10.0) >= 0
+            assert (
+                client.move_j(target, speed=0.5, accel=1.0, wait=True, timeout=10.0)
+                >= 0
+            )
             ran = time.monotonic() - start
         assert abs(ran - quintic) < 0.25, (
             f"previewed {quintic:.2f} s under QUINTIC, the arm took {ran:.2f} s"

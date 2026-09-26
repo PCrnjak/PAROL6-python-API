@@ -230,6 +230,31 @@ def _check_speed_accel(speed: float, accel: float, *, signed: bool = False) -> N
         )
 
 
+def planned_move_timing(
+    duration: float, speed: float, accel: float
+) -> tuple[float, float]:
+    """The ``(duration, speed)`` a planned move puts on the wire: a positive
+    *duration* times the move and leaves speed 0, otherwise *speed* does and
+    duration is 0. Raises ``ValueError`` for a negative or non-finite
+    duration, or for a speed (when it times the move) or accel outside
+    ``(0, 1]``."""
+    if not (math.isfinite(duration) and duration >= 0.0):
+        raise ValueError(f"duration={duration} must be finite seconds >= 0")
+    if not (0.0 < accel <= 1.0):
+        raise ValueError(
+            f"accel={accel} is out of range (0.0, 1.0]. "
+            "Accel is a fraction of max acceleration, not a percentage."
+        )
+    if duration > 0.0:
+        return duration, 0.0
+    if not (0.0 < speed <= 1.0):
+        raise ValueError(
+            f"speed={speed} is out of range (0.0, 1.0]. "
+            "Speed is a fraction of max velocity, not a percentage."
+        )
+    return 0.0, speed
+
+
 class MotionParamsMixin:
     """Mixin providing resolved motion parameters for wire structs.
 
@@ -253,7 +278,8 @@ class MotionParamsMixin:
 
     @property
     def resolved_speed(self) -> float:
-        """Velocity fraction 0-1, defaults to 1.0 (full speed)."""
+        """Velocity fraction 0-1; 1.0 on a duration-timed move, which
+        leaves speed unset."""
         s = cast("float | None", getattr(self, "speed"))
         return s if s is not None and s > 0.0 else 1.0
 
@@ -2285,6 +2311,7 @@ __all__ = [
     "HomingJointState",
     "HomingPhase",
     "CheckpointCmd",
+    "planned_move_timing",
     # Command structs — streaming (servo/jog)
     "ServoJCmd",
     "ServoJPoseCmd",

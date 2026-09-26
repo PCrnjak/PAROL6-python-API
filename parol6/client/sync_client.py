@@ -304,10 +304,10 @@ class RobotClient:
         return _run(self._inner.io(timeout=timeout))
 
     def joint_speeds(self) -> list[float] | None:
-        """Current joint velocities in rad/s.
+        """Current joint velocities in deg/s.
 
         Returns:
-            List of 6 joint velocities [J1-J6] in rad/s, or None on timeout.
+            List of 6 joint velocities [J1-J6] in deg/s, or None on timeout.
         """
         return _run(self._inner.joint_speeds())
 
@@ -499,7 +499,7 @@ class RobotClient:
         """
         return _run(self._inner.is_estop_pressed())
 
-    def is_robot_stopped(self, threshold_speed: float = 0.01) -> bool:
+    def is_robot_stopped(self, threshold_speed: float = 0.5) -> bool:
         """Check if robot has stopped moving.
 
         Prefer ``wait_command()`` for waiting on specific commands.
@@ -507,7 +507,7 @@ class RobotClient:
         diagnostics or manual stopping logic.
 
         Args:
-            threshold_speed: Speed threshold in rad/s.
+            threshold_speed: Speed threshold in deg/s.
 
         Returns:
             True if all joints below threshold.
@@ -518,7 +518,7 @@ class RobotClient:
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
-        speed_threshold: float = 0.01,
+        speed_threshold: float = 0.5,
         angle_threshold: float = 0.5,
         motion_start_timeout: float = 1.0,
     ) -> bool:
@@ -527,7 +527,7 @@ class RobotClient:
         Args:
             timeout: Maximum time to wait in seconds.
             settle_window: How long robot must be stable.
-            speed_threshold: Max joint speed to be considered stopped (rad/s).
+            speed_threshold: Max joint speed to be considered stopped (deg/s).
             angle_threshold: Max angle change to be considered stopped.
             motion_start_timeout: Max time to wait for motion to start.
 
@@ -581,8 +581,8 @@ class RobotClient:
         self,
         angles: list[float],
         *,
-        duration: float | None = ...,
-        speed: float | None = ...,
+        duration: float = ...,
+        speed: float = ...,
         accel: float = ...,
         r: float = ...,
         rel: bool = ...,
@@ -596,8 +596,8 @@ class RobotClient:
         angles: list[float] | None = ...,
         *,
         pose: list[float],
-        duration: float | None = ...,
-        speed: float | None = ...,
+        duration: float = ...,
+        speed: float = ...,
         accel: float = ...,
         r: float = ...,
         wait: bool = ...,
@@ -609,9 +609,9 @@ class RobotClient:
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = True,
@@ -648,9 +648,9 @@ class RobotClient:
         pose: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = True,
@@ -676,9 +676,9 @@ class RobotClient:
         end: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         wait: bool = True,
         timeout: float = 10.0,
@@ -702,9 +702,9 @@ class RobotClient:
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = True,
         timeout: float = 10.0,
     ) -> int:
@@ -725,9 +725,9 @@ class RobotClient:
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = True,
         timeout: float = 10.0,
     ) -> int:
@@ -767,8 +767,8 @@ class RobotClient:
         angles: list[float] | None = None,
         *,
         pose: list[float] | None = None,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         if pose is not None:
             return _run(
@@ -782,8 +782,8 @@ class RobotClient:
         self,
         pose: list[float],
         *,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         return _run(self._inner.servo_l(pose, speed=speed, accel=accel))
 
@@ -815,7 +815,7 @@ class RobotClient:
         *,
         joints: list[int] | None = None,
         speeds: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         if joints is not None and speeds is not None:
             return _run(
@@ -858,7 +858,7 @@ class RobotClient:
         *,
         axes: list[Axis] | None = None,
         speeds_list: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         if axes is not None and speeds_list is not None:
             return _run(

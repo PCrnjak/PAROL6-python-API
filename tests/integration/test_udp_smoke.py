@@ -3,11 +3,14 @@ Integration smoke tests for UDP communication using parol6.
 Covers PING/PONG, GET_* endpoints, STOP semantics, and basic functionality.
 """
 
+import math
 import socket
+import time
 
 import pytest
 
 from parol6 import RobotClient
+from parol6.config import LIMITS
 
 
 @pytest.mark.integration
@@ -53,16 +56,31 @@ class TestGetEndpoints:
         # Test helper method too
         assert not client.is_estop_pressed()  # Should be False in FAKE_SERIAL
 
-    def test_joint_speeds(self, client, server_proc):
-        """Test JOINT_SPEEDS command."""
-        speeds = client.joint_speeds()
-        assert speeds is not None
-        assert isinstance(speeds, list)
-        assert len(speeds) == 6  # 6 joint speeds
-
-        # Test helper method too
-        stopped = client.is_robot_stopped()
-        assert isinstance(stopped, bool)
+    def test_joint_speeds_read_deg_per_second(self, client, server_proc):
+        """While J1 jogs at full speed, the status stream and
+        ``joint_speeds()`` read its jog velocity limit in deg/s, the other
+        joints read still, and once the jog ends the arm reads stopped."""
+        rate = math.degrees(LIMITS.joint.jog.velocity[0])
+        assert client.is_robot_stopped()
+        assert client.jog_j(0, -1.0, duration=1.5, accel=1.0) == 1
+        assert client.wait_status(
+            lambda s: abs(s.speeds[0]) > 0.9 * rate, timeout=2.0
+        ), f"the status stream never read J1 near its {rate:.1f} deg/s jog"
+        peak = 0.0
+        others = 0.0
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            speeds = client.joint_speeds()
+            assert speeds is not None
+            peak = max(peak, abs(speeds[0]))
+            others = max(others, *(abs(v) for v in speeds[1:]))
+            time.sleep(0.02)
+        assert peak == pytest.approx(rate, rel=0.05), (
+            f"J1 read {peak:.2f} at a jog of {rate:.2f} deg/s"
+        )
+        assert others < 0.5, f"a still joint read {others:.2f} deg/s"
+        assert client.wait_motion(timeout=5.0)
+        assert client.is_robot_stopped()
 
     def test_status_aggregate(self, client, server_proc):
         """Test STATUS aggregate command."""
@@ -152,10 +170,6 @@ class TestBasicMotionCommands:
     def test_cartesian_move_validation(self, client, server_proc):
         """Test cartesian movement with proper validation."""
         from parol6.utils.errors import MotionError
-
-        # Test that move requires either duration or speed (struct validates)
-        with pytest.raises(ValueError):
-            client.move_l([50, 50, 50, 0, 0, 0])  # No duration or speed
 
         # Unreachable pose — planner surfaces IK failure via MotionError
         with pytest.raises(MotionError):

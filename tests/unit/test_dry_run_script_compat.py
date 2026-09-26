@@ -1,8 +1,9 @@
 """Verify that all motion commands users write in scripts work through the dry run client.
 
-The dry run client uses __getattr__ + build_cmd to dispatch calls by mapping
-kwargs to wire struct fields. If the client API param names don't match the
-struct field names, the kwargs get silently dropped and the command fails.
+The dry run client maps kwargs to wire struct fields through build_cmd, from
+its own move/servo/jog methods and, for the rest, __getattr__. If the client
+API param names don't match the struct field names, the kwargs get silently
+dropped and the command fails.
 
 This test calls every user-facing motion method with the same signatures shown
 in the docs / editor auto-complete, ensuring the dry run path doesn't diverge

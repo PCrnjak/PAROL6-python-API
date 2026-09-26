@@ -350,10 +350,15 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
             **kwargs,
         )
 
-    async def set_position(self, position: float, **kwargs: float | int) -> int:
-        speed = float(kwargs.pop("speed", 0.5))
-        current = int(kwargs.pop("current", self.default_current))
-        return await self._cmd("move", [position, speed, current], **kwargs)
+    async def set_position(
+        self,
+        position: float,
+        *,
+        speed: float = 0.5,
+        current: float = 0.5,
+        **wait_kwargs: Any,
+    ) -> int:
+        return await self._cmd("move", [position, speed, current], **wait_kwargs)
 
     async def calibrate(self, **kwargs: object) -> int:
         return await self._cmd("calibrate", **kwargs)
@@ -370,17 +375,20 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
     async def action_r(self, engaged: bool) -> None:
         await self.calibrate()
 
-    async def open(self, **kwargs: float | int) -> int:
-        return await self.set_position(0.0, **kwargs)
+    async def open(
+        self, *, speed: float = 0.5, current: float = 0.5, **wait_kwargs: Any
+    ) -> int:
+        return await self.set_position(0.0, speed=speed, current=current, **wait_kwargs)
 
-    async def close(self, **kwargs: float | int) -> int:
-        return await self.set_position(1.0, **kwargs)
+    async def close(
+        self, *, speed: float = 0.5, current: float = 0.5, **wait_kwargs: Any
+    ) -> int:
+        return await self.set_position(1.0, speed=speed, current=current, **wait_kwargs)
 
     @property
     def adjust_step(self) -> int:
-        """Default current step: ~10% of range, rounded to nearest 10 mA."""
-        lo, hi = self.current_range
-        return max(10, round((hi - lo) / 10 / 10) * 10)
+        """Current step in percent points of the current range."""
+        return 10
 
     @property
     def adjust_labels(self) -> tuple[str, str]:
