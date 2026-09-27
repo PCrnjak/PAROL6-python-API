@@ -27,7 +27,6 @@ from parol6.motion.geometry import (
     ArcSegment,
     LineSegment,
     build_blended_path,
-    cartesian_path_knots,
 )
 from parol6.protocol.wire import (
     CmdType,
@@ -40,7 +39,7 @@ from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
 from parol6.utils.ik import RateLimitedWarning, solve_ik
-from pinokin import se3_from_rpy, se3_interp, se3_rpy
+from pinokin import se3_from_rpy, se3_rpy
 
 from parol6.commands.servo_commands import _max_vel_ratio_jit
 
@@ -322,9 +321,29 @@ def resolve_pose(
     return delta_se3
 
 
+def cartesian_diagnostic(poses: np.ndarray, ik_valid: np.ndarray) -> dict:
+    """What a dry run draws of a cartesian path IK could not solve all of:
+    the path's TCP poses (x, y, z in m, roll, pitch, yaw in rad) and which
+    of them solved."""
+    n = len(poses)
+    tcp_poses = np.empty((n, 6), dtype=np.float64)
+    rpy = np.empty(3, dtype=np.float64)
+    for i in range(n):
+        tcp_poses[i, :3] = poses[i][:3, 3]
+        se3_rpy(poses[i], rpy)
+        tcp_poses[i, 3:] = rpy
+    return {"tcp_poses": tcp_poses, "ik_valid": ik_valid}
+
+
 class CartesianChainLink:
     """A cartesian move that can join a blend chain: it contributes one
     segment, resolved against the pose the move before it ends at."""
+
+    #: Where the move ends, once planning has resolved it: a dry run that
+    #: fails the move carries on from there.
+    target_pose: np.ndarray | None = None
+    #: The path a dry run draws for a move that fails in IK.
+    cartesian_diagnostic: dict | None = None
 
     def chain_segment(
         self, previous: np.ndarray, state: "ControllerState"
@@ -352,7 +371,12 @@ def setup_cartesian_chain(
     """Plan ``head`` and the cartesian moves blended behind it as ONE path
     whose junctions are rounded. Returns how many of ``next_cmds`` the chain
     consumed; the head's trajectory covers them all. Falls back to the
-    head's own setup when there is nothing to chain."""
+    head's own setup when there is nothing to chain.
+
+    A move whose segment cannot be built (a move_c whose via names no
+    circle) ends the chain ahead of it: the moves before it run, stopping
+    where it would have started, and it fails on its own setup as it
+    would alone."""
     assert isinstance(head, CartesianChainLink)
     chain: list[TrajectoryMoveCommandBase] = [head]
     if head.blend_radius > 0:
@@ -367,28 +391,39 @@ def setup_cartesian_chain(
         return 0
 
     segments: list[LineSegment | ArcSegment] = []
-    blend_radii: list[float] = []
     previous = get_fkine_se3(state).copy()
     for i, cmd in enumerate(chain):
         assert isinstance(cmd, CartesianChainLink)
-        segment, end = cmd.chain_segment(previous, state)
+        try:
+            segment, end = cmd.chain_segment(previous, state)
+        except TrajectoryPlanningError:
+            if i == 0:
+                raise
+            del chain[i:]
+            break
         segments.append(segment)
         previous = end
-        if i < len(chain) - 1:
-            blend_radii.append(cmd.blend_radius)
+        if i == 0:
+            head.target_pose = end
+    if len(chain) < 2:
+        head.do_setup(state)
+        return 0
+    blend_radii = [cmd.blend_radius for cmd in chain[:-1]]
 
     composite_poses = build_blended_path(
         segments, blend_radii, samples_per_segment=PATH_SAMPLES
     )
-    if len(composite_poses) == 0:
-        head.do_setup(state)
-        return 0
 
     steps_to_rad(state.Position_in, head._q_rad_buf)
-    joint_path = JointPath.from_poses(composite_poses, head._q_rad_buf)
+    joint_path = JointPath.from_poses(
+        composite_poses, head._q_rad_buf, stop_on_failure=state.stop_on_failure
+    )
     if joint_path.is_partial:
         assert joint_path.valid is not None
-        raise TrajectoryPlanningError(
+        head.cartesian_diagnostic = cartesian_diagnostic(
+            composite_poses, joint_path.valid
+        )
+        raise IKError(
             make_error(
                 ErrorCode.IK_PARTIAL_PATH,
                 valid=str(int(joint_path.valid.sum())),
@@ -415,7 +450,7 @@ def setup_cartesian_chain(
         dt=INTERVAL_S,
         cart_vel_limit=LIMITS.cart.hard.velocity.linear * min_speed,
         cart_acc_limit=LIMITS.cart.hard.acceleration.linear * min_accel,
-        path_knots=cartesian_path_knots(composite_poses),
+        path_knots=joint_path.knots,
     )
     trajectory = builder.build()
     head.trajectory_steps = trajectory.steps
@@ -462,9 +497,9 @@ class MoveLCommand(CartesianChainLink, TrajectoryMoveCommandBase[MoveLCmd]):
         current_rad = self._q_rad_buf
 
         cart_poses = self._cart_poses_buf
-        for i in range(PATH_SAMPLES):
-            s = i / (PATH_SAMPLES - 1)
-            se3_interp(self.initial_pose, self.target_pose, s, cart_poses[i])
+        LineSegment(self.initial_pose, self.target_pose).sample_into(
+            cart_poses, 0.0, 1.0, 0
+        )
 
         stop_on_failure = state.stop_on_failure
         joint_path = JointPath.from_poses(
@@ -479,18 +514,7 @@ class MoveLCommand(CartesianChainLink, TrajectoryMoveCommandBase[MoveLCmd]):
         if joint_path.is_partial:
             ik_valid = joint_path.valid
             assert ik_valid is not None
-            # Extract TCP poses (x,y,z,rx,ry,rz) in meters+radians from SE3
-            n = len(cart_poses)
-            tcp_poses = np.empty((n, 6), dtype=np.float64)
-            _rpy_buf = np.empty(3, dtype=np.float64)
-            for i in range(n):
-                tcp_poses[i, :3] = cart_poses[i][:3, 3]
-                se3_rpy(cart_poses[i], _rpy_buf)
-                tcp_poses[i, 3:] = _rpy_buf
-            self.cartesian_diagnostic = {
-                "tcp_poses": tcp_poses,
-                "ik_valid": ik_valid,
-            }
+            self.cartesian_diagnostic = cartesian_diagnostic(cart_poses, ik_valid)
             raise IKError(
                 make_error(
                     ErrorCode.IK_PARTIAL_PATH,
@@ -508,7 +532,7 @@ class MoveLCommand(CartesianChainLink, TrajectoryMoveCommandBase[MoveLCmd]):
             dt=INTERVAL_S,
             cart_vel_limit=LIMITS.cart.hard.velocity.linear * self.p.resolved_speed,
             cart_acc_limit=LIMITS.cart.hard.acceleration.linear * self.p.accel,
-            path_knots=cartesian_path_knots(cart_poses),
+            path_knots=joint_path.knots,
         )
 
         trajectory = builder.build()

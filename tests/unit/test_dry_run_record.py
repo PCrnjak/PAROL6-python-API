@@ -134,4 +134,5 @@ def test_a_move_that_starts_with_a_wrist_turn_takes_the_duration_it_names():
     record = client.plan()
     block = record.blocks[index]
     assert block.error is None, block.error
-    assert block.rows * record.row_dt_s == pytest.approx(2.0, abs=record.row_dt_s)
+    # The block's first row is the pose the move starts from, at t = 0.
+    assert (block.rows - 1) * record.row_dt_s == pytest.approx(2.0, abs=record.row_dt_s)

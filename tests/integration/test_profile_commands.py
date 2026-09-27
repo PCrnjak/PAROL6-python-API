@@ -165,6 +165,37 @@ class TestProfileMotionBehavior:
             f"{planned[-1]:.2f} s"
         )
 
+    @pytest.mark.parametrize("profile", ["LINEAR", "QUINTIC", "TRAPEZOID"])
+    def test_a_short_timed_move_takes_its_whole_duration(self, profile):
+        """A move timed to 50 ms reaches its target 50 ms in, not a control
+        tick early. The preview plays one row per control tick, as the
+        controller does, so a plan that spreads the time it names over one
+        tick too few shows there: on a move this short, a tick early is
+        half again the acceleration planned."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        target = [standby[0] + 0.2, *standby[1:]]
+        duration = 0.05
+        preview = DryRunRobotClient(initial_joints_deg=standby)
+        assert preview.select_profile(profile) == 1
+        # Small and fast enough that every profile keeps the duration asked.
+        index = preview.move_j(target, duration=duration, accel=1.0)
+        preview.delay(0.1)
+        record = preview.plan()
+        block = record.blocks[index]
+        assert block.error is None and block.start_row == 0
+        j1 = np.degrees(np.asarray(record.joints_rad[:, 0], dtype=np.float64))
+        # The arm holds the target to half a motor step of J1 (0.0044°); a
+        # tick before it ends, the move is still over 0.01° short of it.
+        arrived = int(np.argmax(np.abs(j1 - target[0]) < 0.005)) * record.row_dt_s
+        assert arrived >= duration - 1e-9, (
+            f"{profile}: a {duration * 1000:.0f} ms move arrived "
+            f"{arrived * 1000:.0f} ms in"
+        )
+
 
 @pytest.mark.integration
 class TestServoCartesian:

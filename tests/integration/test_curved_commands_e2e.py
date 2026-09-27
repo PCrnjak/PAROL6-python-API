@@ -77,6 +77,41 @@ class TestCurvedMotionCommands:
         assert client.wait_motion(timeout=15.0)
         assert client.is_robot_stopped()
 
+    def test_a_collinear_via_fails_the_move_c_alone_or_after_a_blend(
+        self, client, server_proc, robot_api_env, home_pose
+    ):
+        """Three points on a line name no circle. The move_c that gives
+        them fails on its own index, with the same error whether it runs
+        alone or a move_l blends into it: the move_l ahead of it asked for
+        nothing wrong."""
+        from parol6 import MotionError
+
+        alone = client.move_c(
+            via=self._offset(home_pose, dy=10),
+            end=self._offset(home_pose, dy=20),
+            speed=0.5,
+            wait=False,
+        )
+        assert alone >= 0
+        with pytest.raises(MotionError) as lone:
+            client.wait_command(alone, timeout=10.0)
+        assert lone.value.command_index == alone, lone.value
+
+        head = client.move_l(
+            self._offset(home_pose, dx=20), speed=0.5, r=5.0, wait=False
+        )
+        culprit = client.move_c(
+            via=self._offset(home_pose, dx=20, dy=10),
+            end=self._offset(home_pose, dx=20, dy=20),
+            speed=0.5,
+            wait=False,
+        )
+        assert min(head, culprit) >= 0
+        with pytest.raises(MotionError) as chained:
+            client.wait_command(culprit, timeout=10.0)
+        assert chained.value.command_index == culprit, chained.value
+        assert chained.value.code == lone.value.code, chained.value
+
     def test_move_s_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test spline motion through waypoints."""
         waypoints = [

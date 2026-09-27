@@ -31,6 +31,7 @@ from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
 from parol6.utils.ik import solve_ik
+from parol6.utils.joint_limits import joint_outside_travel_rad
 from pinokin import se3_from_rpy
 
 _MP = TypeVar("_MP", bound=MotionParamsMixin)
@@ -43,21 +44,21 @@ logger = logging.getLogger(__name__)
 
 def _require_inside_limits(target_rad: np.ndarray) -> None:
     """Refuse a joint target outside a joint's travel rather than plan a
-    move into the stop (par6's ``require_inside_soft``)."""
-    lo = LIMITS.joint.position.rad[:, 0]
-    hi = LIMITS.joint.position.rad[:, 1]
-    for j in range(6):
-        q = float(target_rad[j])
-        if not (lo[j] <= q <= hi[j]):
-            raise TrajectoryPlanningError(
-                make_error(
-                    ErrorCode.COMM_VALIDATION_ERROR,
-                    detail=(
-                        f"joint {j + 1} target {np.degrees(q):.2f} deg is outside "
-                        f"[{np.degrees(lo[j]):.2f}, {np.degrees(hi[j]):.2f}] deg"
-                    ),
-                )
+    move into the stop (par6's ``require_inside_soft``). A joint parked on
+    its limit and left where it is stays inside, however its motor step
+    rounds."""
+    j = joint_outside_travel_rad(target_rad)
+    if j >= 0:
+        lo, hi = LIMITS.joint.position.deg[j]
+        raise TrajectoryPlanningError(
+            make_error(
+                ErrorCode.COMM_VALIDATION_ERROR,
+                detail=(
+                    f"joint {j + 1} target {np.degrees(target_rad[j]):.2f} deg "
+                    f"is outside [{lo:.2f}, {hi:.2f}] deg"
+                ),
             )
+        )
 
 
 class JointMoveCommandBase(TrajectoryMoveCommandBase[_MP]):

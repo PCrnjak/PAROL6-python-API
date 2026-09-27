@@ -34,6 +34,7 @@ import ormsgpack
 from numba import njit
 
 from parol6.config import LIMITS
+from parol6.utils.joint_limits import joint_outside_travel_deg
 from waldoctl import ActionState, ToolStatus
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from waldoctl.shapes import Attachment
@@ -314,15 +315,11 @@ class MoveJCmd(
         _check_speed_accel(self.speed, self.accel)
         _check_finite("MOVEJ angles", self.angles)
         if not self.rel:
-            for i in range(6):
-                if not (
-                    LIMITS.joint.position.deg[i, 0]
-                    <= self.angles[i]
-                    <= LIMITS.joint.position.deg[i, 1]
-                ):
-                    raise ValueError(
-                        f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
-                    )
+            i = joint_outside_travel_deg(self.angles)
+            if i >= 0:
+                raise ValueError(
+                    f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
+                )
 
 
 class MoveJPoseCmd(
@@ -506,15 +503,11 @@ class ServoJCmd(
 
     def __post_init__(self) -> None:
         _check_finite("SERVOJ angles", self.angles)
-        for i in range(6):
-            if not (
-                LIMITS.joint.position.deg[i, 0]
-                <= self.angles[i]
-                <= LIMITS.joint.position.deg[i, 1]
-            ):
-                raise ValueError(
-                    f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
-                )
+        i = joint_outside_travel_deg(self.angles)
+        if i >= 0:
+            raise ValueError(
+                f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
+            )
 
 
 class ServoJPoseCmd(
@@ -665,8 +658,8 @@ class TeleportCmd(
 
     A system command: the controller answers OK once the pose is applied,
     or an error when it is refused. The angles must be finite and inside
-    the hard joint limits; each tool position must be finite and within
-    ``[0, 1]``.
+    the hard joint limits, to half a motor step; each tool position must be
+    finite and within ``[0, 1]``.
     """
 
     angles: Annotated[list[float], msgspec.Meta(min_length=6, max_length=6)]
@@ -674,13 +667,13 @@ class TeleportCmd(
 
     def __post_init__(self) -> None:
         _check_finite("angles", self.angles)
-        limits = LIMITS.joint.position.deg
-        for i, deg in enumerate(self.angles):
-            if not (limits[i, 0] <= deg <= limits[i, 1]):
-                raise ValueError(
-                    f"angles[{i}]={deg} is outside the hard limits "
-                    f"[{limits[i, 0]}, {limits[i, 1]}] deg"
-                )
+        i = joint_outside_travel_deg(self.angles)
+        if i >= 0:
+            limits = LIMITS.joint.position.deg
+            raise ValueError(
+                f"angles[{i}]={self.angles[i]} is outside the hard limits "
+                f"[{limits[i, 0]}, {limits[i, 1]}] deg"
+            )
         if self.tool_positions is not None:
             _check_finite("tool_positions", self.tool_positions)
             for i, p in enumerate(self.tool_positions):
