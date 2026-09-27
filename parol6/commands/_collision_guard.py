@@ -13,20 +13,99 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import COLLISION_PATH_SAMPLES
-from parol6.utils.error_catalog import make_error
+from parol6.config import COLLISION_JOG_LOOKAHEAD_S, COLLISION_PATH_SAMPLES
+from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
 
 if TYPE_CHECKING:
     from parol6.motion.trajectory import JointPath
+    from parol6.server.state import ControllerState
 
 # Escape-check tolerance (m): min-distance drops within this count as "not
 # deeper" (absorbs signed-distance jitter).
 _ESCAPE_TOL = 1e-4
+
+_QLIM_ROWS: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def _qlim_rows() -> tuple[np.ndarray, np.ndarray]:
+    """Joint-limit rows, fetched once per process — ``robot.qlim`` allocates a
+    fresh matrix per access and this is consumed on the 100 Hz stream path."""
+    global _QLIM_ROWS
+    if _QLIM_ROWS is None:
+        qlim = PAROL6_ROBOT.robot.qlim
+        if qlim is None:
+            _QLIM_ROWS = (np.full(6, -np.inf), np.full(6, np.inf))
+        else:
+            _QLIM_ROWS = (
+                np.ascontiguousarray(qlim[0], dtype=np.float64),
+                np.ascontiguousarray(qlim[1], dtype=np.float64),
+            )
+    return _QLIM_ROWS
+
+
+@njit(cache=True)
+def _lookahead_jit(
+    q: np.ndarray,
+    qd: np.ndarray,
+    horizon: float,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    target: np.ndarray,
+    toward_target: bool,
+    out: np.ndarray,
+) -> None:
+    for j in range(q.shape[0]):
+        v = q[j] + qd[j] * horizon
+        if toward_target:
+            t = target[j]
+            if q[j] <= t < v or v < t <= q[j]:
+                v = t
+        if v < lo[j]:
+            v = lo[j]
+        elif v > hi[j]:
+            v = hi[j]
+        out[j] = v
+
+
+def stream_lookahead(
+    q: np.ndarray,
+    qd: np.ndarray,
+    out: np.ndarray,
+    target: np.ndarray | None = None,
+) -> np.ndarray:
+    """Where a stream at ``q`` moving at ``qd`` (rad/s) will be one collision
+    lookahead horizon on, written into ``out``: faster motion is checked
+    further ahead of contact. A stream tracking ``target`` stops there, so
+    no joint is projected past it. Clamped to the joint limits, so a pose at
+    a mechanical stop cannot trip the checker on travel the arm does not
+    have."""
+    lo, hi = _qlim_rows()
+    if target is None:
+        _lookahead_jit(q, qd, COLLISION_JOG_LOOKAHEAD_S, lo, hi, q, False, out)
+    else:
+        _lookahead_jit(q, qd, COLLISION_JOG_LOOKAHEAD_S, lo, hi, target, True, out)
+    return out
+
+
+def collision_stop(state: ControllerState, checker, q: np.ndarray) -> RobotError:
+    """The error a stream stopped short of a contact at ``q`` ends with.
+    The pairs are recorded as the standing collision the display draws.
+    Allocates: a stop path, never a clean tick."""
+    pairs = tuple(PAROL6_ROBOT.display_pairs(checker.colliding_pairs(q)))
+    state.collision_pairs = pairs
+    state.collision_active = True
+    return make_error(
+        ErrorCode.SYS_SELF_COLLISION,
+        sample="1",
+        total="1",
+        pairs=_format_pairs(list(pairs)),
+    )
 
 
 def collision_blocked(checker, current_q, target_q) -> bool:

@@ -11,8 +11,8 @@ import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.commands._collision_guard import (
-    _format_pairs,
     collision_blocked,
+    collision_stop,
     guard_cartesian_path,
 )
 from parol6.config import (
@@ -35,13 +35,14 @@ from parol6.protocol.wire import (
 )
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
-from parol6.utils.error_catalog import make_error
+from parol6.utils.error_catalog import RobotError, make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
 from parol6.utils.ik import RateLimitedWarning, solve_ik
 from pinokin import se3_from_rpy, se3_rpy
 
-from parol6.commands.servo_commands import _max_vel_ratio_jit
+from parol6.commands.servo_commands import _step_toward_jit
+from parol6.motion.streaming_executors import below_speed
 
 from .base import (
     ExecutionStatusCode,
@@ -82,38 +83,46 @@ class JogLCommand(MotionCommand[JogLCmd]):
     The CSE drives the commanded 6-DOF TCP twist (Ruckig-smoothed); IK
     converts each smoothed pose to joint space. Velocity clamping and
     commanded-position tracking match servo_l for smooth, deterministic
-    joint trajectories. An unreachable pose brakes the tool along its
-    twist; a predicted collision brakes it and ends the jog with the
-    collision latched, as a planned move is refused.
+    joint trajectories. The twist is resolved against the tool as it now
+    stands, every tick: a tool-frame jog moves along the tool's axes as
+    they are after any turn before it, a world-frame turn is about the
+    world axis. An unreachable pose brakes the tool along its twist; a
+    predicted collision brakes it and ends the jog with the collision
+    latched, as a planned move is refused. The duration is counted in
+    control ticks.
     """
 
     PARAMS_TYPE = JogLCmd
     streamable = True
 
     __slots__ = (
+        "_initialized",
+        "_accel_applied",
         "_ik_stopping",
-        "_collision_stopping",
+        "_released",
+        "_collision_error",
         "_twist",
-        "_dot_buf",
+        "_scaled_twist",
         "_q_commanded",
         "_q_ik_seed",
-        "_dq_buf",
-        "_pos_rad_buf",
         "_vel_ratio",
     )
 
     def __init__(self, p: JogLCmd):
         super().__init__(p)
+        self._initialized = False
+        self._accel_applied = -1.0
         self._ik_stopping = False
-        self._collision_stopping = False
+        # The duration ran out and the brake has been handed to the CSE.
+        self._released = False
+        # Set once a contact stops the jog; latched across datagrams.
+        self._collision_error: RobotError | None = None
         self._vel_ratio = 1.0
 
         self._twist = np.zeros(6, dtype=np.float64)
-        self._dot_buf = np.zeros((), dtype=np.float64)
+        self._scaled_twist = np.zeros(6, dtype=np.float64)
         self._q_commanded = np.zeros(6, dtype=np.float64)
         self._q_ik_seed = np.zeros(6, dtype=np.float64)
-        self._dq_buf = np.zeros(6, dtype=np.float64)
-        self._pos_rad_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
         """Resolve the twist and start the timer. A collision stop stays
@@ -121,25 +130,23 @@ class JogLCommand(MotionCommand[JogLCmd]):
         ends where it braked, like a refused planned move."""
         guard_homed(state)
         jog_twist(self.p.velocities, self._twist)
-        self.start_timer(self.p.duration)
+        self.start_tick_timer(self.p.duration)
         self._ik_stopping = False
+
+    def _sync(self, state: "ControllerState") -> None:
+        """Start the CSE and the joint tracking from the arm, at rest."""
+        steps_to_rad(state.Position_in, self._q_rad_buf)
+        state.cartesian_streaming_executor.sync_pose(get_fkine_se3(state))
+        self._q_commanded[:] = self._q_rad_buf
+        self._q_ik_seed[:] = self._q_rad_buf
+        self._vel_ratio = 1.0
 
     def _track_and_send(self, state: "ControllerState", ik_q: np.ndarray) -> None:
         """Velocity-clamp IK result, update tracked position, send MOVE."""
         self._q_ik_seed[:] = ik_q
-        dq = self._dq_buf
-        for i in range(6):
-            dq[i] = float(ik_q[i]) - self._q_commanded[i]
-        ratio = _max_vel_ratio_jit(ik_q, self._q_commanded)
-        if ratio > 1.0:
-            for i in range(6):
-                self._q_commanded[i] += dq[i] / ratio
-            self._vel_ratio = ratio
-        else:
-            self._q_commanded[:] = ik_q
-            self._vel_ratio = 1.0
-        self._pos_rad_buf[:] = self._q_commanded
-        rad_to_steps(self._pos_rad_buf, self._steps_buf)
+        ratio = _step_toward_jit(self._q_commanded, ik_q)
+        self._vel_ratio = ratio if ratio > 1.0 else 1.0
+        rad_to_steps(self._q_commanded, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 
     def _send_if_clear(self, state: "ControllerState", pose: np.ndarray) -> None:
@@ -155,12 +162,13 @@ class JogLCommand(MotionCommand[JogLCmd]):
         ):
             self._track_and_send(state, ik_result.q)
 
-    def _command_twist(self, cse, scale: float) -> None:
-        """Re-command the twist, held back by the factor the joints were:
-        the tool keeps its direction and loses only speed."""
-        if scale != 1.0:
-            np.multiply(self._twist, scale, out=self._pos_rad_buf)
-            cse.set_jog_twist(self._pos_rad_buf, self.p.frame == "WRF")
+    def _command_twist(self, cse) -> None:
+        """Command the twist, held back by the factor the joints were: the
+        tool keeps its direction and loses only speed."""
+        self._released = False
+        if self._vel_ratio != 1.0:
+            np.multiply(self._twist, 1.0 / self._vel_ratio, out=self._scaled_twist)
+            cse.set_jog_twist(self._scaled_twist, self.p.frame == "WRF")
         else:
             cse.set_jog_twist(self._twist, self.p.frame == "WRF")
 
@@ -168,44 +176,36 @@ class JogLCommand(MotionCommand[JogLCmd]):
         """Execute one tick of Cartesian jogging."""
         cse = state.cartesian_streaming_executor
 
-        # Initialize only if not already active (preserve velocity across streaming)
-        if not cse.active:
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-            cse.sync_pose(get_fkine_se3(state))
+        # A new jog starts from the arm; one continued by the next datagram
+        # keeps the velocity it is at.
+        if not self._initialized or not cse.active:
+            self._sync(state)
+            self._accel_applied = -1.0
+            self._initialized = True
+        if self.p.accel != self._accel_applied:
             cse.set_limits(1.0, self.p.accel)
-            self._q_commanded[:] = self._q_rad_buf
-            self._q_ik_seed[:] = self._q_rad_buf
-            self._vel_ratio = 1.0
+            self._accel_applied = self.p.accel
 
-        if self._collision_stopping:
+        if self._collision_error is not None:
             # Braking to rest with the collision latched, whatever the timer
             # says; the jog ends there in error and does not resume on its
             # own, like a refused planned move.
             smoothed_pose, smoothed_vel, _finished = cse.tick()
-            np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
-            if self._dot_buf < 1e-8:
-                cse.sync_pose(get_fkine_se3(state))
+            if below_speed(smoothed_vel, 1e-8):
                 cse.active = False
-                self.fail_and_idle(
-                    state,
-                    make_error(
-                        ErrorCode.SYS_SELF_COLLISION,
-                        sample="1",
-                        total="1",
-                        pairs=_format_pairs(list(state.collision_pairs)),
-                    ),
-                )
+                self.fail_and_idle(state, self._collision_error)
                 return ExecutionStatusCode.FAILED
             self._send_if_clear(state, smoothed_pose)
             return ExecutionStatusCode.EXECUTING
 
         # Handle timer expiry - stop smoothly
-        if self.timer_expired():
-            cse.stop()
+        if self.tick_timer_expired():
+            if not self._released:
+                cse.stop()
+                self._released = True
             smoothed_pose, smoothed_vel, finished = cse.tick()
 
-            np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
-            if not finished and self._dot_buf > 1e-8:
+            if not finished and not below_speed(smoothed_vel, 1e-8):
                 # Keep streaming while escaping from inside a keep-out,
                 # else the target freezes at release and the arm jerks.
                 self._send_if_clear(state, smoothed_pose)
@@ -219,7 +219,7 @@ class JogLCommand(MotionCommand[JogLCmd]):
         # While stopping, leave the CSE target at zero — re-commanding the
         # twist every tick would defeat cse.stop()'s deceleration.
         if not self._ik_stopping:
-            self._command_twist(cse, 1.0 / self._vel_ratio)
+            self._command_twist(cse)
 
         smoothed_pose, smoothed_vel, _finished = cse.tick()
 
@@ -237,14 +237,10 @@ class JogLCommand(MotionCommand[JogLCmd]):
                 )
                 cse.stop()
                 self._ik_stopping = True
-            else:
-                # Still failing, check if we've stopped decelerating
-                np.dot(smoothed_vel, smoothed_vel, out=self._dot_buf)
-                if self._dot_buf < 1e-8:
-                    cse.sync_pose(get_fkine_se3(state))
-                    cse.active = False
-                    self.finish()
-                    return ExecutionStatusCode.COMPLETED
+            elif below_speed(smoothed_vel, 1e-8):
+                cse.active = False
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING
 
         # A predicted collision brakes like an IK failure (no mid-jog
@@ -259,25 +255,16 @@ class JogLCommand(MotionCommand[JogLCmd]):
                 logger,
                 "[JOGL] collision predicted - stopping",
             )
-            # Captured once on the stop transition (not every decel tick).
-            state.collision_pairs = tuple(
-                PAROL6_ROBOT.display_pairs(checker.colliding_pairs(ik_result.q))
-            )
-            state.collision_active = True
+            self._collision_error = collision_stop(state, checker, ik_result.q)
             cse.stop()
-            self._collision_stopping = True
             return ExecutionStatusCode.EXECUTING
 
         # Reachable again — resume jogging.
         if self._ik_stopping:
             logger.info("[JOGL] pose reachable again - resuming jog")
-            steps_to_rad(state.Position_in, self._q_rad_buf)
-            cse.sync_pose(get_fkine_se3(state))
-            self._q_commanded[:] = self._q_rad_buf
-            self._q_ik_seed[:] = self._q_rad_buf
-            self._vel_ratio = 1.0
+            self._sync(state)
             self._ik_stopping = False
-            self._command_twist(cse, 1.0)
+            self._command_twist(cse)
 
         self._track_and_send(state, ik_result.q)
 

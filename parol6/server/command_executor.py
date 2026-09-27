@@ -258,6 +258,7 @@ class CommandExecutor:
                 logger.error("Command execution error: %s", e)
                 self._refusal_logged = (error.code, now)
             self._latch_failure(ac, error, state)
+            self._release_streams(state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
@@ -323,6 +324,7 @@ class CommandExecutor:
                 ),
                 state,
             )
+            self._release_streams(state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
@@ -340,6 +342,16 @@ class CommandExecutor:
 
             self._update_queue_state(state)
             self.active_command = None
+
+    @staticmethod
+    def _release_streams(state: "ControllerState") -> None:
+        """Drop whatever motion the streaming executors carry: a stream cut
+        off (a stop, an E-stop, a teleport, a planned move, a stream of
+        another kind) or failed leaves nothing for the next one, which
+        starts from the arm at rest instead of running on the way this one
+        was going, or back to where it was."""
+        state.streaming_executor.reset()
+        state.cartesian_streaming_executor.reset()
 
     def _latch_failure(
         self, ac: QueuedCommand, error: RobotError, state: "ControllerState"
@@ -371,6 +383,7 @@ class CommandExecutor:
         )
 
         state = self._state_manager.get_state()
+        self._release_streams(state)
         state.action_current = ""
         state.executing_command_index = -1
         state.action_params = ""
@@ -387,6 +400,7 @@ class CommandExecutor:
         ac = self.active_command
         if ac and isinstance(ac.command, MotionCommand) and ac.command.streamable:
             state = self._state_manager.get_state()
+            self._release_streams(state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""

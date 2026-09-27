@@ -10,7 +10,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 
-from parol6.config import TRACE
+from parol6.config import INTERVAL_S, TRACE
 from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType, Response
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
@@ -117,6 +117,7 @@ class CommandBase(ABC, Generic[P]):
         "robot_error",
         "_t0",
         "_t_end",
+        "_ticks_left",
         "_q_rad_buf",
         "_steps_buf",
     )
@@ -128,6 +129,8 @@ class CommandBase(ABC, Generic[P]):
         self.robot_error: RobotError | None = None
         self._t0: float | None = None
         self._t_end: float | None = None
+        # Control ticks left on the tick timer; -1 before it starts.
+        self._ticks_left = -1
         # Pre-allocated buffers for zero-allocation unit conversions
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
         self._steps_buf: np.ndarray = np.zeros(6, dtype=np.int32)
@@ -242,6 +245,21 @@ class CommandBase(ABC, Generic[P]):
     def timer_expired(self) -> bool:
         """Check if the timer has expired."""
         return self._t_end is not None and time.perf_counter() >= self._t_end
+
+    def start_tick_timer(self, duration_s: float) -> None:
+        """Start a timer for ``duration_s`` counted in control ticks, one per
+        :meth:`tick_timer_expired`, as the motion it times advances: a loop
+        that drops periods stretches it in wall time instead of cutting the
+        motion short."""
+        self._ticks_left = max(0, round(duration_s / INTERVAL_S))
+
+    def tick_timer_expired(self) -> bool:
+        """Whether the tick timer has run out; counts one tick off it, so it
+        is called once per tick."""
+        if self._ticks_left > 0:
+            self._ticks_left -= 1
+            return False
+        return self._ticks_left == 0
 
     def progress01(self, duration_s: float) -> float:
         """Get progress as a value between 0 and 1."""

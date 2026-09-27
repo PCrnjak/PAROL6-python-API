@@ -6,9 +6,9 @@ Contains fundamental movement commands: Home, Jog, and SelectTool.
 import logging
 from enum import Enum, auto
 import numpy as np
+from numba import njit
 
 from parol6.config import (
-    COLLISION_JOG_LOOKAHEAD_S,
     JOG_MIN_STEPS,
     LIMITS,
     rad_to_steps,
@@ -25,7 +25,8 @@ from parol6.protocol.wire import (
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
-from parol6.commands._collision_guard import collision_blocked
+from parol6.commands._collision_guard import collision_blocked, stream_lookahead
+from parol6.motion.streaming_executors import below_speed
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.config import deg_to_steps
@@ -41,38 +42,98 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-_QLIM_ROWS: tuple[np.ndarray, np.ndarray] | None = None
-
-
-def _qlim_rows() -> tuple[np.ndarray, np.ndarray]:
-    """Joint-limit rows, fetched once per process — ``robot.qlim`` allocates a
-    fresh matrix per access and this is consumed on the 100 Hz jog path."""
-    global _QLIM_ROWS
-    if _QLIM_ROWS is None:
-        qlim = PAROL6_ROBOT.robot.qlim
-        if qlim is None:
-            _QLIM_ROWS = (np.full(6, -np.inf), np.full(6, np.inf))
-        else:
-            _QLIM_ROWS = (
-                np.ascontiguousarray(qlim[0], dtype=np.float64),
-                np.ascontiguousarray(qlim[1], dtype=np.float64),
-            )
-    return _QLIM_ROWS
-
-
 # A jog stops this far short of a joint's limit, on top of its own
 # stopping distance, so a joint that overshoots its ramp by a hair never
 # touches the stop.
 _JOG_LIMIT_MARGIN_RAD: float = 0.005
-# The jerk-limited stopping distance is over-estimated by this factor.
+# The jerk-limited stopping distance is over-estimated by this factor. The
+# limit itself is held by StreamingExecutor.hold_inside, whatever the
+# lookahead predicted; this only decides how far short the ramp starts.
 _JOG_STOP_MARGIN: float = 1.05
 # The measured position trails the commanded one by this many ticks
 # (write, firmware, read back); the lookahead counts that travel too.
 _JOG_LAG_TICKS: float = 2.0
-# Joint travel the jog lookahead stops short of, read once: slicing the
-# limits table every tick would allocate a view each time.
-_POS_LO_RAD = LIMITS.joint.position.rad[:, 0]
-_POS_HI_RAD = LIMITS.joint.position.rad[:, 1]
+# Joint travel the jog stops short of, read once and contiguous: the
+# per-tick kernels take them as they are.
+_POS_LO_RAD = np.ascontiguousarray(LIMITS.joint.position.rad[:, 0])
+_POS_HI_RAD = np.ascontiguousarray(LIMITS.joint.position.rad[:, 1])
+_ACCEL_MAX = np.ascontiguousarray(LIMITS.joint.hard.acceleration, dtype=np.float64)
+_JERK_MAX = np.ascontiguousarray(LIMITS.joint.hard.jerk, dtype=np.float64)
+
+
+@njit(cache=True)
+def _jog_lookahead_jit(
+    jog_vel: np.ndarray,
+    stopping: bool,
+    vel: np.ndarray,
+    acc: np.ndarray,
+    q_meas: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    accel_max: np.ndarray,
+    jerk_max: np.ndarray,
+    accel_frac: float,
+    dt: float,
+    blocked: np.ndarray,
+    target_vel: np.ndarray,
+) -> int:
+    """Fill the target velocities, latching the direction of any joint
+    whose stopping distance reaches its limit and zeroing a joint driven
+    into its latch. Returns bit 0 set while any joint is still driven, and
+    bit ``j + 1`` for each joint latched this tick.
+
+    The stopping distance is the jerk-limited ramp's: from the speed and
+    acceleration the executor is at, the acceleration first reverses at the
+    jerk limit, peaking the speed, then the ramp runs at the acceleration
+    limit and rounds off at the jerk limit again. The remaining travel is
+    measured: the arm is what approaches the limit, not the integrator.
+    """
+    status = 0
+    for j in range(target_vel.shape[0]):
+        v_t = 0.0 if stopping else jog_vel[j]
+        v = vel[j]
+        probe = v if v != 0.0 else v_t
+        if probe != 0.0:
+            if probe > 0.0:
+                remaining = hi[j] - q_meas[j]
+                sgn = 1
+            else:
+                remaining = q_meas[j] - lo[j]
+                sgn = -1
+            a = accel_max[j] * accel_frac
+            jk = jerk_max[j]
+            speed = abs(v)
+            a0 = acc[j] * sgn
+            if a0 < 0.0:
+                a0 = 0.0
+            v_peak = speed + a0 * a0 / (2.0 * jk)
+            stop = (
+                speed * a0 / jk
+                + a0 * a0 * a0 / (3.0 * jk * jk)
+                + v_peak * v_peak / (2.0 * a)
+                + v_peak * a / (2.0 * jk)
+            )
+            stop = _JOG_STOP_MARGIN * stop + _JOG_LAG_TICKS * speed * dt
+            if stop + _JOG_LIMIT_MARGIN_RAD >= remaining and blocked[j] != sgn:
+                blocked[j] = sgn
+                status |= 1 << (j + 1)
+        if v_t != 0.0 and blocked[j] == (1 if v_t > 0.0 else -1):
+            v_t = 0.0
+        target_vel[j] = v_t
+        if v_t != 0.0:
+            status |= 1
+    return status
+
+
+@njit(cache=True)
+def _track_rates_jit(
+    vel: np.ndarray, vel_prev: np.ndarray, acc_prev: np.ndarray, dt: float
+) -> None:
+    """The executor's speed and acceleration as the lookahead reads them."""
+    inv = 1.0 / dt
+    for j in range(vel.shape[0]):
+        acc_prev[j] = (vel[j] - vel_prev[j]) * inv
+        vel_prev[j] = vel[j]
 
 
 class HomeState(Enum):
@@ -160,8 +221,12 @@ class JogJCommand(MotionCommand[JogJCmd]):
 
     Each joint runs its own lookahead against its position limits: a joint
     whose stopping distance would reach its limit is ramped to rest there
-    — that joint alone; the others carry on. The jog ends when its
-    duration runs out or every commanded joint has been stopped by a limit.
+    — that joint alone; the others carry on — and held while the jog
+    drives it that way. The hold is the joint's own: it lets go when the
+    jog drives that joint the other way or stops driving it. Whatever the
+    lookahead predicted, the commanded position never steps across a
+    limit. The jog ends when its duration, counted in control ticks, runs
+    out and the joints have come to rest.
     """
 
     PARAMS_TYPE = JogJCmd
@@ -169,7 +234,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
 
     __slots__ = (
         "speeds_out",
-        "_jog_initialized",
+        "_synced",
+        "_accel_applied",
         "_jog_vel_rad",
         "_target_vel",
         "_vel_prev",
@@ -182,7 +248,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
     def __init__(self, p: JogJCmd):
         super().__init__(p)
         self.speeds_out = np.zeros(6, dtype=np.int32)
-        self._jog_initialized = False
+        self._synced = False
+        self._accel_applied = -1.0
         self._jog_vel_rad = np.zeros(6, dtype=np.float64)
         self._target_vel = np.zeros(6, dtype=np.float64)
         self._vel_prev = np.zeros(6, dtype=np.float64)
@@ -193,9 +260,17 @@ class JogJCommand(MotionCommand[JogJCmd]):
         self._lookahead_buf = np.zeros(6, dtype=np.float64)
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Pre-compute step speeds and rad/s velocities for all 6 joints."""
+        """Pre-compute step speeds and rad/s velocities for all 6 joints,
+        releasing the limit hold of a joint this datagram stops driving or
+        drives the other way."""
         for i in range(6):
             s = self.p.speeds[i]
+            held = self._blocked[i]
+            if held != 0 and (
+                (s == 0.0 and self._jog_vel_rad[i] != 0.0)
+                or (s != 0.0 and (1 if s > 0.0 else -1) != held)
+            ):
+                self._blocked[i] = 0
             if s == 0.0:
                 self.speeds_out[i] = 0
                 self._jog_vel_rad[i] = 0.0
@@ -209,84 +284,52 @@ class JogJCommand(MotionCommand[JogJCmd]):
                 self._jog_vel_rad[i] = speed_steps_to_rad_scalar(step_speed, i) * (
                     1 if s > 0 else -1
                 )
-        self.start_timer(self.p.duration)
-        self._jog_initialized = False
-
-    def _limit_lookahead(self, stopping: bool, dt: float) -> bool:
-        """Fill the target velocities, zeroing any joint whose stopping
-        distance reaches its limit. Returns True when nothing is left to
-        drive: the timer ran out, or a limit stopped every commanded joint.
-
-        The stopping distance is the jerk-limited ramp's: from the speed
-        and acceleration the executor is at, the acceleration first
-        reverses at the jerk limit, peaking the speed, then the ramp runs
-        at the acceleration limit and rounds off at the jerk limit again.
-        """
-        lo = _POS_LO_RAD
-        hi = _POS_HI_RAD
-        accel = LIMITS.joint.hard.acceleration
-        jerk = LIMITS.joint.hard.jerk
-        driving = False
-        for j in range(6):
-            v_t = 0.0 if stopping else self._jog_vel_rad[j]
-            v = self._vel_prev[j]
-            probe = v if v != 0.0 else v_t
-            if probe != 0.0:
-                if probe > 0.0:
-                    remaining = hi[j] - self._q_meas[j]
-                    sgn = 1
-                else:
-                    remaining = self._q_meas[j] - lo[j]
-                    sgn = -1
-                a = accel[j] * self.p.accel
-                jk = jerk[j]
-                speed = abs(v)
-                a0 = max(self._acc_prev[j] * sgn, 0.0)
-                v_peak = speed + a0 * a0 / (2.0 * jk)
-                stop = (
-                    speed * a0 / jk
-                    + a0 * a0 * a0 / (3.0 * jk * jk)
-                    + v_peak * v_peak / (2.0 * a)
-                    + v_peak * a / (2.0 * jk)
-                )
-                stop = _JOG_STOP_MARGIN * stop + _JOG_LAG_TICKS * speed * dt
-                if stop + _JOG_LIMIT_MARGIN_RAD >= remaining:
-                    self._blocked[j] = sgn
-            if v_t != 0.0 and self._blocked[j] == (1 if v_t > 0.0 else -1):
-                v_t = 0.0
-            self._target_vel[j] = v_t
-            if v_t != 0.0:
-                driving = True
-        return not driving
+        self.start_tick_timer(self.p.duration)
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         """Execute one tick of joint jogging via StreamingExecutor."""
         se = state.streaming_executor
 
-        # A jog starting from rest syncs to the arm; one continued by the
-        # next datagram keeps the motion it is in, and the lookahead keeps
-        # the speed and acceleration it has measured of it.
-        if not self._jog_initialized:
-            if not se.active:
-                steps_to_rad(state.Position_in, self._q_rad_buf)
-                se.sync_position(self._q_rad_buf)
-                self._vel_prev.fill(0.0)
-                self._acc_prev.fill(0.0)
-                self._blocked.fill(0)
+        # A new jog starts from the arm at rest; one continued by the next
+        # datagram keeps the motion it is in, and the lookahead the speed
+        # and acceleration it has measured of it.
+        if not self._synced:
+            steps_to_rad(state.Position_in, self._q_rad_buf)
+            se.sync_position(self._q_rad_buf)
+            self._vel_prev.fill(0.0)
+            self._acc_prev.fill(0.0)
+            self._synced = True
+        if self.p.accel != self._accel_applied:
             se.set_limits(1.0, self.p.accel)
-            self._jog_initialized = True
+            self._accel_applied = self.p.accel
 
-        # The lookahead measures the remaining travel: the arm is what
-        # approaches the limit, not the integrator.
         steps_to_rad(state.Position_in, self._q_meas)
-        stopping = self.timer_expired()
-        at_rest_wanted = self._limit_lookahead(stopping, se.dt)
+        stopping = self.tick_timer_expired()
+        status = _jog_lookahead_jit(
+            self._jog_vel_rad,
+            stopping,
+            self._vel_prev,
+            self._acc_prev,
+            self._q_meas,
+            _POS_LO_RAD,
+            _POS_HI_RAD,
+            _ACCEL_MAX,
+            _JERK_MAX,
+            self.p.accel,
+            se.dt,
+            self._blocked,
+            self._target_vel,
+        )
+        if status > 1:
+            for j in range(6):
+                if status & (1 << (j + 1)):
+                    logger.info("[JOGJ] joint %d stopping short of its limit", j + 1)
 
         se.set_jog_velocity(self._target_vel)
         pos_rad, vel, finished = se.tick()
-        np.subtract(vel, self._vel_prev, out=self._acc_prev)
-        self._acc_prev /= se.dt
-        self._vel_prev[:] = vel
+        # _q_rad_buf still holds the position commanded last tick.
+        se.hold_inside(self._q_rad_buf, self._q_meas, _POS_LO_RAD, _POS_HI_RAD)
+        _track_rates_jit(vel, self._vel_prev, self._acc_prev, se.dt)
 
         # Never stream a config that collides or approaches collision: the
         # streamed config itself is checked (catches anything inside the
@@ -301,15 +344,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
         # configuration to check: the jog that nudges it clear before it
         # can home runs unchecked, as does par6's.
         checker = PAROL6_ROBOT.collision
-        if checker is not None and not at_rest_wanted and arm_homed(state):
-            # In-place to keep the hot path allocation-free; clamped to joint
-            # limits so a pose past the mechanical stop can't phantom-trip.
-            la = self._lookahead_buf
-            la[:] = self._target_vel
-            la *= COLLISION_JOG_LOOKAHEAD_S
-            la += pos_rad
-            lo, hi = _qlim_rows()
-            np.clip(la, lo, hi, out=la)
+        if checker is not None and status & 1 and arm_homed(state):
+            la = stream_lookahead(pos_rad, self._target_vel, self._lookahead_buf)
             if collision_blocked(checker, pos_rad, la):
                 logger.warning("[JOGJ] collision predicted - stopping jog")
                 # Allocate only here (the rare stop), never on the clean tick.
@@ -325,13 +361,8 @@ class JogJCommand(MotionCommand[JogJCmd]):
         rad_to_steps(self._q_rad_buf, self._steps_buf)
         self.set_move_position(state, self._steps_buf)
 
-        if at_rest_wanted and (finished or np.dot(vel, vel) < 1e-6):
-            if stopping:
-                self.log_trace("Timed jog finished.")
-            else:
-                logger.warning(
-                    "Limit reached on joint %d.", int(np.argmax(self._blocked != 0)) + 1
-                )
+        if stopping and (finished or below_speed(vel, 1e-6)):
+            self.log_trace("Timed jog finished.")
             se.active = False
             self.finish()
             return ExecutionStatusCode.COMPLETED

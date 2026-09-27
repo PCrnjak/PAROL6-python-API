@@ -34,7 +34,11 @@ import ormsgpack
 from numba import njit
 
 from parol6.config import LIMITS
-from parol6.utils.joint_limits import joint_outside_travel_deg
+from parol6.utils.joint_limits import (
+    TRAVEL_MAX_RAD,
+    TRAVEL_MIN_RAD,
+    joint_outside_travel_deg,
+)
 from waldoctl import ActionState, ToolStatus
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from waldoctl.shapes import Attachment
@@ -487,6 +491,10 @@ class CheckpointCmd(
 
 # -- Streaming commands: servo (position) --
 
+# Joint travel [deg] as plain floats, for the servo_j sweep.
+_SERVO_MIN_DEG: tuple[float, ...] = tuple(float(v) for v in np.degrees(TRAVEL_MIN_RAD))
+_SERVO_MAX_DEG: tuple[float, ...] = tuple(float(v) for v in np.degrees(TRAVEL_MAX_RAD))
+
 
 class ServoJCmd(
     msgspec.Struct,
@@ -502,11 +510,23 @@ class ServoJCmd(
     accel: Annotated[float, msgspec.Meta(gt=0.0, le=1.0)] = 1.0
 
     def __post_init__(self) -> None:
-        _check_finite("SERVOJ angles", self.angles)
-        i = joint_outside_travel_deg(self.angles)
+        # A stream sends one of these every few ticks: six plain floats
+        # inside travel, the case that matters, pass in one sweep; anything
+        # else goes through the full checks for its refusal.
+        angles = self.angles
+        for i in range(6):
+            v = angles[i]
+            if v.__class__ is not float or not (
+                _SERVO_MIN_DEG[i] <= v <= _SERVO_MAX_DEG[i]
+            ):
+                break
+        else:
+            return
+        _check_finite("SERVOJ angles", angles)
+        i = joint_outside_travel_deg(angles)
         if i >= 0:
             raise ValueError(
-                f"Joint {i + 1} target ({self.angles[i]:.1f} deg) is out of range"
+                f"Joint {i + 1} target ({angles[i]:.1f} deg) is out of range"
             )
 
 

@@ -46,7 +46,7 @@ from ..config import (
 from ..motion.geometry import joint_path_to_tcp_poses
 from ..motion.streaming_executors import cap_twist
 from ..utils.ik import solve_ik
-from pinokin import se3_rpy, so3_exp
+from pinokin import se3_exp, se3_rpy, so3_exp
 from math import degrees, radians
 
 import parol6.protocol.wire as _wire
@@ -138,19 +138,21 @@ def _twist_pose(
     start: np.ndarray, twist: np.ndarray, t: float, wrf: bool
 ) -> np.ndarray:
     """The pose a TCP driven at `twist` for `t` seconds from `start`
-    reaches: the translation and the rotation each integrate on their own
-    axis, in world axes when `wrf` else in the tool's."""
-    rot = np.empty((3, 3), dtype=np.float64)
-    so3_exp(twist[3:] * t, rot)
+    reaches, the twist resolved against the tool as it stands at every
+    instant, as the live jog resolves it. In world axes when `wrf`: the TCP
+    runs a straight line while the tool turns about a fixed world axis
+    through it. In the tool's axes otherwise: the tool's own axes turn with
+    it, so a twist that both moves and turns the tool traces the screw
+    ``start · exp(t · twist)``."""
     out = np.eye(4, dtype=np.float64)
-    r0 = start[:3, :3]
     if wrf:
-        out[:3, :3] = rot @ r0
+        rot = np.empty((3, 3), dtype=np.float64)
+        so3_exp(twist[3:] * t, rot)
+        out[:3, :3] = rot @ start[:3, :3]
         out[:3, 3] = start[:3, 3] + twist[:3] * t
-    else:
-        out[:3, :3] = r0 @ rot
-        out[:3, 3] = start[:3, 3] + r0 @ (twist[:3] * t)
-    return out
+        return out
+    se3_exp(twist * t, out)
+    return start @ out
 
 
 #: Row spacing of the commanded record: the rate par6's engine keeps too,
@@ -762,11 +764,19 @@ class DryRunRobotClient:
             fracs[:, np.newaxis] * displacements[np.newaxis, :]
         ).astype(np.int64)
 
-        self._state.Position_in[:] = start_pos + displacements
-
         radians = np.empty((n_points, 6), dtype=np.float64)
         for i in range(n_points):
             steps_to_rad(trajectory[i], radians[i])
+        # A joint jogged into its limit stops there, as on the arm; one
+        # already past it is held where it is.
+        start_rad = np.empty(6, dtype=np.float64)
+        steps_to_rad(start_pos, start_rad)
+        lo = np.minimum(LIMITS.joint.position.rad[:, 0], start_rad)
+        hi = np.maximum(LIMITS.joint.position.rad[:, 1], start_rad)
+        np.clip(radians, lo, hi, out=radians)
+        end_steps = np.empty(6, dtype=np.int32)
+        rad_to_steps(radians[-1], end_steps)
+        self._state.Position_in[:] = end_steps
         return radians
 
     def _simulate_cartesian_jog(self, cmd: JogLCommand) -> np.ndarray:
