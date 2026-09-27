@@ -227,6 +227,10 @@ def server_proc(request, ports: TestPorts, robot_api_env):
             "PAROL6_CONTROLLER_IP": ports.server_ip,
             "PAROL6_CONTROLLER_PORT": str(ports.server_port),
             "PAROL6_MCAST_PORT": str(ports.mcast_port),
+            # A test sends a blend chain one acknowledged command at a
+            # time, and a degraded CI loop (macOS runs ~40 Hz) forwards
+            # them more than the default hold apart.
+            "PAROL6_BLEND_HOLD_S": "0.5",
         },
     )
 

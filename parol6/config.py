@@ -21,6 +21,10 @@ logging.addLevelName(TRACE, "TRACE")
 # Command queue limits
 MAX_COMMAND_QUEUE_SIZE: int = 100
 MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "100"))
+# How long the planner waits for the next command of a blend chain before
+# planning what it has: a corner cannot be rounded until both of its moves
+# have arrived.
+BLEND_HOLD_S: float = float(os.getenv("PAROL6_BLEND_HOLD_S", "0.1"))
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
 # Further messages read in a tick whose batch filled up. A client streaming
 # faster than the tick leaves a backlog in the socket; it is already stale, so

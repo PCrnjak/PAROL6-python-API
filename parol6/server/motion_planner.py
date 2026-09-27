@@ -24,7 +24,7 @@ from math import radians
 
 import numpy as np
 
-from parol6.config import INTERVAL_S
+from parol6.config import BLEND_HOLD_S, INTERVAL_S
 from parol6.protocol.wire import (
     HomeCmd,
     MoveJCmd,
@@ -697,7 +697,7 @@ def motion_planner_main(
     try:
         while not shutdown_event.is_set():
             try:
-                msg = command_queue.get(timeout=0.1)
+                msg = command_queue.get(timeout=BLEND_HOLD_S)
             except queue.Empty:
                 worker.flush_stale_blend()
                 continue
