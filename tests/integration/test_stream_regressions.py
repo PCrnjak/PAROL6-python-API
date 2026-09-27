@@ -31,7 +31,14 @@ from parol6.protocol.wire import (
 from parol6.server.state import get_fkine_se3
 from parol6.utils.error_codes import ErrorCode
 from pinokin import se3_rpy
-from tests.integration.controller_loop import VirtualClock, push, ready, send, tick
+from tests.integration.controller_loop import (
+    VirtualClock,
+    drain,
+    push,
+    ready,
+    send,
+    tick,
+)
 from waldoctl import Box
 
 pytestmark = pytest.mark.integration
@@ -514,6 +521,9 @@ def test_a_jog_l_after_a_cancelled_cartesian_stream_moves_the_arm(
                 tick(controller, state)
             before = get_fkine_se3(state)[2, 3]
             push(controller, sock, JogLCmd(velocities=down, duration=0.5))
+            # Loopback can deliver the jog a tick or two late (macOS): read it
+            # before waiting for the stream to end.
+            drain(controller, state, sock, 100 + req_id)
             _settle(controller, state, clock)
             dropped = (before - get_fkine_se3(state)[2, 3]) * 1000.0
             assert dropped > 10.0, (

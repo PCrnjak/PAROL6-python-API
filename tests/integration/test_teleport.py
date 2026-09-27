@@ -6,6 +6,7 @@ any motion read with the teleport, which starts from there; the failure the
 arm was left in stays behind; and the tool positions it takes are the ones
 status reports, in the convention status reports them in."""
 
+import select
 import socket
 import time
 
@@ -44,13 +45,14 @@ def _angles_deg(state) -> np.ndarray:
 
 
 def _reply_index(sock: socket.socket, req_id: int) -> int:
-    """The index acknowledged to request ``req_id``, among the replies
-    already waiting on ``sock``."""
+    """The index acknowledged to request ``req_id``, which the controller has
+    already sent; loopback may still be delivering it (macOS)."""
+    deadline = time.monotonic() + 2.0
     while True:
-        try:
-            data, _ = sock.recvfrom(4096)
-        except BlockingIOError:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([sock], [], [], remaining)[0]:
             pytest.fail(f"no acknowledgement of request {req_id}")
+        data, _ = sock.recvfrom(4096)
         reply = decode_message(data)
         if isinstance(reply, OkMsg) and reply.req_id == req_id:
             assert reply.index is not None, reply
