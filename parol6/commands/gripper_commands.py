@@ -11,11 +11,17 @@ from dataclasses import dataclass
 from enum import Enum
 
 from parol6.commands.base import Debouncer, ExecutionStatusCode, MotionCommand
+from parol6.config import INTERVAL_S
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
+
+#: Control ticks an electric gripper's calibration is given to finish. The
+#: calibrated bit in the gripper's status byte is not read: it is unverified
+#: across the supported grippers (see ``ControllerState.gripper_calibrated``).
+CALIBRATE_TICKS = 200
 
 
 class ElectricGripperState(Enum):
@@ -34,6 +40,7 @@ class PneumaticGripperParams:
 
     action: str  # "open" or "close"
     port: int  # 1 or 2
+    dwell_s: float  # the jaws' estimated stroke, which the action waits out
 
 
 @dataclass(frozen=True)
@@ -47,38 +54,41 @@ class ElectricGripperParams:
 
 
 class PneumaticGripperCommand(MotionCommand[PneumaticGripperParams]):
-    """Control pneumatic gripper (open/close)."""
+    """Control pneumatic gripper (open/close). The valve switches on the
+    first tick; the action lasts the jaws' estimated stroke, as the dry run
+    previews it, since the valve reports nothing when they arrive."""
 
     PARAMS_TYPE = None  # Not wire-registered — instantiated by ToolActionCommand
 
     __slots__ = (
-        "timeout_counter",
         "_state_to_set",
         "_port_index",
+        "_ticks_left",
     )
 
     def __init__(self, p: PneumaticGripperParams):
         super().__init__(p)
-        self.timeout_counter = 1000
         self._state_to_set: int = 0
         self._port_index: int = 0
+        self._ticks_left: int = 1
 
     @classmethod
-    def from_tool_action(cls, *, action: str, port: int) -> PneumaticGripperCommand:
-        return cls(PneumaticGripperParams(action=action, port=port))
+    def from_tool_action(
+        cls, *, action: str, port: int, dwell_s: float
+    ) -> PneumaticGripperCommand:
+        return cls(PneumaticGripperParams(action=action, port=port, dwell_s=dwell_s))
 
     def do_setup(self, state: ControllerState) -> None:
         self._state_to_set = 1 if self.p.action == "open" else 0
         # port 1 -> index 2, port 2 -> index 3
         self._port_index = 2 if self.p.port == 1 else 3
+        self._ticks_left = max(1, round(self.p.dwell_s / INTERVAL_S))
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        self.timeout_counter -= 1
-        if self.timeout_counter <= 0:
-            self.fail(make_error(ErrorCode.MOTN_GRIPPER_TIMEOUT))
-            return ExecutionStatusCode.FAILED
-
         state.InOut_out[self._port_index] = self._state_to_set
+        self._ticks_left -= 1
+        if self._ticks_left > 0:
+            return ExecutionStatusCode.EXECUTING
         self.finish()
         return ExecutionStatusCode.COMPLETED
 
@@ -182,7 +192,7 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         self._hw_position = int(round(self.p.position * 255))
         self._hw_speed = max(1, int(round(self.p.speed * 255)))
         if self.p.action == "calibrate":
-            self.wait_counter = 200
+            self.wait_counter = CALIBRATE_TICKS
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         self.timeout_counter -= 1

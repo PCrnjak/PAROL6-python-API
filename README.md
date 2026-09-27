@@ -333,9 +333,10 @@ the pause request can be acknowledged while still decelerating. Queued delays
 retain their remaining time while paused; positive speed changes do not retime
 delays, tool actuators or homing routines already in progress.
 
-Completion waits query the requested command's exact success. Tool actions run
-concurrently with arm motion, so the highest completed index alone cannot prove
-that an earlier command finished. The controller retains its latest 1024
+Completion waits query the requested command's exact success. A jog, a servo
+stream or a `tool.stop()` can finish ahead of commands queued before it, so the
+highest completed index alone cannot prove that an earlier command finished.
+The controller retains its latest 1024
 successful completions; an unknown, cancelled, or expired result remains
 unconfirmed. A controller-session change during a wait raises `ConnectionError`.
 This requires matching client and controller versions supporting the completion
@@ -413,6 +414,32 @@ with RobotClient() as c:
 ```
 
 Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` directly) and calling `register_tool("KEY", config)` in `parol6/tools.py`.
+
+### Tool actions
+
+Tool actions (`tool.open()`, `close()`, `set_position()`, `calibrate()`,
+`release()`, `tool_action(...)`) are queued work, in the same queue as planned
+motion:
+
+- **They take their turn.** A tool action waits for the motion queued ahead of
+  it, the arm holds still while it runs, and the motion queued after it waits
+  for it. A tool action sent after a blended move ends the blend there. A wait
+  on a tool action therefore covers the motion queued ahead of it, and
+  `queued_duration` counts the tool's estimated travel.
+- **A failure cancels what follows.** A `move` on a gripper never calibrated is
+  refused when its turn comes, under its own index; like any command that
+  fails, it cancels the commands queued behind it (`MOTN_CANCELLED`).
+- **What discards the queue discards them.** A pause holds them. `stop()`,
+  `estop()`, `reset_state()`, a teleport, or a jog or servo stream taking the
+  arm fails the queued ones as cancelled and halts the one running where the
+  jaws are, keeping the grip.
+- **`tool.stop()` is immediate.** It is not queued: it halts the tool action
+  running, failing it as cancelled by a tool stop, keeps everything queued
+  behind it, and holds the next queued tool action until the jaws are still.
+
+`release()` drops the grip without moving the jaws. A pneumatic action lasts
+its estimated stroke; an electric `calibrate` lasts 200 control ticks (two
+seconds at the default 100 Hz).
 
 
 **Security note:** The controller has no authentication — it accepts any correctly parsed command on its UDP port. Multiple senders are supported by design (e.g., GUI + orchestrator), but deploy only on trusted networks.

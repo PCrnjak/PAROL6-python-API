@@ -10,7 +10,7 @@ import pytest
 
 from parol6.protocol.wire import OkMsg, SelectToolCmd, ToolActionCmd
 from parol6.utils.error_codes import ErrorCode
-from tests.integration.controller_loop import ready, send, tick_for, tick_until
+from tests.integration.controller_loop import ready, send, tick_for
 
 pytestmark = pytest.mark.integration
 
@@ -34,11 +34,12 @@ def test_a_jaw_move_waits_for_the_calibrate_ahead_of_it(controller):
         )
         never = send(controller, state, sock, move, 1)
         assert isinstance(never, OkMsg) and never.index is not None, never
-        tick_until(
+        tick_for(
             controller,
             state,
             lambda: state.command_failure(never.index) is not None,
             "the move on a never-calibrated gripper was not failed",
+            seconds=30.0,
         )
         failure = state.command_failure(never.index)
         assert failure is not None
@@ -56,12 +57,12 @@ def test_a_jaw_move_waits_for_the_calibrate_ahead_of_it(controller):
         moved = send(controller, state, sock, move, 3)
         assert isinstance(calibrate, OkMsg) and calibrate.index is not None
         assert isinstance(moved, OkMsg) and moved.index is not None
-        tick_until(
+        tick_for(
             controller,
             state,
             lambda: state.command_completed(moved.index),
             "the move queued behind the calibrate never completed",
-            ticks=2000,
+            seconds=30.0,
         )
         assert state.command_completed(calibrate.index)
         assert state.command_failure(moved.index) is None

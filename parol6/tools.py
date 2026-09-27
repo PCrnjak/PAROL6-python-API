@@ -166,10 +166,11 @@ class PneumaticGripperConfig(ToolConfig):
     def create_command(self, action: str, params: list) -> PneumaticGripperCommand:
         from parol6.commands.gripper_commands import PneumaticGripperCommand
 
+        dwell_s = self.estimate_duration(action, params)
         if action in ("move", "set_position"):
             action = "open" if float(params[0]) < 0.5 else "close"
         return PneumaticGripperCommand.from_tool_action(
-            action=action, port=self.io_port
+            action=action, port=self.io_port, dwell_s=dwell_s
         )
 
     def estimate_duration(self, action: str, params: list) -> float:
@@ -237,6 +238,11 @@ class ElectricGripperConfig(ToolConfig):
         )
 
     def estimate_duration(self, action: str, params: list) -> float:
+        if action == "calibrate":
+            from parol6.commands.gripper_commands import CALIBRATE_TICKS
+            from parol6.config import INTERVAL_S
+
+            return CALIBRATE_TICKS * INTERVAL_S
         if action != "move":
             return 0.0
         target = float(params[0])
@@ -400,8 +406,8 @@ def tool_action_refusal(
     """Why a decoded tool action cannot run on the arm as it stands, or
     None. The action and its parameters were validated on decode; these
     checks need the controller's state at the moment the action's turn
-    comes, and the dry run applies them to its own so a script previews
-    the refusal it would get live."""
+    comes in the queue, and the dry run applies them to its own so a
+    script previews the refusal it would get live."""
     refusal = unselected_tool_refusal(tool_key, current_tool)
     if refusal is not None:
         return refusal

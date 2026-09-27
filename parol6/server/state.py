@@ -371,10 +371,11 @@ class ControllerState:
     # Named wrapper over raw gripper arrays (initialized in __post_init__)
     gripper_hw: GripperHWState = field(init=False, repr=False)
     # Set when a calibrate action completes; cleared when the transport
-    # (re)connects, since the gripper may have lost power. The firmware
-    # reports no calibrated bit this controller can read, so it is tracked
-    # here. reset() leaves it alone: resetting software state does not
-    # uncalibrate the gripper.
+    # (re)connects, since the gripper may have lost power. Tracked here, one
+    # flag for whichever gripper is fitted: the SSG-48 firmware packs a
+    # calibrated bit into its status byte, but that bit is unverified on the
+    # other supported grippers, so it is not read. reset() leaves it alone:
+    # resetting software state does not uncalibrate the gripper.
     gripper_calibrated: bool = False
 
     def __post_init__(self) -> None:

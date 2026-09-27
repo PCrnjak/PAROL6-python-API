@@ -1681,8 +1681,11 @@ class AsyncRobotClient(_RobotClientABC):
     async def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
-        Queries exact success in the controller's last 1024 completions.
-        A concurrent tool finishing does not complete an unfinished arm command.
+        Queries exact success in the controller's last 1024 completions: a
+        later command that finishes first — a jog, a ``tool.stop()`` — does
+        not complete an unfinished one queued before it. Queued commands,
+        tool actions among them, run in index order, so a wait on one covers
+        everything queued ahead of it.
         Unknown or expired results are never inferred successful from the
         status high-water mark. A command that ended as a failure — cancelled
         by ``stop()``/``estop()`` (``MOTN_CANCELLED``) or failed by the
@@ -2261,15 +2264,31 @@ class AsyncRobotClient(_RobotClientABC):
         Returns the command index (>= 0) on success, -1 on failure. The
         action and its parameters are checked before anything is sent: a
         malformed one raises ``ValueError``. A key naming a tool other than
-        the selected one, or a ``move`` before a completed ``calibrate``, is
-        refused by the controller.
+        the selected one is refused by the controller.
+
+        A tool action is queued work: it runs in queue order with motion,
+        the arm holding still while it does, so a wait on it covers the
+        motion queued ahead of it, and one sent after a blended move ends
+        the blend there. A ``move`` before a completed ``calibrate`` is
+        refused when its turn comes, failing its own index; a tool action
+        that fails cancels what is queued behind it (``MOTN_CANCELLED``).
+        A pause holds the tool actions still queued. ``stop()``,
+        ``estop()``, ``reset_state()``, a teleport, or a jog or servo stream
+        taking the arm discards them and halts the one running where the
+        jaws are, keeping the grip.
+
+        ``stop`` alone acts at once, on the tool fitted now: it halts the
+        action running, failing it as cancelled by a tool stop, keeps what
+        is queued behind it, and holds the next queued tool action until
+        the jaws are still.
 
         Electric grippers take ``move [position, speed, current]``
         (exactly three fractions in ``[0, 1]``; current spans the tool's
         ``current_range``), ``calibrate``, ``stop`` (halt in place, keep
-        grip) and ``idle`` (release); ``set_position``/``open``/``close``
-        map onto ``move``. Pneumatic grippers take ``open``,
-        ``close``, and ``move``/``set_position [position]``.
+        grip) and ``idle`` (release, the jaws left where they are);
+        ``set_position``/``open``/``close`` map onto ``move``. Pneumatic
+        grippers take ``open``, ``close``, and ``move``/``set_position
+        [position]``.
 
         Category: I/O
 

@@ -148,7 +148,7 @@ def test_a_stream_refused_unhomed_is_not_the_failure_of_the_tool_action_beside_i
     controller,
 ):
     """A cartesian jog refused on an unhomed arm leaves its refusal standing
-    as its own, not against the calibration running beside it."""
+    as its own, not against the calibration queued before it."""
     state = controller.state_manager.get_state()
     controller._planner.start()
     ready(controller, state, homed=False)
@@ -196,12 +196,14 @@ def test_a_stream_refused_unhomed_is_not_the_failure_of_the_tool_action_beside_i
             f"the jog's refusal stands against index {state.error.command_index}, "
             f"failing a wait on the calibration ({calibrating})"
         )
-        tick_until(
+        # Wall time, not a tick budget: the calibration reaches the loop
+        # through the planner process, like all queued work.
+        tick_for(
             controller,
             state,
             lambda: state.command_completed(calibrating),
             "the calibration never completed",
-            ticks=400,
+            seconds=30.0,
         )
         assert state.command_failure(calibrating) is None
 

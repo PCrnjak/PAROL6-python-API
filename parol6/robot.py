@@ -364,12 +364,16 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
         return await self._cmd("calibrate", **kwargs)
 
     async def stop(self, **kwargs: object) -> int:
-        """Halt the jaws in place, keeping the grip. On an uncalibrated
-        gripper, which has no position to hold, this releases instead."""
+        """Halt the jaws where they are, keeping the grip, ahead of anything
+        still queued: the action running fails as cancelled, and the queue
+        behind it is kept. On an uncalibrated gripper, which has no position
+        to hold, this releases instead."""
         return await self._cmd("stop", **kwargs)
 
     async def release(self, **kwargs: object) -> int:
-        """Drop the grip, freeing the jaws for manual handling."""
+        """Drop the grip, freeing the jaws for manual handling, once the
+        commands queued ahead of it have run. The jaws stay where they
+        are."""
         return await self._cmd("idle", **kwargs)
 
     async def action_r(self, engaged: bool) -> None:

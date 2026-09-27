@@ -115,8 +115,8 @@ class TestPneumaticGripperMethods:
         assert idx >= 0
         assert await client.wait_motion(timeout=5.0)
 
-        # A side-channel tool action can finish before an older planned
-        # command. Its completion must still be observable after that command.
+        # A tool action waits its turn behind the delay the pause holds, the
+        # jaws still shut, and runs once the queue resumes.
         earlier = await client.delay(0.5)
         assert await client.wait_status(
             lambda s: s.executing_index == earlier, timeout=5.0
@@ -124,14 +124,16 @@ class TestPneumaticGripperMethods:
         assert await client.pause() == 1
         try:
             opened = await tool.open(wait=False)
-            assert await client.wait_command(opened, timeout=1.0)
-            assert not await client.wait_command(earlier, timeout=0.05), (
-                "a completed tool action must not confirm the paused delay"
+            assert not await client.wait_command(opened, timeout=0.5), (
+                "the open ran past the paused delay ahead of it"
+            )
+            assert (await tool.status()).positions[0] > 0.99, (
+                "the jaws opened under the pause"
             )
         finally:
             assert await client.resume() == 1
-        assert await client.wait_motion(timeout=5.0)
-        assert await client.wait_command(opened, timeout=1.0)
+        assert await client.wait_command(opened, timeout=5.0)
+        assert await client.wait_command(earlier, timeout=1.0)
 
         cancelled = await client.delay(1.0)
         assert await client.wait_status(
@@ -302,10 +304,11 @@ class TestSSG48GripperMethods:
         fraction = 0.3
         closing = await tool.set_position(1.0, speed=0.05, current=fraction)
         assert closing >= 0
+        # The close itself, not any current: the frame an earlier move left
+        # reports that move's current until the queue reaches the close.
         assert await client.wait_status(
-            lambda s: s.tool_status.channels and s.tool_status.channels[0] > 0,
-            timeout=5.0,
-        ), "the jaws never got under way"
+            lambda s: s.executing_index == closing, timeout=5.0
+        ), "the close never started"
         commanded = (await tool.status()).channels[0]
         assert commanded == round(lo + fraction * (hi - lo)), (
             f"a move at current {fraction} sent {commanded} mA across "

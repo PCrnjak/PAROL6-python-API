@@ -896,7 +896,7 @@ class RobotClient:
         action: str,
         params: list | None = None,
         *,
-        wait: bool = True,
+        wait: bool = False,
         timeout: float = 10.0,
     ) -> int:
         return _run(

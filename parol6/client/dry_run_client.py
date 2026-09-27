@@ -451,7 +451,8 @@ class DryRunRobotClient:
         return q_rad[at]
 
     def _tool_target(self, action: str, params: list) -> float:
-        if action in ("open", "calibrate", "idle"):
+        # ``idle`` drops the grip without moving the jaws.
+        if action in ("open", "calibrate"):
             return 0.0
         if action == "close":
             return 1.0
@@ -459,13 +460,12 @@ class DryRunRobotClient:
             return float(min(1.0, max(0.0, float(params[0]))))
         return self._tool_position
 
-    def _fill_tool_action(self, idx: int, cmd: ToolActionCmd) -> None:
-        """A tool action holds the arm for the tool's estimated travel while
-        the jaws ramp to their target."""
-        cfg = get_registry().get(cmd.tool_key.strip().upper())
+    def _fill_tool_action(self, idx: int, cmd: ToolActionCmd, seconds: float) -> None:
+        """A tool action holds the arm for *seconds*, the tool's estimated
+        travel as the planner hands it to the live queue too, while the jaws
+        ramp to their target."""
         action = cmd.action.strip().lower()
         params = list(cmd.params)
-        seconds = cfg.estimate_duration(action, params) if cfg is not None else 0.0
         ticks = int(round(seconds / INTERVAL_S))
         target = self._tool_target(action, params)
         if action == "calibrate":
@@ -502,7 +502,7 @@ class DryRunRobotClient:
             elif isinstance(seg, InlineSegment) and isinstance(
                 seg.params, ToolActionCmd
             ):
-                self._fill_tool_action(seg.command_index, seg.params)
+                self._fill_tool_action(seg.command_index, seg.params, seg.duration)
             # Any other InlineSegment (select_tool, checkpoint, write_io …)
             # plans nothing: its chunk keeps its place at zero ticks.
 
@@ -634,6 +634,12 @@ class DryRunRobotClient:
             self._state.execution_paused = False
             return idx
         if isinstance(params, ToolActionCmd):
+            stop = params.action.strip().lower() == "stop"
+            if not stop:
+                # A tool action takes its turn in the queue with the arm at
+                # rest: a pending blend chain ends before it, and it holds
+                # the pose the chain ends at.
+                self.flush()
             refusal = tool_action_refusal(
                 params.tool_key,
                 params.action,
@@ -646,6 +652,11 @@ class DryRunRobotClient:
                     np.empty((0, 6)),
                     error=make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=refusal),
                 )
+                return idx
+            if stop:
+                # Live, a stop acts at once, beside the queue: it takes no
+                # turn in it and leaves a blend chain whole.
+                self._fill(idx, np.empty((0, 6)))
                 return idx
         if isinstance(params, (_wire.EstopCmd, _wire.ResetCmd)):
             self._state.invalidate_attachments()

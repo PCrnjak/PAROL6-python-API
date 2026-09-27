@@ -4,8 +4,8 @@ The MotionPlanner offloads trajectory computation (TOPPRA, IK chains) from
 the 100Hz control loop to a separate process.  Commands flow in via
 ``command_queue`` and computed segments flow back via ``segment_queue``.
 
-Non-trajectory motion commands (Home, SelectTool, Gripper, Checkpoint, Delay)
-are forwarded as ``InlineSegment`` tokens so that the SegmentPlayer can
+Non-trajectory motion commands (Home, SelectTool, tool actions, Checkpoint,
+Delay) are forwarded as ``InlineSegment`` tokens so that the SegmentPlayer can
 execute them in the control loop while preserving command ordering.
 
 TrajectoryPlanner holds the shared planning logic used by both the real-time
@@ -37,6 +37,7 @@ from parol6.protocol.wire import (
     wire_command_name,
 )
 from parol6.server.command_executor import _format_cmd_params
+from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
 
@@ -90,6 +91,9 @@ class InlineSegment:
     command_index: int
     params: object  # wire struct (msgspec.Struct — picklable)
     generation: int = 0
+    # Seconds it holds the arm, as far as the plan can tell: a tool action's
+    # estimated travel, which the queued duration counts. Zero otherwise.
+    duration: float = 0.0
 
 
 @dataclass
@@ -284,8 +288,9 @@ class TrajectoryPlanner:
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
             self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type]
         else:
-            # Tool actions run concurrently with motion — don't flush blend
-            if not isinstance(params, ToolActionCmd) and self._blend_buffer:
+            # Every inline command, a tool action included, takes its turn
+            # with the arm at rest: the chain ahead of it ends there.
+            if self._blend_buffer:
                 self._flush_blend()
             self._handle_inline(command_index, params)
 
@@ -534,10 +539,18 @@ class TrajectoryPlanner:
 
     def _handle_inline(self, command_index: int, params: object) -> None:
         """Emit an InlineSegment and predict state changes."""
+        duration = 0.0
+        if isinstance(params, ToolActionCmd):
+            cfg = get_registry().get(params.tool_key.strip().upper())
+            if cfg is not None:
+                duration = cfg.estimate_duration(
+                    params.action.strip().lower(), params.params
+                )
         self._output.append(
             InlineSegment(
                 command_index=command_index,
                 params=params,
+                duration=duration,
             )
         )
 
