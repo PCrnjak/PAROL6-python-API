@@ -48,7 +48,11 @@ with Robot(host=HOST, port=PORT, normalize_logs=True):
     cx, _, cz = CENTERS[0]
     rbt.move_j(pose=circle_pt(cx, cz, 0), speed=0.5, wait=True)
     rbt.move_c(
-        via=circle_pt(cx, cz, 180), end=circle_pt(cx, cz, 0), speed=SPEED, wait=True
+        via=circle_pt(cx, cz, 180),
+        end=circle_pt(cx, cz, 0),
+        speed=SPEED,
+        wait=True,
+        timeout=30,
     )
 
     # Circle 2: two half-circle move_c arcs
