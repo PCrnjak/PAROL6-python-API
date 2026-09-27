@@ -39,7 +39,12 @@ from parol6.server.motion_planner import (
     Segment,
     TrajectorySegment,
 )
-from parol6.utils.error_catalog import RobotError, make_error
+from parol6.utils.error_catalog import (
+    RobotError,
+    attributed,
+    extract_robot_error,
+    make_error,
+)
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
 from waldoctl import ActionState
@@ -300,7 +305,9 @@ class SegmentPlayer:
                 logger.error(
                     "Command %d failed: %s", active.command_index, active.error
                 )
-                state.error = active.error
+                error = attributed(active.error, active.command_index)
+                state.error = error
+                state.record_failure(active.command_index, error)
                 pairs = active.colliding_pairs
                 state.collision_active = bool(pairs)
                 state.collision_pairs = tuple(pairs) if pairs else ()
@@ -309,10 +316,10 @@ class SegmentPlayer:
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
-                self._fail_dropped(state, active.command_index)
+                self._fail_dropped(state)
                 self._buffer.clear()
                 self._planner.cancel()
-                self._drain_planner_queue(state)
+                self._drain_planner_queue(state, failed=True)
                 return False
 
             # Unknown segment type
@@ -405,7 +412,19 @@ class SegmentPlayer:
 
         cmd = self._inline_cmd
         if not self._inline_activated:
-            cmd.setup(state)
+            try:
+                cmd.setup(state)
+            except Exception as e:
+                # Raised out of the tick, the segment would stay unactivated
+                # and raise again on every tick after.
+                self._on_failure(
+                    seg,
+                    extract_robot_error(
+                        e, ErrorCode.MOTN_SETUP_FAILED, seg.command_index, detail=str(e)
+                    ),
+                    state,
+                )
+                return False
             state.action_current = wire_command_name(type(cmd.p))
             state.action_params = _format_cmd_params(seg.params)
             self._inline_activated = True
@@ -454,14 +473,17 @@ class SegmentPlayer:
         self, seg: Segment, error: RobotError, state: ControllerState
     ) -> None:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
+        error = attributed(error, seg.command_index)
         state.error = error
+        state.record_failure(seg.command_index, error)
         state.action_current = ""
         state.action_params = ""
         state.action_state = ActionState.ERROR
         self._active = None
+        self._fail_dropped(state)
         self._buffer.clear()
         self._planner.cancel()
-        self._drain_planner_queue(state)
+        self._drain_planner_queue(state, failed=True)
 
     def _world_guard(
         self, seg: TrajectorySegment, steps: np.ndarray, state: ControllerState
@@ -494,7 +516,8 @@ class SegmentPlayer:
                 seg.command_index,
                 exc.robot_error,
             )
-            state.error = exc.robot_error
+            error = attributed(exc.robot_error, seg.command_index)
+            state.error = error
             pairs = exc.colliding_pairs
             state.collision_active = bool(pairs)
             state.collision_pairs = tuple(pairs) if pairs else ()
@@ -502,34 +525,29 @@ class SegmentPlayer:
             state.action_current = ""
             state.action_params = ""
             self._active = None
+            state.record_failure(seg.command_index, error)
             # The moves its blend absorbed were the same path, and fail
             # with it.
             for index in seg.blend_consumed_indices:
-                state.record_failure(index, exc.robot_error)
-            self._fail_dropped(state, seg.command_index)
+                state.record_failure(index, error)
+            self._fail_dropped(state)
             self._buffer.clear()
             self._planner.cancel()
-            self._drain_planner_queue(state)
+            self._drain_planner_queue(state, failed=True)
             return False
         return True
 
     @staticmethod
-    def _fail_dropped(state: ControllerState, failed_index: int) -> None:
+    def _fail_dropped(state: ControllerState) -> None:
         """The commands queued behind a failed one are dropped with it: each
         fails as cancelled, so a wait on it raises instead of running out its
-        timeout. Failure path only — it allocates."""
-        for index, _ in state.pending_planned:
-            if (
-                index != failed_index
-                and index >= 0
-                and not state.command_completed(index)
-            ):
-                state.record_failure(
-                    index,
-                    make_error(
-                        ErrorCode.MOTN_CANCELLED, index, scope="the failure ahead of it"
-                    ),
-                )
+        timeout. One whose failure is already recorded (the failed command,
+        the moves its blend absorbed) keeps it. Failure path only — it
+        allocates."""
+        state.fail_unfinished(
+            [index for index, _ in state.pending_planned],
+            make_error(ErrorCode.MOTN_CANCELLED, scope="the failure ahead of it"),
+        )
 
     def owed_indices(self, state: ControllerState) -> list[int]:
         """Every command index this pipeline still owes an outcome: the
@@ -566,10 +584,23 @@ class SegmentPlayer:
         # Drain stale segments from planner output queue
         self._drain_planner_queue(state)
 
-    def _drain_planner_queue(self, state: ControllerState) -> None:
-        """Drain any remaining segments from the planner's output queue."""
+    def _drain_planner_queue(
+        self, state: ControllerState, failed: bool = False
+    ) -> None:
+        """Drain any remaining segments from the planner's output queue.
+
+        Every path that drops planned work ends here. The planner applies a
+        tool selection or a TCP change when it plans it, so when dropped
+        work — or a *failed* command, which it may have applied in part —
+        can have left it holding one the controller never applied, it is
+        brought back to the controller's tool. A tool action accepted from
+        here on is judged against the fitted tool: no selection is queued.
+        """
         while self._planner.poll_segment() is not None:
             pass
+        if failed or state.pending_planned:
+            self._planner.resync(state)
+        state.accepted_tool = state.current_tool
         state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0

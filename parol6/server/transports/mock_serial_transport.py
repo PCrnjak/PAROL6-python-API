@@ -24,6 +24,7 @@ from parol6.protocol.wire import (
     _pack_positions,
 )
 from parol6.server.state import ControllerState
+from parol6.tools import PneumaticToolSimulator, get_registry
 
 if TYPE_CHECKING:
     from parol6.tools import ToolSimulator
@@ -549,16 +550,25 @@ class MockSerialTransport:
         dt = cfg.INTERVAL_S
         self._state.last_update = now
 
-        # Snap gripper position if teleport requested
-        if tool_teleport_pos >= 0:
-            self._state.gripper_pos_f = tool_teleport_pos
-            self._state.gripper_data_in[1] = int(tool_teleport_pos + 0.5)
-            self._state.gripper_ramp[_RAMP_TARGET] = tool_teleport_pos
+        # Resolved before a teleport snaps the tool: the snap is in the
+        # fitted tool's convention.
+        if tool_name != self._simulator_tool_name:
+            self._simulator_tool_name = tool_name
+            # Clear stale ramp state from the previous tool
             self._state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
-            # Also snap the pneumatic/generic ramp so it doesn't overwrite
-            frac = tool_teleport_pos / 255.0
-            self._state.tool_ramp_current = frac
-            self._state.tool_ramp_target = frac
+            self._state.tool_ramp_current = 0.0
+            self._state.tool_ramp_target = 0.0
+
+            tool_cfg = get_registry().get(tool_name)
+            if tool_cfg is not None:
+                self._simulator = tool_cfg.create_simulator()
+                if self._simulator is not None:
+                    self._simulator.resolve_params(tool_cfg)
+            else:
+                self._simulator = None
+
+        if tool_teleport_pos >= 0:
+            self._teleport_tool(tool_teleport_pos / 255.0)
 
         if dt > 0:
             state = self._state
@@ -582,24 +592,6 @@ class MockSerialTransport:
                 state.homing_countdown,
             )
 
-            # Tool simulation: resolve params on change, then tick
-            if tool_name != self._simulator_tool_name:
-                self._simulator_tool_name = tool_name
-                # Clear stale ramp state from the previous tool
-                state.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
-                state.tool_ramp_current = 0.0
-                state.tool_ramp_target = 0.0
-
-                from parol6.tools import get_registry
-
-                tool_cfg = get_registry().get(tool_name)
-                if tool_cfg is not None:
-                    self._simulator = tool_cfg.create_simulator()
-                    if self._simulator is not None:
-                        self._simulator.resolve_params(tool_cfg)
-                else:
-                    self._simulator = None
-
             if self._simulator is not None:
                 self._simulator.tick(state, dt)
 
@@ -611,6 +603,22 @@ class MockSerialTransport:
         self._encode_payload_into(self._frame_mv)
         self._frame_version += 1
         self._frame_ts = time.time()
+
+    def _teleport_tool(self, position: float) -> None:
+        """Snap the fitted tool to *position*, read as status reads it."""
+        st = self._state
+        if isinstance(self._simulator, PneumaticToolSimulator):
+            # Its ramp runs to 1.0 with the valve open, which status reads
+            # as 0.0: open.
+            position = 1.0 - position
+        byte = position * 255.0
+        st.gripper_pos_f = byte
+        st.gripper_data_in[1] = int(byte + 0.5)
+        st.gripper_ramp[_RAMP_TARGET] = byte
+        st.gripper_ramp[_RAMP_ACTIVE] = _RAMP_OFF
+        # The binary-tool ramp snaps too, or it writes its old position back.
+        st.tool_ramp_current = position
+        st.tool_ramp_target = position
 
     # ================================
     # Latest-frame API (reduced-copy)

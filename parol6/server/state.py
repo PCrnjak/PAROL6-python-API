@@ -4,6 +4,7 @@ import atexit
 import logging
 import secrets
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,7 +16,7 @@ from pinokin import arrays_equal_6
 from parol6.config import CONTROL_RATE_HZ, steps_to_rad
 from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 from parol6.protocol.wire import CommandCode
-from parol6.utils.error_catalog import RobotError
+from parol6.utils.error_catalog import RobotError, attributed
 from waldoctl import ActionState
 
 # How many exact outcomes (successes, failures) the completion query retains.
@@ -277,6 +278,9 @@ class ControllerState:
     status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
     _recent_completions: list[int] = field(default_factory=lambda: [-1] * _OUTCOME_RING)
     _completion_cursor: int = 0
+    # Where each index sits in its ring: a stop owes an outcome for every
+    # queued command, and a ring scan per index would hold the stop's tick.
+    _completion_slots: dict[int, int] = field(default_factory=dict)
     # Commands that ended as failures (a stop discarded them), with why —
     # preallocated rings beside the success ring, so the completion query
     # can answer "failed" instead of leaving a wait to run out its timeout.
@@ -285,6 +289,7 @@ class ControllerState:
         default_factory=lambda: [None] * _OUTCOME_RING
     )
     _failure_cursor: int = 0
+    _failure_slots: dict[int, int] = field(default_factory=dict)
     last_checkpoint: str = ""
 
     # Planning behavior (stop on first IK failure vs solve all for diagnostic)
@@ -385,30 +390,60 @@ class ControllerState:
     def record_completion(self, index: int) -> None:
         """Retain exact successes; concurrent lanes do not finish in index order."""
         self.completed_command_index = max(self.completed_command_index, index)
-        self._recent_completions[self._completion_cursor] = index
-        self._completion_cursor = (self._completion_cursor + 1) % len(
-            self._recent_completions
-        )
+        cursor = self._completion_cursor
+        evicted = self._recent_completions[cursor]
+        if self._completion_slots.get(evicted) == cursor:
+            del self._completion_slots[evicted]
+        self._recent_completions[cursor] = index
+        self._completion_slots[index] = cursor
+        self._completion_cursor = (cursor + 1) % _OUTCOME_RING
 
     def command_completed(self, index: int) -> bool:
-        return index >= 0 and index in self._recent_completions
+        return index >= 0 and index in self._completion_slots
 
     def record_failure(self, index: int, error: RobotError) -> None:
         """Retain a command that ended without completing, and why. It is
         past the completion watermark all the same: nothing more will run
         for it."""
-        self.completed_command_index = max(self.completed_command_index, index)
-        self._recent_failures[self._failure_cursor] = index
-        self._failure_errors[self._failure_cursor] = error
-        self._failure_cursor = (self._failure_cursor + 1) % len(self._recent_failures)
+        self.fail_unfinished((index,), error)
+
+    def fail_unfinished(self, indices: Iterable[int], error: RobotError) -> None:
+        """Record *error* as the failure of each of *indices* that has no
+        outcome yet: a command ends once, so its first outcome is the one
+        kept. *error* need not be attributed to them (see
+        :meth:`command_failure`). A stop fails its whole queue in the tick
+        that stops the arm, hence one pass over locals."""
+        done = self._completion_slots
+        slots = self._failure_slots
+        ring = self._recent_failures
+        errors = self._failure_errors
+        cursor = self._failure_cursor
+        top = self.completed_command_index
+        for index in indices:
+            if index < 0 or index in done or index in slots:
+                continue
+            if index > top:
+                top = index
+            evicted = ring[cursor]
+            if slots.get(evicted) == cursor:
+                del slots[evicted]
+            ring[cursor] = index
+            errors[cursor] = error
+            slots[index] = cursor
+            cursor = (cursor + 1) % _OUTCOME_RING
+        self._failure_cursor = cursor
+        self.completed_command_index = top
 
     def command_failure(self, index: int) -> RobotError | None:
+        """Why *index* failed, attributed to it, or None. A stop records one
+        error for every command it drops, attributed here, on the read."""
         if index < 0:
             return None
-        try:
-            return self._failure_errors[self._recent_failures.index(index)]
-        except ValueError:
+        cursor = self._failure_slots.get(index)
+        if cursor is None:
             return None
+        error = self._failure_errors[cursor]
+        return None if error is None else attributed(error, index)
 
     def reset(self) -> None:
         """

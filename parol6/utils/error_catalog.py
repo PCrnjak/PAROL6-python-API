@@ -194,6 +194,17 @@ def make_error(
     )
 
 
+def attributed(error: RobotError, command_index: int) -> RobotError:
+    """*error* as the failure of *command_index*. Rebuilt from the wire, not
+    ``replace``d: a RobotError is an exception, and a dataclass replace does
+    not survive the copy a state snapshot makes of it."""
+    if error.command_index == command_index:
+        return error
+    wire = error.to_wire()
+    wire[0] = command_index
+    return RobotError.from_wire(wire)
+
+
 def extract_robot_error(
     exc: Exception, fallback_code: ErrorCode, command_index: int = -1, **params: object
 ) -> RobotError:

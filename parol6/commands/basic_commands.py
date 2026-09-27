@@ -364,7 +364,7 @@ class TeleportCommand(SystemCommand[TeleportCmd]):
     """Set the simulated arm's joint angles, and optionally its tool's
     positions, in one tick — no trajectory. The pose is exact afterwards,
     so the arm counts as homed. Refused on hardware, and when the tool
-    positions do not match the fitted tool's degrees of freedom."""
+    positions are not as many as status reports for the fitted tool."""
 
     PARAMS_TYPE = TeleportCmd
 
@@ -376,8 +376,8 @@ class TeleportCommand(SystemCommand[TeleportCmd]):
 
     def do_setup(self, state: ControllerState) -> None:
         # The controller refuses what the simulator cannot apply before
-        # setup runs (off the simulator, tool positions the fitted tool has
-        # no degrees of freedom for).
+        # setup runs (off the simulator, tool positions other than the ones
+        # status reports for the fitted tool).
         deg_to_steps(np.asarray(self.p.angles, dtype=np.float64), self._target_steps)
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
@@ -385,7 +385,9 @@ class TeleportCommand(SystemCommand[TeleportCmd]):
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.TELEPORT
         # The pose is exact: the arm is referenced there from this tick on,
-        # and the simulator reports it so on the next frame.
+        # and the simulator reports it so on the next frame. A move read
+        # after the teleport, in the same batch, is planned from the landing.
+        state.Position_in[:] = self._target_steps
         state.Homed_in[:6] = 1
 
         if self.p.tool_positions:

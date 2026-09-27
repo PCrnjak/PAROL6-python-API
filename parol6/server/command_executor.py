@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,12 @@ from parol6.commands.base import (
 )
 from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
 from parol6.protocol.wire import Command, decode_command, wire_command_name
-from parol6.utils.error_catalog import RobotError, extract_robot_error
+from parol6.utils.error_catalog import (
+    RobotError,
+    attributed,
+    extract_robot_error,
+    make_error,
+)
 from parol6.utils.error_codes import ErrorCode
 from waldoctl import ActionState
 
@@ -70,8 +76,13 @@ class CommandExecutor:
     Immediate commands (system, query) are handled directly by the controller.
     """
 
-    def __init__(self, state_manager: "StateManager"):
+    def __init__(
+        self, state_manager: "StateManager", others_in_flight: Callable[[], bool]
+    ):
         self._state_manager = state_manager
+        # Whether work beside the streams (planned motion, a tool action) is
+        # under way, which a refusal left standing would be read against.
+        self._others_in_flight = others_in_flight
 
         self.command_queue: deque[QueuedCommand] = deque(maxlen=MAX_COMMAND_QUEUE_SIZE)
         self.active_command: QueuedCommand | None = None
@@ -250,7 +261,6 @@ class CommandExecutor:
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.ERROR
             self._update_queue_state(state)
             self.active_command = None
 
@@ -305,13 +315,17 @@ class CommandExecutor:
                 time.time(),
             )
 
-            error = ac.command.robot_error
-            if error is not None:
-                self._latch_failure(ac, error, state)
+            self._latch_failure(
+                ac,
+                ac.command.robot_error
+                or make_error(
+                    ErrorCode.MOTN_TICK_FAILED, detail=type(ac.command).__name__
+                ),
+                state,
+            )
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.ERROR
 
             # Drop queued streamable commands so they don't pile up after a failure.
             if isinstance(ac.command, MotionCommand) and ac.command.streamable:
@@ -327,19 +341,21 @@ class CommandExecutor:
             self._update_queue_state(state)
             self.active_command = None
 
-    @staticmethod
     def _latch_failure(
-        ac: QueuedCommand, error: RobotError, state: "ControllerState"
+        self, ac: QueuedCommand, error: RobotError, state: "ControllerState"
     ) -> None:
-        """A command that ends in error leaves it standing, as a planned
-        move's does: a stream answers no datagram, so ``error()`` and STATUS
-        are how its client hears of a brake-out or a refusal. Only a command
-        a client can wait on has its index failed; a stream's is never
-        waited on, and would crowd real outcomes out of the ring."""
-        state.error = error
-        command = ac.command
-        if not (isinstance(command, MotionCommand) and command.streamable):
-            state.record_failure(ac.command_index, error)
+        """A command that ends in error fails its own index, and leaves the
+        error standing as a planned move's does: a stream answers no
+        datagram, so ``error()`` and STATUS are how its client hears of a
+        brake-out or a refusal. It stands only while nothing else is under
+        way: beside a running program it would misdescribe the program."""
+        error = attributed(error, ac.command_index)
+        state.record_failure(ac.command_index, error)
+        if self._others_in_flight():
+            state.action_state = ActionState.IDLE
+        else:
+            state.error = error
+            state.action_state = ActionState.ERROR
 
     # ---- Cancellation and queue management ----
 
