@@ -25,7 +25,8 @@ from parol6.server.state import get_fkine_se3
 from parol6.utils.error_codes import ErrorCode
 from pinokin import se3_rpy
 from tests.integration.controller_loop import (
-    Pacer,
+    VirtualClock,
+    drain,
     push,
     ready,
     send,
@@ -153,10 +154,12 @@ def test_a_joint_joining_a_streamed_jog_does_not_carry_another_past_its_limit(
 
 
 def test_a_servo_stream_runs_at_its_speed_and_holds_when_its_client_goes_silent(
-    controller,
+    controller, monkeypatch
 ):
     state = controller.state_manager.get_state()
     ready(controller, state, homed=True, at_deg=list(HOME_ANGLES_DEG))
+    # The grace is timed on the clock the commands read: ticks, here.
+    clock = VirtualClock(monkeypatch)
     start = _q_rad(state)
     target = np.degrees(start).tolist()
     target[0] += 20.0
@@ -166,14 +169,11 @@ def test_a_servo_stream_runs_at_its_speed_and_holds_when_its_client_goes_silent(
         push(controller, sock, ServoJCmd(angles=target, speed=0.3))
         peak = 0.0
         prev = start.copy()
-        deadline = time.monotonic() + 3.0
-        pacer = Pacer()
-        while time.monotonic() < deadline:
-            tick(controller, state)
+        for _ in range(round(3.0 / INTERVAL_S)):
+            clock.tick(controller, state)
             q = _q_rad(state)
             peak = max(peak, abs(q[0] - prev[0]) / INTERVAL_S)
             prev = q
-            pacer.wait()
         assert peak <= LIMITS.joint.hard.velocity[0] * 0.3 * 1.05, (
             f"J1 ran at {peak:.3f} rad/s against a 30% ceiling of "
             f"{LIMITS.joint.hard.velocity[0] * 0.3:.3f} rad/s"
@@ -219,14 +219,20 @@ def test_a_jog_l_braked_short_of_a_keep_out_ends_in_error(controller):
         assert state.error.code == int(ErrorCode.SYS_SELF_COLLISION), state.error
         assert "slab" in state.error.cause, state.error.cause
         assert controller._executor.active_command is None
-        # The datagram pushed just before the stop may still be in flight:
-        # its acceptance clears the error and the jog brakes again at
-        # once. Once the client is silent, the error latches.
-        for _ in range(10):
-            tick(controller, state)
-        assert state.error is not None, "the collision error did not latch"
+        # A jog pushed just before the stop can still be on its way: read,
+        # it clears the error and the jog brakes again at the keep-out.
+        # Past a ping answered after it, nothing is left in flight.
+        drain(controller, state, sock, 2)
+        tick_until(
+            controller,
+            state,
+            lambda: (
+                state.error is not None and controller._executor.active_command is None
+            ),
+            "the jog read after the stop did not end at the keep-out",
+            ticks=500,
+        )
         assert state.error.code == int(ErrorCode.SYS_SELF_COLLISION), state.error
-        assert controller._executor.active_command is None
         held = state.Position_in.copy()
         for _ in range(50):
             tick(controller, state)
@@ -236,14 +242,17 @@ def test_a_jog_l_braked_short_of_a_keep_out_ends_in_error(controller):
         )
 
 
-def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(controller):
+def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(
+    controller, monkeypatch
+):
     """A jog_l is a straight TCP line: with an angular part as well, the tool
     turns about the TCP while the TCP holds its line. The dry run previews
     the pose a full-scale diagonal ends at, held to the same speed ceiling
     as on the arm. (Near the wrist singularity at standby the joint speed
     ceilings slow the tool on the arm, which a preview does not model, so
-    the diagonal starts clear of it.) The jog's duration runs on the wall
-    clock, so the ticks are paced to the control rate the preview models."""
+    the diagonal starts clear of it.) The jog's duration is timed on the
+    clock the commands read, one control interval per tick, as the preview
+    counts it."""
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
     from parol6.client.dry_run_client import DryRunRobotClient
 
@@ -253,6 +262,7 @@ def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(controll
     clear_of_the_wrist = [90.0, -80.0, 190.0, 0.0, 30.0, 180.0]
     axes = ("X", "Y", "Z", "RX", "RY", "RZ")
     state = controller.state_manager.get_state()
+    clock = VirtualClock(monkeypatch)
     rpy = np.zeros(3)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         for begin, velocities, duration, previewed in (
@@ -283,10 +293,9 @@ def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(controll
                 JogLCmd(velocities=velocities, duration=duration, accel=1.0),
             )
             worst = 0.0
-            pacer = Pacer()
             # The jog runs its duration, then brakes: tick through the whole of it.
-            for _ in range(int(round((duration + 1.0) / INTERVAL_S))):
-                tick(controller, state)
+            for _ in range(round((duration + 1.0) / INTERVAL_S)):
+                clock.tick(controller, state)
                 offset = get_fkine_se3(state)[:3, 3] - start
                 worst = max(
                     worst,
@@ -294,7 +303,6 @@ def test_a_jog_l_moves_the_tcp_straight_and_ends_where_the_preview_does(controll
                         np.linalg.norm(offset - np.dot(offset, direction) * direction)
                     ),
                 )
-                pacer.wait()
             assert worst * 1000.0 < 1.0, (
                 f"{velocities}: the TCP left its line by {worst * 1000.0:.1f} mm"
             )

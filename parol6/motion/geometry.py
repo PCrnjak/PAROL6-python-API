@@ -85,12 +85,12 @@ class CircularMotion(_ShapeGenerator):
         cos_angle = np.clip(np.dot(r1_norm, r2_norm), -1, 1)
         arc_angle = np.arccos(cos_angle)
 
-        # Full circle: start ≈ end → 2π arc, not zero
-        if arc_angle < 1e-6 and float(np.linalg.norm(r1 - r2)) < 1.0:
+        # An end back at the start (within the 1 mm the circle fit takes as
+        # one) is a full circle, whatever angle the arm's settle error
+        # between the two subtends.
+        if float(np.linalg.norm(end_pos - start_pos)) < 1.0:
             arc_angle = 2 * np.pi
-
-        cross = np.cross(r1_norm, r2_norm)
-        if np.dot(cross, normal_unit) < 0:
+        elif np.dot(np.cross(r1_norm, r2_norm), normal_unit) < 0:
             arc_angle = 2 * np.pi - arc_angle
         if clockwise:
             arc_angle = -arc_angle

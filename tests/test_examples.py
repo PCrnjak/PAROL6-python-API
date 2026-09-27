@@ -4,6 +4,7 @@ These tests run each example as an isolated subprocess so they don't
 conflict with the shared integration test server.
 """
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -11,11 +12,17 @@ from pathlib import Path
 
 import pytest
 
+from parol6 import Robot
+
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 
 EXAMPLES = sorted(
     p.name for p in EXAMPLES_DIR.glob("*.py") if not p.name.startswith("_")
 )
+
+# Written for a controller that is already running, as a Waldo Commander
+# session runs one; the other examples start their own.
+ATTACHED = {"demo_showcase.py", "precision.py"}
 
 ENV = {
     **os.environ,
@@ -27,17 +34,23 @@ ENV = {
 @pytest.mark.examples
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("script", EXAMPLES)
-def test_example_runs(script, ports):
+def test_example_runs(script, ports, monkeypatch):
     """Run each example as a subprocess and check it exits cleanly."""
-    result = subprocess.run(
-        [sys.executable, str(EXAMPLES_DIR / script)],
-        # Windows can reserve the default status port even with no listener.
-        # The subprocess and its controller share the OS-probed test port.
-        env={**ENV, "PAROL6_MCAST_PORT": str(ports.mcast_port)},
-        capture_output=True,
-        text=True,
-        timeout=240,
-    )
+    # Windows can reserve the default status port even with no listener.
+    # The subprocess and its controller share the OS-probed test port.
+    env = {**ENV, "PAROL6_MCAST_PORT": str(ports.mcast_port)}
+    with contextlib.ExitStack() as stack:
+        if script in ATTACHED:
+            for key, value in env.items():
+                monkeypatch.setenv(key, value)
+            stack.enter_context(Robot(host="127.0.0.1", port=5001))
+        result = subprocess.run(
+            [sys.executable, str(EXAMPLES_DIR / script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
     assert result.returncode == 0, (
         f"{script} failed (exit {result.returncode}):\n"
         f"--- stdout ---\n{result.stdout[-2000:]}\n"

@@ -4,12 +4,20 @@ its real UDP socket."""
 
 import socket
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import parol6.commands.base as command_base
 from parol6.config import INTERVAL_S, deg_to_steps
-from parol6.protocol.wire import ErrorMsg, OkMsg, decode_message, encode_command
+from parol6.protocol.wire import (
+    ErrorMsg,
+    OkMsg,
+    PingCmd,
+    decode_message,
+    encode_command,
+)
 from parol6.server.controller import Controller
 
 
@@ -33,34 +41,51 @@ def tick_until(controller: Controller, state, condition, message: str, ticks=50)
     pytest.fail(message)
 
 
-class Pacer:
-    """Holds a ticking loop to the control rate on any OS: ``wait()``
-    returns at the next tick boundary, sleeping most of the interval and
-    spinning the last two milliseconds. ``time.sleep`` alone overshoots
-    by tens of milliseconds on the macOS runners, and the commands' timers
-    (a jog's duration, a stream's grace) run on the wall clock."""
-
-    def __init__(self) -> None:
-        self._next = time.perf_counter()
-
-    def wait(self) -> None:
-        self._next += INTERVAL_S
-        while (remaining := self._next - time.perf_counter()) > 0.0:
-            if remaining > 0.002:
-                time.sleep(remaining - 0.002)
-
-
 def tick_for(controller: Controller, state, condition, message: str, seconds: float):
     """Tick at the control rate until *condition* holds, for up to *seconds*
     of wall time (a cold planner JITs its motion pipeline)."""
     deadline = time.monotonic() + seconds
-    pacer = Pacer()
     while time.monotonic() < deadline:
         tick(controller, state)
         if condition():
             return
-        pacer.wait()
+        time.sleep(INTERVAL_S)
     pytest.fail(message)
+
+
+class VirtualClock:
+    """The clock the commands' timers read (a jog's duration, a stream's
+    grace), advanced one control interval per :meth:`tick`. The timers then
+    count ticks, as they do on a loop that holds its rate, whatever the
+    machine running the test does to its sleeps."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.now = 0.0
+        monkeypatch.setattr(
+            command_base, "time", SimpleNamespace(perf_counter=lambda: self.now)
+        )
+
+    def tick(self, controller: Controller, state) -> None:
+        tick(controller, state)
+        self.now += INTERVAL_S
+
+
+def drain(controller: Controller, state, sock: socket.socket, req_id: int) -> None:
+    """Tick until the controller answers a ping sent now. Datagrams from one
+    socket to one address are read in the order they were sent, so every
+    one sent before the ping has been read by then, however late it was
+    delivered."""
+    sock.sendto(encode_command(PingCmd(), req_id), address(controller))
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        tick(controller, state)
+        try:
+            data, _ = sock.recvfrom(4096)
+        except BlockingIOError:
+            continue
+        if getattr(decode_message(data), "req_id", None) == req_id:
+            return
+    pytest.fail("the controller never answered the ping")
 
 
 def address(controller: Controller) -> tuple[str, int]:

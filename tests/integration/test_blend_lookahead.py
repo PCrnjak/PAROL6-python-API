@@ -190,10 +190,12 @@ class TestCartesianBlendLookahead:
             ([start[0], start[1] + 45, start[2], start[3], start[4], start[5]], 20.0),
         ]
 
-        for t, r in targets:
-            assert client.move_l(t, speed=0.5, r=r, wait=False) >= 0
-
-        assert client.wait_motion(timeout=15.0)
+        indices = [client.move_l(t, speed=0.5, r=r, wait=False) for t, r in targets]
+        assert all(index >= 0 for index in indices)
+        # The last move's own completion, not the arm keeping still: a
+        # pause between the stopped chain and the move after it is not
+        # the end of the program.
+        assert client.wait_command(indices[-1], timeout=15.0)
 
         final = client.pose()
         assert final is not None

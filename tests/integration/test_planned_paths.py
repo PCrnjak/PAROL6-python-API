@@ -198,6 +198,36 @@ def test_move_s_never_reverses_along_unevenly_spaced_waypoints(client, server_pr
     assert np.linalg.norm(pts[-1] - end_xyz) < 0.5
 
 
+def test_a_move_c_that_ends_where_it_starts_runs_the_whole_circle(client, server_proc):
+    """An end equal to the start asks for a full circle, through the via
+    point opposite the start. The arm settles a hair off the pose it was
+    sent to, so the start the arc is planned from is never exactly the end
+    the script wrote; the circle is still whole."""
+    radius = 30.0
+
+    def on_circle(angle_deg: float) -> list[float]:
+        a = math.radians(angle_deg)
+        return [radius * math.cos(a), 340.0, 210.0 + radius * math.sin(a), 90, 0, 90]
+
+    start, via = on_circle(0.0), on_circle(180.0)
+    assert client.move_j(pose=start, speed=0.5, wait=True, timeout=20.0) >= 0
+
+    with _TcpSampler(client) as sampler:
+        assert (
+            client.move_c(via=via, end=start, speed=SPEED, wait=True, timeout=20.0) >= 0
+        )
+        assert client.wait_motion(timeout=20.0)
+    pts = sampler.positions()
+    assert len(pts) > 10, "the arm did not run the circle"
+
+    v = np.asarray(via[:3])
+    reach = min(
+        _point_to_segment_mm(v, a, b) for a, b in zip(pts[:-1], pts[1:], strict=True)
+    )
+    assert reach < 1.0, f"the circle passed {reach:.1f} mm from its via point"
+    assert np.linalg.norm(pts[-1] - np.asarray(start[:3])) < 0.5
+
+
 def test_a_trf_move_l_runs_along_the_tool_axis(client, server_proc):
     """A TRF pose is an offset in the tool frame at the start of the move."""
     pose, start = _start(client)
@@ -393,9 +423,16 @@ def test_a_wrist_turn_is_collision_checked_all_the_way_round(client, server_proc
     assert np.allclose(after, before, atol=0.05), "the refused move moved the arm"
 
     preview = DryRunRobotClient(initial_joints_deg=before)
-    assert preview.set_shapes([keep_out]) == 1
-    index = preview.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", speed=SPEED)
-    refusal = preview.plan().blocks[index].error
+    # A preview's shapes are the process's robot model's: cleared, or every
+    # later preview in this process plans around the keep-out too.
+    try:
+        assert preview.set_shapes([keep_out]) == 1
+        index = preview.move_l(
+            [0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", speed=SPEED
+        )
+        refusal = preview.plan().blocks[index].error
+    finally:
+        assert preview.set_shapes([]) == 1
     assert refusal is not None and "wrist-arc" in str(refusal), (
         "the preview ran the turn the arm refuses"
     )

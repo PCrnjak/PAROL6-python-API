@@ -22,7 +22,9 @@ RADIUS = 30
 SPEED = 0.4
 CIRCLE_Y = 340
 ORIENTATION = [90, 0, 90]
-CENTERS = [(0, CIRCLE_Y, 280), (0, CIRCLE_Y, 210), (0, CIRCLE_Y, 140)]
+# The top circle sits just below where following it would need the wrist
+# to flip mid-arc, which a cartesian move refuses.
+CENTERS = [(0, CIRCLE_Y, 270), (0, CIRCLE_Y, 210), (0, CIRCLE_Y, 140)]
 
 
 def circle_pt(cx, cz, angle_deg):
