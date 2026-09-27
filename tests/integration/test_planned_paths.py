@@ -220,11 +220,16 @@ def test_a_move_c_that_ends_where_it_starts_runs_the_whole_circle(client, server
     pts = sampler.positions()
     assert len(pts) > 10, "the arm did not run the circle"
 
-    v = np.asarray(via[:3])
-    reach = min(
-        _point_to_segment_mm(v, a, b) for a, b in zip(pts[:-1], pts[1:], strict=True)
-    )
-    assert reach < 1.0, f"the circle passed {reach:.1f} mm from its via point"
+    # Measured against the circle, not the chords between samples: a slow
+    # CI loop spaces the samples out, and a chord cuts inside the arc.
+    off = pts - np.array([0.0, 340.0, 210.0])
+    drift = np.abs(np.hypot(off[:, 0], off[:, 2]) - radius).max()
+    assert drift < 1.0, f"the arm left the circle by {drift:.1f} mm"
+    assert np.abs(off[:, 1]).max() < 1.0
+    # A whole turn about the centre passes the via point opposite the start.
+    angle = np.degrees(np.unwrap(np.arctan2(off[:, 2], off[:, 0])))
+    turn = abs(angle[-1] - angle[0])
+    assert abs(turn - 360.0) < 2.0, f"the arm turned {turn:.0f}° about the centre"
     assert np.linalg.norm(pts[-1] - np.asarray(start[:3])) < 0.5
 
 
