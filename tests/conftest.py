@@ -376,6 +376,7 @@ def client(ports: TestPorts):
 def controller(monkeypatch):
     """An in-process Controller on the fake serial with an ephemeral UDP port,
     ticked by the test through the loop's phases; the planner is not started."""
+    import parol6.PAROL6_ROBOT as PAROL6_ROBOT
     from parol6.server.controller import Controller, ControllerConfig
 
     monkeypatch.setenv("PAROL6_FAKE_SERIAL", "1")
@@ -390,6 +391,10 @@ def controller(monkeypatch):
             ctl._status_broadcaster.close()
         ctl._transport_mgr.disconnect()
         ctl.state_manager.reset_state()
+        # The robot model is per process: a tool or shape this controller
+        # applied would otherwise shape every later in-process plan.
+        PAROL6_ROBOT.apply_tool("NONE")
+        PAROL6_ROBOT.apply_shapes([])
 
 
 def pytest_sessionfinish(session, exitstatus):

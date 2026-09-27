@@ -614,7 +614,9 @@ class Trajectory:
 
     Attributes:
         steps: (M, 6) motor steps at each control tick
-        duration: Actual duration in seconds
+        duration: How long the player takes over it [s]: one control tick
+            per row, the first holding the pose the move starts from. Zero
+            for a move that goes nowhere.
     """
 
     steps: NDArray[np.int32]  # (M, 6) motor steps
@@ -769,6 +771,16 @@ class TrajectoryBuilder:
         else:
             return self._build_toppra_trajectory()
 
+    def _trajectory(self, trajectory_rad: NDArray[np.float64]) -> Trajectory:
+        """The rows as the player takes them, one per control tick: the
+        trajectory lasts as many ticks as it has rows, the queue time the
+        controller reports for it."""
+        return Trajectory(
+            steps=_rad_to_steps_alloc(trajectory_rad),
+            duration=len(trajectory_rad) * self.dt,
+            positions_rad=trajectory_rad,
+        )
+
     def _resampled_by_knots(self, knots: NDArray[np.float64]) -> JointPath:
         """The joint path resampled at even steps of the path parameter the
         knots give each row (the tool's normalized distance), as many rows
@@ -822,11 +834,11 @@ class TrajectoryBuilder:
             dt=self.dt,
         ).build()
         # A requested duration is the whole move's: the path gets what the
-        # turn leaves of it, and runs as fast as it can when the turn left
-        # none, as any request shorter than the move can be does.
+        # turn's motion leaves of it, and runs as fast as it can when the
+        # turn left none, as any request shorter than the move can be does.
         path_duration = None
         if self.duration:
-            remaining = self.duration - turn.duration
+            remaining = self.duration - (len(turn) - 1) * self.dt
             path_duration = remaining if remaining > 0 else None
         path = TrajectoryBuilder(
             joint_path=JointPath(positions=self.joint_path.positions[p:]),
@@ -841,10 +853,8 @@ class TrajectoryBuilder:
             path_knots=self.path_knots,
             constant_tool_speed=self.constant_tool_speed,
         ).build()
-        return Trajectory(
-            steps=np.concatenate([turn.steps, path.steps[1:]]),
-            duration=turn.duration + path.duration,
-            positions_rad=np.concatenate([turn.positions_rad, path.positions_rad[1:]]),
+        return self._trajectory(
+            np.concatenate([turn.positions_rad, path.positions_rad[1:]])
         )
 
     def _build_toppra_trajectory(self) -> Trajectory:
@@ -951,11 +961,7 @@ class TrajectoryBuilder:
                 duration,
             )
 
-            steps = _rad_to_steps_alloc(trajectory_rad)
-
-            return Trajectory(
-                steps=steps, duration=duration, positions_rad=trajectory_rad
-            )
+            return self._trajectory(trajectory_rad)
 
         except Exception as e:
             # A move the solver cannot time is refused, never quietly run
@@ -992,13 +998,9 @@ class TrajectoryBuilder:
         )
         trajectory_rad = self.joint_path.sample_many(profile_s)
 
-        trajectory_rad, duration = self._enforce_segment_limits(
-            trajectory_rad, duration
-        )
+        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
-        steps = _rad_to_steps_alloc(trajectory_rad)
-
-        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
+        return self._trajectory(trajectory_rad)
 
     def _is_cartesian_path(self) -> bool:
         """Check if this is a Cartesian path (has Cartesian velocity limits set)."""
@@ -1054,10 +1056,8 @@ class TrajectoryBuilder:
         return (vmax_s, amax_s, jmax_s)
 
     def _enforce_segment_limits(
-        self,
-        trajectory_rad: NDArray[np.float64],
-        duration: float,
-    ) -> tuple[NDArray[np.float64], float]:
+        self, trajectory_rad: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         """
         Enforce velocity limits by locally stretching segments that exceed limits.
 
@@ -1068,18 +1068,18 @@ class TrajectoryBuilder:
         Args:
             trajectory_rad: Joint positions in radians, shape (N, 6), one
                 control tick apart
-            duration: Initial trajectory duration
 
         Returns:
-            (adjusted_trajectory, adjusted_duration): Resampled trajectory with
-            locally stretched segments and new total duration, its rows
-            still one tick apart
+            The trajectory resampled with locally stretched segments, its
+            rows still one tick apart; the input itself when nothing needs
+            stretching.
         """
         n_points = len(trajectory_rad)
         if n_points < 2:
-            return trajectory_rad, duration
+            return trajectory_rad
 
-        initial_dt = duration / (n_points - 1)
+        initial_dt = self.dt
+        duration = (n_points - 1) * initial_dt
 
         deltas = np.diff(trajectory_rad, axis=0)  # (N-1, 6)
 
@@ -1110,7 +1110,7 @@ class TrajectoryBuilder:
 
         new_duration = float(np.sum(segment_times))
         if new_duration <= duration * 1.001:  # No significant change
-            return trajectory_rad, duration
+            return trajectory_rad
 
         logger.warning(
             "Extending duration from %.3fs to %.3fs (%.1f%% increase) to respect velocity/acceleration limits",
@@ -1132,7 +1132,7 @@ class TrajectoryBuilder:
                 output_times, cumulative_times, trajectory_rad[:, j]
             )
 
-        return new_trajectory, intervals * self.dt
+        return new_trajectory
 
     def _requested_or(self, fastest: float) -> float:
         """The requested duration, stretched to ``fastest`` when shorter:
@@ -1258,13 +1258,9 @@ class TrajectoryBuilder:
                 times, start_pos[j], end_pos[j], duration
             )
 
-        trajectory_rad, duration = self._enforce_segment_limits(
-            trajectory_rad, duration
-        )
+        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
-        steps = _rad_to_steps_alloc(trajectory_rad)
-
-        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
+        return self._trajectory(trajectory_rad)
 
     def _build_quintic_trajectory_along_path(self) -> Trajectory:
         """
@@ -1289,13 +1285,9 @@ class TrajectoryBuilder:
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
 
-        trajectory_rad, duration = self._enforce_segment_limits(
-            trajectory_rad, duration
-        )
+        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
-        steps = _rad_to_steps_alloc(trajectory_rad)
-
-        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
+        return self._trajectory(trajectory_rad)
 
     def _build_trapezoid_trajectory_joint(self) -> Trajectory:
         """
@@ -1333,13 +1325,9 @@ class TrajectoryBuilder:
                 self.a_max[j],
             )
 
-        trajectory_rad, duration = self._enforce_segment_limits(
-            trajectory_rad, duration
-        )
+        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
-        steps = _rad_to_steps_alloc(trajectory_rad)
-
-        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
+        return self._trajectory(trajectory_rad)
 
     def _build_cart_vel_constraint(
         self, path: ta.SplineInterpolator | _LinearPath, ss_waypoints: NDArray
@@ -1561,13 +1549,7 @@ class TrajectoryBuilder:
         if result == Result.Error:
             raise RuntimeError("Ruckig failed to compute trajectory")
 
-        trajectory_rad = trajectory_rad[:count]
-
-        steps = _rad_to_steps_alloc(trajectory_rad)
-
-        return Trajectory(
-            steps=steps, duration=(count - 1) * self.dt, positions_rad=trajectory_rad
-        )
+        return self._trajectory(trajectory_rad[:count])
 
     def _estimate_simple_duration(self) -> float:
         """Estimate minimum duration based on joint velocity limits.

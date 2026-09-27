@@ -143,10 +143,11 @@ class TestJointBlendLookahead:
             ([60, -60, 150, 15, 15, 150], 30.0),  # separate motion
         ]
 
-        for t, r in targets:
-            assert client.move_j(t, speed=0.5, r=r, wait=False) >= 0
-
-        assert client.wait_motion(timeout=15.0)
+        indices = [client.move_j(t, speed=0.5, r=r, wait=False) for t, r in targets]
+        assert all(index >= 0 for index in indices)
+        # The last move's own completion: its r>0 holds it for a partner, so
+        # the arm rests between the stopped chain and it.
+        assert client.wait_command(indices[-1], timeout=15.0)
 
         angles = client.angles()
         assert angles is not None
