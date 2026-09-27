@@ -210,18 +210,18 @@ class TestMixedTypeBlendTermination:
     def test_move_j_then_move_l_executes_separately(self, client, server_proc):
         """move_j(r>0) followed by move_l should not blend across types."""
         # Small joint move with blend radius
-        assert (
-            client.move_j(
-                [85, -85, 175, 2, 2, 175],
-                speed=0.5,
-                r=20.0,
-                wait=False,
-            )
-            >= 0
+        index = client.move_j(
+            [85, -85, 175, 2, 2, 175],
+            speed=0.5,
+            r=20.0,
+            wait=False,
         )
+        assert index >= 0
 
-        # Wait for joint move, then get the pose for a reachable Cartesian target
-        assert client.wait_motion(timeout=10.0)
+        # The move's own completion, not the arm keeping still: the planner
+        # holds an r>0 move for a blend partner, so the arm can still be at
+        # rest when wait_motion stops waiting for it to start.
+        assert client.wait_command(index, timeout=10.0)
         mid_pose = client.pose()
         assert mid_pose is not None
 
