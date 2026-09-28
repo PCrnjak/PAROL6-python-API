@@ -44,14 +44,17 @@ def _angles_deg(state) -> np.ndarray:
     return out
 
 
-def _reply_index(sock: socket.socket, req_id: int) -> int:
-    """The index acknowledged to request ``req_id``, which the controller has
-    already sent; loopback may still be delivering it (macOS)."""
+def _reply_index(controller, state, sock: socket.socket, req_id: int) -> int:
+    """Run the controller until it acknowledges the request: loopback may
+    delay either the inbound command or the outbound reply."""
     deadline = time.monotonic() + 2.0
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([sock], [], [], remaining)[0]:
+        if remaining <= 0:
             pytest.fail(f"no acknowledgement of request {req_id}")
+        tick(controller, state)
+        if not select.select([sock], [], [], min(INTERVAL_S, remaining))[0]:
+            continue
         data, _ = sock.recvfrom(4096)
         reply = decode_message(data)
         if isinstance(reply, OkMsg) and reply.req_id == req_id:
@@ -161,8 +164,7 @@ def test_a_teleport_read_with_motion_lands_before_the_motion_starts(
         goal = [40.0, *landing[1:]]
         push(controller, sock, TeleportCmd(angles=landing), 2)
         push(controller, sock, MoveJCmd(angles=goal, duration=1.0), 3)
-        tick(controller, state)
-        moving = _reply_index(sock, 3)
+        moving = _reply_index(controller, state, sock, 3)
         tick_until(
             controller,
             state,

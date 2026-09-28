@@ -337,14 +337,18 @@ Completion waits query the requested command's exact success. A jog, a servo
 stream or a `tool.stop()` can finish ahead of commands queued before it, so the
 highest completed index alone cannot prove that an earlier command finished.
 The controller retains its latest 1024
-successful completions; an unknown, cancelled, or expired result remains
-unconfirmed. A controller-session change during a wait raises `ConnectionError`.
-This requires matching client and controller versions supporting the completion
-query.
+successful completions and 1024 failures. A wait on a command that was
+discarded — by `stop()`, an E-stop, `reset_state()`, a teleport or a failure
+queued ahead of it — raises `MotionError` (`MOTN_CANCELLED`) at once, and one
+on a command the pipeline failed raises `MotionError` with that failure. An
+unknown or expired result remains unconfirmed. A controller-session change
+during a wait raises `ConnectionError`. This requires matching client and
+controller versions supporting the completion query.
 
 Standalone `wait_command()` keeps its wall-clock timeout and returns false if
-completion is unconfirmed. Blocking motion calls raise `TimeoutError` in that
-case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning
+completion is still unconfirmed when it runs out. Blocking motion calls raise
+`TimeoutError` in that case. A timed-out wait leaves the motion queued;
+`stop()` cancels it. Planning
 preview retimes trajectories and reports paused queued operations as
 `UnresolvedPreview` instead of claiming completion.
 
@@ -364,7 +368,7 @@ checks; no continuous recorded-trajectory command is added.
 
 ## Command system
 
-Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.
+Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. A servo stream stops about 0.25 s after its last target arrives: the arm brakes to rest and holds. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.
 
 ### Command categories
 

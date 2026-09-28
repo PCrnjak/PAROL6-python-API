@@ -11,6 +11,7 @@ import pytest
 
 from parol6 import RobotClient
 from parol6.config import LIMITS
+from waldoctl import ActionState
 
 
 @pytest.mark.integration
@@ -83,17 +84,36 @@ class TestGetEndpoints:
         assert client.is_robot_stopped()
 
     def test_status_aggregate(self, client, server_proc):
-        """Test STATUS aggregate command."""
-        from waldoctl import ToolStatus
-
+        """STATUS reads what the single queries read of the arm at rest, and
+        the tool the reset left fitted."""
         status = client.status()
-        assert status is not None
-        assert len(status.pose) == 16
-        assert len(status.angles) == 6
-        assert len(status.speeds) == 6
-        assert len(status.io) == 5
-        assert isinstance(status.tool_status, ToolStatus)
+        angles = client.angles()
+        pose = client.pose()
+        io = client.io()
+        assert status is not None and angles and pose and io
+        assert status.angles == pytest.approx(angles, abs=1e-6)
+        assert [status.pose[3], status.pose[7], status.pose[11]] == pytest.approx(
+            pose[:3], abs=1e-3
+        )
+        assert status.speeds == pytest.approx([0.0] * 6, abs=0.5)
+        assert status.io == io
         assert status.tool_status.key == "NONE"
+
+    def test_activity_names_the_move_under_way(self, client, server_proc):
+        """ACTIVITY reports the move while it plays and idle once it ends."""
+        start = client.angles()
+        assert start is not None
+        there = [start[0] - 10.0, *start[1:]]
+        moving = client.move_j(there, duration=2.0, wait=False)
+        assert moving >= 0
+        assert client.wait_status(lambda s: s.executing_index == moving, timeout=5.0)
+        playing = client.activity()
+        assert playing is not None
+        assert (playing.state, playing.command) == (ActionState.EXECUTING, "move_j")
+        assert client.wait_command(moving, timeout=10.0)
+        done = client.activity()
+        assert done is not None
+        assert (done.state, done.command) == (ActionState.IDLE, "")
 
 
 @pytest.mark.integration

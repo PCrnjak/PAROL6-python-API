@@ -224,9 +224,6 @@ class StatusCache:
         self._tcp_hist_t: np.ndarray = np.zeros(_TCP_SPEED_WINDOW, dtype=np.float64)
         self._tcp_hist_n: int = 0
         self._tcp_hist_i: int = 0
-        # The frame the last refresh saw: a refresh within the same frame
-        # (a query between two broadcasts) says nothing about motion.
-        self._tcp_frame_s: float = 0.0
 
         # Per-joint drive faults, one bit per condition. One entry per joint
         # always — an all-clear list of empty tuples is how a consumer tells
@@ -468,8 +465,6 @@ class StatusCache:
             self._last_shapes_version = state.shapes_version
             self._sync_ik_geometry(SyncShapes(shapes=tuple(state.shapes)))
 
-        fresh_frame = self.last_serial_s != self._tcp_frame_s
-        self._tcp_frame_s = self.last_serial_s
         if pos_changed or tool_changed:
             self.pose[:] = get_fkine_flat_mm(state)
 
@@ -491,12 +486,13 @@ class StatusCache:
                     dz = self.pose[11] - self._tcp_hist_pos[oldest, 2]
                     self.tcp_speed = (dx * dx + dy * dy + dz * dz) ** 0.5 / dt
         else:
-            # No motion for a window of ticks is a robot at rest: speed
-            # zero, and the ring dropped so a restart is not differentiated
-            # against the hold.
-            if fresh_frame and self._tcp_hist_n:
+            # No movement seen for a window of ticks is a speed of zero:
+            # the arm has come to rest, or its frames have stopped and the
+            # speed they gave is no longer known. The ring is dropped so a
+            # restart is not differentiated against the hold.
+            if self._tcp_hist_n:
                 newest = (self._tcp_hist_i - 1) % _TCP_SPEED_WINDOW
-                if self.last_serial_s - self._tcp_hist_t[newest] >= _TCP_STILL_S:
+                if time.perf_counter() - self._tcp_hist_t[newest] >= _TCP_STILL_S:
                     self.tcp_speed = 0.0
                     self._tcp_hist_n = 0
 

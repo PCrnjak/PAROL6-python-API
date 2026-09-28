@@ -367,8 +367,10 @@ class AsyncRobotClient(_RobotClientABC):
         self._status_generation: int = 0
         self._status_event: asyncio.Event = asyncio.Event()
 
-        # Last command index returned by server for queued commands
+        # Last command index returned by server for queued commands, and the
+        # status session it was acknowledged in (0 before any status).
         self._last_command_index: int | None = None
+        self._last_command_session: int = 0
 
         self._active_tool_key: str | None = None
         self._active_variant_key: str = ""
@@ -661,7 +663,9 @@ class AsyncRobotClient(_RobotClientABC):
                     ok = await self._request_ok_raw(
                         encode_command(cmd, req_id), wait, req_id
                     )
-                    self._last_command_index = ok.index
+                    if ok.index is not None:
+                        self._last_command_index = ok.index
+                        self._last_command_session = self._shared_status.session_id
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
                     if timeout is not None:
@@ -898,8 +902,8 @@ class AsyncRobotClient(_RobotClientABC):
         Category: Control
 
         Example:
-            rbt.teleport([0, -90, 0, 0, 0, 0])
-            rbt.teleport([0, -90, 0, 0, 0, 0], tool_positions=[1.0])
+            rbt.teleport([90, -90, 180, 0, 0, 180])
+            rbt.teleport([90, -90, 180, 0, 0, 180], tool_positions=[1.0])
 
         Returns:
             1 once the pose is applied, 0 when no reply arrives.
@@ -937,10 +941,13 @@ class AsyncRobotClient(_RobotClientABC):
         return await self._send(ConnectHardwareCmd(port_str=port_str))
 
     async def reset_state(self) -> int:
-        """Reset controller state to initial values.
+        """Reset program state — world shapes, tool selection, errors, pause,
+        motion profile and execution speed — and discard the queue, each
+        discarded command failing with ``MOTN_CANCELLED``.
 
-        Instantly resets positions to home, clears queues, resets tool/errors.
-        Preserves serial connection. Useful for fast test isolation.
+        The arm holds where it is. A protective stop stays latched (only
+        ``reset()`` clears it), and homed state, digital outputs and the
+        serial connection are kept.
 
         Category: Control
 
@@ -1537,15 +1544,15 @@ class AsyncRobotClient(_RobotClientABC):
         settle_window: float = 0.25,
         speed_threshold: float = 0.5,
         angle_threshold: float = 0.5,
-        motion_start_timeout: float = 1.0,
         **kwargs: Any,
     ) -> bool:
-        """Wait for robot to stop moving using multicast status broadcasts.
+        """Wait until the queue has run out and the arm has come to rest.
 
-        This method first waits for motion to START (speeds above threshold),
-        then waits for motion to COMPLETE (speeds below threshold for settle_window).
-        This avoids a race condition where the method returns immediately if
-        called before motion has begun.
+        First waits for the latest command the controller has accepted —
+        every command this client queued, and each newer one the status
+        stream reports accepted — to end, then for the arm to hold still
+        for ``settle_window``. A command that failed or was cancelled ends
+        the wait like one that completed; ``wait_command()`` tells which.
 
         Category: Synchronization
 
@@ -1557,58 +1564,61 @@ class AsyncRobotClient(_RobotClientABC):
             settle_window: How long robot must be stable to be considered stopped
             speed_threshold: Max joint speed to be considered stopped (deg/s)
             angle_threshold: Max angle change to be considered stopped (degrees)
-            motion_start_timeout: Max time to wait for motion to start (seconds)
 
         Returns:
             True if robot stopped, False if timeout
+
+        Raises:
+            ConnectionError: If the controller session changes while a
+                command is still being waited on.
         """
         await self._ensure_endpoint()
 
+        # An index acknowledged by a controller that has since restarted
+        # will never end on this one.
+        own = self._last_command_index
+        barrier = -1
+        if own is not None and self._last_command_session in (
+            0,
+            self._shared_status.session_id,
+        ):
+            barrier = own
+        ended = -1
         last_angles: np.ndarray | None = None
         settle_start: float | None = None
-        motion_started = False
-        start_time = time.monotonic()
 
         try:
             async with asyncio.timeout(timeout):
                 async for status in self.stream_status_shared():
-                    speeds = status.speeds
+                    barrier = max(barrier, status.accepted_index)
+                    if ended < barrier:
+                        if await self._command_outcome(barrier) is False:
+                            return False
+                        ended = barrier
+                        last_angles = None
+                        settle_start = None
+                        continue
+
+                    max_speed = float(np.abs(status.speeds).max())
                     angles = status.angles
-
-                    max_speed = float(np.abs(speeds).max())
-
-                    max_angle_change = 0.0
-                    if last_angles is not None:
+                    if last_angles is None:
+                        last_angles = angles.copy()
+                        max_angle_change = 0.0
+                    else:
                         max_angle_change = float(np.abs(angles - last_angles).max())
                         last_angles[:] = angles
-                    else:
-                        last_angles = angles.copy()
 
+                    if (
+                        max_speed >= speed_threshold
+                        or max_angle_change >= angle_threshold
+                    ):
+                        settle_start = None
+                        continue
                     now = time.monotonic()
-
-                    # Phase 1: Wait for motion to start
-                    if not motion_started:
-                        if (
-                            max_speed >= speed_threshold
-                            or max_angle_change >= angle_threshold
-                        ):
-                            motion_started = True
-                            settle_start = None
-                        elif now - start_time > motion_start_timeout:
-                            motion_started = True
-
-                    # Phase 2: Wait for motion to complete
-                    if motion_started:
-                        if (
-                            max_speed < speed_threshold
-                            and max_angle_change < angle_threshold
-                        ):
-                            if settle_start is None:
-                                settle_start = now
-                            elif now - settle_start > settle_window:
-                                return True
-                        else:
-                            settle_start = None
+                    if settle_start is None:
+                        settle_start = now
+                    elif now - settle_start > settle_window:
+                        return True
         except TimeoutError:
             return False
 
@@ -1701,6 +1711,23 @@ class AsyncRobotClient(_RobotClientABC):
         Raises:
             MotionError: If the pipeline errored at or before command_index.
         """
+        try:
+            async with asyncio.timeout(timeout):
+                outcome = await self._command_outcome(command_index)
+        except TimeoutError:
+            return False
+        if isinstance(outcome, RobotError):
+            raise MotionError(outcome)
+        return outcome
+
+    async def _command_outcome(self, command_index: int) -> RobotError | bool:
+        """Wait for *command_index* to end: True once it completed, the
+        error it failed with, or False if the client closed first. Runs
+        until it has an answer; the caller's deadline bounds it.
+
+        Raises:
+            ConnectionError: If the controller session changes.
+        """
 
         def _blocking_error(s: StatusBuffer) -> RobotError | None:
             # A standing error fails this wait only when the frame proves it
@@ -1731,29 +1758,25 @@ class AsyncRobotClient(_RobotClientABC):
                     "Controller session changed during completion wait"
                 )
 
-        try:
-            async with asyncio.timeout(timeout):
-                while not self._closed:
-                    check_session(self._shared_status.session_id)
-                    result = await self._request(command)
-                    # Status has its own socket and can survive a command
-                    # socket that stopped receiving after a peer restart.
-                    check_session(self._shared_status.session_id)
-                    if (
-                        isinstance(result, CommandCompletionResultStruct)
-                        and result.command_index == command_index
-                    ):
-                        check_session(result.session_id)
-                        if result.completed:
-                            return True
-                        if result.error is not None:
-                            raise MotionError(RobotError.from_wire(result.error))
-                    err = _blocking_error(self._shared_status)
-                    if err is not None:
-                        raise MotionError(err)
-                    await self._await_completion_hint(command_index, 0.25)
-        except TimeoutError:
-            return False
+        while not self._closed:
+            check_session(self._shared_status.session_id)
+            result = await self._request(command)
+            # Status has its own socket and can survive a command
+            # socket that stopped receiving after a peer restart.
+            check_session(self._shared_status.session_id)
+            if (
+                isinstance(result, CommandCompletionResultStruct)
+                and result.command_index == command_index
+            ):
+                check_session(result.session_id)
+                if result.completed:
+                    return True
+                if result.error is not None:
+                    return RobotError.from_wire(result.error)
+            err = _blocking_error(self._shared_status)
+            if err is not None:
+                return err
+            await self._await_completion_hint(command_index, 0.25)
         return False
 
     async def _await_completion_hint(self, command_index: int, timeout: float) -> None:
@@ -2078,6 +2101,9 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Streaming joint position target. Fire-and-forget.
 
+        The stream stops about 0.25 s after the last target arrives: the arm
+        brakes to rest and holds there.
+
         Category: Streaming
 
         Example:
@@ -2101,6 +2127,9 @@ class AsyncRobotClient(_RobotClientABC):
         accel: float = 0.5,
     ) -> int:
         """Streaming linear Cartesian position target. Fire-and-forget.
+
+        The stream stops about 0.25 s after the last target arrives: the tool
+        brakes along its line to rest and holds there.
 
         Category: Streaming
 

@@ -275,7 +275,8 @@ class RobotClient:
         return _run(self._inner.connect_hardware(port_str))
 
     def reset_state(self) -> int:
-        """Reset controller state to initial values."""
+        """Reset program state and discard the queue; the arm holds where it
+        is and a protective stop stays latched."""
         return _run(self._inner.reset_state())
 
     # ---------- status / queries ----------
@@ -520,16 +521,16 @@ class RobotClient:
         settle_window: float = 0.25,
         speed_threshold: float = 0.5,
         angle_threshold: float = 0.5,
-        motion_start_timeout: float = 1.0,
     ) -> bool:
-        """Wait for robot to stop moving.
+        """Wait until the queue has run out and the arm has come to rest:
+        the latest accepted command has ended (failed and cancelled ones
+        included) and the arm has held still for ``settle_window``.
 
         Args:
             timeout: Maximum time to wait in seconds.
             settle_window: How long robot must be stable.
             speed_threshold: Max joint speed to be considered stopped (deg/s).
             angle_threshold: Max angle change to be considered stopped.
-            motion_start_timeout: Max time to wait for motion to start.
 
         Returns:
             True if robot stopped, False if timeout.
@@ -540,7 +541,6 @@ class RobotClient:
                 settle_window=settle_window,
                 speed_threshold=speed_threshold,
                 angle_threshold=angle_threshold,
-                motion_start_timeout=motion_start_timeout,
             )
         )
 

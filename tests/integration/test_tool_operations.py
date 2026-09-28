@@ -191,41 +191,50 @@ class TestPneumaticGripperMethods:
 
 
 # ===========================================================================
-# SSG-48 Electric Gripper Methods (async, via client.tool)
+# Electric Gripper Methods (async, via client.tool)
 # ===========================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["SSG-48", "MSG"])
+async def test_an_electric_gripper_calibrates_and_moves(async_client, key):
+    """From an uncalibrated gripper, which refuses a jaw move, a calibration
+    sent right behind the selection takes effect for the jaw moves queued
+    behind it: they wait for it, reach their targets, and draw the
+    commanded fraction of the tool's current range while the jaws travel."""
+    robot, client = async_client
+    spec = robot.tools[key]
+    assert isinstance(spec, ElectricGripperTool)
+    lo, hi = spec.current_range
+
+    # A simulator toggle leaves the gripper uncalibrated, whatever an
+    # earlier test calibrated.
+    assert await client.simulator(True) == 1
+    assert await client.select_tool(key) >= 0
+    tool = client.tool
+    assert await tool.calibrate() >= 0
+    assert await tool.set_position(0.0, speed=1.0, wait=True, timeout=15.0) >= 0
+    assert (await tool.status()).positions[0] == pytest.approx(0.0, abs=0.02)
+
+    fraction = 0.25
+    moving = await tool.set_position(0.6, speed=0.1, current=fraction)
+    assert moving >= 0
+    assert await client.wait_status(
+        lambda s: s.executing_index == moving and s.tool_status.positions[0] > 0.1,
+        timeout=5.0,
+    ), f"the {key} jaws never got under way"
+    drawn = (await tool.status()).channels[0]
+    assert drawn == round(lo + fraction * (hi - lo)), (
+        f"a {key} move at current {fraction} drew {drawn} mA across {lo}..{hi}"
+    )
+    assert await client.wait_command(moving, timeout=10.0)
+    assert (await tool.status()).positions[0] == pytest.approx(0.6, abs=0.02)
 
 
 @pytest.mark.integration
 class TestSSG48GripperMethods:
     """Test SSG-48 electric gripper via client.tool()."""
-
-    @pytest.mark.asyncio
-    async def test_ssg48_calibrate_and_move(self, async_client):
-        """Calibrate and move SSG-48 gripper through tool methods."""
-        robot, client = async_client
-        spec = robot.tools["SSG-48"]
-        assert isinstance(spec, ElectricGripperTool)
-        assert spec.gripper_type == GripperType.ELECTRIC
-
-        # Verify parameter ranges
-        assert spec.position_range == (0.0, 1.0)
-        assert spec.speed_range == (0.0, 1.0)
-        assert spec.current_range == (100, 1300)
-
-        await client.select_tool("SSG-48")
-        await client.wait_motion(timeout=5.0)
-
-        tool = client.tool
-
-        # Calibrate
-        idx = await tool.calibrate()
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
-
-        # Move to half position
-        idx = await tool.set_position(0.5, speed=0.7, current=0.4)
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
 
     @pytest.mark.asyncio
     async def test_a_bad_tool_action_is_refused_before_it_is_acknowledged(
@@ -277,12 +286,6 @@ class TestSSG48GripperMethods:
             with pytest.raises(ValueError):
                 await tool.set_position(0.5, current=current)
         assert await client.status() is not None
-
-        # Tool actions queue in order: the move waits for the calibration
-        # it needs instead of cancelling it.
-        assert await tool.calibrate() >= 0
-        assert await tool.set_position(0.5, wait=True) >= 0
-        assert abs((await tool.status()).positions[0] - 0.5) < 0.05
 
     @pytest.mark.asyncio
     async def test_a_script_drives_the_tool_it_just_selected(self, async_client):
@@ -343,39 +346,6 @@ class TestSSG48GripperMethods:
         assert 0.1 < held < 0.9, f"the jaws ran on to {held}"
         assert abs(later.positions[0] - held) < 0.02, "the jaws kept moving"
         assert later.engaged, "the stop released the grip"
-
-
-# ===========================================================================
-# MSG AI Stepper Gripper Methods (async, via client.tool)
-# ===========================================================================
-
-
-@pytest.mark.integration
-class TestMSGGripperMethods:
-    """Test MSG compliant AI stepper gripper via client.tool()."""
-
-    @pytest.mark.asyncio
-    async def test_msg_calibrate_and_move(self, async_client):
-        """Calibrate and move MSG gripper through tool methods."""
-        robot, client = async_client
-        spec = robot.tools["MSG"]
-        assert isinstance(spec, ElectricGripperTool)
-        assert spec.gripper_type == GripperType.ELECTRIC
-
-        await client.select_tool("MSG")
-        await client.wait_motion(timeout=5.0)
-
-        tool = client.tool
-
-        # Calibrate
-        idx = await tool.calibrate()
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
-
-        # Move to position
-        idx = await tool.set_position(0.3, speed=0.5, current=0.2)
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
 
 
 # ===========================================================================

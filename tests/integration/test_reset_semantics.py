@@ -81,4 +81,6 @@ def test_reset_state_keeps_the_protective_stop_outputs_and_homed(
         assert moved >= 0 and client.wait_command(moved, timeout=10.0)
     finally:
         client.reset()
-        client.write_io(0, 0)
+        # Waited on: the next test's reset_state would discard it queued,
+        # and a reset leaves the output where it is.
+        client.wait_command(client.write_io(0, 0), timeout=5.0)

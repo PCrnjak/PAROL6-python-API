@@ -1,7 +1,7 @@
 """How a planned move is timed, through the client and the simulated
-controller: with no timing given it runs at half speed, a positive duration
-sets its length whatever speed says, and a timing value out of range is
-refused before anything is sent."""
+controller: with no timing given it runs at half speed and half
+acceleration, a positive duration sets its length whatever speed says, and
+a timing value out of range is refused before anything is sent."""
 
 import math
 
@@ -33,13 +33,15 @@ def test_an_untimed_move_runs_at_half_speed_and_a_duration_overrides_speed(
     start = client.angles()
     assert start is not None
     there = list(start)
-    there[0] -= 20.0
+    # Long enough to cruise at half speed under LINEAR: a shorter move that
+    # the acceleration ramps alone fill plans the same at any faster speed.
+    there[0] -= 90.0
     try:
         # Paused, so each move is planned and held rather than run.
         assert client.pause() == 1
         assert client.move_j(there, wait=False) >= 0
         untimed = _queued_seconds(client, 1)
-        assert client.move_j(start, speed=0.5, wait=False) >= 0
+        assert client.move_j(start, speed=0.5, accel=0.5, wait=False) >= 0
         at_half = _queued_seconds(client, 2) - untimed
         assert client.move_j(there, duration=4.0, speed=0.1, wait=False) >= 0
         timed = _queued_seconds(client, 3) - untimed - at_half
@@ -47,7 +49,7 @@ def test_an_untimed_move_runs_at_half_speed_and_a_duration_overrides_speed(
         assert client.stop() == 1
     assert untimed == pytest.approx(at_half, abs=0.02), (
         f"a move given no timing planned {untimed:.3f}s, the same move at "
-        f"speed 0.5 {at_half:.3f}s"
+        f"speed and accel 0.5 {at_half:.3f}s"
     )
     assert timed == pytest.approx(4.0, abs=0.02), (
         f"a 4 s move planned {timed:.3f}s: its speed overrode its duration"

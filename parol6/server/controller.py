@@ -161,6 +161,9 @@ class Controller:
                 "sim",  # tick_simulation
             ]
         )
+        self._tick_count = 0
+        self._broadcast_rate_hz = 0.0
+        self._broadcast_interval = 1
         self._cmd_rate = EventRateMetrics()
         self._gc_tracker = GCTracker()
         self._ack_policy = AckPolicy()
@@ -577,61 +580,16 @@ class Controller:
         """Main control loop with phase-based structure and precise timing."""
         self._timer.start()
         pt = self._phase_timer
-        tick_count = 0
-        # Re-derived from the state rather than captured once: SET_STATUS_RATE
-        # moves the rate mid-session, and a snapshot taken here would keep
-        # broadcasting at whatever the rate was at boot. The sentinel rate
-        # never matches, so the first tick derives the real interval.
-        broadcast_rate_hz = 0.0
-        broadcast_interval = 1
 
         while self.running:
             try:
                 state = self.state_manager.get_state()
-                tick_count += 1
-
-                with pt.phase("read"):
-                    self._read_from_firmware(state)
-                    self._check_attachments(state)
-
-                with pt.phase("poll_cmd"):
-                    self._poll_commands(state)
-
-                with pt.phase("estop"):
-                    self._handle_estop(state)
-                    self._check_attachments(state)
-
-                if not self.estop_active:
-                    with pt.phase("execute"):
-                        self._execute_commands(state)
-
-                if state.status_rate_hz != broadcast_rate_hz:
-                    broadcast_rate_hz = state.status_rate_hz
-                    broadcast_interval = status_broadcast_interval(broadcast_rate_hz)
-
-                if tick_count % broadcast_interval == 0:
-                    with pt.phase("status"):
-                        if self._status_broadcaster:
-                            self._status_broadcaster.tick()
-
-                with pt.phase("write"):
-                    self._write_to_firmware(state)
-
-                with pt.phase("sim"):
-                    # Pass tool teleport position if set by TeleportCommand
-                    tool_tp = state.tool_teleport_pos
-                    if tool_tp >= 0:
-                        state.tool_teleport_pos = -1.0  # consume
-                    self._transport_mgr.tick_simulation(
-                        state.current_tool,
-                        tool_teleport_pos=tool_tp,
-                    )
-
+                self._run_tick(state)
                 pt.tick()
                 self._sync_timer_metrics(state)
                 self._log_periodic_status(state)
                 self._gc_tracker.collect_deferred(
-                    self._timer.time_to_next_deadline(), tick_count
+                    self._timer.time_to_next_deadline(), self._tick_count
                 )
                 self._timer.wait_for_next_tick()
 
@@ -648,6 +606,54 @@ class Controller:
                 logger.error(f"Error in main control loop: {e}", exc_info=True)
                 state.Command_out = CommandCode.IDLE
                 state.Speed_out.fill(0)
+
+    def _run_tick(self, state: ControllerState) -> None:
+        """One control tick's phases, in loop order."""
+        pt = self._phase_timer
+        self._tick_count += 1
+
+        with pt.phase("read"):
+            self._read_from_firmware(state)
+            self._check_attachments(state)
+
+        with pt.phase("poll_cmd"):
+            self._poll_commands(state)
+
+        with pt.phase("estop"):
+            self._handle_estop(state)
+            self._check_attachments(state)
+
+        if not self.estop_active:
+            with pt.phase("execute"):
+                self._execute_commands(state)
+
+        # Re-derived from the state rather than captured once: SET_STATUS_RATE
+        # moves the rate mid-session, and a snapshot taken at boot would keep
+        # broadcasting at whatever the rate was then. The sentinel rate never
+        # matches, so the first tick derives the real interval.
+        if state.status_rate_hz != self._broadcast_rate_hz:
+            self._broadcast_rate_hz = state.status_rate_hz
+            self._broadcast_interval = status_broadcast_interval(
+                self._broadcast_rate_hz
+            )
+
+        if self._tick_count % self._broadcast_interval == 0:
+            with pt.phase("status"):
+                if self._status_broadcaster:
+                    self._status_broadcaster.tick()
+
+        with pt.phase("write"):
+            self._write_to_firmware(state)
+
+        with pt.phase("sim"):
+            # Pass tool teleport position if set by TeleportCommand
+            tool_tp = state.tool_teleport_pos
+            if tool_tp >= 0:
+                state.tool_teleport_pos = -1.0  # consume
+            self._transport_mgr.tick_simulation(
+                state.current_tool,
+                tool_teleport_pos=tool_tp,
+            )
 
     def _poll_commands(self, state: ControllerState) -> None:
         """Poll and process UDP commands (non-blocking).
@@ -796,14 +802,13 @@ class Controller:
             return
         if cmd_type in _REFERENCED_STREAMS and not arm_homed(state):
             # Refused before the stream takes the arm from anything: a home
-            # in flight is establishing the reference it lacks. A stream's
-            # client reads the refusal as the standing error, under an index
-            # of its own that no earlier command's wait reads as its failure.
+            # in flight is establishing the reference it lacks. The refusal
+            # stands against the next index, past every earlier command, so
+            # no earlier wait reads it as its failure; it takes no index of
+            # its own, which a wait for the queue would wait on forever.
             if state.error is None or state.error.code != ErrorCode.MOTN_NOT_HOMED:
                 logger.warning("Streamed %s refused: robot not homed", cmd_name)
-            state.error = make_error(
-                ErrorCode.MOTN_NOT_HOMED, self._assign_command_index(state)
-            )
+            state.error = make_error(ErrorCode.MOTN_NOT_HOMED, state.next_command_index)
             if self._ack_policy.requires_ack(cmd_type):
                 self._reply_error(req_id, addr, state.error)
             return

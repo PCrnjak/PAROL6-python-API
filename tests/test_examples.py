@@ -6,6 +6,7 @@ conflict with the shared integration test server.
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,12 +31,18 @@ ENV = {
     "PAROL6_STATUS_RATE_HZ": "20",
 }
 
+# What the controller logs for a command it failed or refused in its turn,
+# and a client raising it: an example that exits 0 without having waited on
+# the failure still reports it here.
+FAILURE = re.compile(r"Command \d+ failed|Inline command failed|MotionError")
+
 
 @pytest.mark.examples
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("script", EXAMPLES)
-def test_example_runs(script, ports, monkeypatch):
-    """Run each example as a subprocess and check it exits cleanly."""
+def test_example_runs(script, ports, monkeypatch, caplog):
+    """Run each example as a subprocess and check it exits cleanly, with
+    every command it sent carried out."""
     # Windows can reserve the default status port even with no listener.
     # The subprocess and its controller share the OS-probed test port.
     env = {**ENV, "PAROL6_MCAST_PORT": str(ports.mcast_port)}
@@ -43,7 +50,8 @@ def test_example_runs(script, ports, monkeypatch):
         if script in ATTACHED:
             for key, value in env.items():
                 monkeypatch.setenv(key, value)
-            stack.enter_context(Robot(host="127.0.0.1", port=5001))
+            # Its log reaches this process's logging, where caplog reads it.
+            stack.enter_context(Robot(host="127.0.0.1", port=5001, normalize_logs=True))
         result = subprocess.run(
             [sys.executable, str(EXAMPLES_DIR / script)],
             env=env,
@@ -55,4 +63,10 @@ def test_example_runs(script, ports, monkeypatch):
         f"{script} failed (exit {result.returncode}):\n"
         f"--- stdout ---\n{result.stdout[-2000:]}\n"
         f"--- stderr ---\n{result.stderr[-2000:]}"
+    )
+    # An example that starts its own controller relays its log to stderr.
+    output = "\n".join((result.stdout, result.stderr, caplog.text))
+    failures = [line for line in output.splitlines() if FAILURE.search(line)]
+    assert not failures, (
+        f"{script} exited 0, but commands it sent failed:\n" + "\n".join(failures[:20])
     )

@@ -1,5 +1,5 @@
-"""Drive an in-process Controller (the ``controller`` fixture) through the
-loop's phases in loop order against the fake serial, and talk to it over
+"""Drive an in-process Controller (the ``controller`` fixture) one pass of
+its own loop body at a time against the fake serial, and talk to it over
 its real UDP socket."""
 
 import socket
@@ -21,16 +21,30 @@ from parol6.protocol.wire import (
 from parol6.server.controller import Controller
 
 
+# The status an in-process controller broadcasts lands on a loopback port
+# held here, not on the multicast group a running controller is heard on.
+_status_sink: socket.socket | None = None
+
+
+def _keep_status_local(controller: Controller) -> None:
+    global _status_sink
+    broadcaster = controller._status_broadcaster
+    if broadcaster is None:
+        return
+    if _status_sink is None:
+        _status_sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _status_sink.bind(("127.0.0.1", 0))
+    port = _status_sink.getsockname()[1]
+    if broadcaster._use_unicast and broadcaster.port == port:
+        return
+    broadcaster.port = port
+    broadcaster._switch_to_unicast()
+
+
 def tick(controller: Controller, state) -> None:
-    controller._read_from_firmware(state)
-    controller._check_attachments(state)
-    controller._poll_commands(state)
-    controller._handle_estop(state)
-    controller._check_attachments(state)
-    if not controller.estop_active:
-        controller._execute_commands(state)
-    controller._write_to_firmware(state)
-    controller._transport_mgr.tick_simulation(state.current_tool, tool_teleport_pos=-1)
+    """One control tick: the controller's own loop body, every phase."""
+    _keep_status_local(controller)
+    controller._run_tick(state)
 
 
 def tick_until(controller: Controller, state, condition, message: str, ticks=50):
@@ -70,12 +84,11 @@ class VirtualClock:
         self.now += INTERVAL_S
 
 
-def drain(controller: Controller, state, sock: socket.socket, req_id: int) -> None:
-    """Tick until the controller answers a ping sent now. Datagrams from one
-    socket to one address are read in the order they were sent, so every
-    one sent before the ping has been read by then, however late it was
-    delivered."""
-    sock.sendto(encode_command(PingCmd(), req_id), address(controller))
+def _reply(controller: Controller, state, sock: socket.socket, req_id: int):
+    """Tick until the reply to request *req_id* arrives and return it
+    decoded, or None after two seconds of wall time: loopback delivers a
+    datagram some ticks late on some hosts (macOS), so no tick count
+    bounds the wait."""
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         tick(controller, state)
@@ -83,9 +96,20 @@ def drain(controller: Controller, state, sock: socket.socket, req_id: int) -> No
             data, _ = sock.recvfrom(4096)
         except BlockingIOError:
             continue
-        if getattr(decode_message(data), "req_id", None) == req_id:
-            return
-    pytest.fail("the controller never answered the ping")
+        reply = decode_message(data)
+        if getattr(reply, "req_id", None) == req_id:
+            return reply
+    return None
+
+
+def drain(controller: Controller, state, sock: socket.socket, req_id: int) -> None:
+    """Tick until the controller answers a ping sent now. Datagrams from one
+    socket to one address are read in the order they were sent, so every
+    one sent before the ping has been read by then, however late it was
+    delivered."""
+    sock.sendto(encode_command(PingCmd(), req_id), address(controller))
+    if _reply(controller, state, sock, req_id) is None:
+        pytest.fail("the controller never answered the ping")
 
 
 def address(controller: Controller) -> tuple[str, int]:
@@ -102,16 +126,10 @@ def send(controller: Controller, state, sock: socket.socket, cmd, req_id: int):
     """Send *cmd* to the controller, tick until it answers, and return the
     decoded reply."""
     sock.sendto(encode_command(cmd, req_id), address(controller))
-    for _ in range(50):
-        tick(controller, state)
-        try:
-            data, _ = sock.recvfrom(4096)
-        except BlockingIOError:
-            continue
-        reply = decode_message(data)
-        if isinstance(reply, (OkMsg, ErrorMsg)) and reply.req_id == req_id:
-            return reply
-    pytest.fail(f"no reply to {type(cmd).__name__}")
+    reply = _reply(controller, state, sock, req_id)
+    if not isinstance(reply, (OkMsg, ErrorMsg)):
+        pytest.fail(f"no reply to {type(cmd).__name__}: {reply}")
+    return reply
 
 
 def ready(

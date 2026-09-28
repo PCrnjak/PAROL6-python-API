@@ -39,9 +39,12 @@ with Robot(host=HOST, port=PORT, normalize_logs=True):
         is_last = row == ROWS - 1
         y_start, y_end = (Y_MIN, Y_MAX) if row % 2 == 0 else (Y_MAX, Y_MIN)
         rbt.move_l([X, y_start, z] + ZZ_ORI, speed=0.5, r=BLEND, wait=False)
-        rbt.move_l(
+        last = rbt.move_l(
             [X, y_end, z] + ZZ_ORI, speed=0.5, r=0 if is_last else BLEND, wait=False
         )
 
-    rbt.wait_motion()
+    # The blended scan runs as one path: wait for its last move. A move that
+    # fails anywhere in the scan fails the ones behind it too, and raises.
+    if not rbt.wait_command(last, timeout=60.0):
+        raise SystemExit("the scan did not finish")
     print("Done!")

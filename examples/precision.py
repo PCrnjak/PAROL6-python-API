@@ -14,11 +14,12 @@ HOME_ANGLES = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 # Select the tool and home: an arm that is already homed returns to the
 # home pose with a planned move, and one already there does not move.
 rbt.select_tool("SSG-48")
-rbt.tool.calibrate()
-rbt.home()
+rbt.tool.calibrate(wait=True, timeout=30.0)
+rbt.home(wait=True, timeout=30.0)
 
 PRECISION_POSE = [0, -250, 350, -90, 0, -90]
-rbt.move_j(pose=PRECISION_POSE, speed=0.5)
+# The first Cartesian target also warms the controller's planner.
+rbt.move_j(pose=PRECISION_POSE, speed=0.5, timeout=30.0)
 
 # Test gripper: two quick close/open cycles
 rbt.tool.close(speed=1.0)
