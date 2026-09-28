@@ -165,7 +165,7 @@ class TestDryRunHomedGate:
 
     def test_snap_carries_the_pending_blend_chain(self):
         """A blended move still buffered when the script homes with calibrate
-        (or teleports) is planned under its own command before the snap —
+        is planned under its own command before the snap —
         the live controller runs it before the snap, so the preview must
         show it."""
         client = DryRunRobotClient(initial_joints_deg=HOME, initial_homed=True)

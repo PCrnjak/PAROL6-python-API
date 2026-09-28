@@ -17,19 +17,26 @@ answer to what the arm will do.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import logging
 import math
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import numpy as np
+from waldoctl.discovery import iter_plugin_tool_specs
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 from waldoctl.skills import UnresolvedPreview
+from waldoctl.sync_tools import make_sync_tool
 from waldoctl.ticks import TickBlock, TickIndex
+from waldoctl.tools import ComposedToolsSpec, ToolSpec, ToolState, ToolStatus
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from ..ack_policy import ARM_MOTION_CMD_TYPES
+from ..ack_policy import ARM_MOTION_CMD_TYPES, FIRE_AND_FORGET
 from ..commands.base import MotionCommand
 from ..commands.cartesian_commands import JogLCommand, jog_twist
 from ..commands.basic_commands import JogJCommand
@@ -73,14 +80,12 @@ from ..server.motion_planner import (
 from ..server.state import ControllerState, get_fkine_se3
 from ..utils.error_catalog import RobotError, make_error
 from ..utils.error_codes import ErrorCode
-from ..utils.errors import TrajectoryPlanningError
+from ..utils.errors import MotionError, TrajectoryPlanningError
 from parol6.tools import (
-    ElectricGripperConfig,
     PneumaticGripperConfig,
     get_registry,
     tool_action_refusal,
 )
-from waldoctl.tools import ToolType
 
 if TYPE_CHECKING:
     from parol6.robot import Robot
@@ -129,6 +134,41 @@ def build_cmd(name: str, *args: Any, **kwargs: Any) -> Any:
             v = v.upper()
         filtered[k] = v
     return struct_cls(*args, **filtered)
+
+
+def _decode_refusal(params: Any) -> RobotError | None:
+    """The refusal the controller answers *params* with when its decoder
+    rejects them, or None. msgspec checks a field's declared constraints —
+    a frame spelled exactly ``WRF`` or ``TRF``, six-value poses, ranges —
+    on decode only, so a struct that constructs can still be refused."""
+    if isinstance(params, SetShapesCmd):
+        # The preview's copy carries the shapes themselves, not their wire form.
+        return None
+    try:
+        _wire.decode_command(_wire.split_request(_wire.encode_command(params))[1])
+    except msgspec.ValidationError as e:
+        return make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=str(e))
+    return None
+
+
+@functools.cache
+def _plugin_tool_specs() -> tuple[ToolSpec, ...]:
+    """The ``waldoctl.tools`` plugin specs, instantiated once per process:
+    entry points are static, and scanning them costs more than the rest of
+    a preview's setup."""
+    return tuple(iter_plugin_tool_specs())
+
+
+def _drive(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run a tool verb's coroutine to completion. The preview answers every
+    call at once, so it finishes on its first step with no event loop, which
+    keeps it usable in a worker process and inside a host's running loop."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise RuntimeError("a dry-run tool verb suspended; the preview never awaits")
 
 
 logger = logging.getLogger(__name__)
@@ -234,55 +274,6 @@ def _truncated(record: TickIndex, max_seconds: float) -> TickIndex:
     )
 
 
-class _DryRunTool:
-    """Tool proxy for dry-run. Routes actions through the planner, spelling
-    the ToolSpec methods as the live tools do: an electric gripper's
-    ``open``/``close``/``set_position`` are a ``move`` with the current
-    fraction turned into mA, ``release`` is ``idle``; a pneumatic
-    ``set_position`` opens below 0.5 and closes at or above it."""
-
-    def __init__(self, client: DryRunRobotClient) -> None:
-        self._client = client
-
-    @property
-    def key(self) -> str:
-        return self._client._active_tool_key
-
-    @property
-    def tool_type(self) -> str:
-        spec = get_registry().get(self.key)
-        return (
-            ToolType.GRIPPER
-            if isinstance(spec, (ElectricGripperConfig, PneumaticGripperConfig))
-            else ToolType.NONE
-        )
-
-    def __getattr__(self, name: str) -> Any:
-        def method(*args: Any, **kwargs: Any) -> int:
-            action, params = self._translate(name, list(args), kwargs)
-            return self._client.tool_action(self.key, action, params, **kwargs)
-
-        return method
-
-    def _translate(
-        self, name: str, args: list[Any], kwargs: dict[str, Any]
-    ) -> tuple[str, list[Any]]:
-        cfg = get_registry().get(self.key)
-        if isinstance(cfg, ElectricGripperConfig):
-            if name in ("open", "close", "set_position"):
-                position = (
-                    0.0 if name == "open" else 1.0 if name == "close" else args[0]
-                )
-                speed = kwargs.pop("speed", 0.5)
-                current = kwargs.pop("current", 0.5)
-                return "move", [position, speed, current]
-            if name == "release":
-                return "idle", []
-        elif isinstance(cfg, PneumaticGripperConfig) and name == "set_position":
-            return ("open" if args[0] < 0.5 else "close"), []
-        return name, args
-
-
 class DryRunRobotClient:
     """Runs commands through the trajectory planner without UDP/serial.
 
@@ -336,8 +327,9 @@ class DryRunRobotClient:
         register_plugin_tools()
 
         self._state = ControllerState()
-        # Mirror the live gate: an electric gripper's jaw move before a
-        # calibrate is refused here exactly as the controller refuses it.
+        # The controller refuses an electric gripper's jaw move until a
+        # calibrate, and status does not say whether one ran: the host seeds
+        # what it knows, and False (as after power-on) previews that refusal.
         self._state.gripper_calibrated = bool(initial_gripper_calibrated)
         init_deg = np.asarray(
             initial_joints_deg if initial_joints_deg is not None else HOME_ANGLES_DEG,
@@ -357,7 +349,18 @@ class DryRunRobotClient:
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._active_tool_key: str = "NONE"
         self._active_variant_key: str = ""
-        self._tool_proxy = _DryRunTool(self)
+        # The robot's own tool specs, bound to this preview as the live
+        # client binds them: every verb and property is the live tool's, and
+        # only the action it sends lands here. Typed Any: the sync wrapper
+        # turns each async verb into a plain call.
+        from parol6.robot import _build_tools
+
+        self._tools: dict[str, Any] = {}
+        for spec in ComposedToolsSpec(_build_tools(), _plugin_tool_specs()).available:
+            bound: Any = copy.copy(spec)
+            bound._execute = self._tool_execute
+            bound._get_status = self._tool_status
+            self._tools[spec.key] = make_sync_tool(bound, _drive)
 
         # The commanded record: one chunk per program command, filled as the
         # planner answers. Rows are recorded at submit time, under the tool
@@ -373,9 +376,34 @@ class DryRunRobotClient:
         return self._state
 
     @property
-    def tool(self) -> _DryRunTool:
-        """Tool proxy that routes actions through the planner."""
-        return self._tool_proxy
+    def tool(self) -> Any:
+        """The selected tool, as the live client hands it out: its verbs
+        send their actions through the planner."""
+        return self._tools[self._active_tool_key]
+
+    async def _tool_execute(
+        self, tool_key: str, action: str, params: list[Any], **kwargs: Any
+    ) -> int:
+        return self.tool_action(tool_key, action, params, **kwargs)
+
+    async def _tool_status(self) -> ToolStatus:
+        """The previewed tool state: the tool fitted, and its jaws where the
+        program last sent them."""
+        return ToolStatus(
+            key=self._state.current_tool,
+            variant_key=self._state.current_tool_variant,
+            state=ToolState.IDLE,
+            positions=(self._tool_position,) * self._tool_dof(),
+        )
+
+    def _tool_dof(self) -> int:
+        """How many positions status reports for the fitted tool, as the
+        controller counts them."""
+        reported = ToolStatus()
+        cfg = get_registry().get(self._state.current_tool)
+        if cfg is not None:
+            cfg.populate_status(self._state, reported)
+        return len(reported.positions)
 
     @property
     def program_length(self) -> int:
@@ -450,14 +478,20 @@ class DryRunRobotClient:
         )
         return q_rad[at]
 
-    def _tool_target(self, action: str, params: list) -> float:
+    def _tool_target(self, tool_key: str, action: str, params: list) -> float:
         # ``idle`` drops the grip without moving the jaws.
         if action in ("open", "calibrate"):
             return 0.0
         if action == "close":
             return 1.0
         if action in ("move", "set_position") and params:
-            return float(min(1.0, max(0.0, float(params[0]))))
+            position = float(params[0])
+            # A valve is open or shut: it closes at half a position or more.
+            if isinstance(
+                get_registry().get(tool_key.strip().upper()), PneumaticGripperConfig
+            ):
+                return 0.0 if position < 0.5 else 1.0
+            return min(1.0, max(0.0, position))
         return self._tool_position
 
     def _fill_tool_action(self, idx: int, cmd: ToolActionCmd, seconds: float) -> None:
@@ -467,7 +501,7 @@ class DryRunRobotClient:
         action = cmd.action.strip().lower()
         params = list(cmd.params)
         ticks = int(round(seconds / INTERVAL_S))
-        target = self._tool_target(action, params)
+        target = self._tool_target(cmd.tool_key, action, params)
         if action == "calibrate":
             self._state.gripper_calibrated = True
         q = np.repeat(self._current_q()[np.newaxis], ticks, axis=0)
@@ -599,21 +633,60 @@ class DryRunRobotClient:
         """Snap to angles instantly (no trajectory) — used by Home and Teleport.
 
         Both establish position references, so subsequent planned moves pass
-        the homed gate. Blended moves still buffered in the planner are
-        planned first, under their own commands — the live controller runs
-        them before the snap — and the snap itself lands as one row at the
-        new pose, so the record shows where the arm is once it is there."""
-        self._absorb(self._planner.flush())
+        the homed gate. The snap lands as one row at the new pose, so the
+        record shows where the arm is once it is there."""
         deg = np.asarray(angles_deg, dtype=np.float64)
         deg_to_steps(deg, self._state.Position_in)
         self._planner.state.Position_in[:] = self._state.Position_in
         self._planner.state.Homed_in.fill(1)
         self._hold(idx, _STRIDE)
 
+    def _cancel_pending(self, scope: str) -> None:
+        """Discard the blend chain the planner still holds, failing each of
+        its commands with ``MOTN_CANCELLED`` as the controller fails what a
+        cancel discards, so a wait on one reads the cancel."""
+        for index, _ in self._planner._blend_buffer:
+            self._fill(
+                index,
+                np.empty((0, 6)),
+                error=make_error(ErrorCode.MOTN_CANCELLED, index, scope=scope),
+            )
+        self._planner.cancel()
+
+    def _teleport_refusal(self, params: TeleportCmd) -> RobotError | None:
+        """Why the controller would refuse this teleport, or None. Whether
+        the live controller runs the simulator, as a teleport also needs, is
+        not the preview's to know."""
+        if params.tool_positions is not None:
+            dof = self._tool_dof()
+            if len(params.tool_positions) != dof:
+                return make_error(
+                    ErrorCode.COMM_VALIDATION_ERROR,
+                    detail=(
+                        f"tool_positions has {len(params.tool_positions)} entries; "
+                        f"the fitted tool {self._state.current_tool} reports {dof} "
+                        "positions"
+                    ),
+                )
+        if not self._state.enabled:
+            return make_error(
+                ErrorCode.SYS_CONTROLLER_DISABLED,
+                detail=self._state.disabled_reason or "Controller disabled",
+            )
+        return None
+
     def _dispatch(self, params: Any, method: str) -> int:
         """Route a command struct through the trajectory planner, recording
         it as the next program command. Returns its program index."""
         self._state.Homed_in[:] = self._planner.state.Homed_in
+        refusal = _decode_refusal(params)
+        if refusal is not None:
+            idx = self._open(method)
+            self._fill(idx, np.empty((0, 6)), error=refusal)
+            if _wire.STRUCT_TO_CMDTYPE.get(type(params)) in FIRE_AND_FORGET:
+                # Live, a streamed datagram's refusal reaches nobody.
+                return idx
+            raise MotionError(refusal)
         cmd_cls = self._registry.get_command_for_struct(type(params))
         if (
             cmd_cls is not None
@@ -630,7 +703,7 @@ class DryRunRobotClient:
         if isinstance(params, _wire.StopCmd):
             # A stop discards the blends still buffered and lifts a pause,
             # as the controller's does.
-            self._planner.cancel()
+            self._cancel_pending("stop")
             self._state.execution_paused = False
             return idx
         if isinstance(params, ToolActionCmd):
@@ -662,10 +735,10 @@ class DryRunRobotClient:
             self._state.invalidate_attachments()
             self._state.enabled = isinstance(params, _wire.ResetCmd)
             if not self._state.enabled:
-                self._planner.cancel()
+                self._cancel_pending("estop")
             return idx
         if isinstance(params, _wire.ResetStateCmd):
-            self._planner.cancel()
+            self._cancel_pending("reset_state")
             self._state.reset()
             self._planner.state.Position_in[:] = self._state.Position_in
             self._planner.state.Homed_in[:] = self._state.Homed_in
@@ -689,7 +762,13 @@ class DryRunRobotClient:
             return idx
         if isinstance(params, (_wire.SimulatorCmd, _wire.ConnectHardwareCmd)):
             self._state.invalidate_attachments()
-            self._planner.cancel()
+            self._cancel_pending(
+                "a simulator toggle"
+                if isinstance(params, _wire.SimulatorCmd)
+                else "a hardware connect"
+            )
+            # The gripper on the new transport has not been calibrated.
+            self._state.gripper_calibrated = False
             self._state.Homed_in.fill(0)
             self._planner.state.Homed_in.fill(0)
             return idx
@@ -698,11 +777,24 @@ class DryRunRobotClient:
         if isinstance(params, HomeCmd):
             if params.calibrate or not self._planner.state.Homed_in[:6].all():
                 self._state.invalidate_attachments()
+                # A home is queued: the controller runs a pending blend chain
+                # before it, each move under its own command.
+                self._absorb(self._planner.flush())
                 self._snap_to_angles(idx, HOME_ANGLES_DEG)
                 return idx
             # Already referenced → fall through: the planner fast-paths HOME
             # into a planned return move, so the preview renders the path.
         if isinstance(params, TeleportCmd):
+            refusal = self._teleport_refusal(params)
+            if refusal is not None:
+                self._fill(idx, np.empty((0, 6)), error=refusal)
+                raise MotionError(refusal)
+            # The pose jumps: whatever was driving the arm is void, and a
+            # pause held a queue that is gone.
+            self._cancel_pending("a teleport")
+            self._state.execution_paused = False
+            if params.tool_positions:
+                self._tool_position = float(params.tool_positions[0])
             self._snap_to_angles(idx, params.angles)
             return idx
         if isinstance(params, (SelectToolCmd, SetTcpOffsetCmd, SetTcpTransformCmd)):
@@ -977,17 +1069,16 @@ class DryRunRobotClient:
 
     def servo_j(
         self,
-        angles: list[float] | None = None,
+        angles: list[float],
         *,
         pose: list[float] | None = None,
         speed: float = 0.5,
         accel: float = 0.5,
-        **kwargs: Any,
     ) -> int:
         if pose is not None:
-            cmd = build_cmd("servo_j_pose", pose, speed=speed, accel=accel, **kwargs)
+            cmd: Any = _wire.ServoJPoseCmd(pose=pose, speed=speed, accel=accel)
         else:
-            cmd = build_cmd("servo_j", angles or [], speed=speed, accel=accel, **kwargs)
+            cmd = _wire.ServoJCmd(angles=angles, speed=speed, accel=accel)
         idx = self._dispatch(cmd, "servo_j")
         return -1 if self._failed(idx) else 1
 
@@ -997,15 +1088,20 @@ class DryRunRobotClient:
         *,
         speed: float = 0.5,
         accel: float = 0.5,
-        **kwargs: Any,
     ) -> int:
         idx = self._dispatch(
-            build_cmd("servo_l", pose, speed=speed, accel=accel, **kwargs), "servo_l"
+            _wire.ServoLCmd(pose=pose, speed=speed, accel=accel), "servo_l"
         )
         return -1 if self._failed(idx) else 1
 
     def checkpoint(self, label: str) -> int:
         return self._dispatch(build_cmd("checkpoint", label), "checkpoint")
+
+    def select_tool(self, tool_name: str, variant_key: str = "") -> int:
+        return self._dispatch(
+            SelectToolCmd(tool_name=tool_name.upper(), variant_key=variant_key),
+            "select_tool",
+        )
 
     def write_io(self, index: int, value: int, *, timeout: float | None = None) -> int:
         if type(index) is not int or index not in (0, 1):
@@ -1015,6 +1111,22 @@ class DryRunRobotClient:
         return self._dispatch(
             WriteIOCmd(port_index=index + 2, value=int(value)), "write_io"
         )
+
+    def tool_action(
+        self,
+        tool_key: str,
+        action: str,
+        params: list | None = None,
+        *,
+        wait: bool = False,
+        timeout: float = 10.0,
+    ) -> int:
+        cmd = ToolActionCmd(
+            tool_key=tool_key.strip().upper(),
+            action=action.strip().lower(),
+            params=params or [],
+        )
+        return self._dispatch(cmd, "tool_action")
 
     def delay(self, seconds: float) -> int:
         """Hold the pose for *seconds*: rows on the commanded record, so the
@@ -1104,9 +1216,11 @@ class DryRunRobotClient:
         speeds_list: list[float] | None = None,
         accel: float = 0.5,
     ) -> int:
+        if frame not in ("WRF", "TRF"):
+            raise ValueError(f"jog_l frame must be 'WRF' or 'TRF', got {frame!r}")
         vel = [0.0] * 6
         if axes is not None and speeds_list is not None:
-            for a, s in zip(axes, speeds_list):
+            for a, s in zip(axes, speeds_list, strict=True):
                 vel[_AXIS_INDEX[a]] = s
         elif axis is not None:
             vel[_AXIS_INDEX[axis]] = speed
