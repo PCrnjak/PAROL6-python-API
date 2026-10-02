@@ -301,12 +301,15 @@ Note: RUCKIG is point-to-point only and cannot follow Cartesian paths. When RUCK
 ### Speed and acceleration
 
 ```python
-client.moveJ(target, speed=0.5, accel=0.5)   # 50% of joint limits
-client.moveL(target, speed=0.25, accel=1.0)   # 25% cart speed, full accel
-client.moveL(target, duration=2.0)             # Fixed duration (uses TOPPRA)
+client.move_j(target)                          # default speed=0.5, accel=0.5
+client.move_l(target, speed=0.25, accel=1.0)   # 25% cart speed, full accel
+client.move_l(target, duration=2.0)            # Fixed duration; speed is unused
 ```
 
-Speed and accel are fractions of maximum (0.0–1.0), not percentages.
+Speed and accel are fractions of maximum in (0, 1], not percentages. A
+`duration` > 0 times the move and `speed` is ignored; otherwise `speed` times
+it. `servo_j`/`servo_l` default to `speed=0.5, accel=0.5`, and jogs to
+`accel=0.5`.
 
 For Cartesian moves, joint limits stay at 100% as hard bounds—the speed fraction only affects the Cartesian velocity constraint.
 
@@ -330,17 +333,22 @@ the pause request can be acknowledged while still decelerating. Queued delays
 retain their remaining time while paused; positive speed changes do not retime
 delays, tool actuators or homing routines already in progress.
 
-Completion waits query the requested command's exact success. Tool actions run
-concurrently with arm motion, so the highest completed index alone cannot prove
-that an earlier command finished. The controller retains its latest 1024
-successful completions; an unknown, cancelled, or expired result remains
-unconfirmed. A controller-session change during a wait raises `ConnectionError`.
-This requires matching client and controller versions supporting the completion
-query.
+Completion waits query the requested command's exact success. A jog, a servo
+stream or a `tool.stop()` can finish ahead of commands queued before it, so the
+highest completed index alone cannot prove that an earlier command finished.
+The controller retains its latest 1024
+successful completions and 1024 failures. A wait on a command that was
+discarded — by `stop()`, an E-stop, `reset_state()`, a teleport or a failure
+queued ahead of it — raises `MotionError` (`MOTN_CANCELLED`) at once, and one
+on a command the pipeline failed raises `MotionError` with that failure. An
+unknown or expired result remains unconfirmed. A controller-session change
+during a wait raises `ConnectionError`. This requires matching client and
+controller versions supporting the completion query.
 
 Standalone `wait_command()` keeps its wall-clock timeout and returns false if
-completion is unconfirmed. Blocking motion calls raise `TimeoutError` in that
-case. A timed-out wait leaves the motion queued; `stop()` cancels it. Planning
+completion is still unconfirmed when it runs out. Blocking motion calls raise
+`TimeoutError` in that case. A timed-out wait leaves the motion queued;
+`stop()` cancels it. Planning
 preview retimes trajectories and reports paused queued operations as
 `UnresolvedPreview` instead of claiming completion.
 
@@ -360,7 +368,7 @@ checks; no continuous recorded-trajectory command is added.
 
 ## Command system
 
-Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.
+Jog and servo commands (JogJ, JogL, ServoJ, ServoL) automatically use the streaming fast-path — the server de-duplicates stale inputs, reduces ACK chatter, and reuses the active command. A servo stream stops about 0.25 s after its last target arrives: the arm brakes to rest and holds. Use jog/servo for UI-driven motion or teleoperation; use planned moves (MoveJ, MoveL, etc.) for discrete motions and queued programs.
 
 ### Command categories
 
@@ -410,6 +418,32 @@ with RobotClient() as c:
 ```
 
 Add a new tool by creating a `ToolConfig` subclass (or using `ToolConfig` directly) and calling `register_tool("KEY", config)` in `parol6/tools.py`.
+
+### Tool actions
+
+Tool actions (`tool.open()`, `close()`, `set_position()`, `calibrate()`,
+`release()`, `tool_action(...)`) are queued work, in the same queue as planned
+motion:
+
+- **They take their turn.** A tool action waits for the motion queued ahead of
+  it, the arm holds still while it runs, and the motion queued after it waits
+  for it. A tool action sent after a blended move ends the blend there. A wait
+  on a tool action therefore covers the motion queued ahead of it, and
+  `queued_duration` counts the tool's estimated travel.
+- **A failure cancels what follows.** A `move` on a gripper never calibrated is
+  refused when its turn comes, under its own index; like any command that
+  fails, it cancels the commands queued behind it (`MOTN_CANCELLED`).
+- **What discards the queue discards them.** A pause holds them. `stop()`,
+  `estop()`, `reset_state()`, a teleport, or a jog or servo stream taking the
+  arm fails the queued ones as cancelled and halts the one running where the
+  jaws are, keeping the grip.
+- **`tool.stop()` is immediate.** It is not queued: it halts the tool action
+  running, failing it as cancelled by a tool stop, keeps everything queued
+  behind it, and holds the next queued tool action until the jaws are still.
+
+`release()` drops the grip without moving the jaws. A pneumatic action lasts
+its estimated stroke; an electric `calibrate` lasts 200 control ticks (two
+seconds at the default 100 Hz).
 
 
 **Security note:** The controller has no authentication — it accepts any correctly parsed command on its UDP port. Multiple senders are supported by design (e.g., GUI + orchestrator), but deploy only on trusted networks.

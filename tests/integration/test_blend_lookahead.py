@@ -11,6 +11,108 @@ import pytest
 class TestJointBlendLookahead:
     """Joint-space blending with N-command lookahead."""
 
+    def test_a_blended_relative_chain_past_a_joint_limit_is_refused(
+        self, client, server_proc
+    ):
+        """Relative moves blended into one path are held to the joint limits
+        at every target, as a single move is: two +25° steps of J1 from
+        standby end past its limit, so the chain is refused and the arm
+        stays inside it."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        from parol6 import MotionError
+        from parol6.config import LIMITS
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        hi = float(LIMITS.joint.position.deg[0, 1])
+        assert standby[0] + 50.0 > hi > standby[0] + 25.0
+        step = [25.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        first = client.move_j(step, speed=0.5, rel=True, r=5.0, wait=False)
+        second = client.move_j(step, speed=0.5, rel=True, wait=False)
+        assert min(first, second) >= 0
+        with pytest.raises(MotionError):
+            client.wait_command(second, timeout=10.0)
+        angles = client.angles()
+        assert angles is not None
+        assert angles[0] < hi, f"J1 ran to {angles[0]:.1f}°, past its {hi:.1f}° limit"
+
+    @pytest.mark.parametrize(
+        ("joint", "side"),
+        [(1, 0), (2, 1), (4, 0), (4, 1), (5, 1)],
+        ids=["J2-min", "J3-max", "J5-min", "J5-max", "J6-max"],
+    )
+    def test_relative_moves_from_a_joint_parked_on_its_limit_run(
+        self, client, server_proc, joint, side
+    ):
+        """A joint parked on its limit reads back a hair past the limit's
+        decimal, by a motor step's rounding or a float's. A relative move
+        of another joint leaves it where it is parked, which is no move
+        past the limit, alone or blended into a chain."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        from parol6.config import LIMITS
+
+        parked = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        parked[joint] = float(LIMITS.joint.position.deg[joint, side])
+        assert client.teleport(parked) == 1
+        step = [10.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        assert client.move_j(step, speed=0.5, rel=True, timeout=10.0) >= 0
+
+        out = client.move_j(step, speed=0.5, rel=True, r=5.0, wait=False)
+        back = client.move_j(
+            [-10.0, 0.0, 0.0, 0.0, 0.0, 0.0], speed=0.5, rel=True, wait=False
+        )
+        assert min(out, back) >= 0
+        assert client.wait_command(back, timeout=10.0)
+        angles = client.angles()
+        assert angles is not None
+        assert abs(angles[0] - (parked[0] + 10.0)) < 0.5
+        assert abs(angles[joint] - parked[joint]) < 0.01
+
+    @pytest.mark.parametrize(
+        "profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG"]
+    )
+    def test_a_blended_chain_runs_its_path_under_every_profile(
+        self, client, server_proc, profile
+    ):
+        """A blended joint chain goes where its moves go, whichever profile
+        times it: out along J2 and back swings the arm out before it comes
+        home, and standby → A → B passes by A rather than cutting straight
+        across to B."""
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        assert client.select_profile(profile) > 0
+
+        out = client.move_j(
+            [0.0, 20.0, 0.0, 0.0, 0.0, 0.0], speed=0.5, rel=True, r=10.0, wait=False
+        )
+        back = client.move_j(
+            [0.0, -20.0, 0.0, 0.0, 0.0, 0.0], speed=0.5, rel=True, wait=False
+        )
+        assert min(out, back) >= 0
+        # The blend cuts the turn-round by its radius: the arm swings out
+        # most of the 20°, never all of it.
+        assert client.wait_status(
+            lambda s: s.angles[1] > standby[1] + 15.0, timeout=10.0
+        ), f"{profile}: the chain never swung J2 out"
+        assert client.wait_command(back, timeout=10.0)
+        angles = client.angles()
+        assert angles is not None
+        assert abs(angles[1] - standby[1]) < 1.0
+
+        a = [80.0, -80.0, 170.0, 5.0, 5.0, 170.0]
+        b = [70.0, -90.0, 160.0, 10.0, 10.0, 160.0]
+        assert client.move_j(a, speed=0.5, r=10.0, wait=False) >= 0
+        last = client.move_j(b, speed=0.5, wait=False)
+        assert last >= 0
+        # Straight from standby to B passes A 10° off in J2.
+        assert client.wait_status(
+            lambda s: max(abs(q - t) for q, t in zip(s.angles, a)) < 3.0, timeout=10.0
+        ), f"{profile}: the chain cut straight past A"
+        assert client.wait_command(last, timeout=10.0)
+        angles = client.angles()
+        assert angles is not None
+        assert max(abs(q - t) for q, t in zip(angles, b)) < 1.0
+
     def test_three_move_j_blended_reaches_final_target(self, client, server_proc):
         """Three move_j with blend zones should reach the last target."""
         targets = [
@@ -41,10 +143,11 @@ class TestJointBlendLookahead:
             ([60, -60, 150, 15, 15, 150], 30.0),  # separate motion
         ]
 
-        for t, r in targets:
-            assert client.move_j(t, speed=0.5, r=r, wait=False) >= 0
-
-        assert client.wait_motion(timeout=15.0)
+        indices = [client.move_j(t, speed=0.5, r=r, wait=False) for t, r in targets]
+        assert all(index >= 0 for index in indices)
+        # The last move's own completion: its r>0 holds it for a partner, so
+        # the arm rests between the stopped chain and it.
+        assert client.wait_command(indices[-1], timeout=15.0)
 
         angles = client.angles()
         assert angles is not None
@@ -166,10 +269,12 @@ class TestCartesianBlendLookahead:
             ([start[0], start[1] + 45, start[2], start[3], start[4], start[5]], 20.0),
         ]
 
-        for t, r in targets:
-            assert client.move_l(t, speed=0.5, r=r, wait=False) >= 0
-
-        assert client.wait_motion(timeout=15.0)
+        indices = [client.move_l(t, speed=0.5, r=r, wait=False) for t, r in targets]
+        assert all(index >= 0 for index in indices)
+        # The last move's own completion, not the arm keeping still: a
+        # pause between the stopped chain and the move after it is not
+        # the end of the program.
+        assert client.wait_command(indices[-1], timeout=15.0)
 
         final = client.pose()
         assert final is not None
@@ -184,18 +289,18 @@ class TestMixedTypeBlendTermination:
     def test_move_j_then_move_l_executes_separately(self, client, server_proc):
         """move_j(r>0) followed by move_l should not blend across types."""
         # Small joint move with blend radius
-        assert (
-            client.move_j(
-                [85, -85, 175, 2, 2, 175],
-                speed=0.5,
-                r=20.0,
-                wait=False,
-            )
-            >= 0
+        index = client.move_j(
+            [85, -85, 175, 2, 2, 175],
+            speed=0.5,
+            r=20.0,
+            wait=False,
         )
+        assert index >= 0
 
-        # Wait for joint move, then get the pose for a reachable Cartesian target
-        assert client.wait_motion(timeout=10.0)
+        # The move's own completion, not the arm keeping still: the planner
+        # holds an r>0 move for a blend partner, so the arm can still be at
+        # rest when wait_motion stops waiting for it to start.
+        assert client.wait_command(index, timeout=10.0)
         mid_pose = client.pose()
         assert mid_pose is not None
 

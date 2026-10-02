@@ -4,8 +4,8 @@ The MotionPlanner offloads trajectory computation (TOPPRA, IK chains) from
 the 100Hz control loop to a separate process.  Commands flow in via
 ``command_queue`` and computed segments flow back via ``segment_queue``.
 
-Non-trajectory motion commands (Home, SelectTool, Gripper, Checkpoint, Delay)
-are forwarded as ``InlineSegment`` tokens so that the SegmentPlayer can
+Non-trajectory motion commands (Home, SelectTool, tool actions, Checkpoint,
+Delay) are forwarded as ``InlineSegment`` tokens so that the SegmentPlayer can
 execute them in the control loop while preserving command ordering.
 
 TrajectoryPlanner holds the shared planning logic used by both the real-time
@@ -18,13 +18,14 @@ import logging
 import multiprocessing
 import queue
 import signal
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union, cast
 from math import radians
 
 import numpy as np
 
-from parol6.config import INTERVAL_S
+from parol6.config import BLEND_HOLD_S, INTERVAL_S
 from parol6.protocol.wire import (
     HomeCmd,
     MoveJCmd,
@@ -33,8 +34,10 @@ from parol6.protocol.wire import (
     SetTcpOffsetCmd,
     SetTcpTransformCmd,
     ToolActionCmd,
+    wire_command_name,
 )
 from parol6.server.command_executor import _format_cmd_params
+from parol6.tools import get_registry
 from parol6.utils.error_catalog import RobotError, extract_robot_error
 from parol6.utils.error_codes import ErrorCode
 
@@ -45,6 +48,10 @@ if TYPE_CHECKING:
     from parol6.commands.base import TrajectoryMoveCommandBase
 
 logger = logging.getLogger(__name__)
+
+# How soon a held blend chain notices the motion ahead of it has finished,
+# which is when its hold starts.
+_PLAYBACK_POLL_S = 0.02
 
 # ---------------------------------------------------------------------------
 # Segment types (planner → player via segment_queue)
@@ -84,6 +91,9 @@ class InlineSegment:
     command_index: int
     params: object  # wire struct (msgspec.Struct — picklable)
     generation: int = 0
+    # Seconds it holds the arm, as far as the plan can tell: a tool action's
+    # estimated travel, which the queued duration counts. Zero otherwise.
+    duration: float = 0.0
 
 
 @dataclass
@@ -245,6 +255,9 @@ class TrajectoryPlanner:
         self._max_blend_lookahead = MAX_BLEND_LOOKAHEAD
         self._robot_module = PAROL6_ROBOT
         self._blend_buffer: list[tuple[int, TrajectoryMoveCommandBase]] = []
+        # The name each in-flight command is reported under: the wire
+        # command's, so a HOME planned as a joint return still reads "home".
+        self._names: dict[int, str] = {}
         self._output: list[Segment] = []
 
         # Pre-compute home position in steps
@@ -268,13 +281,16 @@ class TrajectoryPlanner:
             and bool(self.state.Homed_in[:6].all())
         ):
             params = MoveJCmd(angles=self._home_deg, speed=self._home_return_speed)
+            # Reported as the home it answers, not the move it plans.
+            self._names[command_index] = "home"
 
         cmd_class = self._registry.get_command_for_struct(type(params))
         if cmd_class is not None and issubclass(cmd_class, self._trajectory_base):
             self._handle_trajectory(command_index, params, cmd_class)  # type: ignore[invalid-argument-type]
         else:
-            # Tool actions run concurrently with motion — don't flush blend
-            if not isinstance(params, ToolActionCmd) and self._blend_buffer:
+            # Every inline command, a tool action included, takes its turn
+            # with the arm at rest: the chain ahead of it ends there.
+            if self._blend_buffer:
                 self._flush_blend()
             self._handle_inline(command_index, params)
 
@@ -290,6 +306,11 @@ class TrajectoryPlanner:
     def cancel(self) -> None:
         """Clear blend buffer."""
         self._blend_buffer.clear()
+
+    @property
+    def holding(self) -> bool:
+        """A blend chain is waiting for the move its last corner rounds into."""
+        return bool(self._blend_buffer)
 
     def sync_tool(
         self,
@@ -399,7 +420,7 @@ class TrajectoryPlanner:
                     trajectory_steps=head_cmd.trajectory_steps.copy(),
                     trajectory_rad=head_cmd.trajectory_rad.copy(),
                     duration=head_cmd._duration,
-                    command_name=type(head_cmd).__name__,
+                    command_name=self._reported_name(head_idx, head_cmd),
                     action_params=_format_cmd_params(head_cmd.p),
                     blend_consumed_indices=consumed_indices,
                 )
@@ -435,16 +456,21 @@ class TrajectoryPlanner:
                 trajectory_steps=cmd.trajectory_steps.copy(),
                 trajectory_rad=cmd.trajectory_rad.copy(),
                 duration=cmd._duration,
-                command_name=type(cmd).__name__,
+                command_name=self._reported_name(command_index, cmd),
                 action_params=_format_cmd_params(params) if params is not None else "",
             )
         )
         self.state.Position_in[:] = cmd.trajectory_steps[-1]
 
+    def _reported_name(self, command_index: int, cmd: TrajectoryMoveCommandBase) -> str:
+        name = self._names.pop(command_index, None)
+        return name if name is not None else wire_command_name(type(cmd.p))
+
     def _emit_error(
         self, command_index: int, cmd: TrajectoryMoveCommandBase, exc: Exception
     ) -> None:
         """Append an ErrorSegment to output, with diagnostic data if available."""
+        self._names.pop(command_index, None)
         cartesian_path = None
         ik_valid = None
         if self._diagnostic:
@@ -513,10 +539,18 @@ class TrajectoryPlanner:
 
     def _handle_inline(self, command_index: int, params: object) -> None:
         """Emit an InlineSegment and predict state changes."""
+        duration = 0.0
+        if isinstance(params, ToolActionCmd):
+            cfg = get_registry().get(params.tool_key.strip().upper())
+            if cfg is not None:
+                duration = cfg.estimate_duration(
+                    params.action.strip().lower(), params.params
+                )
         self._output.append(
             InlineSegment(
                 command_index=command_index,
                 params=params,
+                duration=duration,
             )
         )
 
@@ -608,6 +642,10 @@ class PlannerWorker:
         """Clear blend buffer on CancelAll."""
         self._planner.cancel()
 
+    @property
+    def holding(self) -> bool:
+        return self._planner.holding
+
     def apply_tool(
         self,
         tool_name: str,
@@ -638,9 +676,15 @@ def motion_planner_main(
     segment_queue: multiprocessing.Queue,
     shutdown_event: EventType,
     ready_event: EventType,
+    playing_event: EventType,
     avoid_core: int | None = None,
 ) -> None:
-    """Worker process main loop — compute trajectories and forward inline commands."""
+    """Worker process main loop — compute trajectories and forward inline commands.
+
+    A held blend chain is planned once ``BLEND_HOLD_S`` passes with neither
+    a command arriving nor anything playing ahead of it (``playing_event``):
+    a script sending its chain move by move while earlier motion plays is
+    still sending it."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from parol6.server import set_pdeathsig
     from parol6.tools import register_plugin_tools
@@ -683,13 +727,35 @@ def motion_planner_main(
         multiprocessing.current_process().pid,
     )
 
+    # The generation a plan raised in. The controller fails every plan
+    # submitted before its cancel for that failure, so they are skipped; the
+    # syncs among them are not, since one of them is that cancel's resync.
+    failed_generation = -1
+    # What a held chain's hold runs from: the last command to arrive, or the
+    # last moment something played ahead of it.
+    held_from = time.monotonic()
     try:
         while not shutdown_event.is_set():
+            if worker.holding:
+                if playing_event.is_set():
+                    held_from = time.monotonic()
+                timeout = min(
+                    _PLAYBACK_POLL_S,
+                    max(0.0, held_from + BLEND_HOLD_S - time.monotonic()),
+                )
+            else:
+                timeout = BLEND_HOLD_S
             try:
-                msg = command_queue.get(timeout=0.1)
+                msg = command_queue.get(timeout=timeout)
             except queue.Empty:
-                worker.flush_stale_blend()
+                if (
+                    worker.holding
+                    and not playing_event.is_set()
+                    and time.monotonic() - held_from >= BLEND_HOLD_S
+                ):
+                    worker.flush_stale_blend()
                 continue
+            held_from = time.monotonic()
 
             if isinstance(msg, CancelAll):
                 worker.cancel()
@@ -717,6 +783,8 @@ def motion_planner_main(
                 continue
 
             if isinstance(msg, PlanCommand):
+                if msg.generation <= failed_generation:
+                    continue
                 try:
                     worker.process_command(msg)
                 except Exception as e:
@@ -739,7 +807,7 @@ def motion_planner_main(
                         )
                     )
                     worker.cancel()
-                    _drain_queue(command_queue)
+                    failed_generation = msg.generation
 
     except (EOFError, OSError, BrokenPipeError, KeyboardInterrupt):
         # Expected when the parent process is shutting down: the queue's
@@ -769,6 +837,10 @@ class MotionPlanner:
         self._segment_queue: multiprocessing.Queue = multiprocessing.Queue()
         self._shutdown_event: EventType = multiprocessing.Event()
         self._ready_event: EventType = multiprocessing.Event()
+        # Set while segments play or wait to: a blend chain arriving behind
+        # them is held until they are done.
+        self._playing_event: EventType = multiprocessing.Event()
+        self._playing = False
         self._process: multiprocessing.Process | None = None
         # CancelAll travels the command FIFO behind plans already queued, so
         # the worker still emits them after a cancel; the generation is what
@@ -789,6 +861,8 @@ class MotionPlanner:
             return
         self._shutdown_event.clear()
         self._ready_event.clear()
+        self._playing_event.clear()
+        self._playing = False
         self._process = multiprocessing.Process(
             target=motion_planner_main,
             args=(
@@ -796,6 +870,7 @@ class MotionPlanner:
                 self._segment_queue,
                 self._shutdown_event,
                 self._ready_event,
+                self._playing_event,
                 avoid_core,
             ),
             daemon=True,
@@ -878,10 +953,37 @@ class MotionPlanner:
         """Replace the planner checker's workspace keep-out shapes."""
         self.submit(SyncShapes(shapes=list(shapes)))
 
+    def resync(self, state: ControllerState) -> None:
+        """Bring the planner back to the controller's tool, world and profile.
+
+        The planner applies SET_TCP_TRANSFORM / SELECT_TOOL / SET_SHAPES at
+        plan time, when the command is still queued. Dropping that queue
+        leaves the planner holding a change the controller never applied,
+        and every later plan would be solved against it.
+        """
+        self.sync_tool(
+            state.current_tool,
+            variant_key=state.current_tool_variant,
+            tcp_offset_m=state.tcp_offset_m,
+            tcp_rotation_rad=state.tcp_rotation_rad,
+        )
+        self.sync_shapes(state.shapes)
+        self.sync_profile(state.motion_profile)
+
     def cancel(self) -> None:
         """Cancel all pending work in the planner."""
         self._generation += 1
         self.submit(CancelAll())
+
+    def set_playing(self, playing: bool) -> None:
+        """Tell the planner whether segments play or wait to. Called every
+        tick; the event is touched only when the answer changes."""
+        if playing != self._playing:
+            self._playing = playing
+            if playing:
+                self._playing_event.set()
+            else:
+                self._playing_event.clear()
 
     # -- planner → main --
 

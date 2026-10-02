@@ -15,7 +15,7 @@ from importlib.metadata import version as _pkg_version
 from . import PAROL6_ROBOT
 
 __version__: str = _pkg_version("parol6")
-from .client.async_client import AsyncRobotClient
+from .client.async_client import AsyncRobotClient, StatusSnapshot
 from .client.dry_run_client import DryRunRobotClient
 from .client.sync_client import RobotClient
 from .protocol.wire import (
@@ -33,7 +33,7 @@ from .utils.errors import MotionError
 # Type aliases for backward compatibility
 CurrentActionResult = CurrentActionResultStruct
 LoopStatsResult = LoopStatsResultStruct
-StatusResult = StatusResultStruct
+StatusResult = StatusSnapshot
 ToolResult = ToolResultStruct
 
 __all__ = [
@@ -43,6 +43,7 @@ __all__ = [
     "DryRunRobotClient",
     "RobotClient",
     "PAROL6_ROBOT",
+    "StatusSnapshot",
     # Result types (msgspec structs)
     "CurrentActionResultStruct",
     "LoopStatsResultStruct",

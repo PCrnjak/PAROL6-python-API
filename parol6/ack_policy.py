@@ -15,6 +15,7 @@ SYSTEM_CMD_TYPES: set[CmdType] = {
     CmdType.SET_STATUS_RATE,
     CmdType.SET_EXECUTION_SPEED,
     CmdType.PAUSE,
+    CmdType.TELEPORT,
 }
 
 # Query command types (use request/response, not ACK)
@@ -50,7 +51,6 @@ FIRE_AND_FORGET: set[CmdType] = {
     CmdType.SERVOL,
     CmdType.JOGJ,
     CmdType.JOGL,
-    CmdType.TELEPORT,
     CmdType.RESET_LOOP_STATS,
 }
 

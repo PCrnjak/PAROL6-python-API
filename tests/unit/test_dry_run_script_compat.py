@@ -1,20 +1,25 @@
 """Verify that all motion commands users write in scripts work through the dry run client.
 
-The dry run client uses __getattr__ + build_cmd to dispatch calls by mapping
-kwargs to wire struct fields. If the client API param names don't match the
-struct field names, the kwargs get silently dropped and the command fails.
+The dry run client maps kwargs to wire struct fields through build_cmd, from
+its own move/servo/jog methods and, for the rest, __getattr__. If the client
+API param names don't match the struct field names, the kwargs get silently
+dropped and the command fails.
 
 This test calls every user-facing motion method with the same signatures shown
 in the docs / editor auto-complete, ensuring the dry run path doesn't diverge
 from the real client.
 """
 
+import asyncio
+
 import numpy as np
 import pytest
 from waldoctl import CommandKind, command_table
 
+from parol6 import AsyncRobotClient
 from parol6.client.dry_run_client import _CMD_STRUCTS, DryRunRobotClient
-from tests.conftest import rows_for
+from parol6.config import LIMITS
+from tests.conftest import free_udp_port, rows_for
 
 HOME = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
 POSE_A = [0.0, 280.0, 200.0, 90.0, 0.0, 90.0]
@@ -160,7 +165,7 @@ class TestDryRunHomedGate:
 
     def test_snap_carries_the_pending_blend_chain(self):
         """A blended move still buffered when the script homes with calibrate
-        (or teleports) is planned under its own command before the snap —
+        is planned under its own command before the snap —
         the live controller runs it before the snap, so the preview must
         show it."""
         client = DryRunRobotClient(initial_joints_deg=HOME, initial_homed=True)
@@ -230,3 +235,73 @@ def test_state_commands_answer_with_the_live_clients_int_codes(client, name):
     result = getattr(client, name)(*_STATE_ARGS[name])
     assert isinstance(result, int) and not isinstance(result, bool)
     assert result == 1
+
+
+def test_a_joint_jog_previews_the_distance_it_runs():
+    """A jog of J1 at a fifth of the jog speed for one second travels about
+    a fifth of a second's travel at full jog speed, as on the arm."""
+    client = DryRunRobotClient(initial_joints_deg=HOME)
+    before = np.asarray(client.angles())
+    assert client.jog_j(0, 0.2, 1.0) == 1
+    record = client.plan()
+    block = record.blocks[client.program_length - 1]
+    travel = np.radians(
+        np.degrees(record.joints_rad[block.start_row + block.rows - 1][0]) - before[0]
+    )
+    expected = 0.2 * float(LIMITS.joint.jog.velocity[0]) * 1.0
+    assert travel == pytest.approx(expected, rel=0.15), (
+        f"jog_j(0, 0.2, 1.0) previewed {np.degrees(travel):.1f}° of J1 travel, "
+        f"not about {np.degrees(expected):.1f}°"
+    )
+
+
+def test_a_relative_pose_move_j_is_refused_in_preview_and_live():
+    """A pose target is absolute: ``move_j(pose=..., rel=True)`` names no move
+    either client can run, so both refuse it rather than dropping ``rel``."""
+    with pytest.raises(ValueError, match="rel=True"):
+        DryRunRobotClient(initial_joints_deg=HOME).move_j(
+            pose=POSE_A, speed=0.5, rel=True
+        )
+
+    async def live() -> None:
+        client = AsyncRobotClient(host="127.0.0.1", port=free_udp_port())
+        try:
+            await client.move_j(pose=POSE_A, speed=0.5, rel=True)
+        finally:
+            await client.close()
+
+    with pytest.raises(ValueError, match="rel=True"):
+        asyncio.run(live())
+
+
+def test_a_move_out_of_the_wrist_singularity_is_timed_by_its_length_not_a_snap():
+    """The turn a chain takes out of the singularity is the one whose
+    chain stays continuous. With the split between J4 and J6 settled a
+    hair wrong, the solver snaps the wrist round in one row once the
+    tool has barely left the singularity; TOPP-RA slows over that row,
+    but a profile that times the path by its rows stretches a 5 mm move
+    to many times its length."""
+    for profile in ("LINEAR", "TRAPEZOID"):
+        client = DryRunRobotClient(initial_joints_deg=HOME)
+        assert client.select_profile(profile) == 1
+        client.set_tcp_transform(5.0, -3.0, 20.0, 20.0, 25.0, -10.0)
+        index = client.move_l(
+            [0.0, 0.0, 5.0, 0.0, 0.0, 0.0], frame="TRF", rel=True, speed=0.2
+        )
+        record = client.plan()
+        block = record.blocks[index]
+        assert block.error is None, block.error
+        planned = block.rows * record.row_dt_s
+        assert planned < 3.0, f"{profile}: a 5 mm move planned as {planned:.2f} s"
+
+
+def test_a_move_that_leaves_the_wrist_singularity_previews_as_it_runs():
+    """From standby the wrist is singular; a tool-frame reorientation leaves
+    it through a turn of J4 on the arm, and the preview plans the same turn
+    every time rather than calling the move unreachable."""
+    for _ in range(10):
+        client = DryRunRobotClient(initial_joints_deg=HOME)
+        index = client.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", speed=0.5)
+        block = client.plan().blocks[index]
+        assert block.error is None, block.error
+        assert block.rows > 1

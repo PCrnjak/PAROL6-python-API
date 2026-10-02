@@ -49,7 +49,7 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=9.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_c_with_orientation(
         self, client, server_proc, robot_api_env, home_pose
@@ -63,7 +63,7 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_c_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_c with frame=TRF is accepted and completes."""
@@ -75,7 +75,42 @@ class TestCurvedMotionCommands:
         )
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
+
+    def test_a_collinear_via_fails_the_move_c_alone_or_after_a_blend(
+        self, client, server_proc, robot_api_env, home_pose
+    ):
+        """Three points on a line name no circle. The move_c that gives
+        them fails on its own index, with the same error whether it runs
+        alone or a move_l blends into it: the move_l ahead of it asked for
+        nothing wrong."""
+        from parol6 import MotionError
+
+        alone = client.move_c(
+            via=self._offset(home_pose, dy=10),
+            end=self._offset(home_pose, dy=20),
+            speed=0.5,
+            wait=False,
+        )
+        assert alone >= 0
+        with pytest.raises(MotionError) as lone:
+            client.wait_command(alone, timeout=10.0)
+        assert lone.value.command_index == alone, lone.value
+
+        head = client.move_l(
+            self._offset(home_pose, dx=20), speed=0.5, r=5.0, wait=False
+        )
+        culprit = client.move_c(
+            via=self._offset(home_pose, dx=20, dy=10),
+            end=self._offset(home_pose, dx=20, dy=20),
+            speed=0.5,
+            wait=False,
+        )
+        assert min(head, culprit) >= 0
+        with pytest.raises(MotionError) as chained:
+            client.wait_command(culprit, timeout=10.0)
+        assert chained.value.command_index == culprit, chained.value
+        assert chained.value.code == lone.value.code, chained.value
 
     def test_move_s_basic(self, client, server_proc, robot_api_env, home_pose):
         """Test spline motion through waypoints."""
@@ -87,7 +122,7 @@ class TestCurvedMotionCommands:
         result = client.move_s(waypoints=waypoints, duration=3.0, frame="WRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_s_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_s with frame=TRF is accepted and completes."""
@@ -99,19 +134,25 @@ class TestCurvedMotionCommands:
         result = client.move_s(waypoints=waypoints, duration=3.0, frame="TRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
-    def test_move_p_basic(self, client, server_proc, robot_api_env, home_pose):
+    def test_move_p_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test process move through waypoints with constant TCP speed."""
+        # A process move runs at the one speed its slowest row allows, and
+        # at the home pose's wrist singularity that row is the wrist's: the
+        # move starts clear of it.
+        assert client.teleport([90.0, -80.0, 190.0, 0.0, 30.0, 180.0]) == 1
+        start = client.pose()
+        assert start is not None
         waypoints = [
-            self._offset(home_pose, dz=-5),
-            self._offset(home_pose, dx=10, dy=5, dz=-5),
-            self._offset(home_pose, dz=-5),
+            self._offset(start, dz=-5),
+            self._offset(start, dx=10, dy=5, dz=-5),
+            self._offset(start, dz=-5),
         ]
         result = client.move_p(waypoints=waypoints, speed=0.3, frame="WRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
     def test_move_p_trf_accepted(self, client, server_proc, robot_api_env, homed_robot):
         """Test that move_p with frame=TRF is accepted and completes."""
@@ -123,7 +164,7 @@ class TestCurvedMotionCommands:
         result = client.move_p(waypoints=waypoints, speed=0.3, frame="TRF")
         assert result >= 0
         assert client.wait_motion(timeout=15.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
+        assert client.is_robot_stopped()
 
 
 class TestComputeCircleFrom3Points:

@@ -95,6 +95,12 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Motion command rejected before dispatch.",
         remedy="Run home() first. Jogging remains available.",
     ),
+    ErrorCode.MOTN_CANCELLED: _ErrorTemplate(
+        title="Command cancelled",
+        cause="The command was cancelled by {scope} before it finished.",
+        effect="The motion did not run to completion.",
+        remedy="Re-issue the command if the motion is still wanted.",
+    ),
     # -- Communication --
     ErrorCode.COMM_QUEUE_FULL: _ErrorTemplate(
         title="Command queue full",
@@ -152,6 +158,12 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         effect="Profile not changed.",
         remedy="Use one of: TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR.",
     ),
+    ErrorCode.SYS_NOT_SIMULATOR: _ErrorTemplate(
+        title="Simulator-only command",
+        cause="{detail} is only available on the simulator.",
+        effect="Command rejected; the arm is unchanged.",
+        remedy="Switch to the simulator with simulator(True), or drive the arm with a planned move.",
+    ),
     ErrorCode.SYS_SELF_COLLISION: _ErrorTemplate(
         title="Self-collision predicted",
         cause="Planned configuration would self-collide at sample {sample} of {total}: {pairs}",
@@ -180,6 +192,17 @@ def make_error(
         effect=tmpl.effect.format_map(params) if params else tmpl.effect,
         remedy=tmpl.remedy.format_map(params) if params else tmpl.remedy,
     )
+
+
+def attributed(error: RobotError, command_index: int) -> RobotError:
+    """*error* as the failure of *command_index*. Rebuilt from the wire, not
+    ``replace``d: a RobotError is an exception, and a dataclass replace does
+    not survive the copy a state snapshot makes of it."""
+    if error.command_index == command_index:
+        return error
+    wire = error.to_wire()
+    wire[0] = command_index
+    return RobotError.from_wire(wire)
 
 
 def extract_robot_error(

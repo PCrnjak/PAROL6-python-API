@@ -27,7 +27,7 @@ from ruckig import (  # type: ignore[unresolved-import, ty:unresolved-import]
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS
-from pinokin import se3_exp_ws, se3_inverse, se3_log_ws, se3_mul
+from pinokin import arrays_equal_6, so3_exp, so3_log
 
 logger = logging.getLogger(__name__)
 
@@ -39,57 +39,197 @@ _IDENTITY_SE3.flags.writeable = False
 def _pose_to_tangent_jit(
     ref_pose: np.ndarray,
     pose: np.ndarray,
-    ref_inv: np.ndarray,
-    delta: np.ndarray,
+    rel_rot: np.ndarray,
     out: np.ndarray,
     omega_ws: np.ndarray,
-    R_ws: np.ndarray,
-    V_inv_ws: np.ndarray,
 ) -> None:
-    """Convert SE3 pose to 6D tangent vector relative to reference.
-
-    Uses workspace variants for zero internal allocation.
+    """Coordinates of ``pose`` against ``ref_pose``: its translation in the
+    reference's axes, then the axis-angle of its rotation relative to the
+    reference. The two are independent, so a straight line in these
+    coordinates is a straight line for the TCP with the tool turning about
+    one fixed axis — not the screw an SE3 twist traces when both change.
 
     Args:
         ref_pose: Reference pose (4x4 SE3)
         pose: Pose to convert (4x4 SE3)
-        ref_inv: Workspace buffer for reference inverse (4x4)
-        delta: Workspace buffer for delta transform (4x4)
-        out: Output tangent vector (6,) [vx, vy, vz, wx, wy, wz]
-        omega_ws: Workspace buffer for axis-angle (3,)
-        R_ws: Workspace buffer for rotation matrix (3,3)
-        V_inv_ws: Workspace buffer for V inverse matrix (3,3)
+        rel_rot: Workspace for the relative rotation (3x3)
+        out: Output coordinates (6,) [x, y, z, wx, wy, wz]
+        omega_ws: Workspace for the axis-angle (3,)
     """
-    se3_inverse(ref_pose, ref_inv)
-    se3_mul(ref_inv, pose, delta)
-    se3_log_ws(delta, out, omega_ws, R_ws, V_inv_ws)
+    for i in range(3):
+        acc = 0.0
+        for k in range(3):
+            acc += ref_pose[k, i] * (pose[k, 3] - ref_pose[k, 3])
+        out[i] = acc
+        for j in range(3):
+            acc = 0.0
+            for k in range(3):
+                acc += ref_pose[k, i] * pose[k, j]
+            rel_rot[i, j] = acc
+    so3_log(rel_rot, omega_ws)
+    out[3] = omega_ws[0]
+    out[4] = omega_ws[1]
+    out[5] = omega_ws[2]
 
 
 @njit(cache=True)
 def _tangent_to_pose_jit(
     ref_pose: np.ndarray,
     tangent: np.ndarray,
-    delta: np.ndarray,
+    rel_rot: np.ndarray,
     out: np.ndarray,
     omega_ws: np.ndarray,
-    R_ws: np.ndarray,
-    V_ws: np.ndarray,
 ) -> None:
-    """Convert 6D tangent vector back to SE3 pose.
-
-    Uses workspace variants for zero internal allocation.
+    """The pose at ``tangent`` against ``ref_pose``; the inverse of
+    :func:`_pose_to_tangent_jit`.
 
     Args:
         ref_pose: Reference pose (4x4 SE3)
-        tangent: Tangent vector (6,) [vx, vy, vz, wx, wy, wz]
-        delta: Workspace buffer for delta transform (4x4)
+        tangent: Coordinates (6,) [x, y, z, wx, wy, wz]
+        rel_rot: Workspace for the relative rotation (3x3)
         out: Output pose (4x4 SE3)
-        omega_ws: Workspace buffer for axis-angle (3,)
-        R_ws: Workspace buffer for rotation matrix (3,3)
-        V_ws: Workspace buffer for V matrix (3,3)
+        omega_ws: Workspace for the axis-angle (3,)
     """
-    se3_exp_ws(tangent, delta, omega_ws, R_ws, V_ws)
-    se3_mul(ref_pose, delta, out)
+    omega_ws[0] = tangent[3]
+    omega_ws[1] = tangent[4]
+    omega_ws[2] = tangent[5]
+    so3_exp(omega_ws, rel_rot)
+    for i in range(3):
+        acc = ref_pose[i, 3]
+        for k in range(3):
+            acc += ref_pose[i, k] * tangent[k]
+        out[i, 3] = acc
+        for j in range(3):
+            acc = 0.0
+            for k in range(3):
+                acc += ref_pose[i, k] * rel_rot[k, j]
+            out[i, j] = acc
+    out[3, 0] = 0.0
+    out[3, 1] = 0.0
+    out[3, 2] = 0.0
+    out[3, 3] = 1.0
+
+
+@njit(cache=True)
+def _rebase_rate_jit(
+    tangent: np.ndarray,
+    rel_rot: np.ndarray,
+    rate: np.ndarray,
+    ws: np.ndarray,
+    turn_linear: bool,
+) -> None:
+    """A rate of the tangent state at ``tangent`` (its velocity or
+    acceleration), rewritten in place in coordinates about the pose that
+    state reaches: the rotation part through the right jacobian of SO(3)
+    at ``tangent``'s rotation; the translation part turned by ``rel_rotᵀ``
+    (``rel_rot`` is the rotation ``tangent`` reaches) when ``turn_linear``,
+    so it keeps its direction in the world, else left to turn with the
+    tool."""
+    for i in range(3):
+        if turn_linear:
+            ws[i] = (
+                rel_rot[0, i] * rate[0]
+                + rel_rot[1, i] * rate[1]
+                + rel_rot[2, i] * rate[2]
+            )
+        else:
+            ws[i] = rate[i]
+    px = tangent[3]
+    py = tangent[4]
+    pz = tangent[5]
+    t2 = px * px + py * py + pz * pz
+    if t2 < 1e-12:
+        a = 0.5 - t2 / 24.0
+        b = 1.0 / 6.0 - t2 / 120.0
+    else:
+        t = math.sqrt(t2)
+        a = (1.0 - math.cos(t)) / t2
+        b = (t - math.sin(t)) / (t2 * t)
+    wx = rate[3]
+    wy = rate[4]
+    wz = rate[5]
+    c1x = py * wz - pz * wy
+    c1y = pz * wx - px * wz
+    c1z = px * wy - py * wx
+    c2x = py * c1z - pz * c1y
+    c2y = pz * c1x - px * c1z
+    c2z = px * c1y - py * c1x
+    rate[0] = ws[0]
+    rate[1] = ws[1]
+    rate[2] = ws[2]
+    rate[3] = wx - a * c1x + b * c2x
+    rate[4] = wy - a * c1y + b * c2y
+    rate[5] = wz - a * c1z + b * c2z
+
+
+@njit(cache=True)
+def _same_pose_jit(a: np.ndarray, b: np.ndarray) -> bool:
+    """Whether two SE3 poses are the same pose."""
+    for i in range(3):
+        for j in range(4):
+            if a[i, j] != b[i, j]:
+                return False
+    return True
+
+
+@njit(cache=True)
+def _hold_inside_jit(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    prev: np.ndarray,
+    measured: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    held: np.ndarray,
+) -> bool:
+    """Stop, in ``pos`` and ``vel``, each joint moving outward that this
+    tick carried across a limit or that the arm reports past one: at the
+    limit, or where it is if that is short of it. ``held`` marks them;
+    returns whether there were any."""
+    any_held = False
+    for j in range(pos.shape[0]):
+        v = vel[j]
+        stop = False
+        if v > 0.0:
+            if (pos[j] > hi[j] and prev[j] <= hi[j]) or measured[j] > hi[j]:
+                if pos[j] > hi[j]:
+                    pos[j] = hi[j]
+                stop = True
+        elif v < 0.0:
+            if (pos[j] < lo[j] and prev[j] >= lo[j]) or measured[j] < lo[j]:
+                if pos[j] < lo[j]:
+                    pos[j] = lo[j]
+                stop = True
+        held[j] = stop
+        if stop:
+            vel[j] = 0.0
+            any_held = True
+    return any_held
+
+
+@njit(cache=True)
+def below_speed(vel: np.ndarray, tol_sq: float) -> bool:
+    """Whether the squared norm of ``vel`` is under ``tol_sq``."""
+    s = 0.0
+    for i in range(vel.shape[0]):
+        s += vel[i] * vel[i]
+    return s < tol_sq
+
+
+def cap_twist(twist: np.ndarray, linear_max: float, angular_max: float) -> None:
+    """Scale a twist's linear and angular parts down to their ceilings in
+    place, each keeping its direction. The live jog and its preview cap
+    alike through this."""
+    lin = math.sqrt(twist[0] * twist[0] + twist[1] * twist[1] + twist[2] * twist[2])
+    if lin > linear_max:
+        k = linear_max / lin
+        for i in range(3):
+            twist[i] *= k
+    ang = math.sqrt(twist[3] * twist[3] + twist[4] * twist[4] + twist[5] * twist[5])
+    if ang > angular_max:
+        k = angular_max / ang
+        for i in range(3, 6):
+            twist[i] *= k
 
 
 # Module-level constant avoids tuple creation per error check.
@@ -153,8 +293,12 @@ class RuckigExecutorBase(ABC):
 
     def set_limits(self, velocity_frac: float = 1.0, accel_frac: float = 1.0) -> None:
         """Set velocity/acceleration as fraction of limits (0.0-1.0)."""
-        self._vel_scale = max(0.01, min(1.0, velocity_frac))
-        self._acc_scale = max(0.01, min(1.0, accel_frac))
+        vel = max(0.01, min(1.0, velocity_frac))
+        acc = max(0.01, min(1.0, accel_frac))
+        if vel == self._vel_scale and acc == self._acc_scale:
+            return
+        self._vel_scale = vel
+        self._acc_scale = acc
         self._apply_limits()
 
     def _tick_ruckig(self) -> tuple[Result, np.ndarray, np.ndarray]:
@@ -177,10 +321,11 @@ class RuckigExecutorBase(ABC):
 
     def stop(self) -> None:
         """Request graceful stop - decelerate to zero velocity."""
+        # Whole-array assignment: ruckig hands out a copy of its targets, so
+        # writing into an element of one changes nothing.
         self.inp.control_interface = ControlInterface.Velocity
-        for i in range(self.num_dofs):
-            self.inp.target_velocity[i] = 0.0
-            self.inp.target_acceleration[i] = 0.0
+        self.inp.target_velocity = self._zeros
+        self.inp.target_acceleration = self._zeros
 
 
 # =============================================================================
@@ -227,6 +372,14 @@ class StreamingExecutor(RuckigExecutorBase):
         self._max_acc_buf: list[float] = [0.0] * num_dofs
         self._max_jerk_buf: list[float] = [0.0] * num_dofs
         self._target_vel_buf: list[float] = [0.0] * num_dofs
+        self._held_acc_buf: list[float] = [0.0] * num_dofs
+
+        # The jog velocity Ruckig was last handed, and whether it still
+        # holds with the jog limits: a jog repeats its target every tick,
+        # and handing Ruckig the same parameters again is wasted work.
+        self._jog_target = np.zeros(num_dofs, dtype=np.float64)
+        self._jog_applied = False
+        self._held = np.zeros(num_dofs, dtype=np.bool_)
 
         super().__init__(num_dofs, dt)
 
@@ -250,13 +403,17 @@ class StreamingExecutor(RuckigExecutorBase):
 
     def _apply_limits(self) -> None:
         """Apply current limits (with scaling) to Ruckig parameters."""
+        self._apply_scaled_vel_limit()
         for i in range(self.num_dofs):
-            self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
             self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
             self._max_jerk_buf[i] = self._hardware_j_max[i]
-        self.inp.max_velocity = self._max_vel_buf
         self.inp.max_acceleration = self._max_acc_buf
         self.inp.max_jerk = self._max_jerk_buf
+
+    def _apply_scaled_vel_limit(self) -> None:
+        for i in range(self.num_dofs):
+            self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
+        self.inp.max_velocity = self._max_vel_buf
 
     def set_cart_velocity_limit(self, limit_mm_s: float | None) -> None:
         """
@@ -286,6 +443,15 @@ class StreamingExecutor(RuckigExecutorBase):
             self.inp.current_velocity = self._zeros
             self.inp.current_acceleration = self._zeros
             self.inp.target_position = self._sync_pos_buf
+            self._jog_applied = False
+
+    def set_limits(self, velocity_frac: float = 1.0, accel_frac: float = 1.0) -> None:
+        super().set_limits(velocity_frac, accel_frac)
+        self._jog_applied = False
+
+    def stop(self) -> None:
+        super().stop()
+        self._jog_applied = False
 
     def set_position_target(self, q_target: list[float]) -> None:
         """
@@ -301,13 +467,14 @@ class StreamingExecutor(RuckigExecutorBase):
         if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
             self._apply_cart_velocity_limit(q_target)
         else:
-            self._max_vel_buf[:] = self._hardware_v_max
-            self.inp.max_velocity = self._max_vel_buf
+            self._apply_scaled_vel_limit()
 
+        self.inp.synchronization = Synchronization.Time
         self.inp.control_interface = ControlInterface.Position
         self._sync_pos_buf[:] = q_target
         self.inp.target_position = self._sync_pos_buf
         self.inp.target_velocity = self._zeros  # Stop at target
+        self._jog_applied = False
         self.active = True
 
     def set_jog_velocity(self, joint_velocities: NDArray[np.float64]) -> None:
@@ -320,6 +487,11 @@ class StreamingExecutor(RuckigExecutorBase):
         Args:
             joint_velocities: Desired velocity for each joint in rad/s (signed)
         """
+        if self._jog_applied and arrays_equal_6(joint_velocities, self._jog_target):
+            self.active = True
+            return
+        self._jog_target[:] = joint_velocities
+        self._jog_applied = True
         # Jog uses its own velocity limits (~80% of hardware) rather than the hardware caps.
         for i in range(self.num_dofs):
             self._max_vel_buf[i] = self._jog_v_max[i] * self._vel_scale
@@ -327,6 +499,11 @@ class StreamingExecutor(RuckigExecutorBase):
         self.inp.max_velocity = self._max_vel_buf
         self.inp.max_acceleration = self._max_acc_buf
 
+        # Each joint brakes on its own profile: synchronized, a joint whose
+        # limit stops it would be stretched to finish with one still
+        # ramping, and carried past the stopping distance its lookahead
+        # measured.
+        self.inp.synchronization = Synchronization.No
         self.inp.control_interface = ControlInterface.Velocity
         self._target_vel_buf[:] = joint_velocities
         self.inp.target_velocity = self._target_vel_buf
@@ -361,16 +538,16 @@ class StreamingExecutor(RuckigExecutorBase):
             for j in range(self.num_dofs):
                 # Joint velocity = dq[j] * scale, so max joint vel = |dq[j]| * max_scale.
                 q_dot_max = min(
-                    abs(self._dq_buf[j]) * max_scale, self._hardware_v_max[j]
+                    abs(self._dq_buf[j]) * max_scale,
+                    self._hardware_v_max[j] * self._vel_scale,
                 )
                 # Non-zero minimum avoids Ruckig issues with zero limits.
                 self._max_vel_buf[j] = max(q_dot_max, 1e-6)
 
             self.inp.max_velocity = self._max_vel_buf
         else:
-            # Near-zero motion: fall back to hardware limits.
-            self._max_vel_buf[:] = self._hardware_v_max
-            self.inp.max_velocity = self._max_vel_buf
+            # Near-zero motion: fall back to the scaled hardware limits.
+            self._apply_scaled_vel_limit()
 
     def tick(self) -> tuple[np.ndarray, np.ndarray, bool]:
         """
@@ -395,11 +572,36 @@ class StreamingExecutor(RuckigExecutorBase):
 
         return pos, vel, result == Result.Finished
 
+    def hold_inside(
+        self,
+        prev: np.ndarray,
+        measured: np.ndarray,
+        lo: np.ndarray,
+        hi: np.ndarray,
+    ) -> None:
+        """Never let the position :meth:`tick` just returned step across a
+        joint limit: a joint moving outward that this tick carried from
+        ``prev`` across its limit, or that ``measured`` reports past it,
+        stops there — at the limit, with its velocity and acceleration
+        zeroed, in the returned buffers and in Ruckig's state alike."""
+        if not _hold_inside_jit(
+            self._pos_out, self._vel_out, prev, measured, lo, hi, self._held
+        ):
+            return
+        self._held_acc_buf[:] = self.out.new_acceleration
+        for j in range(self.num_dofs):
+            if self._held[j]:
+                self._held_acc_buf[j] = 0.0
+        self.inp.current_position = self._pos_out
+        self.inp.current_velocity = self._vel_out
+        self.inp.current_acceleration = self._held_acc_buf
+
     def reset_limits(self) -> None:
         """Reset velocity, acceleration, and jerk limits to hardware defaults."""
         self._vel_scale = 1.0
         self._acc_scale = 1.0
         self._apply_limits()
+        self._jog_applied = False
 
     def reset(self) -> None:
         """Reset executor state."""
@@ -407,6 +609,7 @@ class StreamingExecutor(RuckigExecutorBase):
         self._acc_scale = 1.0
         self.active = False
         self._cart_vel_limit = None
+        self._jog_applied = False
         self._init_state()
 
     @property
@@ -434,8 +637,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
     Key features:
     - Jerk-limited smoothing via Ruckig in Cartesian space
     - Position mode for MOVECART (straight-line TCP motion)
-    - Velocity mode for CARTJOG (1-DOF jogging)
+    - Velocity mode for JOGL (6-DOF twist jogging)
     - WRF/TRF frame support for jogging
+
+    The reference moves with the tool. A new pose target is taken from
+    where the limiter is when it arrives, so the tangent to it is the turn
+    still to make, never a coordinate that wraps at half a turn from where
+    the stream began; and while the tool turns under the velocity interface
+    the reference follows it every tick, so a twist is resolved against
+    the tool as it now stands.
     """
 
     def __init__(self, dt: float = INTERVAL_S):
@@ -462,32 +672,44 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         # direction, and super().__init__() calls it, so both exist first.
         self._direction = np.zeros(6, dtype=np.float64)
         self._cur_tangent = np.zeros(6, dtype=np.float64)
-        self._delta_tangent = np.zeros(6, dtype=np.float64)
-        self._last_target = np.zeros(6, dtype=np.float64)
+        # The pose target being tracked; _has_target is False once Ruckig
+        # has been taken off it (a jog, a brake, a sync).
+        self._target_pose = np.zeros((4, 4), dtype=np.float64)
         self._has_target = False
+        # Whether Ruckig runs on the velocity interface (a jog or a brake),
+        # where the reference follows the tool.
+        self._velocity_mode = False
+        # Whether the linear motion belongs to the tool (a tool-frame jog,
+        # and the brake that ends it) and turns with it, rather than
+        # holding its direction in the world.
+        self._tool_rates = False
+        # The jog twist last resolved, its frame, and whether Ruckig still
+        # holds it: a jog repeats its twist every tick.
+        self._jog_src = np.zeros(6, dtype=np.float64)
+        self._jog_wrf = False
+        self._jog_resolved = False
+        self._rate_buf = np.zeros(6, dtype=np.float64)
+        self._acc_buf = np.zeros(6, dtype=np.float64)
+        self._rate_ws = np.zeros(3, dtype=np.float64)
 
         super().__init__(num_dofs=6, dt=dt)  # 6-DOF: [x, y, z, wx, wy, wz]
 
         self._tangent_buf = np.zeros(6, dtype=np.float64)
         self._vel_np_buf = np.zeros(6, dtype=np.float64)
-        self._world_vel_buf = np.zeros(6, dtype=np.float64)
 
         # Ruckig's default (Time) only makes the six components FINISH
         # together; each still takes its own time-optimal route there, so
-        # the tangent bows and the TCP leaves the straight line by
-        # millimetres. Phase holds them to one shared profile, which is
-        # what makes the interpolation the screw geodesic. Ruckig falls
-        # back to time synchronization by itself when the limits make a
-        # shared profile impossible.
+        # the coordinates bow and the TCP leaves the straight line by
+        # millimetres. Phase holds them to one shared profile, which keeps
+        # the TCP on its line and the tool on its axis. Ruckig falls back
+        # to time synchronization by itself when the limits make a shared
+        # profile impossible.
         self.inp.synchronization = Synchronization.Phase
 
-        # SE3 workspace buffers let the JIT pose conversions run with zero allocation.
-        self._ref_inv_buf = np.zeros((4, 4), dtype=np.float64)
-        self._delta_buf = np.zeros((4, 4), dtype=np.float64)
+        # Workspace buffers let the JIT pose conversions run with zero allocation.
         self._result_pose_buf = np.zeros((4, 4), dtype=np.float64)
         self._omega_ws = np.zeros(3, dtype=np.float64)
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
-        self._V_ws = np.zeros((3, 3), dtype=np.float64)  # Reused for V and V_inv
 
     def _init_limits(self) -> None:
         """Initialize Cartesian velocity/acceleration/jerk limits from centralized config."""
@@ -586,6 +808,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self.reference_pose = current_pose.copy()  # avoid aliasing with cached FK
         self._cur_tangent.fill(0.0)
         self._has_target = False
+        self._velocity_mode = False
+        self._tool_rates = False
+        self._jog_resolved = False
         # Reset Ruckig state to origin (relative to reference)
         self.inp.current_position = self._zeros
         self.inp.current_velocity = self._zeros
@@ -593,12 +818,38 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self.inp.target_position = self._zeros
         self.active = False
 
+    def set_limits(self, velocity_frac: float = 1.0, accel_frac: float = 1.0) -> None:
+        super().set_limits(velocity_frac, accel_frac)
+        self._jog_resolved = False
+
+    def stop(self) -> None:
+        super().stop()
+        self._has_target = False
+        self._velocity_mode = True
+        self._jog_resolved = False
+
+    def _rebase(self, tangent: np.ndarray, vel: np.ndarray, acc: np.ndarray) -> None:
+        """Move the reference to the pose the limiter is at, ``tangent``,
+        with ``vel`` and ``acc`` its Ruckig velocity and acceleration: the
+        state is rewritten about the new reference, at its origin, moving
+        as it was. Needs the rotation ``tangent`` reaches in ``_R_ws``,
+        which :meth:`_tangent_to_pose` leaves there."""
+        assert self.reference_pose is not None
+        turn = not self._tool_rates
+        _rebase_rate_jit(tangent, self._R_ws, vel, self._rate_ws, turn)
+        _rebase_rate_jit(tangent, self._R_ws, acc, self._rate_ws, turn)
+        self.reference_pose[:] = self._result_pose_buf
+        self._cur_tangent.fill(0.0)
+        self.inp.current_position = self._zeros
+        self.inp.current_velocity = vel
+        self.inp.current_acceleration = acc
+        self._jog_resolved = False
+
     def _pose_to_tangent(self, pose: np.ndarray) -> np.ndarray:
         """
-        Convert SE3 pose to 6D tangent vector relative to reference.
-
-        The tangent vector is the Lie algebra representation (twist):
-        [vx, vy, vz, wx, wy, wz] where v is linear and w is angular.
+        Coordinates of an SE3 pose relative to the reference:
+        [x, y, z, wx, wy, wz], the translation in the reference's axes and
+        the relative rotation's axis-angle (see ``_pose_to_tangent_jit``).
 
         Args:
             pose: 4x4 SE3 matrix to convert
@@ -612,12 +863,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         _pose_to_tangent_jit(
             self.reference_pose,
             pose,
-            self._ref_inv_buf,
-            self._delta_buf,
+            self._R_ws,
             self._tangent_buf,
             self._omega_ws,
-            self._R_ws,
-            self._V_ws,
         )
         return self._tangent_buf
 
@@ -637,11 +885,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         _tangent_to_pose_jit(
             self.reference_pose,
             self._tangent_buf,
-            self._delta_buf,
+            self._R_ws,
             self._result_pose_buf,
             self._omega_ws,
-            self._R_ws,
-            self._V_ws,
         )
         return self._result_pose_buf
 
@@ -655,8 +901,6 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         Args:
             target_pose: Target TCP pose as SE3
         """
-        target_tangent = self._pose_to_tangent(target_pose)
-
         # Re-planning a target Ruckig is already tracking costs the phase
         # synchronization that keeps the TCP on its line. A re-plan tests
         # the current velocity and acceleration against the new profile
@@ -666,23 +910,38 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         # target at the tick rate, so this is the common case, not an
         # edge one: the same move retargeted every tick left the line by
         # 4.7 mm, and left by none at all when set once.
-        if self._has_target:
-            same = True
-            for i in range(6):
-                if self._last_target[i] != target_tangent[i]:
-                    same = False
-                    break
-            if same:
-                self.active = True
-                return
-        self._last_target[:] = target_tangent
+        if self._has_target and _same_pose_jit(self._target_pose, target_pose):
+            self.active = True
+            return
+        self._target_pose[:] = target_pose
         self._has_target = True
+        self._jog_resolved = False
 
-        # The envelope is direction-dependent (see _apply_limits), and
-        # the direction is the one from where the limiter is to the
-        # target, not the target's own bearing from the reference.
-        np.subtract(target_tangent, self._cur_tangent, out=self._delta_tangent)
-        self._set_direction(self._delta_tangent)
+        # A new target is taken from where the limiter is: the tangent to
+        # it is then the move still to make, a straight line with the tool
+        # turning about one axis, and a stream that keeps turning the tool
+        # never nears the half turn where the coordinates wrap.
+        cur = self._cur_tangent
+        if self.reference_pose is not None and (
+            cur[0] != 0.0
+            or cur[1] != 0.0
+            or cur[2] != 0.0
+            or cur[3] != 0.0
+            or cur[4] != 0.0
+            or cur[5] != 0.0
+        ):
+            self._tangent_to_pose(cur)
+            self._rate_buf[:] = self.inp.current_velocity
+            self._acc_buf[:] = self.inp.current_acceleration
+            self._rebase(cur, self._rate_buf, self._acc_buf)
+        self._velocity_mode = False
+        self._tool_rates = False
+
+        target_tangent = self._pose_to_tangent(target_pose)
+        # The envelope is direction-dependent (see _apply_limits), and the
+        # limiter stands at the origin, so the target's tangent is the
+        # direction to it.
+        self._set_direction(target_tangent)
 
         self.inp.control_interface = ControlInterface.Position
         self.inp.target_position = target_tangent
@@ -691,73 +950,54 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._apply_limits()
         self.active = True
 
-    def set_jog_velocity_1dof(
-        self, axis: int, velocity: float, is_rotation: bool
-    ) -> None:
-        """
-        Set 1-DOF jog velocity in body frame (TRF - Tool Reference Frame).
+    def set_jog_twist(self, twist: np.ndarray, wrf: bool) -> None:
+        """Drive the TCP at a 6-DOF velocity `[vx, vy, vz, wx, wy, wz]`
+        (m/s, rad/s), in world axes when `wrf` else in the tool's.
 
-        The tangent space is relative to reference_pose, so velocities are
-        naturally in body/tool frame. Use this for TRF jogging.
+        Velocity mode: Ruckig ramps to the twist under the envelope,
+        which follows the twist's direction so a diagonal runs at the
+        configured TCP ceiling rather than sqrt(3) times it; a twist
+        asking for more than the ceiling is scaled down to it, direction
+        kept, since Ruckig's velocity interface does not bound the
+        target itself. An all-zero twist is a brake. Needs
+        `reference_pose`, which `sync_pose` sets.
 
-        Uses velocity mode - Ruckig smoothly accelerates/decelerates
-        to reach target velocity. Call with velocity=0 to stop.
-
-        Args:
-            axis: Axis index (0=X, 1=Y, 2=Z)
-            velocity: Target velocity (m/s for linear, rad/s for rotation)
-            is_rotation: True for rotation axes (RX, RY, RZ)
-        """
-        self._target_velocity_arr.fill(0.0)
-        if is_rotation:
-            self._target_velocity_arr[3 + axis] = velocity
-        else:
-            self._target_velocity_arr[axis] = velocity
-
-        self._has_target = False
-        self._set_direction(self._target_velocity_arr)
-        self.inp.control_interface = ControlInterface.Velocity
-        self.inp.target_velocity = self._target_velocity_arr
-        self._target_acceleration_arr.fill(0.0)
-        self.inp.target_acceleration = self._target_acceleration_arr
-
-        self._apply_limits()
-        self.active = True
-
-    def set_jog_velocity_1dof_wrf(
-        self,
-        axis: int,
-        velocity: float,
-        is_rotation: bool,
-    ) -> None:
-        """
-        Set 1-DOF jog velocity in world reference frame (WRF).
-
-        Transforms the velocity from world frame to body frame (tangent space)
-        before applying to Ruckig. Requires reference_pose to be set.
-
-        Args:
-            axis: Axis index (0=X, 1=Y, 2=Z)
-            velocity: Target velocity (m/s for linear, rad/s for rotation)
-            is_rotation: True for rotation axes (RX, RY, RZ)
+        The twist is resolved against the reference, which follows the
+        tool while it turns (see :meth:`tick`): a tool-frame twist moves
+        the tool along its axes as they now stand, and a world-frame turn
+        is about the world axis whatever turn came before it. Setting the
+        same twist again changes nothing and costs nothing, until the
+        reference moves.
         """
         if self.reference_pose is None:
-            logger.warning("set_jog_velocity_1dof_wrf called without reference_pose")
+            logger.warning("set_jog_twist called without reference_pose")
             return
-
-        self._world_vel_buf.fill(0.0)
-        if is_rotation:
-            self._world_vel_buf[3 + axis] = velocity
+        if (
+            self._jog_resolved
+            and self._jog_wrf == wrf
+            and arrays_equal_6(twist, self._jog_src)
+        ):
+            self.active = True
+            return
+        self._jog_src[:] = twist
+        self._jog_wrf = wrf
+        self._jog_resolved = True
+        t = self._target_velocity_arr
+        if wrf:
+            # The coordinates are in the reference's axes: Rᵀ · world.
+            R = self.reference_pose
+            for i in range(3):
+                t[i] = R[0, i] * twist[0] + R[1, i] * twist[1] + R[2, i] * twist[2]
+                t[3 + i] = R[0, i] * twist[3] + R[1, i] * twist[4] + R[2, i] * twist[5]
         else:
-            self._world_vel_buf[axis] = velocity
-
-        # Transform world frame to body frame (tangent space): body velocity = R^T @ world velocity.
-        R = self.reference_pose[:3, :3]
-
-        np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
-        np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
+            t[:] = twist
+        cap_twist(
+            t, self._v_lin_max * self._vel_scale, self._v_ang_max * self._vel_scale
+        )
 
         self._has_target = False
+        self._velocity_mode = True
+        self._tool_rates = not wrf
         self._set_direction(self._target_velocity_arr)
         self.inp.control_interface = ControlInterface.Velocity
         self.inp.target_velocity = self._target_velocity_arr
@@ -807,6 +1047,17 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._cur_tangent[:] = pos
         self._vel_np_buf[:] = vel
 
+        # Under the velocity interface the reference follows the tool while
+        # it turns. The tangent's rotation coordinates only turn the tool
+        # about a fixed axis through the reference; a twist resolved
+        # against a reference the tool has turned away from would turn it
+        # about some other axis, and move it along the axes it had. The
+        # interface integrates position without reading it back, so the
+        # shift changes nothing about the motion itself.
+        if self._velocity_mode and (pos[3] != 0.0 or pos[4] != 0.0 or pos[5] != 0.0):
+            self._acc_buf[:] = self.out.new_acceleration
+            self._rebase(pos, self._vel_np_buf, self._acc_buf)
+
         # Don't auto-deactivate in velocity mode - caller controls via set_jog_velocity(0)
         return smoothed_pose, self._vel_np_buf, result == Result.Finished
 
@@ -826,4 +1077,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._acc_scale = 1.0
         self.reference_pose = None
         self.active = False
+        self._cur_tangent.fill(0.0)
+        self._has_target = False
+        self._velocity_mode = False
+        self._tool_rates = False
+        self._jog_resolved = False
         self._init_state()

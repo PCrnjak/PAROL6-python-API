@@ -326,13 +326,13 @@ def test_pose_to_matrix_is_extrinsic_xyz_rpy():
     assert np.allclose(T[:3, 3], [0.1, 0.2, 0.3])
 
 
-def test_jogl_release_decel_streams_while_escaping():
+@pytest.mark.parametrize("tool", ["NONE", "SSG-48"])
+def test_jogl_release_decel_streams_while_escaping(tool):
     """Releasing a Cartesian jog while ESCAPING from inside a keep-out must
     keep streaming the deceleration (escape-aware gate) — the pre-fix bare
     ``in_collision`` skipped every decel send, freezing the target at the
-    release point. Real command, real state, real checker, real IK."""
-    import time as _time
-
+    release point. Bare and with a gripper, whose body the cage also holds.
+    Real command, real state, real checker, real IK."""
     from waldoctl import Box
 
     from parol6.commands.cartesian_commands import JogLCommand
@@ -342,11 +342,13 @@ def test_jogl_release_decel_streams_while_escaping():
     from parol6.config import deg_to_steps
 
     state = ControllerState()
+    state.Homed_in[:] = 1  # a cartesian jog is refused unreferenced
     # IK-friendly physical home (wrist at ~(0.237, 0, 0.334)); q=zeros is an
     # IK danger zone where the jog never streams.
     q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
     deg_to_steps(q_home_deg, state.Position_in)
     try:
+        PAROL6_ROBOT.apply_tool(tool)
         # Box centred 5 cm below the wrist: +Z is unambiguously the escape.
         PAROL6_ROBOT.apply_shapes(
             [
@@ -361,12 +363,13 @@ def test_jogl_release_decel_streams_while_escaping():
         )
         assert PAROL6_ROBOT.collision.in_collision(np.radians(q_home_deg)) is True
 
-        cmd = JogLCommand(JogLCmd(velocities=[0.0, 0.0, 1.0, 0, 0, 0], duration=5.0))
+        # The jog's duration is counted in ticks: 30 ticks held, released
+        # on the next.
+        cmd = JogLCommand(JogLCmd(velocities=[0.0, 0.0, 1.0, 0, 0, 0], duration=0.3))
         cmd.setup(state)
         for _ in range(30):  # held phase: build real velocity (CSE dt=0.01/tick)
             cmd.execute_step(state)
         assert state.Command_out != 0  # held phase streamed (escape allowed)
-        cmd._t_end = _time.perf_counter() - 1.0  # deterministic release
 
         code = cmd.execute_step(state)
         pos0 = state.Position_out.copy()
@@ -381,6 +384,7 @@ def test_jogl_release_decel_streams_while_escaping():
         assert moved, "decel sends were skipped — target frozen at release point"
     finally:
         PAROL6_ROBOT.apply_shapes([])
+        PAROL6_ROBOT.apply_tool("NONE")
 
 
 def test_jogl_escape_never_streams_into_a_second_keepout():
@@ -397,6 +401,7 @@ def test_jogl_escape_never_streams_into_a_second_keepout():
     from parol6.server.state import ControllerState
 
     state = ControllerState()
+    state.Homed_in[:] = 1  # a cartesian jog is refused unreferenced
     q_home_deg = np.array([0.0, -90.0, 180.0, 0.0, 0.0, 180.0])
     deg_to_steps(q_home_deg, state.Position_in)
     state.Position_out[:] = state.Position_in

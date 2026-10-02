@@ -5,6 +5,7 @@ Async UDP client for PAROL6 robot control.
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass
 import math
 import random
 import socket
@@ -26,7 +27,7 @@ from waldoctl.status import (
     StatusRate,
     ToolResult,
 )
-from waldoctl.tools import ToolSpec
+from waldoctl.tools import ToolSpec, ToolState
 
 from waldoctl.execution import ExecutionSpeed, validate_execution_scale
 
@@ -128,12 +129,23 @@ from ..protocol.wire import (
     decode_message,
     encode_command,
     encode_command_into,
+    planned_move_timing,
 )
 from waldoctl.types import Axis, Frame
 from waldoctl import PingResult
 from pinokin import so3_rpy
 
 logger = logging.getLogger(__name__)
+
+
+def _no_wait_kwargs(wait_kwargs: dict[str, Any]) -> None:
+    """Refuse keywords the wait does not take; it takes none beyond
+    ``timeout``."""
+    if wait_kwargs:
+        raise TypeError(
+            f"unexpected keyword argument(s): {', '.join(sorted(wait_kwargs))}"
+        )
+
 
 _AXIS_MAP: dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "RX": 3, "RY": 4, "RZ": 5}
 _ACTION_STATE_MAP: dict[str, ActionState] = {
@@ -274,6 +286,19 @@ class _StatusProtocol(asyncio.DatagramProtocol):
         pass
 
 
+@dataclass(frozen=True, slots=True)
+class StatusSnapshot:
+    """One ``status()`` reading: the TCP transform (flattened row-major 4×4,
+    translation in mm), joint angles (deg), joint velocities (deg/s), digital
+    I/O, and the fitted tool's status."""
+
+    pose: list[float]
+    angles: list[float]
+    speeds: list[float]
+    io: list[int]
+    tool_status: ToolStatus
+
+
 class AsyncRobotClient(_RobotClientABC):
     """
     Async UDP client for the PAROL6 headless controller.
@@ -342,8 +367,10 @@ class AsyncRobotClient(_RobotClientABC):
         self._status_generation: int = 0
         self._status_event: asyncio.Event = asyncio.Event()
 
-        # Last command index returned by server for queued commands
+        # Last command index returned by server for queued commands, and the
+        # status session it was acknowledged in (0 before any status).
         self._last_command_index: int | None = None
+        self._last_command_session: int = 0
 
         self._active_tool_key: str | None = None
         self._active_variant_key: str = ""
@@ -636,7 +663,9 @@ class AsyncRobotClient(_RobotClientABC):
                     ok = await self._request_ok_raw(
                         encode_command(cmd, req_id), wait, req_id
                     )
-                    self._last_command_index = ok.index
+                    if ok.index is not None:
+                        self._last_command_index = ok.index
+                        self._last_command_session = self._shared_status.session_id
                     return ok.index if ok.index is not None else 0
                 except TimeoutError:
                     if timeout is not None:
@@ -786,6 +815,7 @@ class AsyncRobotClient(_RobotClientABC):
             calibrate: If True, always run the referencing sequence
             timeout: Maximum time to wait in seconds (only used when wait=True)
         """
+        _no_wait_kwargs(wait_kwargs)
         index = await self._send(HomeCmd(calibrate=calibrate))
         assert isinstance(index, int)
         if wait and index >= 0:
@@ -865,11 +895,25 @@ class AsyncRobotClient(_RobotClientABC):
     ) -> int:
         """Instantly set joint angles and optional tool positions (simulator only).
 
+        The pose is exact, so the arm counts as homed afterwards and
+        planned motion may follow. Whatever was driving the arm is
+        cancelled with ``MOTN_CANCELLED``.
+
         Category: Control
 
         Example:
-            rbt.teleport([0, -90, 0, 0, 0, 0])
-            rbt.teleport([0, -90, 0, 0, 0, 0], tool_positions=[1.0])
+            rbt.teleport([90, -90, 180, 0, 0, 180])
+            rbt.teleport([90, -90, 180, 0, 0, 180], tool_positions=[1.0])
+
+        Returns:
+            1 once the pose is applied, 0 when no reply arrives.
+
+        Raises:
+            ValueError: for a non-finite angle, one outside the hard joint
+                limits, or a tool position outside ``[0, 1]``.
+            MotionError: off the simulator (``SYS_NOT_SIMULATOR``), when the
+                tool positions do not match the fitted tool's DOF count, or
+                while the controller is disabled.
         """
         return await self._send(
             TeleportCmd(angles=angles_deg, tool_positions=tool_positions)
@@ -897,10 +941,13 @@ class AsyncRobotClient(_RobotClientABC):
         return await self._send(ConnectHardwareCmd(port_str=port_str))
 
     async def reset_state(self) -> int:
-        """Reset controller state to initial values.
+        """Reset program state — world shapes, tool selection, errors, pause,
+        motion profile and execution speed — and discard the queue, each
+        discarded command failing with ``MOTN_CANCELLED``.
 
-        Instantly resets positions to home, clears queues, resets tool/errors.
-        Preserves serial connection. Useful for fast test isolation.
+        The arm holds where it is. A protective stop stays latched (only
+        ``reset()`` clears it), and homed state, digital outputs and the
+        serial connection are kept.
 
         Category: Control
 
@@ -958,7 +1005,8 @@ class AsyncRobotClient(_RobotClientABC):
         return resp.io if isinstance(resp, IOResultStruct) else None
 
     async def joint_speeds(self) -> list[float] | None:
-        """Current joint speeds in steps/sec [J1, J2, J3, J4, J5, J6].
+        """Current joint velocities in deg/s [J1, J2, J3, J4, J5, J6], the
+        units of ``StatusBuffer.speeds``.
 
         Category: Query
 
@@ -1002,8 +1050,10 @@ class AsyncRobotClient(_RobotClientABC):
         except (ValueError, IndexError):
             return None
 
-    async def status(self) -> StatusResultStruct | None:
+    async def status(self) -> StatusSnapshot | None:
         """Aggregate status snapshot (pose, angles, speeds, io, tool_status).
+        Its ``tool_status`` is always a ``ToolStatus``, key ``"NONE"`` when
+        no tool is fitted.
 
         Category: Query
 
@@ -1011,7 +1061,34 @@ class AsyncRobotClient(_RobotClientABC):
             status = rbt.status()
         """
         resp = await self._request(StatusCmd())
-        return resp if isinstance(resp, StatusResultStruct) else None
+        if not isinstance(resp, StatusResultStruct):
+            return None
+        (
+            key,
+            tool_state,
+            engaged,
+            part_detected,
+            fault_code,
+            positions,
+            channels,
+            variant,
+        ) = resp.tool_status
+        return StatusSnapshot(
+            pose=resp.pose,
+            angles=resp.angles,
+            speeds=resp.speeds,
+            io=resp.io,
+            tool_status=ToolStatus(
+                key=key,
+                state=ToolState(tool_state),
+                engaged=bool(engaged),
+                part_detected=bool(part_detected),
+                fault_code=int(fault_code),
+                positions=tuple(positions),
+                channels=tuple(channels),
+                variant_key=variant,
+            ),
+        )
 
     async def loop_stats(self) -> LoopStatsResult | None:
         """Fetch control-loop runtime metrics.
@@ -1172,11 +1249,12 @@ class AsyncRobotClient(_RobotClientABC):
         Returns:
             Command index (>= 0) if queued, 0 on failure.
         """
-        self._active_tool_key = tool_name.upper()
-        self._active_variant_key = variant_key
-        return await self._send(
-            SelectToolCmd(tool_name=self._active_tool_key, variant_key=variant_key)
-        )
+        key = tool_name.upper()
+        index = await self._send(SelectToolCmd(tool_name=key, variant_key=variant_key))
+        if index >= 0:
+            self._active_tool_key = key
+            self._active_variant_key = variant_key
+        return index
 
     async def set_tcp_offset(self, x: float = 0, y: float = 0, z: float = 0) -> int:
         """Set TCP offset in mm, composed on top of the current tool transform.
@@ -1307,7 +1385,10 @@ class AsyncRobotClient(_RobotClientABC):
                 Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
-            True if successful
+            1 once the profile is selected, 0 when no reply arrives.
+
+        Raises:
+            MotionError: when ``profile`` is not a profile name.
         """
         return await self._send(SelectProfileCmd(profile=profile.upper()))
 
@@ -1434,7 +1515,7 @@ class AsyncRobotClient(_RobotClientABC):
             return io_status[4] == 0  # E-stop at index 4, 0 means pressed
         return False
 
-    async def is_robot_stopped(self, threshold_speed: float = 2.0) -> bool:
+    async def is_robot_stopped(self, threshold_speed: float = 0.5) -> bool:
         """Check if robot has stopped moving.
 
         Category: Query
@@ -1447,7 +1528,7 @@ class AsyncRobotClient(_RobotClientABC):
             stopped = rbt.is_robot_stopped()
 
         Args:
-            threshold_speed: Speed threshold in steps/sec
+            threshold_speed: Speed threshold in deg/s
 
         Returns:
             True if all joints below threshold
@@ -1461,17 +1542,17 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         timeout: float = 10.0,
         settle_window: float = 0.25,
-        speed_threshold: float = 0.01,
+        speed_threshold: float = 0.5,
         angle_threshold: float = 0.5,
-        motion_start_timeout: float = 1.0,
         **kwargs: Any,
     ) -> bool:
-        """Wait for robot to stop moving using multicast status broadcasts.
+        """Wait until the queue has run out and the arm has come to rest.
 
-        This method first waits for motion to START (speeds above threshold),
-        then waits for motion to COMPLETE (speeds below threshold for settle_window).
-        This avoids a race condition where the method returns immediately if
-        called before motion has begun.
+        First waits for the latest command the controller has accepted —
+        every command this client queued, and each newer one the status
+        stream reports accepted — to end, then for the arm to hold still
+        for ``settle_window``. A command that failed or was cancelled ends
+        the wait like one that completed; ``wait_command()`` tells which.
 
         Category: Synchronization
 
@@ -1481,60 +1562,63 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             timeout: Maximum time to wait in seconds
             settle_window: How long robot must be stable to be considered stopped
-            speed_threshold: Max joint speed to be considered stopped (rad/s)
+            speed_threshold: Max joint speed to be considered stopped (deg/s)
             angle_threshold: Max angle change to be considered stopped (degrees)
-            motion_start_timeout: Max time to wait for motion to start (seconds)
 
         Returns:
             True if robot stopped, False if timeout
+
+        Raises:
+            ConnectionError: If the controller session changes while a
+                command is still being waited on.
         """
         await self._ensure_endpoint()
 
+        # An index acknowledged by a controller that has since restarted
+        # will never end on this one.
+        own = self._last_command_index
+        barrier = -1
+        if own is not None and self._last_command_session in (
+            0,
+            self._shared_status.session_id,
+        ):
+            barrier = own
+        ended = -1
         last_angles: np.ndarray | None = None
         settle_start: float | None = None
-        motion_started = False
-        start_time = time.monotonic()
 
         try:
             async with asyncio.timeout(timeout):
                 async for status in self.stream_status_shared():
-                    speeds = status.speeds
+                    barrier = max(barrier, status.accepted_index)
+                    if ended < barrier:
+                        if await self._command_outcome(barrier) is False:
+                            return False
+                        ended = barrier
+                        last_angles = None
+                        settle_start = None
+                        continue
+
+                    max_speed = float(np.abs(status.speeds).max())
                     angles = status.angles
-
-                    max_speed = float(np.abs(speeds).max())
-
-                    max_angle_change = 0.0
-                    if last_angles is not None:
+                    if last_angles is None:
+                        last_angles = angles.copy()
+                        max_angle_change = 0.0
+                    else:
                         max_angle_change = float(np.abs(angles - last_angles).max())
                         last_angles[:] = angles
-                    else:
-                        last_angles = angles.copy()
 
+                    if (
+                        max_speed >= speed_threshold
+                        or max_angle_change >= angle_threshold
+                    ):
+                        settle_start = None
+                        continue
                     now = time.monotonic()
-
-                    # Phase 1: Wait for motion to start
-                    if not motion_started:
-                        if (
-                            max_speed >= speed_threshold
-                            or max_angle_change >= angle_threshold
-                        ):
-                            motion_started = True
-                            settle_start = None
-                        elif now - start_time > motion_start_timeout:
-                            motion_started = True
-
-                    # Phase 2: Wait for motion to complete
-                    if motion_started:
-                        if (
-                            max_speed < speed_threshold
-                            and max_angle_change < angle_threshold
-                        ):
-                            if settle_start is None:
-                                settle_start = now
-                            elif now - settle_start > settle_window:
-                                return True
-                        else:
-                            settle_start = None
+                    if settle_start is None:
+                        settle_start = now
+                    elif now - settle_start > settle_window:
+                        return True
         except TimeoutError:
             return False
 
@@ -1607,10 +1691,15 @@ class AsyncRobotClient(_RobotClientABC):
     async def wait_command(self, command_index: int, timeout: float = 10.0) -> bool:
         """Wait until a specific command index has been completed.
 
-        Queries exact success in the controller's last 1024 completions.
-        A concurrent tool finishing does not complete an unfinished arm command.
-        Unknown, cancelled, or expired results are never inferred successful
-        from the status high-water mark. Pipeline failures raise MotionError.
+        Queries exact success in the controller's last 1024 completions: a
+        later command that finishes first — a jog, a ``tool.stop()`` — does
+        not complete an unfinished one queued before it. Queued commands,
+        tool actions among them, run in index order, so a wait on one covers
+        everything queued ahead of it.
+        Unknown or expired results are never inferred successful from the
+        status high-water mark. A command that ended as a failure — cancelled
+        by ``stop()``/``estop()`` (``MOTN_CANCELLED``) or failed by the
+        pipeline — raises MotionError.
 
         Args:
             command_index: The command index to wait for (returned by motion commands).
@@ -1621,6 +1710,23 @@ class AsyncRobotClient(_RobotClientABC):
 
         Raises:
             MotionError: If the pipeline errored at or before command_index.
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                outcome = await self._command_outcome(command_index)
+        except TimeoutError:
+            return False
+        if isinstance(outcome, RobotError):
+            raise MotionError(outcome)
+        return outcome
+
+    async def _command_outcome(self, command_index: int) -> RobotError | bool:
+        """Wait for *command_index* to end: True once it completed, the
+        error it failed with, or False if the client closed first. Runs
+        until it has an answer; the caller's deadline bounds it.
+
+        Raises:
+            ConnectionError: If the controller session changes.
         """
 
         def _blocking_error(s: StatusBuffer) -> RobotError | None:
@@ -1652,27 +1758,25 @@ class AsyncRobotClient(_RobotClientABC):
                     "Controller session changed during completion wait"
                 )
 
-        try:
-            async with asyncio.timeout(timeout):
-                while not self._closed:
-                    check_session(self._shared_status.session_id)
-                    result = await self._request(command)
-                    # Status has its own socket and can survive a command
-                    # socket that stopped receiving after a peer restart.
-                    check_session(self._shared_status.session_id)
-                    if (
-                        isinstance(result, CommandCompletionResultStruct)
-                        and result.command_index == command_index
-                    ):
-                        check_session(result.session_id)
-                        if result.completed:
-                            return True
-                    err = _blocking_error(self._shared_status)
-                    if err is not None:
-                        raise MotionError(err)
-                    await self._await_completion_hint(command_index, 0.25)
-        except TimeoutError:
-            return False
+        while not self._closed:
+            check_session(self._shared_status.session_id)
+            result = await self._request(command)
+            # Status has its own socket and can survive a command
+            # socket that stopped receiving after a peer restart.
+            check_session(self._shared_status.session_id)
+            if (
+                isinstance(result, CommandCompletionResultStruct)
+                and result.command_index == command_index
+            ):
+                check_session(result.session_id)
+                if result.completed:
+                    return True
+                if result.error is not None:
+                    return RobotError.from_wire(result.error)
+            err = _blocking_error(self._shared_status)
+            if err is not None:
+                return err
+            await self._await_completion_hint(command_index, 0.25)
         return False
 
     async def _await_completion_hint(self, command_index: int, timeout: float) -> None:
@@ -1705,8 +1809,8 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         pose: list[float] | None = None,
         duration: float = 0.0,
-        speed: float = 0.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
@@ -1725,17 +1829,31 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             angles: 6 joint angles in degrees (ignored if pose= is set)
             pose: If set, Cartesian target [x,y,z,rx,ry,rz] — dispatches to MOVEJ_POSE
-            duration: Motion duration in seconds (mutually exclusive with speed)
-            speed: Speed fraction 0-1 (mutually exclusive with duration)
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm (0 = stop at target)
             rel: If True, angles are relative to current position
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         if pose is not None:
+            if rel:
+                # A pose target is absolute on the wire; planning it as
+                # though the offset had been honoured would send the arm
+                # to a world pose near the origin.
+                raise ValueError(
+                    "move_j(pose=..., rel=True) is not supported: a pose target is "
+                    "absolute. Use move_j(angles, rel=True) for a relative joint move."
+                )
             index = await self._send(
                 MoveJPoseCmd(
-                    pose=pose, duration=duration, speed=speed, accel=accel, r=r
+                    pose=pose,
+                    duration=duration,
+                    speed=speed,
+                    accel=accel,
+                    r=r,
                 )
             )
         else:
@@ -1759,8 +1877,8 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         frame: Frame = "WRF",
         duration: float = 0.0,
-        speed: float = 0.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         rel: bool = False,
         wait: bool = False,
@@ -1779,13 +1897,15 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             pose: Target [x,y,z,rx,ry,rz] in mm and degrees
             frame: Reference frame ("WRF" or "TRF")
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm
             rel: If True, pose is relative delta
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MoveLCmd(
             pose=pose,
             frame=frame,
@@ -1806,9 +1926,9 @@ class AsyncRobotClient(_RobotClientABC):
         end: list[float],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         r: float = 0.0,
         wait: bool = False,
         timeout: float = 10.0,
@@ -1827,18 +1947,21 @@ class AsyncRobotClient(_RobotClientABC):
             via: Via-point pose [x,y,z,rx,ry,rz]
             end: End-point pose [x,y,z,rx,ry,rz]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             r: Blend radius in mm
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
+        # The arc and spline wires mark their unused timing field None, not 0.
         cmd = MoveCCmd(
             via=via,
             end=end,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
             r=r,
         )
@@ -1852,9 +1975,9 @@ class AsyncRobotClient(_RobotClientABC):
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = False,
         timeout: float = 10.0,
         **wait_kwargs: Any,
@@ -1871,16 +1994,18 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MoveSCmd(
             waypoints=waypoints,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
         )
         index = await self._send(cmd)
@@ -1893,9 +2018,9 @@ class AsyncRobotClient(_RobotClientABC):
         waypoints: list[list[float]],
         *,
         frame: Frame = "WRF",
-        duration: float | None = None,
-        speed: float | None = None,
-        accel: float = 1.0,
+        duration: float = 0.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
         wait: bool = False,
         timeout: float = 10.0,
         **wait_kwargs: Any,
@@ -1912,16 +2037,18 @@ class AsyncRobotClient(_RobotClientABC):
         Args:
             waypoints: List of poses [[x,y,z,rx,ry,rz], ...]
             frame: Reference frame
-            duration: Motion duration in seconds
-            speed: Speed fraction 0-1
-            accel: Acceleration fraction 0-1
+            duration: Motion duration in seconds; > 0 times the move and speed is unused
+            speed: Speed fraction in (0, 1], used when duration is 0
+            accel: Acceleration fraction in (0, 1]
             wait: If True, block until motion completes
         """
+        _no_wait_kwargs(wait_kwargs)
+        duration, speed = planned_move_timing(duration, speed, accel)
         cmd = MovePCmd(
             waypoints=waypoints,
             frame=frame,
-            duration=duration,
-            speed=speed,
+            duration=duration or None,
+            speed=speed or None,
             accel=accel,
         )
         index = await self._send(cmd)
@@ -1969,10 +2096,13 @@ class AsyncRobotClient(_RobotClientABC):
         angles: list[float],
         *,
         pose: list[float] | None = None,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         """Streaming joint position target. Fire-and-forget.
+
+        The stream stops about 0.25 s after the last target arrives: the arm
+        brakes to rest and holds there.
 
         Category: Streaming
 
@@ -1993,10 +2123,13 @@ class AsyncRobotClient(_RobotClientABC):
         self,
         pose: list[float],
         *,
-        speed: float = 1.0,
-        accel: float = 1.0,
+        speed: float = 0.5,
+        accel: float = 0.5,
     ) -> int:
         """Streaming linear Cartesian position target. Fire-and-forget.
+
+        The stream stops about 0.25 s after the last target arrives: the tool
+        brakes along its line to rest and holds there.
 
         Category: Streaming
 
@@ -2020,7 +2153,7 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         joints: list[int] | None = None,
         speeds: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         """Joint velocity jog. Single-joint or multi-joint.
 
@@ -2061,7 +2194,7 @@ class AsyncRobotClient(_RobotClientABC):
         *,
         axes: list[Axis] | None = None,
         speeds_list: list[float] | None = None,
-        accel: float = 1.0,
+        accel: float = 0.5,
     ) -> int:
         """Cartesian velocity jog. Single-axis or multi-axis.
 
@@ -2082,9 +2215,11 @@ class AsyncRobotClient(_RobotClientABC):
             speeds_list: List of signed speed fractions for multi-axis jog
             accel: Acceleration fraction 0-1
         """
+        if frame not in ("WRF", "TRF"):
+            raise ValueError(f"jog_l frame must be 'WRF' or 'TRF', got {frame!r}")
         vel = [0.0] * 6
         if axes is not None and speeds_list is not None:
-            for a, s in zip(axes, speeds_list):
+            for a, s in zip(axes, speeds_list, strict=True):
                 vel[_AXIS_MAP[a]] = s
         elif axis is not None:
             vel[_AXIS_MAP[axis]] = speed
@@ -2150,12 +2285,39 @@ class AsyncRobotClient(_RobotClientABC):
         action: str,
         params: list | None = None,
         *,
-        wait: bool = True,
+        wait: bool = False,
         timeout: float = 10.0,
     ) -> int:
         """Send a generic tool action command.
 
-        Returns the command index (>= 0) on success, -1 on failure.
+        Returns the command index (>= 0) on success, -1 on failure. The
+        action and its parameters are checked before anything is sent: a
+        malformed one raises ``ValueError``. A key naming a tool other than
+        the selected one is refused by the controller.
+
+        A tool action is queued work: it runs in queue order with motion,
+        the arm holding still while it does, so a wait on it covers the
+        motion queued ahead of it, and one sent after a blended move ends
+        the blend there. A ``move`` before a completed ``calibrate`` is
+        refused when its turn comes, failing its own index; a tool action
+        that fails cancels what is queued behind it (``MOTN_CANCELLED``).
+        A pause holds the tool actions still queued. ``stop()``,
+        ``estop()``, ``reset_state()``, a teleport, or a jog or servo stream
+        taking the arm discards them and halts the one running where the
+        jaws are, keeping the grip.
+
+        ``stop`` alone acts at once, on the tool fitted now: it halts the
+        action running, failing it as cancelled by a tool stop, keeps what
+        is queued behind it, and holds the next queued tool action until
+        the jaws are still.
+
+        Electric grippers take ``move [position, speed, current]``
+        (exactly three fractions in ``[0, 1]``; current spans the tool's
+        ``current_range``), ``calibrate``, ``stop`` (halt in place, keep
+        grip) and ``idle`` (release, the jaws left where they are);
+        ``set_position``/``open``/``close`` map onto ``move``. Pneumatic
+        grippers take ``open``, ``close``, and ``move``/``set_position
+        [position]``.
 
         Category: I/O
 

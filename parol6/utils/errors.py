@@ -5,10 +5,7 @@ Keep this focused and non-redundant; prefer built-ins where appropriate.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .error_catalog import RobotError
+from waldoctl.errors import RobotError
 
 
 class IKError(RuntimeError):
@@ -29,13 +26,21 @@ class TrajectoryPlanningError(RuntimeError):
         super().__init__(str(robot_error))
 
 
-class MotionError(RuntimeError):
-    """Pipeline planning/execution error detected via status broadcast."""
+class MotionError(RobotError):
+    """Pipeline planning/execution error detected via status broadcast or a
+    completion: the runtime's :class:`RobotError`, raised as this client's
+    own type so ``except RobotError`` reads it on every backend."""
 
     def __init__(self, robot_error: RobotError):
         self.robot_error = robot_error
-        super().__init__(str(robot_error))
+        super().__init__(
+            robot_error.command_index,
+            robot_error.code,
+            robot_error.title,
+            robot_error.cause,
+            robot_error.effect,
+            robot_error.remedy,
+        )
 
-    @property
-    def command_index(self) -> int:
-        return self.robot_error.command_index
+    def __reduce__(self) -> tuple:
+        return (type(self), (self.robot_error,))

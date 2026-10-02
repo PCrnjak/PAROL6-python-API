@@ -7,7 +7,11 @@ planner's output queue and executes them in order:
 - **TrajectorySegment**: index into pre-computed waypoints at 100Hz
   (zero-allocation hot path, identical to the old execute_step()).
 - **InlineSegment**: create the command object from its wire params and
-  tick it in the control loop until completion (Home, Gripper, etc.).
+  tick it in the control loop until completion (Home, tool actions, etc.).
+  The arm holds still while a tool action runs.
+
+A tool stop is the one tool action that does not wait its turn: it halts
+the tool action playing and runs beside the queue until the jaws are still.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import numpy as np
 
 from parol6.commands._collision_guard import guard_joint_path
 from parol6.commands.base import CommandBase, ExecutionStatusCode
+from parol6.commands.tool_action_command import ToolActionCommand
 from parol6.config import (
     COLLISION_PATH_SAMPLES,
     EXECUTION_OVERRIDE_TRANSITION_S,
@@ -29,7 +34,7 @@ from parol6.config import (
     rad_to_steps,
     steps_to_rad,
 )
-from parol6.protocol.wire import CommandCode, DelayCmd
+from parol6.protocol.wire import CommandCode, DelayCmd, ToolActionCmd, wire_command_name
 from parol6.server.command_executor import _format_cmd_params
 from parol6.server.command_registry import create_command_from_struct
 from parol6.server.motion_planner import (
@@ -39,7 +44,12 @@ from parol6.server.motion_planner import (
     Segment,
     TrajectorySegment,
 )
-from parol6.utils.error_catalog import RobotError, make_error
+from parol6.utils.error_catalog import (
+    RobotError,
+    attributed,
+    extract_robot_error,
+    make_error,
+)
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import TrajectoryPlanningError
 from waldoctl import ActionState
@@ -73,6 +83,8 @@ class SegmentPlayer:
         "_settle_ticks",
         "_settle_err",
         "_last_shapes_version",
+        "_tool_stop",
+        "_tool_stop_index",
     )
 
     def __init__(self, planner: MotionPlanner) -> None:
@@ -91,11 +103,19 @@ class SegmentPlayer:
         self._settle_ticks: int = 0
         self._settle_err: int = -1
         self._last_shapes_version: int = 0
+        # The tool stop settling the jaws, and its command index.
+        self._tool_stop: ToolActionCommand | None = None
+        self._tool_stop_index: int = -1
 
     @property
     def active(self) -> bool:
         """True if playing a segment or has buffered segments."""
         return self._active is not None or bool(self._buffer)
+
+    @property
+    def tool_stopping(self) -> bool:
+        """A tool stop is waiting for the jaws to come still."""
+        return self._tool_stop is not None
 
     def tick(self, state: ControllerState) -> bool:
         """Execute one tick. Returns True if actively playing/executing.
@@ -115,6 +135,8 @@ class SegmentPlayer:
                 for idx in seg.blend_consumed_indices:
                     if idx > state.plan_received_index:
                         state.plan_received_index = idx
+            elif isinstance(seg, InlineSegment):
+                state.queued_duration += seg.duration
             seg = self._planner.poll_segment()
 
         # MoveIt-style invalidation: a world change (SET_SHAPES bumps
@@ -139,10 +161,19 @@ class SegmentPlayer:
                         0.0 if state.execution_paused else state.execution_speed
                     )
                     return False
-                if state.execution_paused and not isinstance(
-                    self._buffer[0], ErrorSegment
-                ):
+                head = self._buffer[0]
+                if state.execution_paused and not isinstance(head, ErrorSegment):
                     state.execution_applied_speed = 0.0
+                    state.Speed_out.fill(0)
+                    return True
+                if (
+                    self._tool_stop is not None
+                    and isinstance(head, InlineSegment)
+                    and isinstance(head.params, ToolActionCmd)
+                ):
+                    # The next tool action waits for the jaws a tool stop
+                    # is settling; the arm holds with it.
+                    state.Command_out = CommandCode.IDLE
                     state.Speed_out.fill(0)
                     return True
                 self._activate_next(state)
@@ -289,6 +320,11 @@ class SegmentPlayer:
                 if held:
                     state.Speed_out.fill(0)
                     return True
+                if isinstance(active.params, ToolActionCmd):
+                    # The arm holds still while the tool acts, as it does
+                    # through a delay.
+                    state.Command_out = CommandCode.IDLE
+                    state.Speed_out.fill(0)
                 result = self._tick_inline(active, state)
                 if result is None:
                     # Instant completion — try next immediately
@@ -300,7 +336,9 @@ class SegmentPlayer:
                 logger.error(
                     "Command %d failed: %s", active.command_index, active.error
                 )
-                state.error = active.error
+                error = attributed(active.error, active.command_index)
+                state.error = error
+                state.record_failure(active.command_index, error)
                 pairs = active.colliding_pairs
                 state.collision_active = bool(pairs)
                 state.collision_pairs = tuple(pairs) if pairs else ()
@@ -309,9 +347,10 @@ class SegmentPlayer:
                 state.action_params = ""
                 self._active = None
                 # Halt: cancel all remaining planned work
+                self._fail_dropped(state)
                 self._buffer.clear()
                 self._planner.cancel()
-                self._drain_planner_queue(state)
+                self._drain_planner_queue(state, failed=True)
                 return False
 
             # Unknown segment type
@@ -404,8 +443,20 @@ class SegmentPlayer:
 
         cmd = self._inline_cmd
         if not self._inline_activated:
-            cmd.setup(state)
-            state.action_current = type(cmd).__name__
+            try:
+                cmd.setup(state)
+            except Exception as e:
+                # Raised out of the tick, the segment would stay unactivated
+                # and raise again on every tick after.
+                self._on_failure(
+                    seg,
+                    extract_robot_error(
+                        e, ErrorCode.MOTN_SETUP_FAILED, seg.command_index, detail=str(e)
+                    ),
+                    state,
+                )
+                return False
+            state.action_current = wire_command_name(type(cmd.p))
             state.action_params = _format_cmd_params(seg.params)
             self._inline_activated = True
 
@@ -431,16 +482,25 @@ class SegmentPlayer:
 
     def _complete_segment(self, seg: Segment, state: ControllerState) -> None:
         """Mark segment as completed and update tracking indices."""
-        final_idx = seg.command_index
         if isinstance(seg, TrajectorySegment):
             for idx in seg.blend_consumed_indices:
                 if idx != seg.command_index:
                     state.record_completion(idx)
+        state.record_completion(seg.command_index)
+        self._retire(seg, state)
+
+    def _retire(self, seg: Segment, state: ControllerState) -> None:
+        """Take *seg*, whose outcome is recorded, out of play; the segments
+        queued behind it play on."""
+        final_idx = seg.command_index
+        if isinstance(seg, TrajectorySegment):
+            for idx in seg.blend_consumed_indices:
                 if idx > final_idx:
                     final_idx = idx
             state.queued_duration -= seg.duration
+        elif isinstance(seg, InlineSegment):
+            state.queued_duration -= seg.duration
         state.queued_segments -= 1
-        state.record_completion(seg.command_index)
         while state.pending_planned and state.pending_planned[0][0] <= final_idx:
             state.pending_planned.popleft()
         state.action_current = ""
@@ -453,17 +513,20 @@ class SegmentPlayer:
         self, seg: Segment, error: RobotError, state: ControllerState
     ) -> None:
         """Handle inline command failure: set error state, clear buffer, cancel planner."""
+        error = attributed(error, seg.command_index)
         state.error = error
+        state.record_failure(seg.command_index, error)
         state.action_current = ""
         state.action_params = ""
         state.action_state = ActionState.ERROR
         self._active = None
+        self._fail_dropped(state)
         self._buffer.clear()
         self._planner.cancel()
-        self._drain_planner_queue(state)
+        self._drain_planner_queue(state, failed=True)
 
     def _world_guard(
-        self, seg: Segment, steps: np.ndarray, state: ControllerState
+        self, seg: TrajectorySegment, steps: np.ndarray, state: ControllerState
     ) -> bool:
         """Validate trajectory waypoints (motor steps) against the current
         collision world; on violation, halt playback like an ErrorSegment.
@@ -493,7 +556,8 @@ class SegmentPlayer:
                 seg.command_index,
                 exc.robot_error,
             )
-            state.error = exc.robot_error
+            error = attributed(exc.robot_error, seg.command_index)
+            state.error = error
             pairs = exc.colliding_pairs
             state.collision_active = bool(pairs)
             state.collision_pairs = tuple(pairs) if pairs else ()
@@ -501,14 +565,109 @@ class SegmentPlayer:
             state.action_current = ""
             state.action_params = ""
             self._active = None
+            state.record_failure(seg.command_index, error)
+            # The moves its blend absorbed were the same path, and fail
+            # with it.
+            for index in seg.blend_consumed_indices:
+                state.record_failure(index, error)
+            self._fail_dropped(state)
             self._buffer.clear()
             self._planner.cancel()
-            self._drain_planner_queue(state)
+            self._drain_planner_queue(state, failed=True)
             return False
         return True
 
+    @staticmethod
+    def _fail_dropped(state: ControllerState) -> None:
+        """The commands queued behind a failed one are dropped with it: each
+        fails as cancelled, so a wait on it raises instead of running out its
+        timeout. One whose failure is already recorded (the failed command,
+        the moves its blend absorbed) keeps it. Failure path only — it
+        allocates."""
+        state.fail_unfinished(
+            [index for index, _ in state.pending_planned],
+            make_error(ErrorCode.MOTN_CANCELLED, scope="the failure ahead of it"),
+        )
+
+    def owed_indices(self, state: ControllerState) -> list[int]:
+        """Every command index this pipeline still owes an outcome: the
+        active segment and the commands its blend consumed, each one
+        submitted but not yet started, and a tool stop still settling. Read
+        BEFORE :meth:`cancel`, which forgets them. Stop path only — it
+        allocates."""
+        owed = [idx for idx, _ in state.pending_planned]
+        active = self._active
+        if active is not None:
+            owed.append(active.command_index)
+            if isinstance(active, TrajectorySegment):
+                owed.extend(active.blend_consumed_indices)
+        if self._tool_stop is not None:
+            owed.append(self._tool_stop_index)
+        return owed
+
+    def _halt_tool_action(self, state: ControllerState) -> bool:
+        """Halt the tool action playing, where the jaws are and keeping its
+        grip. Whether one was playing."""
+        cmd = self._inline_cmd
+        if (
+            self._active is None
+            or not self._inline_activated
+            or not isinstance(cmd, ToolActionCommand)
+        ):
+            return False
+        cmd.halt(state)
+        return True
+
+    def stop_tool(
+        self, stop: ToolActionCommand, index: int, state: ControllerState
+    ) -> None:
+        """Run the tool stop *stop*, set up and numbered *index*, ahead of
+        the queue: the tool action playing — or a tool stop still settling —
+        is halted and fails as cancelled by it, and the next queued tool
+        action waits until the jaws are still. The rest of the queue plays
+        on."""
+        cancelled = make_error(ErrorCode.MOTN_CANCELLED, scope="a tool stop")
+        active = self._active
+        if active is not None and self._halt_tool_action(state):
+            state.record_failure(active.command_index, cancelled)
+            self._retire(active, state)
+        if self._tool_stop is not None:
+            state.record_failure(self._tool_stop_index, cancelled)
+        self._tool_stop = stop
+        self._tool_stop_index = index
+
+    def tick_tool_stop(self, state: ControllerState) -> None:
+        """Tick the tool stop until the jaws are still. It drives only the
+        gripper, beside whatever the arm is doing."""
+        stop = self._tool_stop
+        if stop is None:
+            return
+        code = stop.tick(state)
+        if code == ExecutionStatusCode.EXECUTING:
+            return
+        if code == ExecutionStatusCode.COMPLETED:
+            state.record_completion(self._tool_stop_index)
+        else:
+            error = stop.robot_error or make_error(
+                ErrorCode.MOTN_TICK_FAILED, detail=type(stop).__name__
+            )
+            logger.error("Tool stop %d failed: %s", self._tool_stop_index, error)
+            state.record_failure(
+                self._tool_stop_index, attributed(error, self._tool_stop_index)
+            )
+        self._tool_stop = None
+        self._tool_stop_index = -1
+
     def cancel(self, state: ControllerState) -> None:
-        """Clear buffer, drain stale segments, and stop playback."""
+        """Clear buffer, drain stale segments, and stop playback. A tool
+        action playing, or a tool stop settling, is halted where the jaws
+        are: one let run on would close on after it was reported
+        cancelled."""
+        self._halt_tool_action(state)
+        if self._tool_stop is not None:
+            self._tool_stop.halt(state)
+            self._tool_stop = None
+            self._tool_stop_index = -1
         if self._active is not None:
             # Planned trajectories live here rather than in CommandExecutor.
             # Cancelling its command cannot clear this player's activity.
@@ -521,15 +680,31 @@ class SegmentPlayer:
         self._phase = -1.0
         self._inline_cmd = None
         self._inline_activated = False
+        # A seek cut short leaves no step running for the next "home" to
+        # report as its own.
+        state.homing_step = 0
         self._buffer.clear()
         self._planner.cancel()
         # Drain stale segments from planner output queue
         self._drain_planner_queue(state)
 
-    def _drain_planner_queue(self, state: ControllerState) -> None:
-        """Drain any remaining segments from the planner's output queue."""
+    def _drain_planner_queue(
+        self, state: ControllerState, failed: bool = False
+    ) -> None:
+        """Drain any remaining segments from the planner's output queue.
+
+        Every path that drops planned work ends here. The planner applies a
+        tool selection or a TCP change when it plans it, so when dropped
+        work — or a *failed* command, which it may have applied in part —
+        can have left it holding one the controller never applied, it is
+        brought back to the controller's tool. A tool action accepted from
+        here on is judged against the fitted tool: no selection is queued.
+        """
         while self._planner.poll_segment() is not None:
             pass
+        if failed or state.pending_planned:
+            self._planner.resync(state)
+        state.accepted_tool = state.current_tool
         state.pending_planned.clear()
         state.queued_segments = 0
         state.queued_duration = 0.0

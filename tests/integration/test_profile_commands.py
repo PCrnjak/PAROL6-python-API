@@ -115,6 +115,87 @@ class TestProfileMotionBehavior:
                 f"(expected {target_pose[0]:.1f}, got {pose[0]:.1f})"
             )
 
+    def test_a_dry_run_times_a_move_as_the_selected_profile_runs_it(
+        self, client, server_proc
+    ):
+        """A preview is only worth its rows if it is timed as the arm will run
+        the move: after ``select_profile`` the dry run plans with that profile,
+        as the controller does."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        target = [40.0, -60.0, 200.0, 30.0, 20.0, 150.0]
+
+        def previewed(profile: str) -> float:
+            preview = DryRunRobotClient(initial_joints_deg=standby)
+            assert preview.select_profile(profile) == 1
+            index = preview.move_j(target, speed=0.5, accel=1.0)
+            record = preview.plan()
+            assert record.blocks[index].error is None
+            return record.blocks[index].rows * record.row_dt_s
+
+        quintic = previewed("QUINTIC")
+        assert quintic > previewed("TOPPRA") + 0.3, (
+            "the preview timed the move under QUINTIC as it does under TOPPRA"
+        )
+
+        assert client.select_profile("QUINTIC") > 0
+        assert client.teleport(standby) == 1
+        planned: list[float] = []
+
+        def holds_the_move(status) -> bool:
+            if status.queued_segments != 1:
+                return False
+            planned.append(float(status.queued_duration))
+            return True
+
+        # Paused, the controller plans the move and holds it, and the status
+        # stream carries the duration it planned, whatever rate the loop
+        # then plays it at.
+        try:
+            assert client.pause() == 1
+            assert client.move_j(target, speed=0.5, accel=1.0, wait=False) >= 0
+            assert client.wait_status(holds_the_move, timeout=10.0)
+        finally:
+            assert client.stop() == 1
+        assert abs(planned[-1] - quintic) < 0.02, (
+            f"previewed {quintic:.2f} s under QUINTIC, the controller planned "
+            f"{planned[-1]:.2f} s"
+        )
+
+    @pytest.mark.parametrize("profile", ["LINEAR", "QUINTIC", "TRAPEZOID"])
+    def test_a_short_timed_move_takes_its_whole_duration(self, profile):
+        """A move timed to 50 ms reaches its target 50 ms in, not a control
+        tick early. The preview plays one row per control tick, as the
+        controller does, so a plan that spreads the time it names over one
+        tick too few shows there: on a move this short, a tick early is
+        half again the acceleration planned."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        target = [standby[0] + 0.2, *standby[1:]]
+        duration = 0.05
+        preview = DryRunRobotClient(initial_joints_deg=standby)
+        assert preview.select_profile(profile) == 1
+        # Small and fast enough that every profile keeps the duration asked.
+        index = preview.move_j(target, duration=duration, accel=1.0)
+        preview.delay(0.1)
+        record = preview.plan()
+        block = record.blocks[index]
+        assert block.error is None and block.start_row == 0
+        j1 = np.degrees(np.asarray(record.joints_rad[:, 0], dtype=np.float64))
+        # The arm holds the target to half a motor step of J1 (0.0044°); a
+        # tick before it ends, the move is still over 0.01° short of it.
+        arrived = int(np.argmax(np.abs(j1 - target[0]) < 0.005)) * record.row_dt_s
+        assert arrived >= duration - 1e-9, (
+            f"{profile}: a {duration * 1000:.0f} ms move arrived "
+            f"{arrived * 1000:.0f} ms in"
+        )
+
 
 @pytest.mark.integration
 class TestServoCartesian:

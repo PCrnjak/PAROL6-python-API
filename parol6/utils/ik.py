@@ -13,8 +13,8 @@ from numba import njit
 from numpy.typing import ArrayLike, NDArray
 from pinokin import Damping as _Damping, IKSolver as _IKSolver, Robot
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import IK_SAFETY_MARGINS_RAD
+from parol6.utils.joint_limits import TRAVEL_MAX_RAD, TRAVEL_MIN_RAD
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +227,9 @@ _cl_cur_viol = np.zeros(6, dtype=np.bool_)
 _cl_t_below = np.zeros(6, dtype=np.bool_)
 _cl_t_above = np.zeros(6, dtype=np.bool_)
 _cl_dummy_target = np.zeros(6, dtype=np.float64)
-_cl_mn = np.ascontiguousarray(PAROL6_ROBOT._joint_limits_radian[:, 0])
-_cl_mx = np.ascontiguousarray(PAROL6_ROBOT._joint_limits_radian[:, 1])
+# A joint parked on its limit reads back up to half a motor step past it.
+_cl_mn = np.ascontiguousarray(TRAVEL_MIN_RAD)
+_cl_mx = np.ascontiguousarray(TRAVEL_MAX_RAD)
 _last_violation_mask = np.zeros(6, dtype=np.bool_)
 _last_any_violation = False
 

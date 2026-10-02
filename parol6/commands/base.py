@@ -10,7 +10,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 
-from parol6.config import TRACE
+from parol6.config import INTERVAL_S, TRACE
 from parol6.protocol.wire import CmdType, Command, CommandCode, QueryType, Response
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
@@ -20,15 +20,26 @@ from parol6.utils.errors import TrajectoryPlanningError
 logger = logging.getLogger(__name__)
 
 
+def arm_homed(state: ControllerState) -> bool:
+    """Whether every arm joint holds its reference; a loop rather than a
+    slice, so a per-tick caller allocates no view."""
+    for i in range(6):
+        if not state.Homed_in[i]:
+            return False
+    return True
+
+
 def guard_homed(state: ControllerState) -> None:
-    """Refuse planned motion while the robot is not homed.
+    """Refuse motion that works from the reported pose while the robot is
+    not homed.
 
     Reported joint positions are unreferenced until homing (the boot state is
-    all-zeros steps — outside J2/J3's limits), so building or collision-checking
-    a trajectory from them is meaningless. Called at the top of every planned
-    command's ``do_setup``, like ``guard_joint_path``. Jog/servo/home are
-    deliberately not gated: they don't plan a path from the reported pose, and
-    an unhomed arm may need to be jogged clear of an obstruction before homing.
+    all-zeros steps — outside J2/J3's limits), so a trajectory, an IK solve
+    or a collision check built from them is meaningless. Called at the top
+    of every planned command's ``do_setup``, like ``guard_joint_path``, and
+    of every cartesian or servo stream's. Only ``jog_j`` and ``home`` stay
+    open: neither needs the pose, and an unhomed arm may need to be jogged
+    clear of an obstruction before homing.
     """
     for i in range(6):
         if not state.Homed_in[i]:
@@ -106,6 +117,7 @@ class CommandBase(ABC, Generic[P]):
         "robot_error",
         "_t0",
         "_t_end",
+        "_ticks_left",
         "_q_rad_buf",
         "_steps_buf",
     )
@@ -117,6 +129,8 @@ class CommandBase(ABC, Generic[P]):
         self.robot_error: RobotError | None = None
         self._t0: float | None = None
         self._t_end: float | None = None
+        # Control ticks left on the tick timer; -1 before it starts.
+        self._ticks_left = -1
         # Pre-allocated buffers for zero-allocation unit conversions
         self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
         self._steps_buf: np.ndarray = np.zeros(6, dtype=np.int32)
@@ -231,6 +245,21 @@ class CommandBase(ABC, Generic[P]):
     def timer_expired(self) -> bool:
         """Check if the timer has expired."""
         return self._t_end is not None and time.perf_counter() >= self._t_end
+
+    def start_tick_timer(self, duration_s: float) -> None:
+        """Start a timer for ``duration_s`` counted in control ticks, one per
+        :meth:`tick_timer_expired`, as the motion it times advances: a loop
+        that drops periods stretches it in wall time instead of cutting the
+        motion short."""
+        self._ticks_left = max(0, round(duration_s / INTERVAL_S))
+
+    def tick_timer_expired(self) -> bool:
+        """Whether the tick timer has run out; counts one tick off it, so it
+        is called once per tick."""
+        if self._ticks_left > 0:
+            self._ticks_left -= 1
+            return False
+        return self._ticks_left == 0
 
     def progress01(self, duration_s: float) -> float:
         """Get progress as a value between 0 and 1."""
@@ -355,14 +384,13 @@ class SystemCommand(CommandBase[P]):
     and can execute even when the controller is disabled.
 
     Side-effect signaling: commands that need infrastructure changes (simulator toggle,
-    port switch, mock sync) set the corresponding attribute. The controller reads these
+    port switch) set the corresponding attribute. The controller reads these
     after tick() and orchestrates the actual change.
     """
 
-    __slots__ = ("_switch_simulator", "_switch_port", "_sync_mock")
+    __slots__ = ("_switch_simulator", "_switch_port")
 
     def __init__(self, p: P) -> None:
         super().__init__(p)
         self._switch_simulator: bool | None = None
         self._switch_port: str | None = None
-        self._sync_mock: bool = False

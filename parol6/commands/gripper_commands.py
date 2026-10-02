@@ -11,11 +11,17 @@ from dataclasses import dataclass
 from enum import Enum
 
 from parol6.commands.base import Debouncer, ExecutionStatusCode, MotionCommand
+from parol6.config import INTERVAL_S
 from parol6.server.state import ControllerState
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger(__name__)
+
+#: Control ticks an electric gripper's calibration is given to finish. The
+#: calibrated bit in the gripper's status byte is not read: it is unverified
+#: across the supported grippers (see ``ControllerState.gripper_calibrated``).
+CALIBRATE_TICKS = 200
 
 
 class ElectricGripperState(Enum):
@@ -25,6 +31,7 @@ class ElectricGripperState(Enum):
     SEND_CALIBRATE = "SEND_CALIBRATE"
     WAITING_CALIBRATION = "WAITING_CALIBRATION"
     WAIT_FOR_POSITION = "WAIT_FOR_POSITION"
+    HALTING = "HALTING"
 
 
 @dataclass(frozen=True)
@@ -33,57 +40,61 @@ class PneumaticGripperParams:
 
     action: str  # "open" or "close"
     port: int  # 1 or 2
+    dwell_s: float  # the jaws' estimated stroke, which the action waits out
 
 
 @dataclass(frozen=True)
 class ElectricGripperParams:
     """Parameters for electric gripper action."""
 
-    action: str  # "move" or "calibrate"
+    action: str  # "move", "calibrate", "stop" or "idle"
     position: float
     speed: float
     current: int
 
 
 class PneumaticGripperCommand(MotionCommand[PneumaticGripperParams]):
-    """Control pneumatic gripper (open/close)."""
+    """Control pneumatic gripper (open/close). The valve switches on the
+    first tick; the action lasts the jaws' estimated stroke, as the dry run
+    previews it, since the valve reports nothing when they arrive."""
 
     PARAMS_TYPE = None  # Not wire-registered — instantiated by ToolActionCommand
 
     __slots__ = (
-        "timeout_counter",
         "_state_to_set",
         "_port_index",
+        "_ticks_left",
     )
 
     def __init__(self, p: PneumaticGripperParams):
         super().__init__(p)
-        self.timeout_counter = 1000
         self._state_to_set: int = 0
         self._port_index: int = 0
+        self._ticks_left: int = 1
 
     @classmethod
-    def from_tool_action(cls, *, action: str, port: int) -> PneumaticGripperCommand:
-        return cls(PneumaticGripperParams(action=action, port=port))
+    def from_tool_action(
+        cls, *, action: str, port: int, dwell_s: float
+    ) -> PneumaticGripperCommand:
+        return cls(PneumaticGripperParams(action=action, port=port, dwell_s=dwell_s))
 
     def do_setup(self, state: ControllerState) -> None:
         self._state_to_set = 1 if self.p.action == "open" else 0
         # port 1 -> index 2, port 2 -> index 3
         self._port_index = 2 if self.p.port == 1 else 3
+        self._ticks_left = max(1, round(self.p.dwell_s / INTERVAL_S))
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
-        self.timeout_counter -= 1
-        if self.timeout_counter <= 0:
-            self.fail(make_error(ErrorCode.MOTN_GRIPPER_TIMEOUT))
-            return ExecutionStatusCode.FAILED
-
         state.InOut_out[self._port_index] = self._state_to_set
+        self._ticks_left -= 1
+        if self._ticks_left > 0:
+            return ExecutionStatusCode.EXECUTING
         self.finish()
         return ExecutionStatusCode.COMPLETED
 
 
 class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
-    """Control electric gripper (move/calibrate)."""
+    """Control electric gripper (move/calibrate/stop/idle)."""
 
     PARAMS_TYPE = None  # Not wire-registered — instantiated by ToolActionCommand
 
@@ -98,6 +109,9 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
     _STALL_TICKS: int = 20  # 200 ms at 100 Hz
     _STALL_DEAD_BAND: int = 2  # progress threshold, 2/255 ≈ 0.8% of full range
     _GRACE_TICKS: int = 10  # 100 ms before stall checks begin
+    # A stop is done once the jaws hold still, within one position byte,
+    # for this many ticks.
+    _STILL_TICKS: int = 5
 
     __slots__ = (
         "state",
@@ -109,6 +123,8 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         "_stall_best_distance",
         "_stall_remaining",
         "_grace_remaining",
+        "_last_feedback",
+        "_still_remaining",
     )
 
     def __init__(self, p: ElectricGripperParams):
@@ -122,6 +138,8 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         self._stall_best_distance = 256  # larger than any possible distance
         self._stall_remaining = self._STALL_TICKS
         self._grace_remaining = self._GRACE_TICKS
+        self._last_feedback = -1
+        self._still_remaining = self._STILL_TICKS
 
     @classmethod
     def from_tool_action(
@@ -138,11 +156,43 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
             )
         )
 
+    def halt(self, state: ControllerState) -> None:
+        """Stop the jaws where they are (stop/estop), keeping the grip:
+        re-target the reported position with the move bit still set, so the
+        firmware is already in tolerance and holds there. Clearing the bit
+        would release a part the jaws are holding. A calibration has no
+        position to hold and is simply ended; an uncalibrated gripper has
+        none either and is released, as its own stop action releases it."""
+        if self.state in (
+            ElectricGripperState.SEND_CALIBRATE,
+            ElectricGripperState.WAITING_CALIBRATION,
+        ):
+            state.gripper_hw.mode = 0
+            return
+        if not state.gripper_calibrated:
+            self._release(state)
+            return
+        self._hold_in_place(state)
+
+    @staticmethod
+    def _hold_in_place(state: ControllerState) -> None:
+        hw = state.gripper_hw
+        hw.target_position = hw.feedback_position
+        hw.mode = 0
+        hw.set_command_bits(move_active=True, estop=not state.InOut_in[4])
+
+    @staticmethod
+    def _release(state: ControllerState) -> None:
+        state.gripper_hw.mode = 0
+        state.gripper_hw.set_command_bits(
+            move_active=False, estop=not state.InOut_in[4]
+        )
+
     def do_setup(self, state: ControllerState) -> None:
         self._hw_position = int(round(self.p.position * 255))
         self._hw_speed = max(1, int(round(self.p.speed * 255)))
         if self.p.action == "calibrate":
-            self.wait_counter = 200
+            self.wait_counter = CALIBRATE_TICKS
 
     def execute_step(self, state: ControllerState) -> ExecutionStatusCode:
         self.timeout_counter -= 1
@@ -153,10 +203,34 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         hw = state.gripper_hw
 
         if self.state == ElectricGripperState.START:
-            if self.p.action == "calibrate":
+            action = self.p.action
+            if action == "calibrate":
                 self.state = ElectricGripperState.SEND_CALIBRATE
+            elif action == "idle" or (
+                action == "stop" and not state.gripper_calibrated
+            ):
+                # An uncalibrated gripper has no position to hold: re-targeting
+                # its reported 0 would drive it fully open.
+                self._release(state)
+                self.finish()
+                return ExecutionStatusCode.COMPLETED
+            elif action == "stop":
+                self._hold_in_place(state)
+                self.state = ElectricGripperState.HALTING
             else:
                 self.state = ElectricGripperState.WAIT_FOR_POSITION
+
+        if self.state == ElectricGripperState.HALTING:
+            position = hw.feedback_position
+            if abs(position - self._last_feedback) <= 1:
+                self._still_remaining -= 1
+                if self._still_remaining <= 0:
+                    self.finish()
+                    return ExecutionStatusCode.COMPLETED
+            else:
+                self._still_remaining = self._STILL_TICKS
+            self._last_feedback = position
+            return ExecutionStatusCode.EXECUTING
 
         if self.state == ElectricGripperState.SEND_CALIBRATE:
             logger.debug("  -> Sending one-shot calibrate command...")
@@ -169,6 +243,7 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
             if self.wait_counter <= 0:
                 logger.info("  -> Calibration delay finished.")
                 hw.mode = 0
+                state.gripper_calibrated = True
                 self.finish()
                 return ExecutionStatusCode.COMPLETED
             return ExecutionStatusCode.EXECUTING

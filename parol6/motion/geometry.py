@@ -9,213 +9,85 @@ depending on controller state or executing any motion.
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+import math
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from pinokin import batch_se3_interp, se3_from_rpy, se3_interp, so3_rpy
+from pinokin import batch_se3_interp, se3_interp, so3_rpy
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
 if TYPE_CHECKING:
     from pinokin import Robot
 
-from parol6.config import CONTROL_RATE_HZ, PATH_SAMPLES
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONTROL_RATE = CONTROL_RATE_HZ
+
+#: Rotation weight in the multi-segment path metric sqrt(t² + (w·θ)²) [m/rad].
+PATH_ROT_WEIGHT_M_PER_RAD: float = 0.15
+#: Sampling pitch of a spline or process move on that metric [mm] (par6's
+#: ``path_step_m``).
+PATH_STEP_MM: float = 2.0
+#: Most poses a spline or process move is sampled into (par6's
+#: ``CART_PATH_MAX_STEPS``): bounds the IK and timing work of one path.
+PATH_MAX_POINTS: int = 3000
+
+#: An arc's end within this of its start asks for a full circle [mm]: the
+#: arm settles a hair off the pose it was sent to, so the start the arc is
+#: planned from is never exactly the end a script wrote back.
+FULL_CIRCLE_MM: float = 1.0
+#: A via within this of the line through an arc's start and end names no
+#: circle [mm]. The arm settles within a motor step of a commanded pose, a
+#: few hundredths of a millimetre at the tool, so a start read back from
+#: it stands that far off a line a script drew through it.
+ARC_COLLINEAR_MM: float = 0.1
+
+_PATH_ROT_WEIGHT_MM_PER_RAD: float = PATH_ROT_WEIGHT_M_PER_RAD * 1000.0
+# Legs shorter than this on the combined metric repeat the waypoint before [mm].
+_REPEAT_MM: float = 1e-6
 
 
-class _ShapeGenerator:
-    """Base class for geometry generation."""
+def _rotation_angle(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
+    """Angle between the rotations of two SE3 poses [rad].
 
-    def __init__(self, control_rate: float | None = None):
-        self.control_rate = (
-            control_rate if control_rate is not None else DEFAULT_CONTROL_RATE
-        )
-
-
-class CircularMotion(_ShapeGenerator):
-    """Generate arc trajectories in 3D space.
-
-    Returns (N, 6) arrays of [x, y, z, rx, ry, rz] poses.
-    Position units match input units (typically mm).
-    Orientation is in degrees.
-    """
-
-    def generate_arc(
-        self,
-        start_pose: NDArray,
-        end_pose: NDArray,
-        center: NDArray,
-        normal: NDArray | None = None,
-        clockwise: bool = False,
-        n_samples: int = PATH_SAMPLES,
-    ) -> np.ndarray:
-        """Generate a 3D circular arc trajectory (uniformly sampled geometry).
-
-        Args:
-            start_pose: Start pose [x, y, z, rx, ry, rz] (mm, degrees)
-            end_pose: End pose [x, y, z, rx, ry, rz] (mm, degrees)
-            center: Arc center point [x, y, z] (mm)
-            normal: Normal vector defining arc plane (auto-computed if None)
-            clockwise: If True, arc goes clockwise when viewed from normal
-            n_samples: Number of sample points along the arc
-
-        Returns:
-            (N, 4, 4) array of SE3 poses along the arc (meters, radians).
-        """
-        start_pos = start_pose[:3]
-        end_pos = end_pose[:3]
-
-        r1 = start_pos - center
-        r2 = end_pos - center
-
-        if normal is None:
-            normal = np.cross(r1, r2)
-            if np.linalg.norm(normal) < 1e-6:
-                normal = np.array([0, 0, 1])
-        normal_unit = normal / np.linalg.norm(normal)
-
-        r1_norm = r1 / np.linalg.norm(r1)
-        r2_norm = r2 / np.linalg.norm(r2)
-        cos_angle = np.clip(np.dot(r1_norm, r2_norm), -1, 1)
-        arc_angle = np.arccos(cos_angle)
-
-        # Full circle: start ≈ end → 2π arc, not zero
-        if arc_angle < 1e-6 and float(np.linalg.norm(r1 - r2)) < 1.0:
-            arc_angle = 2 * np.pi
-
-        cross = np.cross(r1_norm, r2_norm)
-        if np.dot(cross, normal_unit) < 0:
-            arc_angle = 2 * np.pi - arc_angle
-        if clockwise:
-            arc_angle = -arc_angle
-
-        num_points = max(2, n_samples)
-
-        t_values = np.linspace(0, 1, num_points) if num_points > 1 else np.array([1.0])
-        angles = t_values * arc_angle
-
-        rotvecs = np.outer(angles, normal_unit)  # (num_points, 3)
-        rotations = Rotation.from_rotvec(rotvecs)
-        positions = center + rotations.apply(r1)  # (num_points, 3) in mm
-
-        # Build SE3 start/end from 6D poses, then interpolate orientation in
-        # SE3 space (Lie-algebra geodesic) to avoid gimbal-lock Euler issues.
-        start_se3 = np.empty((4, 4), dtype=np.float64)
-        end_se3 = np.empty((4, 4), dtype=np.float64)
-        se3_from_rpy(
-            start_pose[0] / 1000.0,
-            start_pose[1] / 1000.0,
-            start_pose[2] / 1000.0,
-            np.radians(start_pose[3]),
-            np.radians(start_pose[4]),
-            np.radians(start_pose[5]),
-            start_se3,
-        )
-        se3_from_rpy(
-            end_pose[0] / 1000.0,
-            end_pose[1] / 1000.0,
-            end_pose[2] / 1000.0,
-            np.radians(end_pose[3]),
-            np.radians(end_pose[4]),
-            np.radians(end_pose[5]),
-            end_se3,
-        )
-
-        trajectory = np.empty((num_points, 4, 4), dtype=np.float64)
-        batch_se3_interp(start_se3, end_se3, t_values, trajectory)
-
-        # Override translations with the arc-geometry positions (mm → meters)
-        trajectory[:, :3, 3] = positions / 1000.0
-
-        return trajectory
+    The atan2 of the relative rotation's sine and cosine: exact to rounding
+    at zero, where the arccos of a rounded cosine reads a repeated pose as
+    turned by up to 3e-8 rad."""
+    r = a[:3, :3].T @ b[:3, :3]
+    sine = 0.5 * math.sqrt(
+        (r[2, 1] - r[1, 2]) ** 2 + (r[0, 2] - r[2, 0]) ** 2 + (r[1, 0] - r[0, 1]) ** 2
+    )
+    cosine = (r[0, 0] + r[1, 1] + r[2, 2] - 1.0) / 2.0
+    return math.atan2(sine, cosine)
 
 
-class SplineMotion(_ShapeGenerator):
-    """Generate smooth spline trajectories through waypoints.
+def pose_distance_m(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
+    """Distance between two SE3 poses on the combined metric
+    sqrt(translation² + (w·rotation)²) [m]: a reorientation in place still
+    covers distance."""
+    translation = float(np.linalg.norm(b[:3, 3] - a[:3, 3]))
+    return math.hypot(translation, PATH_ROT_WEIGHT_M_PER_RAD * _rotation_angle(a, b))
 
-    Uses cubic spline interpolation for position and SLERP for orientation.
-    """
 
-    def generate_spline(
-        self,
-        waypoints: NDArray,
-        timestamps: NDArray | None = None,
-        duration: float | None = None,
-        velocity_start: NDArray | None = None,
-        velocity_end: NDArray | None = None,
-    ) -> np.ndarray:
-        """Generate spline trajectory (uniformly sampled geometry).
+def _intervals(length_mm: float, angle_rad: float) -> int:
+    """Sample intervals a piece of path wants at ``PATH_STEP_MM`` on the
+    combined metric, at least one."""
+    metric = math.hypot(length_mm, _PATH_ROT_WEIGHT_MM_PER_RAD * angle_rad)
+    return max(1, math.ceil(metric / PATH_STEP_MM))
 
-        Args:
-            waypoints: (N, 6) array of [x, y, z, rx, ry, rz] waypoints
-            timestamps: Optional timestamps for each waypoint
-            duration: Total duration (overrides timestamps scaling)
-            velocity_start: Start velocity for position [vx, vy, vz]
-            velocity_end: End velocity for position [vx, vy, vz]
 
-        Returns:
-            (N, 6) array of poses along the spline
-        """
-        waypoints_arr = np.asarray(waypoints, dtype=float)
-        num_waypoints = len(waypoints_arr)
-
-        if num_waypoints < 2:
-            return waypoints_arr
-
-        if timestamps is None:
-            total_dist = 0.0
-            for i in range(1, num_waypoints):
-                dist = np.linalg.norm(waypoints_arr[i, :3] - waypoints_arr[i - 1, :3])
-                total_dist += float(dist)
-
-            if duration is not None:
-                total_time = duration
-            else:
-                total_time = max(0.1, total_dist / 50.0)
-
-            timestamps_arr = np.linspace(0, total_time, num_waypoints)
-        else:
-            timestamps_arr = np.asarray(timestamps, dtype=float)
-            if duration is not None:
-                scale = duration / timestamps_arr[-1] if timestamps_arr[-1] > 0 else 1.0
-                timestamps_arr = timestamps_arr * scale
-
-        if len(timestamps_arr) != len(waypoints_arr):
-            raise ValueError(
-                f"Timestamps length ({len(timestamps_arr)}) must match "
-                f"waypoints length ({len(waypoints_arr)})"
-            )
-
-        pos_splines = []
-        for i in range(3):
-            # Annotated assignment keeps bc as Any: scipy-stubs' bc_type rejects
-            # the scalar derivative values scipy requires for 1-D y
-            if velocity_start is not None and velocity_end is not None:
-                bc: Any = ((1, float(velocity_start[i])), (1, float(velocity_end[i])))
-            else:
-                bc = "not-a-knot"
-            spline = CubicSpline(timestamps_arr, waypoints_arr[:, i], bc_type=bc)
-            pos_splines.append(spline)
-
-        # Batch convert euler angles to rotations (vectorized)
-        euler_angles = waypoints_arr[:, 3:]
-        key_rots = Rotation.from_euler("xyz", euler_angles, degrees=True)
-        slerp = Slerp(timestamps_arr, key_rots)
-
-        total_time = float(timestamps_arr[-1])
-        num_points = max(2, int(total_time * self.control_rate))
-        t_eval = np.linspace(0, total_time, num_points)
-
-        trajectory = np.empty((num_points, 6), dtype=np.float64)
-        for i, spline in enumerate(pos_splines):
-            trajectory[:, i] = spline(t_eval)
-        trajectory[:, 3:] = slerp(t_eval).as_euler("xyz", degrees=True)
-
-        return trajectory
+def _fit_budget(counts: list[int]) -> None:
+    """Scale per-piece interval counts down so the whole path stays within
+    ``PATH_MAX_POINTS`` poses, every piece keeping at least one interval."""
+    total = sum(counts)
+    budget = max(PATH_MAX_POINTS, len(counts) + 1)
+    if total < budget:
+        return
+    factor = (budget - 1) / total
+    for i, c in enumerate(counts):
+        counts[i] = max(1, round(c * factor))
 
 
 def joint_path_to_tcp_poses(
@@ -259,10 +131,13 @@ def compute_circle_from_3_points(
     p2: NDArray[np.float64],
     p3: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], float, NDArray[np.float64]]:
-    """Compute the circumscribed circle through 3 non-collinear 3D points.
+    """Compute the circumscribed circle through 3 non-collinear 3D points (mm).
+
+    An end within ``FULL_CIRCLE_MM`` of the start is a full circle through
+    the via opposite the start.
 
     Args:
-        p1, p2, p3: 3D points (shape (3,))
+        p1, p2, p3: 3D points (shape (3,)) in mm
 
     Returns:
         (center, radius, normal):
@@ -271,7 +146,9 @@ def compute_circle_from_3_points(
             normal: Unit normal of the plane containing the circle (3,)
 
     Raises:
-        ValueError: If the 3 points are collinear (no unique circle).
+        ValueError: If the via lies within ``ARC_COLLINEAR_MM`` of the line
+            through the start and the end (no unique circle), or all three
+            points coincide.
     """
     p1 = np.asarray(p1, dtype=np.float64)
     p2 = np.asarray(p2, dtype=np.float64)
@@ -279,10 +156,9 @@ def compute_circle_from_3_points(
 
     a = p2 - p1
     b = p3 - p1
+    b_len = float(np.linalg.norm(b))
 
-    # Full circle: start ≈ end (p1 ≈ p3), via is diametrically opposite.
-    # Threshold accounts for FK/IK precision (~0.1 mm).
-    if float(np.linalg.norm(b)) < 1.0:
+    if b_len < FULL_CIRCLE_MM:
         a_len = float(np.linalg.norm(a))
         if a_len < 1e-12:
             raise ValueError("All three points are coincident.")
@@ -298,7 +174,8 @@ def compute_circle_from_3_points(
 
     normal = np.asarray(np.cross(a, b), dtype=np.float64)
     normal_len = float(np.linalg.norm(normal))
-    if normal_len < 1e-12:
+    # |a × b| / |b| is how far the via stands off the start-end line.
+    if normal_len < ARC_COLLINEAR_MM * b_len:
         raise ValueError("Points are collinear; no unique circle exists.")
     np.divide(normal, normal_len, out=normal)
 
@@ -310,10 +187,7 @@ def compute_circle_from_3_points(
     aa = float(np.dot(a, a))
     bb = float(np.dot(b, b))
     ab = float(np.dot(a, b))
-
     det = aa * bb - ab * ab
-    if abs(det) < 1e-20:
-        raise ValueError("Degenerate configuration; cannot compute circle center.")
 
     s = (bb * aa - ab * bb) / (2.0 * det)
     t = (aa * bb - ab * aa) / (2.0 * det)
@@ -323,96 +197,214 @@ def compute_circle_from_3_points(
     return center, radius, normal
 
 
-def blend_path_into(
+class LineSegment:
+    """A straight cartesian segment: position lerp, orientation geodesic.
+
+    The two are interpolated apart, not as one screw motion: a screw that
+    turns the tool bows its position off the line between the ends."""
+
+    __slots__ = ("start", "end", "_length_m", "_angle_rad")
+
+    def __init__(self, start: NDArray[np.float64], end: NDArray[np.float64]) -> None:
+        self.start = start
+        self.end = end
+        self._length_m = float(np.linalg.norm(end[:3, 3] - start[:3, 3]))
+        self._angle_rad = _rotation_angle(start, end)
+
+    def length_mm(self) -> float:
+        return self._length_m * 1000.0
+
+    def angle_rad(self) -> float:
+        return self._angle_rad
+
+    def sample_into(
+        self, out: NDArray[np.float64], s_start: float, s_end: float, skip: int
+    ) -> None:
+        """Poses at evenly spaced ``t`` from ``s_start`` to ``s_end``, the
+        first ``skip`` of them left out, written into ``out``."""
+        n_total = out.shape[0] + skip
+        t_values = np.linspace(s_start, s_end, n_total)[skip:]
+        # The screw's rotation is the geodesic; its translation is replaced.
+        batch_se3_interp(self.start, self.end, t_values, out)
+        p0 = self.start[:3, 3]
+        out[:, :3, 3] = p0 + np.outer(t_values, self.end[:3, 3] - p0)
+
+    def sample(self, t: float, out: NDArray[np.float64]) -> None:
+        se3_interp(self.start, self.end, t, out)
+        p0 = self.start[:3, 3]
+        out[:3, 3] = p0 + t * (self.end[:3, 3] - p0)
+
+    def tangent(self, t: float) -> NDArray[np.float64]:
+        d = self.end[:3, 3] - self.start[:3, 3]
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-12 else np.zeros(3)
+
+
+class ArcSegment:
+    """A circular arc as a segment: position sweeps the circle through the
+    via point from start to end, orientation is the geodesic between the
+    two end poses."""
+
+    __slots__ = (
+        "start",
+        "end",
+        "_center_m",
+        "_r1_m",
+        "_normal",
+        "_sweep",
+        "_angle_rad",
+    )
+
+    def __init__(
+        self,
+        start: NDArray[np.float64],
+        via: NDArray[np.float64],
+        end: NDArray[np.float64],
+    ) -> None:
+        self.start = start
+        self.end = end
+        start_mm = start[:3, 3] * 1000.0
+        end_mm = end[:3, 3] * 1000.0
+        center_mm, _radius, normal = compute_circle_from_3_points(
+            start_mm, via[:3, 3] * 1000.0, end_mm
+        )
+        self._center_m = center_mm / 1000.0
+        self._normal = normal
+        r1 = start[:3, 3] - self._center_m
+        r2 = end[:3, 3] - self._center_m
+        n1, n2 = float(np.linalg.norm(r1)), float(np.linalg.norm(r2))
+        if n1 < 1e-9 or n2 < 1e-9:
+            raise ValueError("the arc has no radius")
+        self._r1_m = r1
+        u1, u2 = r1 / n1, r2 / n2
+        sweep = float(np.arccos(np.clip(np.dot(u1, u2), -1.0, 1.0)))
+        if float(np.linalg.norm(end_mm - start_mm)) < FULL_CIRCLE_MM:
+            sweep = 2.0 * np.pi
+        elif float(np.dot(np.cross(u1, u2), normal)) < 0.0:
+            sweep = 2.0 * np.pi - sweep
+        self._sweep = sweep
+        self._angle_rad = _rotation_angle(start, end)
+
+    def length_mm(self) -> float:
+        return float(np.linalg.norm(self._r1_m)) * self._sweep * 1000.0
+
+    def angle_rad(self) -> float:
+        return self._angle_rad
+
+    def _position(self, t: float) -> NDArray[np.float64]:
+        rotation = Rotation.from_rotvec(self._normal * (t * self._sweep))
+        return self._center_m + rotation.apply(self._r1_m)
+
+    def sample(self, t: float, out: NDArray[np.float64]) -> None:
+        se3_interp(self.start, self.end, t, out)
+        out[:3, 3] = self._position(t)
+
+    def sample_into(
+        self, out: NDArray[np.float64], s_start: float, s_end: float, skip: int
+    ) -> None:
+        n_total = out.shape[0] + skip
+        t_values = np.linspace(s_start, s_end, n_total)[skip:]
+        batch_se3_interp(self.start, self.end, t_values, out)
+        rotations = Rotation.from_rotvec(np.outer(t_values * self._sweep, self._normal))
+        out[:, :3, 3] = self._center_m + rotations.apply(self._r1_m)
+
+    def tangent(self, t: float) -> NDArray[np.float64]:
+        r = self._position(t) - self._center_m
+        d = np.cross(self._normal, r)
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-12 else np.zeros(3)
+
+
+def _cubic_blend_into(
     entry_pose: NDArray[np.float64],
-    waypoint_pose: NDArray[np.float64],
     exit_pose: NDArray[np.float64],
+    p1: NDArray[np.float64],
+    p2: NDArray[np.float64],
     out: NDArray[np.float64],
     skip: int = 0,
 ) -> None:
-    """Write quadratic Bezier blend zone into pre-allocated buffer.
+    """Write a cubic Bézier blend zone into a pre-allocated buffer.
 
-    The blend zone smoothly rounds a corner between two linear Cartesian
-    segments. It is tangent to the incoming segment at t=0 and to the outgoing
-    segment at t=1.
-
-    Position follows a quadratic Bezier curve::
-
-        P(t) = (1-t)^2*E + 2t(1-t)*W + t^2*X
-
-    Orientation is geodesic (SLERP) from entry to exit.
-
-    Args:
-        entry_pose: SE3 pose at blend zone entry (4x4)
-        waypoint_pose: SE3 pose at the corner being rounded (4x4)
-        exit_pose: SE3 pose at blend zone exit (4x4)
-        out: Output array, shape (n_samples, 4, 4). Written in-place.
-        skip: Number of initial samples to skip (for junction dedup).
+    Position follows the cubic through the control points
+    (entry, p1, p2, exit); orientation is the geodesic from entry to exit.
     """
     E = entry_pose[:3, 3]
-    W = waypoint_pose[:3, 3]
     X = exit_pose[:3, 3]
 
     n_total = out.shape[0] + skip
     t = np.linspace(0.0, 1.0, n_total)[skip:]
 
-    # Batch SLERP for orientation (entry -> exit)
     batch_se3_interp(entry_pose, exit_pose, t, out)
 
-    # Override translation with quadratic Bezier position
     omt = 1.0 - t
     out[:, :3, 3] = (
-        np.outer(omt * omt, E) + np.outer(2.0 * omt * t, W) + np.outer(t * t, X)
+        np.outer(omt * omt * omt, E)
+        + np.outer(3.0 * omt * omt * t, p1)
+        + np.outer(3.0 * omt * t * t, p2)
+        + np.outer(t * t * t, X)
     )
 
 
 def build_composite_cartesian_path(
     waypoints: list[NDArray[np.float64]],
     blend_radii: list[float],
-    samples_per_segment: int = PATH_SAMPLES,
+    samples_per_segment: int | None = None,
 ) -> NDArray[np.float64]:
-    """Build a composite Cartesian path with blend zones at intermediate waypoints.
-
-    Concatenates linear Cartesian segments connected by quadratic Bezier blend
-    zones. Implements ABB-style zone overlap clamping: if two adjacent blend
-    zones would overlap, both radii are proportionally reduced so they don't
-    exceed half the segment length.
+    """A polyline through SE3 waypoints with its interior corners rounded:
+    :func:`build_blended_path` over straight segments.
 
     Args:
-        waypoints: List of SE3 poses (4x4) defining the path corners.
-            Must have at least 2 waypoints.
-        blend_radii: Blend radius (mm) for each intermediate waypoint.
-            Length must equal ``len(waypoints) - 2`` (no blend at start/end).
-            ``r=0`` means stop at the waypoint (no blending).
-        samples_per_segment: Number of linear interpolation samples per segment
-
-    Returns:
-        (M, 4, 4) ndarray of SE3 poses forming the complete path.
-
-    Raises:
-        ValueError: If inputs are inconsistent.
+        waypoints: SE3 poses (4x4) defining the path corners, at least 2.
+        blend_radii: Blend radius (mm) for each intermediate waypoint,
+            ``len(waypoints) - 2`` of them; ``0`` means stop at the waypoint.
+        samples_per_segment: As :func:`build_blended_path` takes it.
     """
     n = len(waypoints)
     if n < 2:
         raise ValueError("Need at least 2 waypoints")
-    if len(blend_radii) != max(0, n - 2):
-        raise ValueError(
-            f"Expected {max(0, n - 2)} blend radii, got {len(blend_radii)}"
-        )
+    segments = [LineSegment(waypoints[i], waypoints[i + 1]) for i in range(n - 1)]
+    return build_blended_path(segments, blend_radii, samples_per_segment)
 
-    # No blending for 2-waypoint path
-    if n == 2:
-        out = np.empty((samples_per_segment, 4, 4), dtype=np.float64)
-        _linear_se3_segment_into(waypoints[0], waypoints[1], out)
-        return out
 
-    # Segment lengths in mm (FK transforms are in meters)
-    seg_lengths: list[float] = [0.0] * (n - 1)
-    for i in range(n - 1):
-        seg_lengths[i] = (
-            float(np.linalg.norm(waypoints[i + 1][:3, 3] - waypoints[i][:3, 3]))
-            * 1000.0
-        )
+def build_blended_path(
+    segments: list[LineSegment | ArcSegment],
+    blend_radii: list[float],
+    samples_per_segment: int | None = None,
+) -> NDArray[np.float64]:
+    """Build a composite cartesian path from straight and circular segments
+    whose junctions are rounded by blend zones.
+
+    Each zone trims both adjoining segments by its radius, measured along
+    the segment (arc length on an arc), and joins the two trim points with
+    a cubic Bézier whose handles lie along the segments' directions of
+    travel there, two thirds of the trim long: the zone is tangent to the
+    incoming segment where it starts and to the outgoing one where it
+    ends. Between two lines the cubic is exactly the degree-raised
+    quadratic through the corner point; an arc's zone follows its
+    curvature into and out of the corner. The ABB zone rule applies: a radius never eats more
+    than half of either adjoining segment, and two zones sharing a segment
+    are scaled down together until they fit.
+
+    Args:
+        segments: The path's segments in order, at least one.
+        blend_radii: Blend radius (mm) for each junction, ``len(segments) - 1``
+            of them; ``0`` means stop at the junction.
+        samples_per_segment: Poses per run of a segment, a blend zone
+            taking its share of them. ``None`` samples every run and zone
+            by its own length at ``PATH_STEP_MM`` on the combined metric,
+            ``PATH_MAX_POINTS`` poses at most, so a long straight run is
+            sampled as finely as a short one.
+
+    Returns:
+        (M, 4, 4) ndarray of SE3 poses forming the complete path.
+    """
+    n_seg = len(segments)
+    if n_seg < 1:
+        raise ValueError("Need at least 1 segment")
+    if len(blend_radii) != n_seg - 1:
+        raise ValueError(f"Expected {n_seg - 1} blend radii, got {len(blend_radii)}")
+
+    seg_lengths = [seg.length_mm() for seg in segments]
 
     # Clamp blend radii (zone overlap prevention)
     clamped = list(blend_radii)
@@ -431,8 +423,8 @@ def build_composite_cartesian_path(
             clamped[i + 1] *= scale
 
     # Pre-compute per-segment trim fractions
-    seg_exit_frac = [0.0] * (n - 1)
-    seg_entry_frac = [0.0] * (n - 1)
+    seg_exit_frac = [0.0] * n_seg
+    seg_entry_frac = [0.0] * n_seg
     for i in range(len(clamped)):
         if clamped[i] > 0:
             if seg_lengths[i] > 0:
@@ -440,98 +432,155 @@ def build_composite_cartesian_path(
             if seg_lengths[i + 1] > 0:
                 seg_entry_frac[i + 1] = clamped[i] / seg_lengths[i + 1]
 
-    # Interleaved precompute: count linear segments and blend zones in order
-    total_rows = 0
-    for seg_idx in range(n - 1):
-        s_start = seg_entry_frac[seg_idx]
-        s_end = 1.0 - seg_exit_frac[seg_idx]
-        if s_end > s_start + 1e-9:
-            rows = samples_per_segment
-            if total_rows > 0 and seg_idx > 0:
-                rows -= 1
-            total_rows += rows
-        if seg_idx < len(clamped) and clamped[seg_idx] > 0:
-            avg_seg_len = (seg_lengths[seg_idx] + seg_lengths[seg_idx + 1]) / 2.0
-            frac = clamped[seg_idx] / avg_seg_len if avg_seg_len > 1e-6 else 0.0
-            bs = _blend_sample_count(frac, samples_per_segment)
-            rows = bs
-            if total_rows > 0:
-                rows -= 1
-            total_rows += rows
-
-    out = np.empty((total_rows, 4, 4), dtype=np.float64)
-    row = 0
-
     # Workspace buffers for blend zone endpoints (hoisted out of loop)
     entry_buf = np.zeros((4, 4), dtype=np.float64)
     exit_buf = np.zeros((4, 4), dtype=np.float64)
 
-    for seg_idx in range(n - 1):
-        start = waypoints[seg_idx]
-        end = waypoints[seg_idx + 1]
-
+    # Size every piece first, so a budget spreads over the whole path: the
+    # runs of each segment between its zones, and the zones.
+    pieces: list[tuple[int, bool, float, float]] = []
+    counts: list[int] = []
+    for seg_idx, seg in enumerate(segments):
         s_start = seg_entry_frac[seg_idx]
         s_end = 1.0 - seg_exit_frac[seg_idx]
-
-        # Linear segment
         if s_end > s_start + 1e-9:
-            skip = 1 if (row > 0 and seg_idx > 0) else 0
-            n_write = samples_per_segment - skip
-            _linear_se3_segment_into(
-                start,
-                end,
-                out[row : row + n_write],
-                s_start,
-                s_end,
-                skip=skip,
+            pieces.append((seg_idx, False, s_start, s_end))
+            span = s_end - s_start
+            counts.append(
+                samples_per_segment - 1
+                if samples_per_segment is not None
+                else _intervals(span * seg_lengths[seg_idx], span * seg.angle_rad())
             )
-            row += n_write
-
-        # Blend zone at end of this segment
         if seg_idx < len(clamped) and clamped[seg_idx] > 0:
-            se3_interp(start, end, 1.0 - seg_exit_frac[seg_idx], entry_buf)
-            corner = end
-            next_end = waypoints[seg_idx + 2]
-            se3_interp(end, next_end, seg_entry_frac[seg_idx + 1], exit_buf)
+            t_in = 1.0 - seg_exit_frac[seg_idx]
+            t_out = seg_entry_frac[seg_idx + 1]
+            pieces.append((seg_idx, True, t_in, t_out))
+            if samples_per_segment is not None:
+                avg_seg_len = (seg_lengths[seg_idx] + seg_lengths[seg_idx + 1]) / 2.0
+                frac = clamped[seg_idx] / avg_seg_len if avg_seg_len > 1e-6 else 0.0
+                counts.append(_blend_sample_count(frac, samples_per_segment) - 1)
+            else:
+                # The zone's control polygon is about 2r long; its curve is
+                # shorter.
+                seg.sample(t_in, entry_buf)
+                segments[seg_idx + 1].sample(t_out, exit_buf)
+                counts.append(
+                    _intervals(
+                        2.0 * clamped[seg_idx], _rotation_angle(entry_buf, exit_buf)
+                    )
+                )
+    if samples_per_segment is None:
+        _fit_budget(counts)
 
-            avg_seg_len = (seg_lengths[seg_idx] + seg_lengths[seg_idx + 1]) / 2.0
-            frac = clamped[seg_idx] / avg_seg_len if avg_seg_len > 1e-6 else 0.0
-            bs = _blend_sample_count(frac, samples_per_segment)
-            skip = 1 if row > 0 else 0
-            n_write = bs - skip
-            blend_path_into(
-                entry_buf,
-                corner,
-                exit_buf,
-                out[row : row + n_write],
-                skip=skip,
+    out = np.empty((1 + sum(counts), 4, 4), dtype=np.float64)
+    row = 0
+    for (seg_idx, zone, t_a, t_b), intervals in zip(pieces, counts, strict=True):
+        # Pieces share their junction pose; each after the first skips it.
+        skip = 1 if row > 0 else 0
+        n_write = intervals + 1 - skip
+        if not zone:
+            segments[seg_idx].sample_into(out[row : row + n_write], t_a, t_b, skip)
+        else:
+            seg, nxt = segments[seg_idx], segments[seg_idx + 1]
+            seg.sample(t_a, entry_buf)
+            nxt.sample(t_b, exit_buf)
+            handle_m = 2.0 / 3.0 * clamped[seg_idx] / 1000.0
+            p1 = entry_buf[:3, 3] + handle_m * seg.tangent(t_a)
+            p2 = exit_buf[:3, 3] - handle_m * nxt.tangent(t_b)
+            _cubic_blend_into(
+                entry_buf, exit_buf, p1, p2, out[row : row + n_write], skip=skip
             )
-            row += n_write
+        row += n_write
 
     return out[:row]
 
 
-def _linear_se3_segment_into(
-    start: NDArray[np.float64],
-    end: NDArray[np.float64],
-    out: NDArray[np.float64],
-    s_start: float = 0.0,
-    s_end: float = 1.0,
-    skip: int = 0,
-) -> None:
-    """Write linearly interpolated SE3 poses into pre-allocated buffer.
+def build_spline_path(
+    waypoints: Sequence[NDArray[np.float64]],
+) -> NDArray[np.float64]:
+    """Poses along a cubic spline through SE3 ``waypoints``, the first being
+    where the path starts; every waypoint is one of the poses.
 
-    Args:
-        start: Start SE3 pose (4x4)
-        end: End SE3 pose (4x4)
-        out: Output array, shape (n_samples, 4, 4). Written in-place.
-        s_start: Start interpolation fraction (0-1)
-        s_end: End interpolation fraction (0-1)
-        skip: Number of initial samples to skip (for junction dedup).
+    Position is a natural cubic spline per axis over chord-length knots:
+    uniform knots overshoot between unevenly spaced waypoints, and a
+    natural end cannot swing wide of the first and last segments as
+    not-a-knot can. Orientation slerps between the waypoints' rotations.
+
+    Both run on one schedule, the distance along the path on the combined
+    metric sqrt(t² + (w·θ)²), sampled at ``PATH_STEP_MM``: a waypoint that
+    only turns the tool takes its turn there, the tool standing at it,
+    rather than all at once between two poses. Position keeps its
+    chord-length knots and holds still while the tool turns in place; a
+    cubic over the combined metric would swing the tool wide of a
+    waypoint it only turns at.
+
+    Returns:
+        (M, 4, 4) SE3 poses; one pose when every waypoint is the first.
     """
-    n_total = out.shape[0] + skip
-    s_values = np.linspace(s_start, s_end, n_total)[skip:]
-    batch_se3_interp(start, end, s_values, out)
+    points = np.array([w[:3, 3] for w in waypoints], dtype=np.float64) * 1000.0
+    rotations = Rotation.from_matrix(np.array([w[:3, :3] for w in waypoints]))
+    if len(points) > 1:
+        chord = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        turn = (rotations[:-1].inv() * rotations[1:]).magnitude()
+        # A waypoint that repeats the one before it is nothing to pass through.
+        keep = np.concatenate(
+            ([True], np.hypot(chord, _PATH_ROT_WEIGHT_MM_PER_RAD * turn) > _REPEAT_MM)
+        )
+        points = points[keep]
+        rotations = rotations[keep]
+    if len(points) < 2:
+        return np.asarray(waypoints[0], dtype=np.float64)[np.newaxis].copy()
+
+    chord = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    turn = (rotations[:-1].inv() * rotations[1:]).magnitude()
+    along_knots = np.concatenate(([0.0], np.cumsum(chord)))
+    knots = np.concatenate(
+        ([0.0], np.cumsum(np.hypot(chord, _PATH_ROT_WEIGHT_MM_PER_RAD * turn)))
+    )
+
+    # The cubic runs through the distinct positions only: a waypoint that
+    # turns the tool in place shares its position's knot.
+    moves = np.concatenate(([True], chord > _REPEAT_MM))
+    position: CubicSpline | None = None
+    if int(moves.sum()) > 1:
+        position = CubicSpline(
+            along_knots[moves], points[moves], bc_type="natural", axis=0
+        )
+
+    counts = [_intervals(float(chord[i]), float(turn[i])) for i in range(len(chord))]
+    _fit_budget(counts)
+    u = np.concatenate(
+        [knots[:1]]
+        + [
+            np.linspace(knots[i], knots[i + 1], counts[i] + 1)[1:]
+            for i in range(len(counts))
+        ]
+    )
+
+    out = np.zeros((len(u), 4, 4), dtype=np.float64)
+    out[:, 3, 3] = 1.0
+    out[:, :3, :3] = Slerp(knots, rotations)(u).as_matrix()
+    if position is None:
+        out[:, :3, 3] = points[0] / 1000.0
+    else:
+        out[:, :3, 3] = position(np.interp(u, knots, along_knots)) / 1000.0
+    return out
+
+
+def cartesian_path_knots(cart_poses: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Normalized cumulative tool distance along an SE3 pose chain, on the
+    metric sqrt(translation² + (w·rotation)²): the path parameter a timing
+    solver should key the poses to, so that a constant ``ds/dt`` is a
+    constant tool speed. Repeated poses share a knot value; the caller
+    drops them."""
+    n = len(cart_poses)
+    knots = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        knots[i] = knots[i - 1] + pose_distance_m(cart_poses[i - 1], cart_poses[i])
+    total = float(knots[-1])
+    if total > 1e-12:
+        knots /= total
+    return knots
 
 
 def _blend_sample_count(frac: float, samples_per_segment: int) -> int:

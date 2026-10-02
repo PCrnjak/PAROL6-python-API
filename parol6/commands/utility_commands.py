@@ -76,7 +76,8 @@ class DelayCommand(CommandBase[DelayCmd]):
 @register_command(CmdType.RESET_STATE)
 class ResetStateCommand(SystemCommand[ResetStateCmd]):
     """
-    Instantly reset controller state to initial values.
+    Reset the program-level controller state (see ``ControllerState.reset``).
+    The arm, the protective-stop latch and the I/O are left as they are.
     """
 
     PARAMS_TYPE = ResetStateCmd
@@ -85,7 +86,6 @@ class ResetStateCommand(SystemCommand[ResetStateCmd]):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatusCode:
         state.reset()
-        self._sync_mock = True
         self.finish()
         return ExecutionStatusCode.COMPLETED
 

@@ -8,10 +8,12 @@ def clean_state(server_proc, client):
     """
     Reset controller state before each integration test for isolation.
 
-    Uses RESET command to instantly reset positions, queues, tool, errors.
+    Clears a protective stop a failed test may have latched (``reset_state``
+    leaves it), then resets the program state and homes.
     Sets LINEAR motion profile for faster test execution.
     Depends on server_proc to ensure server is ready before resetting.
     """
+    client.reset()
     client.reset_state()
     client.select_profile("LINEAR")
     idx = client.home()

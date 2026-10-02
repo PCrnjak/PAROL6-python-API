@@ -11,6 +11,18 @@ from parol6.server.status_cache import StatusCache
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 
+def _wait_for_ik(cache: StatusCache, timeout: float) -> bool:
+    """Poll for the worker's answer. Its first one includes the spawned
+    process importing the robot stack (~2.4 s on a Pi, longer on a loaded
+    Windows runner); later ones take ~0.08 s."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cache._poll_ik_results():
+            return True
+        time.sleep(0.02)
+    return False
+
+
 @pytest.mark.integration
 def test_ik_worker_detects_joint_limits():
     """
@@ -40,12 +52,7 @@ def test_ik_worker_detects_joint_limits():
 
         cache._submit_ik_request(q, T_matrix)
 
-        ready = False
-        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = cache._poll_ik_results()
-            if ready:
-                break
-            time.sleep(0.02)
+        ready = _wait_for_ik(cache, timeout=10.0)
 
         assert ready, "IK worker did not return results"
         joint_en = cache.joint_en
@@ -66,12 +73,7 @@ def test_ik_worker_detects_joint_limits():
 
         cache._submit_ik_request(q, T_matrix)
 
-        ready = False
-        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = cache._poll_ik_results()
-            if ready:
-                break
-            time.sleep(0.02)
+        ready = _wait_for_ik(cache, timeout=2.0)
 
         assert ready, "IK worker did not return results for min limit test"
         joint_en = cache.joint_en
@@ -109,12 +111,7 @@ def test_ik_worker_all_enabled_in_safe_position():
 
         cache._submit_ik_request(q_home, T_matrix)
 
-        ready = False
-        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            ready = cache._poll_ik_results()
-            if ready:
-                break
-            time.sleep(0.02)
+        ready = _wait_for_ik(cache, timeout=10.0)
 
         assert ready, "IK worker did not return results in time"
         joint_en = cache.joint_en

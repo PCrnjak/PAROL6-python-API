@@ -21,6 +21,14 @@ logging.addLevelName(TRACE, "TRACE")
 # Command queue limits
 MAX_COMMAND_QUEUE_SIZE: int = 100
 MAX_BLEND_LOOKAHEAD: int = int(os.getenv("PAROL6_MAX_BLEND_LOOKAHEAD", "100"))
+# How long the planner waits for the next command of a blend chain, once
+# nothing plays ahead of it, before planning what it has: a corner cannot be
+# rounded until both of its moves have arrived.
+BLEND_HOLD_S: float = float(os.getenv("PAROL6_BLEND_HOLD_S", "0.1"))
+# It times the planner's queue waits: NaN or more than a lock wait takes
+# kills the planner, and zero or less spins it and plans every move alone.
+if not 0.0 < BLEND_HOLD_S <= threading.TIMEOUT_MAX:
+    raise ValueError("PAROL6_BLEND_HOLD_S must be a positive, finite duration")
 MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
 # Further messages read in a tick whose batch filled up. A client streaming
 # faster than the tick leaves a backlog in the socket; it is already stale, so
@@ -584,10 +592,8 @@ if np.any(LIMITS.joint.hard.velocity <= 0) or np.any(
 ):
     raise ValueError("Joint limits must be positive. Check PAROL6_ROBOT config.")
 
-# Jog min speeds - derived from control rate (1 step per tick minimum)
+# Jog min speed - derived from control rate (1 step per tick minimum)
 JOG_MIN_STEPS: int = int(CONTROL_RATE_HZ)  # steps/s
-CART_LIN_JOG_MIN: float = CONTROL_RATE_HZ / 100  # mm/s (scales with control rate)
-CART_ANG_JOG_MIN: float = 1.0  # deg/s
 
 # Per-joint IK safety margins (radians) - [min_margin, max_margin] per joint
 # Direction-aware: J3 backwards bend (max) is a trap, but inward (min) is safe

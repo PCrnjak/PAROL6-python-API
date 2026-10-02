@@ -271,18 +271,6 @@ class TransportManager:
                 logger.debug("Error disconnecting transport: %s", e)
             self.transport = None
 
-    def sync_mock_from_state(self, state: Any) -> None:
-        """Sync mock transport from controller state after RESET.
-
-        Args:
-            state: ControllerState to sync from.
-        """
-        if isinstance(self.transport, MockSerialTransport):
-            self.transport.sync_from_controller_state(state)
-            # Skip stale frames
-            _, ver, _ = self.transport.get_latest_frame_view()
-            self._last_version = ver
-
     def tick_simulation(
         self,
         tool_name: str = "NONE",

@@ -11,6 +11,8 @@ import pytest
 import pytest_asyncio
 
 from parol6.protocol.wire import CommandCompletionCmd, encode_command
+from parol6.utils.error_codes import ErrorCode
+from parol6.utils.errors import MotionError
 
 from waldoctl import (
     ElectricGripperTool,
@@ -113,8 +115,8 @@ class TestPneumaticGripperMethods:
         assert idx >= 0
         assert await client.wait_motion(timeout=5.0)
 
-        # A side-channel tool action can finish before an older planned
-        # command. Its completion must still be observable after that command.
+        # A tool action waits its turn behind the delay the pause holds, the
+        # jaws still shut, and runs once the queue resumes.
         earlier = await client.delay(0.5)
         assert await client.wait_status(
             lambda s: s.executing_index == earlier, timeout=5.0
@@ -122,14 +124,16 @@ class TestPneumaticGripperMethods:
         assert await client.pause() == 1
         try:
             opened = await tool.open(wait=False)
-            assert await client.wait_command(opened, timeout=1.0)
-            assert not await client.wait_command(earlier, timeout=0.05), (
-                "a completed tool action must not confirm the paused delay"
+            assert not await client.wait_command(opened, timeout=0.5), (
+                "the open ran past the paused delay ahead of it"
+            )
+            assert (await tool.status()).positions[0] > 0.99, (
+                "the jaws opened under the pause"
             )
         finally:
             assert await client.resume() == 1
-        assert await client.wait_motion(timeout=5.0)
-        assert await client.wait_command(opened, timeout=1.0)
+        assert await client.wait_command(opened, timeout=5.0)
+        assert await client.wait_command(earlier, timeout=1.0)
 
         cancelled = await client.delay(1.0)
         assert await client.wait_status(
@@ -138,7 +142,9 @@ class TestPneumaticGripperMethods:
         assert await client.stop() == 1
         closed = await tool.close(wait=False)
         assert await client.wait_command(closed, timeout=1.0)
-        assert not await client.wait_command(cancelled, timeout=0.05)
+        with pytest.raises(MotionError) as discarded:
+            await client.wait_command(cancelled, timeout=1.0)
+        assert discarded.value.robot_error.code == ErrorCode.MOTN_CANCELLED
 
         # Deliver a real completion reply late, ahead of a different query.
         assert client._transport is not None
@@ -185,8 +191,45 @@ class TestPneumaticGripperMethods:
 
 
 # ===========================================================================
-# SSG-48 Electric Gripper Methods (async, via client.tool)
+# Electric Gripper Methods (async, via client.tool)
 # ===========================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["SSG-48", "MSG"])
+async def test_an_electric_gripper_calibrates_and_moves(async_client, key):
+    """From an uncalibrated gripper, which refuses a jaw move, a calibration
+    sent right behind the selection takes effect for the jaw moves queued
+    behind it: they wait for it, reach their targets, and draw the
+    commanded fraction of the tool's current range while the jaws travel."""
+    robot, client = async_client
+    spec = robot.tools[key]
+    assert isinstance(spec, ElectricGripperTool)
+    lo, hi = spec.current_range
+
+    # A simulator toggle leaves the gripper uncalibrated, whatever an
+    # earlier test calibrated.
+    assert await client.simulator(True) == 1
+    assert await client.select_tool(key) >= 0
+    tool = client.tool
+    assert await tool.calibrate() >= 0
+    assert await tool.set_position(0.0, speed=1.0, wait=True, timeout=15.0) >= 0
+    assert (await tool.status()).positions[0] == pytest.approx(0.0, abs=0.02)
+
+    fraction = 0.25
+    moving = await tool.set_position(0.6, speed=0.1, current=fraction)
+    assert moving >= 0
+    assert await client.wait_status(
+        lambda s: s.executing_index == moving and s.tool_status.positions[0] > 0.1,
+        timeout=5.0,
+    ), f"the {key} jaws never got under way"
+    drawn = (await tool.status()).channels[0]
+    assert drawn == round(lo + fraction * (hi - lo)), (
+        f"a {key} move at current {fraction} drew {drawn} mA across {lo}..{hi}"
+    )
+    assert await client.wait_command(moving, timeout=10.0)
+    assert (await tool.status()).positions[0] == pytest.approx(0.6, abs=0.02)
 
 
 @pytest.mark.integration
@@ -194,65 +237,115 @@ class TestSSG48GripperMethods:
     """Test SSG-48 electric gripper via client.tool()."""
 
     @pytest.mark.asyncio
-    async def test_ssg48_calibrate_and_move(self, async_client):
-        """Calibrate and move SSG-48 gripper through tool methods."""
+    async def test_a_bad_tool_action_is_refused_before_it_is_acknowledged(
+        self, async_client
+    ):
+        """A malformed action never leaves the client; one the arm cannot
+        run is refused by the controller instead of acknowledged and left
+        to fail — and the control loop keeps ticking through all of it."""
+        robot, client = async_client
+        await client.select_tool("SSG-48")
+        await client.wait_motion(timeout=5.0)
+        tool = client.tool
+
+        with pytest.raises(MotionError, match="not the selected tool"):
+            await client.tool_action("PNEUMATIC", "open")
+
+        for params in (
+            [],
+            [0.5],
+            [0.5, 0.5],
+            [0.5, 0.5, 0.5, 1],
+            [float("nan"), 0.5, 0.5],
+            [0.5, float("inf"), 0.5],
+            [0.5, 0.5, float("-inf")],
+            [-0.1, 0.5, 0.5],
+            [1.5, 0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 1.5, 0.5],
+            [0.5, 0.5, -0.1],
+            [0.5, 0.5, 1.5],
+            [0.5, 0.5, 600],
+            ["0.5", 0.5, 0.5],
+            [True, 0.5, 0.5],
+        ):
+            with pytest.raises(ValueError):
+                await client.tool_action("SSG-48", "move", params)
+        for action, params in (
+            ("bogus", []),
+            ("open", []),
+            ("set_position", [0.5]),
+            ("calibrate", [1]),
+            ("stop", [0]),
+            ("idle", [0]),
+        ):
+            with pytest.raises(ValueError):
+                await client.tool_action("SSG-48", action, params)
+        # The jaw methods take current as a fraction of the current range.
+        for current in (-0.1, 1.5, 600, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                await tool.set_position(0.5, current=current)
+        assert await client.status() is not None
+
+    @pytest.mark.asyncio
+    async def test_a_script_drives_the_tool_it_just_selected(self, async_client):
+        """A tool action sent right behind the ``select_tool`` that fits the
+        tool is judged against that selection, not the tool still fitted,
+        and queues behind it; a jaw move's current fraction grips at that
+        fraction of the tool's current range."""
         robot, client = async_client
         spec = robot.tools["SSG-48"]
         assert isinstance(spec, ElectricGripperTool)
-        assert spec.gripper_type == GripperType.ELECTRIC
+        lo, hi = spec.current_range
 
-        # Verify parameter ranges
-        assert spec.position_range == (0.0, 1.0)
-        assert spec.speed_range == (0.0, 1.0)
-        assert spec.current_range == (100, 1300)
-
-        await client.select_tool("SSG-48")
-        await client.wait_motion(timeout=5.0)
-
+        assert await client.select_tool("SSG-48") >= 0
         tool = client.tool
+        calibrating = await tool.calibrate()
+        assert calibrating >= 0
+        assert await client.wait_command(calibrating, timeout=10.0)
 
-        # Calibrate
-        idx = await tool.calibrate()
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
-
-        # Move to half position
-        idx = await tool.set_position(0.5, speed=0.7, current=600)
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
-
-
-# ===========================================================================
-# MSG AI Stepper Gripper Methods (async, via client.tool)
-# ===========================================================================
-
-
-@pytest.mark.integration
-class TestMSGGripperMethods:
-    """Test MSG compliant AI stepper gripper via client.tool()."""
+        fraction = 0.3
+        closing = await tool.set_position(1.0, speed=0.05, current=fraction)
+        assert closing >= 0
+        # The close itself, not any current: the frame an earlier move left
+        # reports that move's current until the queue reaches the close.
+        assert await client.wait_status(
+            lambda s: s.executing_index == closing, timeout=5.0
+        ), "the close never started"
+        commanded = (await tool.status()).channels[0]
+        assert commanded == round(lo + fraction * (hi - lo)), (
+            f"a move at current {fraction} sent {commanded} mA across "
+            f"{spec.current_range}"
+        )
+        assert await client.stop() == 1
 
     @pytest.mark.asyncio
-    async def test_msg_calibrate_and_move(self, async_client):
-        """Calibrate and move MSG gripper through tool methods."""
+    async def test_a_stop_halts_the_jaws_where_they_are(self, async_client):
+        """A stop mid-travel fails the move with MOTN_CANCELLED and leaves
+        the jaws where they were, gripping, rather than letting them run on
+        to the target or releasing."""
         robot, client = async_client
-        spec = robot.tools["MSG"]
-        assert isinstance(spec, ElectricGripperTool)
-        assert spec.gripper_type == GripperType.ELECTRIC
-
-        await client.select_tool("MSG")
+        await client.select_tool("SSG-48")
         await client.wait_motion(timeout=5.0)
-
         tool = client.tool
+        assert await tool.calibrate(wait=True) >= 0
+        assert await tool.set_position(0.0, wait=True) >= 0
 
-        # Calibrate
-        idx = await tool.calibrate()
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
+        closing = await tool.set_position(1.0, speed=0.05)
+        assert await client.wait_status(
+            lambda s: 0.15 < s.tool_status.positions[0] < 0.6, timeout=10.0
+        ), "the jaws never got under way"
+        assert await client.stop() == 1
+        with pytest.raises(MotionError) as stopped:
+            await client.wait_command(closing, timeout=1.0)
+        assert stopped.value.robot_error.code == ErrorCode.MOTN_CANCELLED
 
-        # Move to position
-        idx = await tool.set_position(0.3, speed=0.5, current=500)
-        assert idx >= 0
-        await client.wait_motion(timeout=10.0)
+        held = (await tool.status()).positions[0]
+        await asyncio.sleep(0.3)
+        later = await tool.status()
+        assert 0.1 < held < 0.9, f"the jaws ran on to {held}"
+        assert abs(later.positions[0] - held) < 0.02, "the jaws kept moving"
+        assert later.engaged, "the stop released the grip"
 
 
 # ===========================================================================

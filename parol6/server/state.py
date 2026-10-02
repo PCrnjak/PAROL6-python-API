@@ -4,6 +4,7 @@ import atexit
 import logging
 import secrets
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,8 +16,15 @@ from pinokin import arrays_equal_6
 from parol6.config import CONTROL_RATE_HZ, steps_to_rad
 from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 from parol6.protocol.wire import CommandCode
-from parol6.utils.error_catalog import RobotError
+from parol6.utils.error_catalog import RobotError, attributed
 from waldoctl import ActionState
+
+# How many exact outcomes (successes, failures) the completion query retains.
+_OUTCOME_RING = 1024
+
+ATTACHMENT_CHANGED = (
+    "attachment context changed; reconcile the physical scene and reapply"
+)
 
 
 class GripperHWState:
@@ -181,6 +189,9 @@ class ControllerState:
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
+    # The tool the newest accepted select_tool names: the fitted tool once
+    # the queue reaches it, and what a tool action sent behind it acts on.
+    accepted_tool: str = "NONE"
     _current_tool_variant: str = ""
     _tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _tcp_rotation_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -247,7 +258,7 @@ class ControllerState:
     action_params: str = ""
     # HomeState value of the live HomeCommand (1 signalling, 2 waiting for the
     # firmware to clear the homed bits, 3 waiting for every joint); meaningful
-    # only while action_current is "HomeCommand".
+    # only while action_current is "home".
     homing_step: int = 0
     # Status broadcast rate for this session. Mutable so SET_STATUS_RATE can
     # raise it for a capture or a tuning run and drop it back without a
@@ -265,8 +276,20 @@ class ControllerState:
     executing_command_index: int = -1
     completed_command_index: int = -1
     status_session_id: int = field(default_factory=lambda: secrets.randbits(64) or 1)
-    _recent_completions: list[int] = field(default_factory=lambda: [-1] * 1024)
+    _recent_completions: list[int] = field(default_factory=lambda: [-1] * _OUTCOME_RING)
     _completion_cursor: int = 0
+    # Where each index sits in its ring: a stop owes an outcome for every
+    # queued command, and a ring scan per index would hold the stop's tick.
+    _completion_slots: dict[int, int] = field(default_factory=dict)
+    # Commands that ended as failures (a stop discarded them), with why —
+    # preallocated rings beside the success ring, so the completion query
+    # can answer "failed" instead of leaving a wait to run out its timeout.
+    _recent_failures: list[int] = field(default_factory=lambda: [-1] * _OUTCOME_RING)
+    _failure_errors: list[RobotError | None] = field(
+        default_factory=lambda: [None] * _OUTCOME_RING
+    )
+    _failure_cursor: int = 0
+    _failure_slots: dict[int, int] = field(default_factory=dict)
     last_checkpoint: str = ""
 
     # Planning behavior (stop on first IK failure vs solve all for diagnostic)
@@ -347,6 +370,13 @@ class ControllerState:
 
     # Named wrapper over raw gripper arrays (initialized in __post_init__)
     gripper_hw: GripperHWState = field(init=False, repr=False)
+    # Set when a calibrate action completes; cleared when the transport
+    # (re)connects, since the gripper may have lost power. Tracked here, one
+    # flag for whichever gripper is fitted: the SSG-48 firmware packs a
+    # calibrated bit into its status byte, but that bit is unverified on the
+    # other supported grippers, so it is not read. reset() leaves it alone:
+    # resetting software state does not uncalibrate the gripper.
+    gripper_calibrated: bool = False
 
     def __post_init__(self) -> None:
         """Initialize E-stop to released state and named gripper wrapper."""
@@ -361,55 +391,103 @@ class ControllerState:
     def record_completion(self, index: int) -> None:
         """Retain exact successes; concurrent lanes do not finish in index order."""
         self.completed_command_index = max(self.completed_command_index, index)
-        self._recent_completions[self._completion_cursor] = index
-        self._completion_cursor = (self._completion_cursor + 1) % len(
-            self._recent_completions
-        )
+        cursor = self._completion_cursor
+        evicted = self._recent_completions[cursor]
+        if self._completion_slots.get(evicted) == cursor:
+            del self._completion_slots[evicted]
+        self._recent_completions[cursor] = index
+        self._completion_slots[index] = cursor
+        self._completion_cursor = (cursor + 1) % _OUTCOME_RING
 
     def command_completed(self, index: int) -> bool:
-        return index >= 0 and index in self._recent_completions
+        return index >= 0 and index in self._completion_slots
+
+    def record_failure(self, index: int, error: RobotError) -> None:
+        """Retain a command that ended without completing, and why. It is
+        past the completion watermark all the same: nothing more will run
+        for it."""
+        self.fail_unfinished((index,), error)
+
+    def fail_unfinished(self, indices: Iterable[int], error: RobotError) -> None:
+        """Record *error* as the failure of each of *indices* that has no
+        outcome yet: a command ends once, so its first outcome is the one
+        kept. *error* need not be attributed to them (see
+        :meth:`command_failure`). A stop fails its whole queue in the tick
+        that stops the arm, hence one pass over locals."""
+        done = self._completion_slots
+        slots = self._failure_slots
+        ring = self._recent_failures
+        errors = self._failure_errors
+        cursor = self._failure_cursor
+        top = self.completed_command_index
+        for index in indices:
+            if index < 0 or index in done or index in slots:
+                continue
+            if index > top:
+                top = index
+            evicted = ring[cursor]
+            if slots.get(evicted) == cursor:
+                del slots[evicted]
+            ring[cursor] = index
+            errors[cursor] = error
+            slots[index] = cursor
+            cursor = (cursor + 1) % _OUTCOME_RING
+        self._failure_cursor = cursor
+        self.completed_command_index = top
+
+    def command_failure(self, index: int) -> RobotError | None:
+        """Why *index* failed, attributed to it, or None. A stop records one
+        error for every command it drops, attributed here, on the read."""
+        if index < 0:
+            return None
+        cursor = self._failure_slots.get(index)
+        if cursor is None:
+            return None
+        error = self._failure_errors[cursor]
+        return None if error is None else attributed(error, index)
 
     def reset(self) -> None:
         """
-        Reset robot state to initial values without losing connection state.
+        Reset the program-level state a script builds up, as ``reset_state``
+        promises: world shapes, tool selection, errors, pause, motion profile
+        and execution speed.
 
-        Preserves: ser, ip, port, start_time, next_command_index
-        Resets: positions, speeds, I/O, queues, tool, errors, etc.
+        Preserves what the contract says it does not touch — the protective
+        stop latch (``enabled`` / ``disabled_reason``; only ``reset()`` clears
+        it), homed state, the digital outputs and the gripper's output frame —
+        and everything the firmware reports (positions, I/O inputs).
+        Also preserves ``next_command_index`` and the completion history, so a
+        wait on a command from before the reset — including one this reset
+        cancelled — still resolves.
         """
         self.invalidate_attachments()
-        # Safety and control flags
-        self.enabled = True
+        # Program flags (the protective-stop latch is deliberately left alone)
         self.execution_paused = False
+        self.execution_speed = 1.0
         self.soft_error = False
-        self.disabled_reason = ""
-        self.e_stop_active = False
         self.motion_profile = "TOPPRA"
 
         # Tool back to none
         self._current_tool = "NONE"
+        self.accepted_tool = "NONE"
         self._current_tool_variant = ""
         self._tcp_offset_m = (0.0, 0.0, 0.0)
         self._tcp_rotation_rad = (0.0, 0.0, 0.0)
         PAROL6_ROBOT.apply_tool("NONE")
 
-        # Command and telemetry buffers - zero out
+        # Program-layer world shapes; the installation layer is config and
+        # stays.
+        PAROL6_ROBOT.apply_shapes([])
+        self.shapes = []
+        self.has_attachments = False
+        self.attachments_valid = True
+        self.attachment_motion_stopped = False
+        self.shapes_version += 1
+
+        # Stop commanding motion; the arm holds where it is.
         self.Command_out = CommandCode.IDLE
-        self.Position_out.fill(0)
         self.Speed_out.fill(0)
-        self.Gripper_data_out.fill(0)
-        self.Position_in.fill(0)
-        self.Speed_in.fill(0)
-        self.Timing_data_in.fill(0)
-        self.Gripper_data_in.fill(0)
         self.Affected_joint_out.fill(0)
-        self.InOut_out.fill(0)
-        self.InOut_in.fill(0)
-        self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
-        self.Homed_in.fill(0)
-        self.Temperature_error_in.fill(0)
-        self.Position_error_in.fill(0)
-        self.Timeout_out = 0
-        self.XTR_data = 0
 
         # Action tracking
         self.action_current = ""
@@ -420,15 +498,11 @@ class ControllerState:
         self.queue_nonstreamable.clear()
         self.pending_planned.clear()
 
-        # Queue progress tracking. next_command_index is deliberately NOT
-        # reset: indices must stay monotonic across reset so a stale
-        # pre-reset status frame (its completed_index is a high-water mark)
-        # can never satisfy a wait on a post-reset command.
+        # Queue progress tracking. next_command_index, completed_command_index
+        # and the completion rings are deliberately NOT reset: indices stay
+        # monotonic, and the outcome of every command issued so far stays
+        # readable.
         self.executing_command_index = -1
-        self.completed_command_index = -1
-        for i in range(len(self._recent_completions)):
-            self._recent_completions[i] = -1
-        self._completion_cursor = 0
         self.last_checkpoint = ""
 
         # Error and pipeline depth
@@ -488,9 +562,7 @@ class ControllerState:
         """
         attached = [s for s in shapes if s.attachment is not None]
         if any(s.attachment.epoch != self.attachment_epoch for s in attached):
-            raise ValueError(
-                "attachment context changed; reconcile the physical scene and reapply"
-            )
+            raise ValueError(ATTACHMENT_CHANGED)
         if (attached or self.has_attachments) and (
             self.action_state == ActionState.EXECUTING
             or self.queued_segments

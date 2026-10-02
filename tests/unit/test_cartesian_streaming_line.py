@@ -121,3 +121,46 @@ def test_cartesian_stream_rations_a_mixed_move_between_both_ceilings():
     assert peak_ang <= LIMITS.cart.jog.velocity.angular * 1.01, (
         f"angular TCP speed {peak_ang:.4f} rad/s over its ceiling"
     )
+
+
+@pytest.mark.unit
+def test_a_jog_twist_keeps_its_direction_and_an_empty_one_brakes():
+    """A jog_l is a 6-DOF twist: a diagonal moves the TCP along the
+    diagonal it was given, at the configured TCP ceiling rather than
+    sqrt(2) times it, and a zero twist ramps the tool to rest."""
+    cse = CartesianStreamingExecutor(dt=DT)
+    start = _pose([0.35, 0.10, 0.20])
+    cse.sync_pose(start)
+    ceiling = LIMITS.cart.jog.velocity.linear
+    twist = np.array([ceiling, ceiling, 0.0, 0.0, 0.0, 0.0])
+    unit = np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0)
+
+    cse.set_jog_twist(twist, wrf=True)
+    prev = start[:3, 3].copy()
+    worst_off, peak = 0.0, 0.0
+    for _ in range(300):
+        pose, _vel, _finished = cse.tick()
+        p = pose[:3, 3]
+        rel = p - start[:3, 3]
+        worst_off = max(worst_off, float(np.linalg.norm(rel - (rel @ unit) * unit)))
+        peak = max(peak, float(np.linalg.norm(p - prev)) / DT)
+        prev = p.copy()
+    travelled = float(np.linalg.norm(prev - start[:3, 3]))
+    assert travelled > 0.05, f"the twist never got the tool moving: {travelled:.4f} m"
+    assert worst_off < 1e-6, f"the tool left its diagonal by {worst_off * 1000:.3f} mm"
+    assert peak <= ceiling * 1.01, (
+        f"the TCP ran at {peak:.4f} m/s over a {ceiling:.4f} m/s ceiling"
+    )
+    assert peak > ceiling * 0.9, f"the tool never reached its ceiling: {peak:.4f} m/s"
+
+    cse.set_jog_twist(np.zeros(6), wrf=True)
+    for _ in range(300):
+        pose, vel, finished = cse.tick()
+        if finished and float(np.dot(vel, vel)) < 1e-12:
+            break
+    else:
+        pytest.fail("a zero twist never brought the tool to rest")
+    at_rest = pose[:3, 3].copy()
+    for _ in range(50):
+        pose, _vel, _finished = cse.tick()
+    assert np.linalg.norm(pose[:3, 3] - at_rest) < 1e-9, "the tool crept after braking"

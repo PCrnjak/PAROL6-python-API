@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,14 @@ from parol6.commands.base import (
     MotionCommand,
 )
 from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
-from parol6.protocol.wire import Command, decode_command
+from parol6.protocol.wire import Command, decode_command, wire_command_name
+from parol6.utils.error_catalog import (
+    RobotError,
+    attributed,
+    extract_robot_error,
+    make_error,
+)
+from parol6.utils.error_codes import ErrorCode
 from waldoctl import ActionState
 
 if TYPE_CHECKING:
@@ -68,11 +76,19 @@ class CommandExecutor:
     Immediate commands (system, query) are handled directly by the controller.
     """
 
-    def __init__(self, state_manager: "StateManager"):
+    def __init__(
+        self, state_manager: "StateManager", others_in_flight: Callable[[], bool]
+    ):
         self._state_manager = state_manager
+        # Whether work beside the streams (planned motion, a tool action) is
+        # under way, which a refusal left standing would be read against.
+        self._others_in_flight = others_in_flight
 
         self.command_queue: deque[QueuedCommand] = deque(maxlen=MAX_COMMAND_QUEUE_SIZE)
         self.active_command: QueuedCommand | None = None
+        # The last refusal logged and when, so a stream refused at 50 Hz
+        # logs once a second rather than every datagram.
+        self._refusal_logged: tuple[int, float] = (-1, 0.0)
 
     def _update_queue_state(self, state: "ControllerState") -> None:
         """Update queue snapshot and next action in state."""
@@ -80,7 +96,7 @@ class CommandExecutor:
         state.queue_nonstreamable.clear()
         for qc in self.command_queue:
             if not (isinstance(qc.command, MotionCommand) and qc.command.streamable):
-                state.queue_nonstreamable.append(type(qc.command).__name__)
+                state.queue_nonstreamable.append(wire_command_name(type(qc.command.p)))
         state.action_next = (
             state.queue_nonstreamable[0] if state.queue_nonstreamable else ""
         )
@@ -209,7 +225,7 @@ class CommandExecutor:
             # One-time setup on first activation
             if not ac.activated:
                 self._setup_active(ac, state)
-                state.action_current = type(ac.command).__name__
+                state.action_current = wire_command_name(type(ac.command.p))
                 state.action_params = _format_cmd_params(ac.command.p)
                 state.action_state = ActionState.EXECUTING
                 state.executing_command_index = ac.command_index
@@ -230,11 +246,22 @@ class CommandExecutor:
             self._process_tick_result(ac, code, state)
 
         except Exception as e:
-            logger.error("Command execution error: %s", e)
+            # A stream refused in setup (unhomed, off the simulator, a
+            # bad parameter) answers no datagram: the standing error is
+            # how its client learns of it.
+            error = extract_robot_error(e, ErrorCode.MOTN_SETUP_FAILED, detail=str(e))
+            now = time.monotonic()
+            if (
+                error.code != self._refusal_logged[0]
+                or now - self._refusal_logged[1] >= 1.0
+            ):
+                logger.error("Command execution error: %s", e)
+                self._refusal_logged = (error.code, now)
+            self._latch_failure(ac, error, state)
+            self._release_streams(state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.IDLE
             self._update_queue_state(state)
             self.active_command = None
 
@@ -289,9 +316,18 @@ class CommandExecutor:
                 time.time(),
             )
 
+            self._latch_failure(
+                ac,
+                ac.command.robot_error
+                or make_error(
+                    ErrorCode.MOTN_TICK_FAILED, detail=type(ac.command).__name__
+                ),
+                state,
+            )
+            self._release_streams(state)
             state.action_current = ""
+            state.executing_command_index = -1
             state.action_params = ""
-            state.action_state = ActionState.IDLE
 
             # Drop queued streamable commands so they don't pile up after a failure.
             if isinstance(ac.command, MotionCommand) and ac.command.streamable:
@@ -307,6 +343,32 @@ class CommandExecutor:
             self._update_queue_state(state)
             self.active_command = None
 
+    @staticmethod
+    def _release_streams(state: "ControllerState") -> None:
+        """Drop whatever motion the streaming executors carry: a stream cut
+        off (a stop, an E-stop, a teleport, a planned move, a stream of
+        another kind) or failed leaves nothing for the next one, which
+        starts from the arm at rest instead of running on the way this one
+        was going, or back to where it was."""
+        state.streaming_executor.reset()
+        state.cartesian_streaming_executor.reset()
+
+    def _latch_failure(
+        self, ac: QueuedCommand, error: RobotError, state: "ControllerState"
+    ) -> None:
+        """A command that ends in error fails its own index, and leaves the
+        error standing as a planned move's does: a stream answers no
+        datagram, so ``error()`` and STATUS are how its client hears of a
+        brake-out or a refusal. It stands only while nothing else is under
+        way: beside a running program it would misdescribe the program."""
+        error = attributed(error, ac.command_index)
+        state.record_failure(ac.command_index, error)
+        if self._others_in_flight():
+            state.action_state = ActionState.IDLE
+        else:
+            state.error = error
+            state.action_state = ActionState.ERROR
+
     # ---- Cancellation and queue management ----
 
     def cancel_active_command(self, reason: str = "Cancelled by user") -> None:
@@ -321,6 +383,7 @@ class CommandExecutor:
         )
 
         state = self._state_manager.get_state()
+        self._release_streams(state)
         state.action_current = ""
         state.executing_command_index = -1
         state.action_params = ""
@@ -337,6 +400,7 @@ class CommandExecutor:
         ac = self.active_command
         if ac and isinstance(ac.command, MotionCommand) and ac.command.streamable:
             state = self._state_manager.get_state()
+            self._release_streams(state)
             state.action_current = ""
             state.executing_command_index = -1
             state.action_params = ""

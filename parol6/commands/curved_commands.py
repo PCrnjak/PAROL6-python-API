@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
-from parol6.commands._collision_guard import guard_joint_path
+from parol6.commands._collision_guard import guard_cartesian_path
 from parol6.commands.base import TrajectoryMoveCommandBase, guard_homed
-from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
-from parol6.motion import CircularMotion, JointPath, SplineMotion, TrajectoryBuilder
+from parol6.config import INTERVAL_S, LIMITS, PATH_SAMPLES, steps_to_rad
+from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.protocol.wire import (
     CmdType,
     MoveCCmd,
@@ -22,13 +22,23 @@ from parol6.protocol.wire import (
     MovePCmd,
     MoveSCmd,
 )
-from parol6.motion.geometry import compute_circle_from_3_points
+from parol6.commands.cartesian_commands import (
+    CartesianChainLink,
+    resolve_pose,
+)
+from parol6.motion.geometry import (
+    ArcSegment,
+    LineSegment,
+    build_blended_path,
+    build_composite_cartesian_path,
+    build_spline_path,
+    pose_distance_m,
+)
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_se3
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
-from pinokin import se3_from_rpy, se3_interp, se3_rpy
 
 _MP = TypeVar("_MP", bound=MotionParamsMixin)
 
@@ -38,49 +48,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# TRF/WRF Transformation Utilities
-# =============================================================================
-
-# Pre-allocated workspace buffers for TRF/WRF transformations (command setup phase)
-_pose_trf_buf: np.ndarray = np.zeros((4, 4), dtype=np.float64)
-_pose_wrf_buf: np.ndarray = np.zeros((4, 4), dtype=np.float64)
-_rpy_rad_buf: np.ndarray = np.zeros(3, dtype=np.float64)
+#: A waypoint list's first entry stands in for the start pose within this,
+#: on the combined translation and rotation metric [mm].
+WAYPOINT_SNAP_MM: float = 5.0
 
 
-def _pose6_trf_to_wrf(
-    pose6_mm_deg: Sequence[float], tool_pose: np.ndarray, out: np.ndarray
-) -> None:
-    """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    se3_from_rpy(
-        pose6_mm_deg[0] / 1000.0,
-        pose6_mm_deg[1] / 1000.0,
-        pose6_mm_deg[2] / 1000.0,
-        np.radians(pose6_mm_deg[3]),
-        np.radians(pose6_mm_deg[4]),
-        np.radians(pose6_mm_deg[5]),
-        _pose_trf_buf,
-    )
-    np.matmul(tool_pose, _pose_trf_buf, out=_pose_wrf_buf)
-    se3_rpy(_pose_wrf_buf, _rpy_rad_buf)
-    out[:3] = _pose_wrf_buf[:3, 3] * 1000.0
-    np.degrees(_rpy_rad_buf, out=out[3:])
-
-
-def _transform_waypoints_trf_to_wrf(
-    waypoints: Sequence[Sequence[float]], frame: str, state: "ControllerState"
-) -> np.ndarray:
-    """Transform 6D waypoint poses from TRF to WRF. Returns (N, 6) array."""
-    n = len(waypoints)
-    result = np.empty((n, 6), dtype=np.float64)
-    if frame == "WRF":
-        for i in range(n):
-            result[i] = waypoints[i]
-        return result
-    tool_pose = get_fkine_se3(state)
-    for i in range(n):
-        _pose6_trf_to_wrf(waypoints[i], tool_pose, out=result[i])
-    return result
+def _waypoint_chain(
+    start: np.ndarray, waypoints: Sequence[Sequence[float]], frame: str
+) -> list[np.ndarray]:
+    """The SE3 poses a waypoint list names, resolved against ``start`` as
+    ``resolve_pose`` resolves a move's target, led by ``start`` itself: a
+    first waypoint within ``WAYPOINT_SNAP_MM`` of it is the start."""
+    poses = [start] + [resolve_pose(start, list(wp), frame, False) for wp in waypoints]
+    if len(poses) > 1 and pose_distance_m(start, poses[1]) * 1000.0 <= WAYPOINT_SNAP_MM:
+        del poses[1]
+    return poses
 
 
 # =============================================================================
@@ -89,44 +71,32 @@ def _transform_waypoints_trf_to_wrf(
 
 
 class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
-    """Base class for smooth geometry commands (circle, arc, helix, spline).
+    """Base class for smooth geometry commands (arc, spline, process move).
 
     Subclasses implement generate_main_trajectory() to create Cartesian geometry.
     This base class handles IK conversion and trajectory building.
     """
 
-    __slots__ = (
-        "_rpy_rad_buf",
-        "_pose6_buf",
-    )
+    #: Hold the tool to one speed along the whole path (a process move)
+    #: rather than as fast as the joints allow under the cartesian ceiling.
+    constant_tool_speed: bool = False
 
-    def __init__(self, p: _MP) -> None:
-        super().__init__(p)
-        self._rpy_rad_buf = np.zeros(3, dtype=np.float64)
-        self._pose6_buf = np.zeros(6, dtype=np.float64)
-
-    def get_current_pose(self, state: "ControllerState") -> np.ndarray:
-        """Get current TCP pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
-        current_se3 = get_fkine_se3(state)
-        se3_rpy(current_se3, self._rpy_rad_buf)
-        self._pose6_buf[:3] = current_se3[:3, 3] * 1000  # m -> mm
-        np.degrees(self._rpy_rad_buf, out=self._pose6_buf[3:])
-        return self._pose6_buf
+    __slots__ = ()
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute trajectory from current position."""
         guard_homed(state)
         self.log_debug("  -> Preparing %s...", self.name)
 
-        current_pose = self.get_current_pose(state)
+        start = get_fkine_se3(state).copy()
         self.log_info(
             "  -> Generating %s from position: %s",
             self.name,
-            [round(p, 1) for p in current_pose[:3]],
+            [round(float(p) * 1000.0, 1) for p in start[:3, 3]],
         )
 
-        cartesian_trajectory = self.generate_main_trajectory(current_pose)
-        if cartesian_trajectory is None or len(cartesian_trajectory) == 0:
+        cartesian_trajectory = self.generate_main_trajectory(start, state)
+        if len(cartesian_trajectory) == 0:
             raise TrajectoryPlanningError(
                 make_error(
                     ErrorCode.TRAJ_EMPTY_RESULT, detail="empty cartesian trajectory"
@@ -156,7 +126,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
                 )
             )
 
-        guard_joint_path(joint_path.positions)
+        guard_cartesian_path(joint_path)
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
@@ -167,6 +137,8 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             dt=INTERVAL_S,
             cart_vel_limit=LIMITS.cart.hard.velocity.linear * self.p.resolved_speed,
             cart_acc_limit=LIMITS.cart.hard.acceleration.linear * self.p.accel,
+            path_knots=joint_path.knots,
+            constant_tool_speed=self.constant_tool_speed,
         )
 
         trajectory = builder.build()
@@ -180,53 +152,44 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase[_MP]):
             trajectory.duration,
         )
 
-    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
-        """Override this in subclasses to generate the specific motion trajectory."""
+    def generate_main_trajectory(
+        self, start: np.ndarray, state: "ControllerState"
+    ) -> np.ndarray:
+        """The (N, 4, 4) SE3 poses the move runs through from ``start``."""
         raise NotImplementedError("Subclasses must implement generate_main_trajectory")
 
 
 @register_command(CmdType.MOVEC)
-class MoveCCommand(BaseSmoothMotionCommand[MoveCCmd]):
+class MoveCCommand(CartesianChainLink, BaseSmoothMotionCommand[MoveCCmd]):
     """Execute circular arc motion through current → via → end (3-point arc).
 
-    Computes circle center and normal from the 3 points, then delegates to
-    CircularMotion.generate_arc().
+    Via and end resolve against the pose the move starts from: absolute in
+    WRF, tool-frame offsets in TRF. With a blend radius the arc joins a
+    cartesian blend chain and rounds into the move after it.
     """
 
     PARAMS_TYPE = MoveCCmd
 
-    __slots__ = ("_via", "_end")
+    __slots__ = ()
 
-    def __init__(self, p: MoveCCmd) -> None:
-        super().__init__(p)
-        self._via: np.ndarray = np.asarray(p.via, dtype=np.float64)
-        self._end: np.ndarray = np.asarray(p.end, dtype=np.float64)
+    def generate_main_trajectory(
+        self, start: np.ndarray, state: "ControllerState"
+    ) -> np.ndarray:
+        """The arc from ``start`` through the via to the end."""
+        arc, self.target_pose = self.chain_segment(start, state)
+        return build_blended_path([arc], [], samples_per_segment=PATH_SAMPLES)
 
-    def do_setup(self, state: "ControllerState") -> None:
-        """Transform via/end from TRF if needed, then compute arc."""
-        if self.p.frame == "TRF":
-            tool_pose = get_fkine_se3(state)
-            _pose6_trf_to_wrf(self.p.via, tool_pose, out=self._via)
-            _pose6_trf_to_wrf(self.p.end, tool_pose, out=self._end)
-        return super().do_setup(state)
-
-    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
-        """Generate arc geometry from current position through via to end."""
-        start_xyz = effective_start_pose[:3]
-        via_xyz = self._via[:3]
-        end_xyz = self._end[:3]
-
-        center, _radius, normal = compute_circle_from_3_points(
-            start_xyz, via_xyz, end_xyz
-        )
-
-        return CircularMotion().generate_arc(
-            start_pose=effective_start_pose,
-            end_pose=self._end,
-            center=center,
-            normal=normal,
-            clockwise=False,
-        )
+    def chain_segment(
+        self, previous: np.ndarray, state: "ControllerState"
+    ) -> tuple[LineSegment | ArcSegment, np.ndarray]:
+        via = resolve_pose(previous, self.p.via, self.p.frame, False)
+        end = resolve_pose(previous, self.p.end, self.p.frame, False)
+        try:
+            return ArcSegment(previous, via, end), end
+        except ValueError as e:
+            raise TrajectoryPlanningError(
+                make_error(ErrorCode.COMM_VALIDATION_ERROR, detail=str(e))
+            ) from e
 
 
 @register_command(CmdType.MOVES)
@@ -235,133 +198,57 @@ class MoveSCommand(BaseSmoothMotionCommand[MoveSCmd]):
 
     PARAMS_TYPE = MoveSCmd
 
-    __slots__ = ("_waypoints",)
+    __slots__ = ()
 
-    def __init__(self, p: MoveSCmd) -> None:
-        super().__init__(p)
-        self._waypoints: np.ndarray | None = None
-
-    def do_setup(self, state: "ControllerState") -> None:
-        """Transform parameters if in TRF."""
-        self._waypoints = _transform_waypoints_trf_to_wrf(
-            self.p.waypoints, self.p.frame, state
-        )
-        return super().do_setup(state)
-
-    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
-        """Generate spline starting from actual position."""
-        assert self._waypoints is not None
-
-        wps = self._waypoints
-        motion_gen = SplineMotion()
-
-        first_wp_error = float(np.linalg.norm(wps[0, :3] - effective_start_pose[:3]))
-
-        if first_wp_error > 5.0:
-            modified_waypoints = np.vstack([effective_start_pose[np.newaxis], wps])
-            logger.info(
-                f"    Added start position as first waypoint (distance: {first_wp_error:.1f}mm)"
-            )
-        else:
-            modified_waypoints = np.vstack([effective_start_pose[np.newaxis], wps[1:]])
-            logger.info("    Replaced first waypoint with actual start position")
-
-        duration = self.p.resolved_duration
-        trajectory = motion_gen.generate_spline(
-            waypoints=modified_waypoints,
-            duration=duration,
-        )
-
-        logger.debug(f"    Generated spline with {len(trajectory)} points")
-
+    def generate_main_trajectory(
+        self, start: np.ndarray, state: "ControllerState"
+    ) -> np.ndarray:
+        """The spline from ``start`` through the waypoints, sampled by its
+        length whatever duration times it: a duration too short to keep is
+        stretched to one the arm can, never met by cutting the path."""
+        poses = _waypoint_chain(start, self.p.waypoints, self.p.frame)
+        trajectory = build_spline_path(poses)
+        logger.debug("    Generated spline with %d poses", len(trajectory))
         return trajectory
 
 
-# Number of SE3 samples per linear segment for move_p
-_MOVEP_SAMPLES_PER_SEGMENT: int = 20
+#: Each interior corner of a process move is rounded with this fraction of
+#: the shorter adjoining segment.
+MOVEP_AUTO_BLEND_FRAC: float = 0.25
 
 
 @register_command(CmdType.MOVEP)
 class MovePCommand(BaseSmoothMotionCommand[MovePCmd]):
-    """Process move — constant TCP speed through waypoints with piecewise linear segments.
-
-    Phase 3 will add auto-blending at corners (Bézier blend zones).
-    Currently uses sharp piecewise-linear interpolation.
-    """
+    """Process move — the waypoint list as straight segments with every
+    interior corner rounded, run at one constant tool speed: the TCP sweeps
+    the path without stopping at a single waypoint."""
 
     PARAMS_TYPE = MovePCmd
+    constant_tool_speed = True
 
-    __slots__ = ("_waypoints", "_se3_buf_a", "_se3_buf_b")
+    __slots__ = ()
 
-    def __init__(self, p: MovePCmd) -> None:
-        super().__init__(p)
-        self._waypoints: np.ndarray | None = None
-        self._se3_buf_a = np.zeros((4, 4), dtype=np.float64)
-        self._se3_buf_b = np.zeros((4, 4), dtype=np.float64)
-
-    def do_setup(self, state: "ControllerState") -> None:
-        """Transform parameters if TRF, build trajectory with constant TCP speed."""
-        self._waypoints = _transform_waypoints_trf_to_wrf(
-            self.p.waypoints, self.p.frame, state
-        )
-        return super().do_setup(state)
-
-    def generate_main_trajectory(self, effective_start_pose) -> np.ndarray:
-        """Generate piecewise-linear Cartesian path through waypoints.
-
-        Each segment is linearly interpolated in SE3 space.
-        Phase 3 adds Bézier blend zones at corner points.
-        """
-        assert self._waypoints is not None
-
-        wps = self._waypoints
-
-        first_wp_error = float(np.linalg.norm(wps[0, :3] - effective_start_pose[:3]))
-        if first_wp_error > 5.0:
-            all_waypoints = np.vstack([effective_start_pose[np.newaxis], wps])
-        else:
-            all_waypoints = np.vstack([effective_start_pose[np.newaxis], wps[1:]])
-
-        # Pre-compute total SE3 poses for single allocation
-        n = _MOVEP_SAMPLES_PER_SEGMENT
-        n_segs = len(all_waypoints) - 1
-        total = n_segs * n - (n_segs - 1)  # first segment full, rest skip junction
-        cart_poses = np.empty((total, 4, 4), dtype=np.float64)
-        cursor = 0
-
-        for seg_idx in range(n_segs):
-            wp_a = all_waypoints[seg_idx]
-            wp_b = all_waypoints[seg_idx + 1]
-
-            se3_from_rpy(
-                wp_a[0] / 1000.0,
-                wp_a[1] / 1000.0,
-                wp_a[2] / 1000.0,
-                np.radians(wp_a[3]),
-                np.radians(wp_a[4]),
-                np.radians(wp_a[5]),
-                self._se3_buf_a,
-            )
-            se3_from_rpy(
-                wp_b[0] / 1000.0,
-                wp_b[1] / 1000.0,
-                wp_b[2] / 1000.0,
-                np.radians(wp_b[3]),
-                np.radians(wp_b[4]),
-                np.radians(wp_b[5]),
-                self._se3_buf_b,
-            )
-
-            start_i = 0 if seg_idx == 0 else 1
-            for i in range(start_i, n):
-                s = i / (n - 1)
-                se3_interp(self._se3_buf_a, self._se3_buf_b, s, cart_poses[cursor])
-                cursor += 1
+    def generate_main_trajectory(
+        self, start: np.ndarray, state: "ControllerState"
+    ) -> np.ndarray:
+        """The polyline through the waypoints with each interior corner
+        rounded by a quarter of the shorter adjoining segment, sampled by
+        its length."""
+        poses = _waypoint_chain(start, self.p.waypoints, self.p.frame)
+        lengths = [
+            float(np.linalg.norm(poses[i + 1][:3, 3] - poses[i][:3, 3])) * 1000.0
+            for i in range(len(poses) - 1)
+        ]
+        radii = [
+            MOVEP_AUTO_BLEND_FRAC * min(lengths[i], lengths[i + 1])
+            for i in range(len(lengths) - 1)
+        ]
+        cart_poses = build_composite_cartesian_path(poses, radii)
 
         logger.debug(
             "    Generated process move path with %d SE3 poses across %d segments",
-            cursor,
-            n_segs,
+            len(cart_poses),
+            len(lengths),
         )
 
-        return cart_poses[:cursor]
+        return cart_poses

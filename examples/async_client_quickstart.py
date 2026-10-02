@@ -26,6 +26,11 @@ async def run_client() -> int:
         ok = await client.simulator(True)
         print(f"simulator(True): {ok}")
 
+        # Planned motion is refused until the robot is referenced, and a
+        # freshly started one is not — however sensible its reported
+        # angles look.
+        await client.home(wait=True)
+
         print("ping:", await client.ping())
         pose_xyz = (await client.pose())[:3]
         print("pose xyz:", pose_xyz)
@@ -36,9 +41,11 @@ async def run_client() -> int:
             print(status.speeds)
             break
 
-        # Small relative move (safe in simulator)
-        # Move +5mm in Z over 1.0s
-        moved = await client.move_l([0, 0, 5, 0, 0, 0], rel=True, duration=1.0)
+        # Small relative move (safe in simulator): +5mm in Z over 1.0s,
+        # waited on so a refusal raises instead of passing unnoticed
+        moved = await client.move_l(
+            [0, 0, 5, 0, 0, 0], rel=True, duration=1.0, wait=True
+        )
         print("move_l ->", moved)
 
         return 0

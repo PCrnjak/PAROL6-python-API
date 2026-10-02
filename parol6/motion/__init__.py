@@ -15,11 +15,9 @@ Geometry generators provide path geometry for visualization and preview.
 """
 
 from parol6.motion.geometry import (
-    CircularMotion,
-    SplineMotion,
-    blend_path_into,
     build_composite_cartesian_path,
     build_composite_joint_path,
+    build_spline_path,
     compute_circle_from_3_points,
     joint_path_to_tcp_poses,
 )
@@ -46,11 +44,9 @@ __all__ = [
     "CartesianStreamingExecutor",
     "RuckigExecutorBase",
     # Geometry generators
-    "CircularMotion",
-    "SplineMotion",
+    "build_spline_path",
     "joint_path_to_tcp_poses",
     # Blend infrastructure
-    "blend_path_into",
     "build_composite_cartesian_path",
     "build_composite_joint_path",
     "compute_circle_from_3_points",

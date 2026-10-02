@@ -350,28 +350,49 @@ class _ElectricGripperImpl(_ToolBase, ElectricGripperTool):
             **kwargs,
         )
 
-    async def set_position(self, position: float, **kwargs: float | int) -> int:
-        speed = float(kwargs.get("speed", 0.5))
-        current = int(kwargs.get("current", self.current_range[0]))
-        return await self._cmd("move", [position, speed, current])
+    async def set_position(
+        self,
+        position: float,
+        *,
+        speed: float = 0.5,
+        current: float = 0.5,
+        **wait_kwargs: Any,
+    ) -> int:
+        return await self._cmd("move", [position, speed, current], **wait_kwargs)
 
     async def calibrate(self, **kwargs: object) -> int:
-        return await self._cmd("calibrate")
+        return await self._cmd("calibrate", **kwargs)
+
+    async def stop(self, **kwargs: object) -> int:
+        """Halt the jaws where they are, keeping the grip, ahead of anything
+        still queued: the action running fails as cancelled, and the queue
+        behind it is kept. On an uncalibrated gripper, which has no position
+        to hold, this releases instead."""
+        return await self._cmd("stop", **kwargs)
+
+    async def release(self, **kwargs: object) -> int:
+        """Drop the grip, freeing the jaws for manual handling, once the
+        commands queued ahead of it have run. The jaws stay where they
+        are."""
+        return await self._cmd("idle", **kwargs)
 
     async def action_r(self, engaged: bool) -> None:
         await self.calibrate()
 
-    async def open(self, **kwargs: float | int) -> int:
-        return await self.set_position(0.0, **kwargs)
+    async def open(
+        self, *, speed: float = 0.5, current: float = 0.5, **wait_kwargs: Any
+    ) -> int:
+        return await self.set_position(0.0, speed=speed, current=current, **wait_kwargs)
 
-    async def close(self, **kwargs: float | int) -> int:
-        return await self.set_position(1.0, **kwargs)
+    async def close(
+        self, *, speed: float = 0.5, current: float = 0.5, **wait_kwargs: Any
+    ) -> int:
+        return await self.set_position(1.0, speed=speed, current=current, **wait_kwargs)
 
     @property
     def adjust_step(self) -> int:
-        """Default current step: ~10% of range, rounded to nearest 10 mA."""
-        lo, hi = self.current_range
-        return max(10, round((hi - lo) / 10 / 10) * 10)
+        """Current step in percent points of the current range."""
+        return 10
 
     @property
     def adjust_labels(self) -> tuple[str, str]:
@@ -991,5 +1012,8 @@ class Robot(_RobotABC):
         return DryRunRobotClient(
             initial_joints_deg=initial_joints_deg,
             initial_homed=initial_homed,
+            initial_gripper_calibrated=bool(
+                kwargs.get("initial_gripper_calibrated", False)
+            ),
             robot=self,
         )

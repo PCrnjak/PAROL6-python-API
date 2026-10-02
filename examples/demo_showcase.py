@@ -10,17 +10,12 @@ from parol6 import RobotClient
 rbt = RobotClient()
 
 HOME_ANGLES = [90.0, -90.0, 180.0, 0.0, 0.0, 180.0]
-HOME_TOLERANCE_DEG = 2.0
 
-# Select tool, and home only if not already near the home pose
+# Select the tool and home: an arm that is already homed returns to the
+# home pose with a planned move, and one already there does not move.
 rbt.select_tool("SSG-48")
 rbt.tool.calibrate()
-current = rbt.angles()
-if (
-    current is None
-    or max(abs(a - h) for a, h in zip(current, HOME_ANGLES)) > HOME_TOLERANCE_DEG
-):
-    rbt.home()
+rbt.home()
 
 # move_j vs move_l (joint-space then linear-cartesian to nearby pose)
 rbt.move_j(pose=[100, 340, 334, 90, 0, 90], speed=0.5)
@@ -90,8 +85,11 @@ for row in range(ROWS):
     is_last = row == ROWS - 1
     y_start, y_end = (Y_MIN, Y_MAX) if row % 2 == 0 else (Y_MAX, Y_MIN)
     rbt.move_l([X, y_start, z] + ZZ_ORI, speed=1.0, r=BLEND, wait=False)
-    rbt.move_l([X, y_end, z] + ZZ_ORI, speed=1.0, r=0 if is_last else BLEND, wait=False)
-rbt.wait_motion()
+    last = rbt.move_l(
+        [X, y_end, z] + ZZ_ORI, speed=1.0, r=0 if is_last else BLEND, wait=False
+    )
+# The whole blended scan runs as one path: wait for its last move.
+rbt.wait_command(last, timeout=30)
 
 # ── Precision demo: pencil pick-up and TCP-offset rotations ──────────
 PRECISION_POSE = [0, -250, 350, -90, 0, -90]
