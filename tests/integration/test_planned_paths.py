@@ -11,7 +11,6 @@ turns the tool, and a spline timed shorter than any arm could run it."""
 
 import math
 import threading
-import time
 
 import numpy as np
 import pytest
@@ -65,9 +64,8 @@ def _wire_rotation(pose: list[float]) -> np.ndarray:
 
 
 class _TcpSampler:
-    """Samples the TCP transform from ``status()`` on a background thread;
-    ``positions`` drops the repeats the status cache serves between its
-    updates."""
+    """Records the TCP transform of every published status frame on a
+    background thread; ``positions`` drops repeats."""
 
     def __init__(self, client):
         self._client = client
@@ -83,14 +81,15 @@ class _TcpSampler:
         self._done.set()
         self._thread.join(timeout=2.0)
 
+    def _record(self, status) -> bool:
+        self.frames.append(np.array(status.pose, dtype=np.float64).reshape(4, 4))
+        return self._done.is_set()
+
     def _run(self):
+        # Woken by each frame's arrival: a polling sleep can wake late enough
+        # on a loaded machine to skip whole corners of a fast path.
         while not self._done.is_set():
-            status = self._client.status()
-            if status is not None:
-                self.frames.append(
-                    np.asarray(status.pose, dtype=np.float64).reshape(4, 4)
-                )
-            time.sleep(0.02)
+            self._client.wait_status(self._record, timeout=1.0)
 
     def positions(self) -> np.ndarray:
         pts = [f[:3, 3] for f in self.frames]
