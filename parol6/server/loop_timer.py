@@ -702,12 +702,23 @@ def format_hz_summary(m: LoopMetrics) -> str:
     )
 
 
+# How far one late wake moves the estimate of how late sleeps wake, and how
+# fast that estimate fades on ticks that spin instead of sleeping.
+_LATE_GAIN = 0.25
+_LATE_FADE = 0.995
+
+
 class LoopTimer:
     """Deadline-based loop timing with hybrid sleep + busy-loop.
 
     Uses time.sleep() for most of the wait time to reduce CPU usage,
     then switches to a busy-loop for the final portion to achieve
     precise timing without OS scheduling jitter.
+
+    The busy window adapts to how late this machine's sleeps wake: where
+    a sleep reliably overshoots (an oversubscribed VM), the tick is spun
+    rather than slept past; where sleep is accurate, the window stays at
+    the configured threshold.
     """
 
     def __init__(
@@ -725,11 +736,13 @@ class LoopTimer:
             stats_interval: Compute stats every N loops (default 50 = 5Hz at 250Hz loop).
         """
         self._interval = interval_s
-        self._busy_threshold = (
+        self._base_threshold = (
             busy_threshold_s
             if busy_threshold_s is not None
             else cfg.BUSY_THRESHOLD_MS / 1000.0
         )
+        self._busy_threshold = self._base_threshold
+        self._sleep_late = 0.0
         self._stats_interval = stats_interval
         self._next_deadline = 0.0
         self._prev_t = 0.0
@@ -771,7 +784,16 @@ class LoopTimer:
 
         if sleep_time > self._busy_threshold:
             # leave headroom for the busy-loop so the sleep can't overshoot
-            time.sleep(sleep_time - self._busy_threshold)
+            requested = sleep_time - self._busy_threshold
+            slept_from = time.perf_counter()
+            time.sleep(requested)
+            late = time.perf_counter() - slept_from - requested
+            self._sleep_late += _LATE_GAIN * (max(late, 0.0) - self._sleep_late)
+        else:
+            self._sleep_late *= _LATE_FADE
+        self._busy_threshold = min(
+            self._interval, self._base_threshold + 2.0 * self._sleep_late
+        )
 
         if sleep_time > 0:
             # busy-loop the remainder for precise timing without OS jitter
