@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
 
@@ -117,6 +118,75 @@ def _tick_intervals(duration: float, dt: float) -> int:
     exactly a tick apart; stretched to whole ticks, it lasts as long as
     it plans and accelerates no harder."""
     return max(1, math.ceil(duration / dt - _TICK_ROUNDING))
+
+
+# Relative slack on a segment rate: below it a rate is taken as settled.
+_RATE_TOLERANCE = 1e-9
+
+
+@njit(cache=True)
+def _segment_rates(
+    deltas: NDArray[np.float64],
+    v_max: NDArray[np.float64],
+    dv_max: NDArray[np.float64],
+    rate_max: float,
+) -> NDArray[np.float64]:
+    """The fastest rate (one over its time) each segment between rows can
+    be run at: no faster than ``rate_max``, every joint under ``v_max``,
+    and every joint's velocity changing by at most ``dv_max`` from one
+    segment to the next, from rest into the first and into rest out of the
+    last.
+
+    A joint that its two neighbouring segments move in opposite directions
+    turns at the row between them, and each side takes half the change.
+    Every other bound caps a segment's rate by its own limits or by a
+    rising function of a neighbour's rate, so lowering the rates until no
+    bound is broken reaches the fastest timing that breaks none: a forward
+    pass for a joint speeding up into a segment, a backward pass for one
+    slowing into the next, repeated while either still lowers a rate.
+    """
+    n, dof = deltas.shape
+    rates = np.full(n, rate_max)
+    for i in range(n):
+        for j in range(dof):
+            d = abs(deltas[i, j])
+            if d > 0.0:
+                rates[i] = min(rates[i], v_max[j] / d)
+                if i == 0 or i == n - 1:
+                    rates[i] = min(rates[i], dv_max[j] / d)
+    for i in range(n - 1):
+        for j in range(dof):
+            a = deltas[i, j]
+            b = deltas[i + 1, j]
+            if a * b < 0.0:
+                rates[i] = min(rates[i], 0.5 * dv_max[j] / abs(a))
+                rates[i + 1] = min(rates[i + 1], 0.5 * dv_max[j] / abs(b))
+            elif a == 0.0 and b != 0.0:
+                rates[i + 1] = min(rates[i + 1], dv_max[j] / abs(b))
+            elif b == 0.0 and a != 0.0:
+                rates[i] = min(rates[i], dv_max[j] / abs(a))
+    lowered = True
+    while lowered:
+        lowered = False
+        for i in range(n - 1):
+            for j in range(dof):
+                a = deltas[i, j]
+                b = deltas[i + 1, j]
+                if a * b > 0.0:
+                    cap = (abs(a) * rates[i] + dv_max[j]) / abs(b)
+                    if cap < rates[i + 1] * (1.0 - _RATE_TOLERANCE):
+                        rates[i + 1] = cap
+                        lowered = True
+        for i in range(n - 2, -1, -1):
+            for j in range(dof):
+                a = deltas[i, j]
+                b = deltas[i + 1, j]
+                if a * b > 0.0:
+                    cap = (abs(b) * rates[i + 1] + dv_max[j]) / abs(a)
+                    if cap < rates[i] * (1.0 - _RATE_TOLERANCE):
+                        rates[i] = cap
+                        lowered = True
+    return rates
 
 
 class _LinearPath:
@@ -838,7 +908,7 @@ class TrajectoryBuilder:
         # turn left none, as any request shorter than the move can be does.
         path_duration = None
         if self.duration:
-            remaining = self.duration - (len(turn) - 1) * self.dt
+            remaining = self.duration - len(turn) * self.dt
             path_duration = remaining if remaining > 0 else None
         path = TrajectoryBuilder(
             joint_path=JointPath(positions=self.joint_path.positions[p:]),
@@ -854,7 +924,11 @@ class TrajectoryBuilder:
             constant_tool_speed=self.constant_tool_speed,
         ).build()
         return self._trajectory(
-            np.concatenate([turn.positions_rad, path.positions_rad[1:]])
+            # The turn's last row and the path's first are the same pose;
+            # played twice, the wrist is at rest for the tick between, and a
+            # joint the path drives back the way the turn came does not
+            # reverse within one.
+            np.concatenate([turn.positions_rad, path.positions_rad])
         )
 
     def _build_toppra_trajectory(self) -> Trajectory:
@@ -953,7 +1027,10 @@ class TrajectoryBuilder:
             trajectory_rad = np.empty((intervals + 1, 6), dtype=np.float64)
             trajectory_rad[:-1] = jnt_traj(times)
             trajectory_rad[-1] = jnt_traj(duration)
-            duration = intervals * self.dt
+            # TOPP-RA bounds acceleration along a path it takes as straight
+            # between rows; the bends between them are the rows' own.
+            trajectory_rad = self._enforce_segment_limits(trajectory_rad)
+            duration = len(trajectory_rad) * self.dt
 
             logger.debug(
                 "TrajectoryBuilder: output_samples=%d, duration=%.3f",
@@ -1059,11 +1136,20 @@ class TrajectoryBuilder:
         self, trajectory_rad: NDArray[np.float64]
     ) -> NDArray[np.float64]:
         """
-        Enforce velocity limits by locally stretching segments that exceed limits.
+        Slow the rows down wherever a joint would pass its velocity or
+        acceleration limit as the player plays them, one row per tick.
 
-        Walks through each segment and checks if joint velocities exceed limits.
-        Where they do, stretches that segment's time. This handles singularities
-        and wrist flips by slowing only where necessary, not globally.
+        A profile times the path coordinate, but the rows follow the path's
+        own shape: a bend between rows, a junction in a blended chain or the
+        step a wrist turn leaves behind is a change of joint velocity
+        within one tick, however smoothly the coordinate itself is timed.
+        Each segment between rows is given the shortest time, never less
+        than a tick, that keeps every joint under its velocity limit and
+        its velocity change from one segment to the next within a tick of
+        its acceleration limit (:func:`_segment_rates`). The rows are then
+        resampled a tick apart along that timing; a stretch of segments
+        all at least a tick long, sampled a tick apart, changes velocity
+        no faster than its segments do.
 
         Args:
             trajectory_rad: Joint positions in radians, shape (N, 6), one
@@ -1078,50 +1164,25 @@ class TrajectoryBuilder:
         if n_points < 2:
             return trajectory_rad
 
-        initial_dt = self.dt
-        duration = (n_points - 1) * initial_dt
-
-        deltas = np.diff(trajectory_rad, axis=0)  # (N-1, 6)
-
-        # Minimum time per segment to respect velocity limits:
-        # max(|delta[j]| / v_max[j]) over joints
-        min_segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
-        segment_times = np.maximum(min_segment_times, initial_dt)
-
-        # Approximate acceleration check: is the velocity change between
-        # adjacent segments feasible at the times they take once slowed for
-        # velocity? Measured at the original spacing instead, a segment
-        # slowed for velocity counts its excess twice.
-        if n_points > 2:
-            velocities = deltas / segment_times[:, np.newaxis]
-            spans = 0.5 * (segment_times[:-1] + segment_times[1:])
-            accel = np.diff(velocities, axis=0) / spans[:, np.newaxis]  # (N-2, 6)
-            accel_times = np.zeros(n_points - 1)
-            for i in range(len(accel)):
-                max_accel_ratio = np.max(np.abs(accel[i]) / self.a_max)
-                if max_accel_ratio > 1.0:
-                    # Spread the extra time across adjacent segments
-                    stretch = np.sqrt(max_accel_ratio)
-                    accel_times[i] = max(accel_times[i], min_segment_times[i] * stretch)
-                    accel_times[i + 1] = max(
-                        accel_times[i + 1], min_segment_times[i + 1] * stretch
-                    )
-            segment_times = np.maximum(segment_times, accel_times)
-
-        new_duration = float(np.sum(segment_times))
-        if new_duration <= duration * 1.001:  # No significant change
+        rates = _segment_rates(
+            np.diff(trajectory_rad, axis=0),
+            self.v_max,
+            self.a_max * self.dt,
+            1.0 / self.dt,
+        )
+        if np.all(rates * self.dt >= 1.0 - _RATE_TOLERANCE):
             return trajectory_rad
 
-        logger.warning(
+        cumulative_times = np.zeros(n_points)
+        cumulative_times[1:] = np.cumsum(1.0 / rates)
+        duration = (n_points - 1) * self.dt
+        new_duration = float(cumulative_times[-1])
+        logger.debug(
             "Extending duration from %.3fs to %.3fs (%.1f%% increase) to respect velocity/acceleration limits",
             duration,
             new_duration,
             (new_duration / duration - 1) * 100,
         )
-
-        # Resample at control rate with the new per-segment timing
-        cumulative_times = np.zeros(n_points)
-        cumulative_times[1:] = np.cumsum(segment_times)
 
         intervals = _tick_intervals(new_duration, self.dt)
         output_times = np.arange(intervals + 1) * (new_duration / intervals)

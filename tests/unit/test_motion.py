@@ -3,8 +3,10 @@
 import numpy as np
 import pytest
 
-from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.config import INTERVAL_S, LIMITS, PATH_SAMPLES, steps_to_rad
 from parol6.motion import JointPath, ProfileType, Trajectory, TrajectoryBuilder
+from parol6.motion.geometry import LineSegment
 from parol6.motion.trajectory import (
     IK_MAX_JOINT_STEP_RAD,
     _ik_branch_hop,
@@ -215,6 +217,74 @@ class TestTrajectoryBuilder:
             f"Profile {profile.name}: velocity exceeded limits by "
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            ProfileType.TOPPRA,
+            ProfileType.LINEAR,
+            ProfileType.QUINTIC,
+            ProfileType.TRAPEZOID,
+        ],
+    )
+    def test_a_path_that_bends_is_played_within_the_acceleration_limit(self, profile):
+        """Played one row per tick, a bend between rows is a change of joint
+        velocity within a tick, however smoothly the profile times the path
+        coordinate: the corner where a blended chain turns from J1 to J2,
+        and the J4 step a cartesian move from standby leaves after turning
+        the wrist off its singularity. Each is slowed until no joint
+        accelerates past the fraction of its limit the move asks for."""
+        start = np.array([0.0, -1.57, 3.14, 0.0, 0.5, 0.0])
+        corner = start + [0.3, 0, 0, 0, 0, 0]
+        chain = JointPath(
+            positions=np.vstack(
+                [
+                    JointPath.interpolate(start, corner, 50).positions,
+                    JointPath.interpolate(
+                        corner, corner + [0, 0.3, 0, 0, 0, 0], 50
+                    ).positions[1:],
+                ]
+            )
+        )
+        standby = np.deg2rad(PAROL6_ROBOT.joint.standby_deg)
+        here = np.asarray(PAROL6_ROBOT.robot.fkine(standby)).copy()
+        there = here.copy()
+        there[:3, 3] += [0.04, 0.0, 0.04]
+        poses = np.empty((PATH_SAMPLES, 4, 4))
+        LineSegment(here, there).sample_into(poses, 0.0, 1.0, 0)
+        line = JointPath.from_poses(poses, standby)
+        frac = 0.5
+        cartesian = {
+            "cart_vel_limit": LIMITS.cart.hard.velocity.linear * frac,
+            "cart_acc_limit": LIMITS.cart.hard.acceleration.linear * frac,
+            "path_knots": line.knots,
+        }
+
+        for name, path, extra in [
+            ("blended corner", chain, {}),
+            ("MoveL from standby", line, cartesian),
+        ]:
+            rows = (
+                TrajectoryBuilder(
+                    joint_path=path,
+                    profile=profile,
+                    velocity_frac=frac,
+                    accel_frac=frac,
+                    dt=INTERVAL_S,
+                    **extra,
+                )
+                .build()
+                .positions_rad
+            )
+            rows = np.pad(rows, ((1, 1), (0, 0)), mode="edge")
+            accel = np.diff(rows, n=2, axis=0) / INTERVAL_S**2
+            ratio = float(
+                np.max(np.abs(accel) / (LIMITS.joint.hard.acceleration * frac))
+            )
+            assert ratio <= 1.0, (
+                f"{profile.name}, {name}: a joint at {ratio:.2f}x the "
+                "acceleration asked for"
+            )
 
 
 class TestTrajectory:
