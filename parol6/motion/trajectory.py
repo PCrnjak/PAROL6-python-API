@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -103,11 +104,21 @@ def _quintic_samples(
     return q0 + (q1 - q0) * s * s * s * (10.0 - 15.0 * s + 6.0 * s * s)
 
 
+def _septic_samples(
+    times: NDArray[np.float64], q0: float, q1: float, duration: float
+) -> NDArray[np.float64]:
+    """Sample a septic profile from ``q0`` to ``q1``, at rest, unaccelerated
+    and without jerk at both ends."""
+    s = np.clip(times / duration, 0.0, 1.0)
+    s2 = s * s
+    return q0 + (q1 - q0) * s2 * s2 * (35.0 - 84.0 * s + 70.0 * s2 - 20.0 * s2 * s)
+
+
 # Peak ds/dt and d²s/dt² of a quintic from s=0 to s=1 over one second.
 _QUINTIC_PEAK_VEL = 1.875
 _QUINTIC_PEAK_ACC = 10.0 / math.sqrt(3.0)
 
-# Peaks of the unit septic s(u) = 35u⁴ − 84u⁵ + 70u⁶ − 20u⁷ on u ∈ [0, 1]:
+# Peaks of the septic s(u) = 35u⁴ − 84u⁵ + 70u⁶ − 20u⁷ over one second:
 # ds/du and |d³s/du³| at u = 1/2, |d²s/du²| at u = (5 ∓ √5)/10.
 _SEPTIC_PEAK_VEL: float = 35.0 / 16.0
 _SEPTIC_PEAK_ACC: float = 84.0 * math.sqrt(5.0) / 25.0
@@ -158,7 +169,7 @@ class ProfileType(Enum):
     TOPPRA = "toppra"  # Time-optimal path following (default)
     RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
-    SEPTIC = "septic"  # Septic polynomial (C³ smooth: jerk also zero at the ends)
+    SEPTIC = "septic"  # Point-to-point septic polynomial (C³ smooth, jerk-limited)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
     LINEAR = "linear"  # Direct linear interpolation (no smoothing)
 
@@ -725,11 +736,11 @@ class TrajectoryBuilder:
         at the control rate. No interpolation of the original joint path is needed
         since TOPP-RA's trajectory already provides smooth, continuous positions.
 
-        RUCKIG runs point to point, from the first row to the last; a path
-        that is not a straight run between them is timed by TOPP-RA
-        instead. QUINTIC and TRAPEZOID run each joint on its own profile
-        from end to end on a straight run, and the path coordinate along
-        any other path. SEPTIC runs the path coordinate on every path.
+        RUCKIG and SEPTIC run point to point, from the first row to the
+        last; a path that is not a straight run between them is timed by
+        TOPP-RA instead. QUINTIC and TRAPEZOID run each joint on its own
+        profile from end to end on a straight run, and the path coordinate
+        along any other path.
 
         Returns:
             Trajectory ready for execution, its rows one control tick apart
@@ -753,7 +764,6 @@ class TrajectoryBuilder:
         if self.path_knots is not None and self.profile in (
             ProfileType.LINEAR,
             ProfileType.QUINTIC,
-            ProfileType.SEPTIC,
             ProfileType.TRAPEZOID,
         ):
             # These profiles time a path coordinate spaced by row; spaced
@@ -770,9 +780,19 @@ class TrajectoryBuilder:
         elif self.profile == ProfileType.QUINTIC:
             if along_path:
                 return self._build_quintic_trajectory_along_path()
-            return self._build_quintic_trajectory_joint()
-        elif self.profile == ProfileType.SEPTIC:
-            return self._build_septic_trajectory()
+            return self._build_polynomial_trajectory_joint(
+                _quintic_samples,
+                self._compute_joint_duration_polynomial(
+                    _QUINTIC_PEAK_VEL, _QUINTIC_PEAK_ACC
+                ),
+            )
+        elif self.profile == ProfileType.SEPTIC and not along_path:
+            return self._build_polynomial_trajectory_joint(
+                _septic_samples,
+                self._compute_joint_duration_polynomial(
+                    _SEPTIC_PEAK_VEL, _SEPTIC_PEAK_ACC, _SEPTIC_PEAK_JERK
+                ),
+            )
         elif self.profile == ProfileType.TRAPEZOID:
             if along_path:
                 # A trapezoid of the path coordinate is what LINEAR runs.
@@ -1152,7 +1172,7 @@ class TrajectoryBuilder:
             return fastest
         if self.duration < fastest:
             logger.warning(
-                "Extending duration from %.3fs to %.3fs to respect velocity/acceleration limits",
+                "Extending duration from %.3fs to %.3fs to respect the joint limits",
                 self.duration,
                 fastest,
             )
@@ -1184,16 +1204,18 @@ class TrajectoryBuilder:
 
         return max(max_duration, self.dt * 2)
 
-    def _compute_joint_duration_quintic(self) -> float:
+    def _compute_joint_duration_polynomial(
+        self, peak_vel: float, peak_acc: float, peak_jerk: float = 0.0
+    ) -> float:
         """
-        Compute duration for joint paths using quintic polynomial profile.
+        Compute duration for joint paths using a polynomial profile.
 
-        For quintic polynomials with zero-velocity endpoints:
-        - Peak velocity at t=T/2: v_peak = 1.875 * delta / T
-        - Peak acceleration at t=T*(3-sqrt(3))/6: a_peak = 5.77 * delta / T²
-
-        For velocity limit: T = 1.875 * delta / v_max
-        For acceleration limit: T = sqrt(5.77 * delta / a_max)
+        Each peak of the unit polynomial (ds/dt, d²s/dt² and, for a profile
+        that holds the jerk limit, |d³s/dt³|), scaled by a joint's
+        displacement, has to fit that joint's limit:
+            T >= peak_vel * delta / v_max
+            T >= sqrt(peak_acc * delta / a_max)
+            T >= cbrt(peak_jerk * delta / j_max)
 
         Returns the maximum duration across all joints.
         """
@@ -1203,16 +1225,21 @@ class TrajectoryBuilder:
 
         total_delta = np.abs(positions[-1] - positions[0])
 
-        time_vel = _QUINTIC_PEAK_VEL * total_delta / self.v_max
+        time_vel = peak_vel * total_delta / self.v_max
 
         with np.errstate(divide="ignore", invalid="ignore"):
             time_acc = np.where(
                 self.a_max > 0,
-                np.sqrt(_QUINTIC_PEAK_ACC * total_delta / self.a_max),
+                np.sqrt(peak_acc * total_delta / self.a_max),
+                0.0,
+            )
+            time_jerk = np.where(
+                self.j_max > 0,
+                np.cbrt(peak_jerk * total_delta / self.j_max),
                 0.0,
             )
 
-        time_per_joint = np.maximum(time_vel, time_acc)
+        time_per_joint = np.maximum(np.maximum(time_vel, time_acc), time_jerk)
         return max(float(np.max(time_per_joint)), self.dt * 2)
 
     def _compute_duration_along_rows(self) -> float:
@@ -1241,17 +1268,24 @@ class TrajectoryBuilder:
 
         return max(float(np.sum(segment_times)), self.dt * 2)
 
-    def _build_quintic_trajectory_joint(self) -> Trajectory:
+    def _build_polynomial_trajectory_joint(
+        self,
+        samples: Callable[
+            [NDArray[np.float64], float, float, float], NDArray[np.float64]
+        ],
+        fastest: float,
+    ) -> Trajectory:
         """
-        Build per-joint quintic trajectory.
+        Build per-joint polynomial trajectory.
 
-        Each joint independently follows a quintic polynomial profile,
-        synchronized to finish at the same time.
+        Each joint independently follows the polynomial ``samples``,
+        synchronized to finish at the same time: over ``fastest``, the
+        shortest duration the joint limits allow, or a longer one asked for.
         """
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
-        duration = self._requested_or(self._compute_joint_duration_quintic())
+        duration = self._requested_or(fastest)
 
         intervals = _tick_intervals(duration, self.dt)
         duration = intervals * self.dt
@@ -1264,9 +1298,7 @@ class TrajectoryBuilder:
                 trajectory_rad[:, j] = start_pos[j]
                 continue
 
-            trajectory_rad[:, j] = _quintic_samples(
-                times, start_pos[j], end_pos[j], duration
-            )
+            trajectory_rad[:, j] = samples(times, start_pos[j], end_pos[j], duration)
 
         trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 
@@ -1294,40 +1326,6 @@ class TrajectoryBuilder:
         profile_s = _quintic_samples(times, 0.0, 1.0, duration)
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
-
-        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
-
-        return self._trajectory(trajectory_rad)
-
-    def _build_septic_trajectory(self) -> Trajectory:
-        """
-        Build trajectory with a septic polynomial on the path coordinate.
-
-        Velocity, acceleration and jerk are all zero at both ends, so unlike
-        the quintic the move neither starts nor stops with a jerk step. One
-        scalar profile times the whole path, joint and cartesian alike, so
-        every joint arrives together and a joint move stays on its straight
-        joint-space line. On a cartesian path the profile's peak keeps the
-        tool under its ceiling.
-        """
-        positions = self.joint_path.positions
-        # Steepest dq/ds of each joint over the path's segments. A joint move
-        # has one slope, its displacement; a cartesian path bends in joint
-        # space, and its steepest segment is what the limits have to cover.
-        slope = np.max(np.abs(np.diff(positions, axis=0)), axis=0) * (
-            len(positions) - 1
-        )
-        fastest = max(
-            float(np.max(_SEPTIC_PEAK_VEL * slope / self.v_max)),
-            float(np.max(np.sqrt(_SEPTIC_PEAK_ACC * slope / self.a_max))),
-            float(np.max(np.cbrt(_SEPTIC_PEAK_JERK * slope / self.j_max))),
-            _SEPTIC_PEAK_VEL / self._cruise_cap(),
-            self.dt * 2,
-        )
-        intervals = _tick_intervals(self._requested_or(fastest), self.dt)
-        u = np.linspace(0.0, 1.0, intervals + 1)
-        s = u**4 * (35.0 - 84.0 * u + 70.0 * u**2 - 20.0 * u**3)
-        trajectory_rad = self.joint_path.sample_many(s)
 
         trajectory_rad = self._enforce_segment_limits(trajectory_rad)
 

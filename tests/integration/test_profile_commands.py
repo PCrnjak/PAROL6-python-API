@@ -49,10 +49,8 @@ class TestProfileMotionBehavior:
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
         for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Teleport to the standby pose: each profile starts from the same
-            # spot without paying for a planned home move per profile (home() on a
-            # referenced robot is a real planned move now, not a firmware
-            # re-home — slow CI runners blew the per-test timeout on it).
+            # Teleport, don't drive: a planned home move per profile blows the
+            # per-test timeout on slow runners.
             assert client.teleport(standby) == 1
 
             # Set profile and execute move
@@ -95,7 +93,7 @@ class TestProfileMotionBehavior:
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
         # All profiles should work for Cartesian moves
-        # RUCKIG falls back to TOPPRA automatically
+        # RUCKIG and SEPTIC fall back to TOPPRA automatically
         for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Teleport, don't drive: a planned home move per profile blows the
             # per-test timeout on slow runners.
@@ -165,6 +163,33 @@ class TestProfileMotionBehavior:
             f"{planned[-1]:.2f} s"
         )
 
+    def test_a_septic_cartesian_move_is_timed_along_its_path(self):
+        """SEPTIC times a straight joint run only. From standby the wrist
+        sits at its singularity, and a cartesian move leaves it in the
+        path's first row: a few degrees of J4 and J6 the tool never sees.
+        Timed as one polynomial from that row's slope, the whole move would run at
+        the turn's pace, a few centimetres taking ten times what TOPPRA
+        takes."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+
+        def previewed(profile: str) -> float:
+            preview = DryRunRobotClient(initial_joints_deg=standby)
+            assert preview.select_profile(profile) == 1
+            index = preview.move_l([40.0, 0.0, 40.0, 0.0, 0.0, 0.0], rel=True)
+            record = preview.plan()
+            assert record.blocks[index].error is None
+            return record.blocks[index].rows * record.row_dt_s
+
+        septic, toppra = previewed("SEPTIC"), previewed("TOPPRA")
+        # The wrist's turn ahead of the path is a joint move, run as SEPTIC.
+        assert septic < 1.5 * toppra, (
+            f"SEPTIC planned {septic:.2f} s for a move TOPPRA runs in {toppra:.2f} s"
+        )
+
     @pytest.mark.parametrize("profile", ["LINEAR", "QUINTIC", "TRAPEZOID"])
     def test_a_short_timed_move_takes_its_whole_duration(self, profile):
         """A move timed to 50 ms reaches its target 50 ms in, not a control
@@ -231,9 +256,7 @@ class TestServoCartesian:
 class TestCartesianPrecision:
     """Test Cartesian move precision with different profiles."""
 
-    @pytest.mark.parametrize(
-        "profile", ["TOPPRA", "LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID"]
-    )
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
     def test_cartesian_simple_sequence(self, client, server_proc, profile):
         """
         Test precision of simple Cartesian moves with all profiles.
@@ -344,9 +367,7 @@ def _extract_position_from_pose_matrix(pose_flat: list[float]) -> np.ndarray:
 class TestTCPPathAccuracy:
     """Test that Cartesian moves follow straight-line TCP paths."""
 
-    @pytest.mark.parametrize(
-        "profile", ["TOPPRA", "LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID"]
-    )
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
     def test_cartesian_follows_straight_line(self, client, server_proc, profile):
         """
         Verify TCP follows a straight line during Cartesian moves.

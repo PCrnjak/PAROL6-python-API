@@ -156,7 +156,7 @@ _CATALOG: dict[int, _ErrorTemplate] = {
         title="Invalid motion profile",
         cause="Unrecognized motion profile: {detail}",
         effect="Profile not changed.",
-        remedy="Use one of: TOPPRA, RUCKIG, QUINTIC, SEPTIC, TRAPEZOID, LINEAR.",
+        remedy="Use one of: {allowed}.",
     ),
     ErrorCode.SYS_NOT_SIMULATOR: _ErrorTemplate(
         title="Simulator-only command",

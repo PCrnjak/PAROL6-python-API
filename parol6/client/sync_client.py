@@ -428,7 +428,7 @@ class RobotClient:
 
         Args:
             profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'SEPTIC', 'TRAPEZOID', 'LINEAR')
-                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
+                Note: RUCKIG and SEPTIC are point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
             1 once the profile is selected, 0 when no reply arrives.

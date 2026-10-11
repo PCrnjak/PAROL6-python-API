@@ -293,11 +293,11 @@ client.set_profile("TOPPRA")  # Default: time-optimal path-following
 | **TOPPRA** | Time-optimal path-following (default) |
 | **RUCKIG** | Jerk-limited point-to-point motion (joint moves only) |
 | **QUINTIC** | C² smooth polynomial trajectories |
-| **SEPTIC** | C³ smooth polynomial: jerk also starts and ends at zero, jerk-limited |
+| **SEPTIC** | C³ smooth polynomial, jerk-limited: jerk also starts and ends at zero (joint moves only) |
 | **TRAPEZOID** | Linear segments with parabolic blends |
 | **LINEAR** | Direct interpolation (no smoothing) |
 
-Note: RUCKIG is point-to-point only and cannot follow Cartesian paths. When RUCKIG is set, Cartesian moves automatically use TOPPRA instead.
+Note: RUCKIG and SEPTIC are point-to-point only and cannot follow Cartesian paths. When either is set, Cartesian moves automatically use TOPPRA instead.
 
 ### Speed and acceleration
 
