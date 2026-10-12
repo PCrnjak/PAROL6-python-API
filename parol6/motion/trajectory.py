@@ -23,15 +23,12 @@ from numba import njit
 from numpy.typing import NDArray
 from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
 
-from scipy.interpolate import PPoly
-
-import toppra as ta
 import toppra.algorithm as algo
 import toppra.constraint as constraint
-from toppra.interpolator import SplineInterpolator
+from toppra.interpolator import propose_gridpoints
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
+from parol6.config import INTERVAL_S, LIMITS, rad_to_steps, steps_to_rad_scalar
 from parol6.motion.geometry import _rotation_angle, cartesian_path_knots
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
@@ -124,6 +121,16 @@ def _tick_intervals(duration: float, dt: float) -> int:
 _RATE_TOLERANCE = 1e-9
 
 
+def _slowed(rows: NDArray[np.float64], count: int) -> NDArray[np.float64]:
+    """``rows``, a tick apart, slowed evenly onto ``count`` rows a tick
+    apart: every velocity, and every change of one, shrinks by the same
+    factor."""
+    times = np.linspace(0.0, len(rows) - 1, count)
+    return np.column_stack(
+        [np.interp(times, np.arange(len(rows)), rows[:, j]) for j in range(6)]
+    )
+
+
 @njit(cache=True)
 def _segment_rates(
     deltas: NDArray[np.float64],
@@ -189,31 +196,83 @@ def _segment_rates(
     return rates
 
 
-class _LinearPath:
-    """Piecewise linear path wrapper for TOPPRA compatibility.
+# Half the finest joint's motor step bounds every blend below the arm's
+# command resolution, also used by _within_a_step to recognize no motion.
+_BLEND_MAX_DEV_RAD = 0.5 * min(float(steps_to_rad_scalar(1, j)) for j in range(6))
 
-    Wraps a scipy PPoly (degree-1) to satisfy the toppra path interface:
-    __call__(s, order), .dof, .path_interval.  Linear segments prevent
-    overshoot between waypoints — critical near wrist singularities where
-    cubic spline bulge amplifies orientation error.
+
+class _BlendedPath:
+    """C1 parabolic corner blends in the original waypoint parameter.
+
+    The largest departure from the original path is h*|delta_slope|/4 at the corner.
+    Half-interval widths keep neighbouring blends from overlapping, while
+    retaining the parameter needed by the Cartesian speed constraints.
     """
 
-    __slots__ = ("_pp", "dof", "path_interval")
-
-    def __init__(self, ppoly: PPoly, dof: int) -> None:
-        self._pp = ppoly
-        self.dof = dof
-        self.path_interval = [float(ppoly.x[0]), float(ppoly.x[-1])]
+    def __init__(
+        self, knots: NDArray[np.float64], positions: NDArray[np.float64]
+    ) -> None:
+        self._knots = knots
+        self._positions = positions
+        self.dof = positions.shape[1]
+        self.path_interval = (float(knots[0]), float(knots[-1]))
+        intervals = np.diff(knots)
+        self.slopes = np.diff(positions, axis=0) / intervals[:, None]
+        delta = np.diff(self.slopes, axis=0)
+        magnitude = np.max(np.abs(delta), axis=1)
+        # Sub-nanoradian slope changes are roundoff, far below a motor step.
+        corners = np.flatnonzero(magnitude > 1e-9)
+        half_width = np.minimum(
+            0.5 * np.minimum(intervals[:-1], intervals[1:])[corners],
+            4.0 * _BLEND_MAX_DEV_RAD / magnitude[corners],
+        )
+        self.blend_starts = knots[corners + 1] - half_width
+        self.blend_ends = knots[corners + 1] + half_width
+        self._blend_slopes = self.slopes[corners]
+        self._blend_positions = (
+            positions[corners + 1] - self._blend_slopes * half_width[:, None]
+        )
+        self._curvature = delta[corners] / (2.0 * half_width[:, None])
 
     def __call__(self, s_in: float | NDArray, order: int = 0) -> NDArray[np.float64]:
-        scalar = np.isscalar(s_in)
-        s = np.atleast_1d(np.asarray(s_in, dtype=float))
-        if order <= 1:
-            result = self._pp(s, order)
+        s = np.asarray(s_in, dtype=np.float64)
+        flat = s.reshape(-1)
+        segments = np.clip(
+            np.searchsorted(self._knots, flat, side="right") - 1,
+            0,
+            len(self.slopes) - 1,
+        )
+        if order == 0:
+            result = (
+                self._positions[segments]
+                + self.slopes[segments] * (flat - self._knots[segments])[:, None]
+            )
+        elif order == 1:
+            result = self.slopes[segments].copy()
+        elif order == 2:
+            result = np.zeros((len(flat), self.dof))
         else:
-            # Second+ derivative of a piecewise-linear path is zero
-            result = np.zeros((len(s), self.dof))
-        return result[0] if scalar and result.ndim > 1 else result
+            raise ValueError(f"Unsupported path derivative order: {order}")
+
+        if len(self.blend_starts):
+            blends = np.maximum(
+                np.searchsorted(self.blend_starts, flat, side="right") - 1, 0
+            )
+            inside = (flat >= self.blend_starts[blends]) & (
+                flat <= self.blend_ends[blends]
+            )
+            indices = blends[inside]
+            offset = (flat[inside] - self.blend_starts[indices])[:, None]
+            curvature = self._curvature[indices]
+            if order == 0:
+                result[inside] = self._blend_positions[indices] + offset * (
+                    self._blend_slopes[indices] + 0.5 * offset * curvature
+                )
+            elif order == 1:
+                result[inside] = self._blend_slopes[indices] + offset * curvature
+            else:
+                result[inside] = curvature
+        return result.reshape(s.shape + (self.dof,))
 
 
 class ProfileType(Enum):
@@ -797,6 +856,28 @@ class TrajectoryBuilder:
         Returns:
             Trajectory ready for execution, its rows one control tick apart
         """
+        trajectory = self._build()
+        if not self.duration:
+            return trajectory
+        asked = _tick_intervals(self.duration, self.dt) + 1
+        if len(trajectory) <= asked:
+            return trajectory
+        # Slowed at its bends, the move overran a duration a fastest timing
+        # may still fit: bent rows slowed evenly change velocity no faster.
+        requested, self.duration = self.duration, None
+        fastest = self._build().positions_rad
+        self.duration = requested
+        if len(fastest) > asked:
+            logger.warning(
+                "Extending duration from %.3fs to %.3fs to respect the joint limits",
+                requested,
+                len(fastest) * self.dt,
+            )
+            return self._trajectory(fastest)
+        return self._trajectory(_slowed(fastest, asked))
+
+    def _build(self) -> Trajectory:
+        """The trajectory as the selected profile times it."""
         positions = self.joint_path.positions
         # A path that goes nowhere is done where it stands: there is no
         # distance for a timing solver to spread over, and every profile
@@ -935,9 +1016,8 @@ class TrajectoryBuilder:
         """
         Build trajectory using TOPP-RA's time-optimal path parameterization.
 
-        Uses piecewise linear interpolation through waypoints (no overshoot)
-        and computes time-optimal velocity profile respecting joint limits
-        and optional Cartesian velocity limits.
+        Bounded corner blends expose curvature to the timing solver while
+        preserving the waypoint parameter and Cartesian velocity limits.
         """
         positions = self.joint_path.positions
         if self.path_knots is not None:
@@ -957,16 +1037,7 @@ class TrajectoryBuilder:
             ss_waypoints = np.linspace(0.0, 1.0, len(positions))
         n_points = len(positions)
 
-        # Piecewise linear PPoly — prevents cubic spline overshoot that
-        # amplifies orientation error near wrist singularities
-        n_seg = n_points - 1
-        dof = positions.shape[1]
-        c = np.zeros((2, n_seg, dof))
-        for i in range(n_seg):
-            dx = ss_waypoints[i + 1] - ss_waypoints[i]
-            c[0, i, :] = (positions[i + 1] - positions[i]) / dx
-            c[1, i, :] = positions[i]
-        path = _LinearPath(PPoly(c, ss_waypoints), dof)
+        path = _BlendedPath(ss_waypoints, positions)
 
         joint_vel_constraint = constraint.JointVelocityConstraint(self._vlim)
         joint_acc_constraint = constraint.JointAccelerationConstraint(self._alim)
@@ -980,39 +1051,55 @@ class TrajectoryBuilder:
             if cart_constraint is not None:
                 constraints.append(cart_constraint)
         if self.constant_tool_speed:
-            constraints.append(self._build_path_speed_cap(path, positions, c[0]))
+            constraints.append(self._build_path_speed_cap(path, positions, path.slopes))
 
         try:
-            # Use evenly-spaced gridpoints - TOPPRA docs recommend "at least a few times
-            # the number of waypoints". Auto-selection can cluster points near
-            # discontinuities, causing TOPPRAsd to produce incorrect durations.
-            n_gridpoints = n_points * 3
-            gridpoints = np.linspace(0.0, 1.0, n_gridpoints)
+            # Adaptive samples alone can miss a sub-step blend; its boundaries
+            # and centre must constrain the solver even on a long straight run.
+            # Samples one half-width outside keep boundary curvature from
+            # constraining an entire neighbouring straight segment.
+            half_widths = 0.5 * (path.blend_ends - path.blend_starts)
+            gridpoints = np.unique(
+                np.concatenate(
+                    [
+                        propose_gridpoints(path),
+                        ss_waypoints,
+                        path.blend_starts,
+                        path.blend_ends,
+                        np.clip(path.blend_starts - half_widths, *path.path_interval),
+                        np.clip(path.blend_ends + half_widths, *path.path_interval),
+                    ]
+                )
+            )
+            # A straight span between two slow bends needs an interior speed
+            # to accelerate and brake; curvature-based sampling can omit it.
+            gridpoints = np.sort(
+                np.concatenate([gridpoints, 0.5 * (gridpoints[:-1] + gridpoints[1:])])
+            )
+            # Shared boundaries can differ by roundoff; the same tolerance
+            # as repeated input knots avoids singular solver intervals.
+            gridpoints = gridpoints[
+                np.concatenate(([True], np.diff(gridpoints) > 1e-12))
+            ]
+            gridpoints[[0, -1]] = path.path_interval
 
-            if self.duration is not None and self.duration > 0:
-                instance = algo.TOPPRAsd(constraints, path, gridpoints=gridpoints)
-                instance.set_desired_duration(self.duration)
-                jnt_traj = instance.compute_trajectory()
-                if jnt_traj is not None:
-                    duration = self.duration
-                    logger.debug(
-                        "TrajectoryBuilder: TOPPRAsd target_duration=%.3f, path_len=%d",
-                        duration,
-                        n_points,
-                    )
-                else:
-                    # Fall back to time-optimal if TOPPRAsd fails
-                    logger.warning("TOPPRAsd failed, trying time-optimal TOPPRA")
-                    instance = algo.TOPPRA(constraints, path, gridpoints=gridpoints)
-                    jnt_traj = instance.compute_trajectory()
-            else:
-                instance = algo.TOPPRA(constraints, path, gridpoints=gridpoints)
-                jnt_traj = instance.compute_trajectory()
+            # Uniformly stretching a rest-to-rest solution preserves its
+            # limits. TOPPRAsd's fixed subtraction from squared speed can
+            # instead stall at narrow blends and yield an infinite duration.
+            instance = algo.TOPPRA(
+                constraints,
+                path,
+                gridpoints=gridpoints,
+                parametrizer="ParametrizeConstAccel",
+            )
+            jnt_traj = instance.compute_trajectory()
 
-            if not isinstance(jnt_traj, SplineInterpolator):
+            if jnt_traj is None:
                 raise RuntimeError("TOPP-RA failed to compute trajectory")
 
-            duration = float(jnt_traj.duration)
+            duration = float(jnt_traj.path_interval[1] - jnt_traj.path_interval[0])
+            if not np.isfinite(duration) or duration <= 0:
+                raise RuntimeError("TOPP-RA returned an invalid duration")
 
             logger.debug(
                 "TrajectoryBuilder: TOPP-RA duration=%.3f, path_len=%d",
@@ -1022,13 +1109,14 @@ class TrajectoryBuilder:
 
             # One row per tick, the solved trajectory slowed onto a whole
             # number of ticks and ending exactly at its endpoint.
-            intervals = _tick_intervals(duration, self.dt)
+            intervals = _tick_intervals(self._requested_or(duration), self.dt)
             times = np.arange(intervals) * (duration / intervals)
             trajectory_rad = np.empty((intervals + 1, 6), dtype=np.float64)
             trajectory_rad[:-1] = jnt_traj(times)
-            trajectory_rad[-1] = jnt_traj(duration)
-            # TOPP-RA bounds acceleration along a path it takes as straight
-            # between rows; the bends between them are the rows' own.
+            trajectory_rad[-1] = positions[-1]
+            if not np.all(np.isfinite(trajectory_rad)):
+                raise RuntimeError("TOPP-RA returned non-finite joint positions")
+            # Discretized solver constraints can miss extrema between gridpoints.
             trajectory_rad = self._enforce_segment_limits(trajectory_rad)
             duration = len(trajectory_rad) * self.dt
 
@@ -1164,13 +1252,23 @@ class TrajectoryBuilder:
         if n_points < 2:
             return trajectory_rad
 
-        rates = _segment_rates(
-            np.diff(trajectory_rad, axis=0),
-            self.v_max,
-            self.a_max * self.dt,
-            1.0 / self.dt,
-        )
-        if np.all(rates * self.dt >= 1.0 - _RATE_TOLERANCE):
+        deltas = np.diff(trajectory_rad, axis=0)
+        if self.constant_tool_speed:
+            # A process move holds one tool speed: slowed evenly, by the
+            # most any segment needs, not only where it bends.
+            at_rest = np.zeros((1, 6))
+            turns = np.diff(np.vstack([at_rest, deltas, at_rest]), axis=0)
+            stretch = max(
+                1.0,
+                float(np.max(np.abs(deltas) / (self.v_max * self.dt))),
+                float(np.max(np.abs(turns) / (self.a_max * self.dt**2))),
+            )
+            rates = np.full(len(deltas), 1.0 / (stretch * self.dt))
+        else:
+            rates = _segment_rates(
+                deltas, self.v_max, self.a_max * self.dt, 1.0 / self.dt
+            )
+        if rates.min() * self.dt >= 1.0 - _RATE_TOLERANCE:
             return trajectory_rad
 
         cumulative_times = np.zeros(n_points)
@@ -1391,7 +1489,7 @@ class TrajectoryBuilder:
         return self._trajectory(trajectory_rad)
 
     def _build_cart_vel_constraint(
-        self, path: ta.SplineInterpolator | _LinearPath, ss_waypoints: NDArray
+        self, path: _BlendedPath, ss_waypoints: NDArray
     ) -> constraint.JointVelocityConstraintVarying | None:
         """
         Build Cartesian velocity constraint for TOPP-RA using path-tangent method.
@@ -1484,7 +1582,7 @@ class TrajectoryBuilder:
 
     def _build_path_speed_cap(
         self,
-        path: _LinearPath,
+        path: _BlendedPath,
         positions: NDArray[np.float64],
         slopes: NDArray[np.float64],
     ) -> constraint.Constraint:

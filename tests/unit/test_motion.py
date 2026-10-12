@@ -218,6 +218,32 @@ class TestTrajectoryBuilder:
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
 
+    def test_toppra_corner_is_no_slower_than_stopping_between_legs(self):
+        start = np.array([0.0, -1.57, 3.14, 0.0, 0.5, 0.0])
+        corner = start + [0.3, 0, 0, 0, 0, 0]
+        end = corner + [0, 0.3, 0, 0, 0, 0]
+        legs = [
+            JointPath.interpolate(start, corner, 50),
+            JointPath.interpolate(corner, end, 50),
+        ]
+        chain = JointPath(
+            positions=np.vstack([legs[0].positions, legs[1].positions[1:]])
+        )
+        frac = 0.5
+        separate_duration = sum(
+            TrajectoryBuilder(leg, ProfileType.TOPPRA, accel_frac=frac).build().duration
+            for leg in legs
+        )
+        trajectory = TrajectoryBuilder(
+            chain, ProfileType.TOPPRA, accel_frac=frac
+        ).build()
+
+        assert trajectory.duration <= separate_duration
+        rows = np.pad(trajectory.positions_rad, ((1, 1), (0, 0)), mode="edge")
+        acceleration = np.diff(rows, n=2, axis=0) / INTERVAL_S**2
+        assert np.all(np.abs(acceleration) <= frac * LIMITS.joint.hard.acceleration)
+        np.testing.assert_array_equal(trajectory.positions_rad[[0, -1]], [start, end])
+
     @pytest.mark.parametrize(
         "profile",
         [
