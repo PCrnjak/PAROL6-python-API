@@ -112,20 +112,29 @@ class TestTrajectoryBuilder:
         # Steps should be int32
         assert trajectory.steps.dtype == np.int32
 
-    def test_build_quintic_profile(self, simple_joint_path):
-        """QUINTIC profile should produce smooth trajectory."""
+    @pytest.mark.parametrize(
+        "profile,duration,bent",
+        [(ProfileType.QUINTIC, 3.0, False), (ProfileType.RUCKIG, 5.0, True)],
+    )
+    def test_build_profile_with_requested_duration(
+        self, simple_joint_path, profile, duration, bent
+    ):
+        if bent:
+            start, end = simple_joint_path.positions[[0, -1]]
+            mid = (start + end) / 2
+            mid[0] += 0.1
+            simple_joint_path = JointPath(positions=np.array([start, mid, end]))
         builder = TrajectoryBuilder(
             joint_path=simple_joint_path,
-            profile=ProfileType.QUINTIC,
-            duration=3.0,  # Long duration to stay within velocity limits
+            profile=profile,
+            duration=duration,
             dt=INTERVAL_S,
         )
 
         trajectory = builder.build()
 
-        assert isinstance(trajectory, Trajectory)
         assert len(trajectory) > 0
-        assert trajectory.duration >= 3.0
+        assert trajectory.duration >= duration
 
     def test_build_trapezoid_profile(self, simple_joint_path):
         """TRAPEZOID profile should produce trajectory with plateau."""

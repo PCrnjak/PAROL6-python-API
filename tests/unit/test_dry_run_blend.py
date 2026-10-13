@@ -63,6 +63,9 @@ class TestDryRunBlend:
         client.move_j(angles=W2, speed=0.3, r=10)
         client.move_j(angles=W3, speed=0.3, r=0)
         chain, one = client.plan(), single.plan()
+        for plan in (chain, one):
+            assert plan.rows > 0
+            assert all(block.error is None for block in plan.blocks)
         assert abs(chain.duration_s - one.duration_s) <= one.row_dt_s
 
     def test_state_updated_after_blend(self, client):

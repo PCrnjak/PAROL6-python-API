@@ -852,14 +852,13 @@ class TrajectoryBuilder:
     def build(self) -> Trajectory:
         """Time the fastest selected profile, enforce played joint limits across
         the complete move, then uniformly stretch to a longer requested duration.
-        RUCKIG keeps its own timing and ignores a requested duration.
         """
         trajectory = self._build()
         if trajectory.duration == 0.0:
             return trajectory
         rows = self._enforce_segment_limits(trajectory.positions_rad)
         fastest = (len(rows) - 1) * self.dt
-        if self.duration and self.profile != ProfileType.RUCKIG:
+        if self.duration:
             if self.duration < fastest:
                 logger.warning(
                     "Extending duration from %.3fs to %.3fs to respect the joint limits",
@@ -1439,6 +1438,8 @@ class TrajectoryBuilder:
         inp.max_velocity = self.v_max.tolist()
         inp.max_acceleration = self.a_max.tolist()
         inp.max_jerk = self.j_max.tolist()
+        if self.duration is not None:
+            inp.minimum_duration = self.duration
 
         # Pre-size the buffer from an estimated duration; the loop below
         # grows it if Ruckig runs longer than expected.
