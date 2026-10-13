@@ -40,6 +40,7 @@ from parol6.motion.streaming_executors import (
     _tangent_to_pose_jit,
     below_speed,
 )
+from parol6.motion.trajectory import _segment_rates
 from parol6.protocol.wire import (
     _pack_bitfield,
     _pack_positions,
@@ -129,6 +130,7 @@ def warmup_jit() -> float:
     speed_steps_to_rad_scalar(0.0, 0)
     speed_rad_to_steps(dummy_6f, out_6i)
     speed_rad_to_steps_scalar(0.0, 0)
+    _segment_rates(np.zeros((2, 6)), np.ones(6), np.ones(6), 100.0)
     _progress("joint conversions")
 
     # parol6/utils/ik.py

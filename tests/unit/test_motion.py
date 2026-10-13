@@ -4,13 +4,27 @@ import numpy as np
 import pytest
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import INTERVAL_S, LIMITS, PATH_SAMPLES, steps_to_rad
+from parol6.client.dry_run_client import DryRunRobotClient
+from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import JointPath, ProfileType, Trajectory, TrajectoryBuilder
-from parol6.motion.geometry import LineSegment
 from parol6.motion.trajectory import (
     IK_MAX_JOINT_STEP_RAD,
     _ik_branch_hop,
 )
+
+
+def _played_rows(client: DryRunRobotClient) -> np.ndarray:
+    record = client.plan()
+    assert not [block.error for block in record.blocks if block.error]
+    # TickIndex decimates rows; acceleration needs every control tick.
+    return np.concatenate([chunk.q_rad for chunk in client._chunks if len(chunk.q_rad)])
+
+
+def _assert_played_acceleration(rows: np.ndarray, fraction: float) -> None:
+    at_rest = np.pad(rows, ((1, 1), (0, 0)), mode="edge")
+    acceleration = np.diff(at_rest, n=2, axis=0) / INTERVAL_S**2
+    ratio = np.max(np.abs(acceleration) / (fraction * LIMITS.joint.hard.acceleration))
+    assert ratio <= 1.0, f"Played acceleration reached {ratio:.3f}x the requested limit"
 
 
 class TestJointPath:
@@ -218,99 +232,73 @@ class TestTrajectoryBuilder:
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
 
-    def test_toppra_corner_is_no_slower_than_stopping_between_legs(self):
-        start = np.array([0.0, -1.57, 3.14, 0.0, 0.5, 0.0])
-        corner = start + [0.3, 0, 0, 0, 0, 0]
-        end = corner + [0, 0.3, 0, 0, 0, 0]
-        legs = [
-            JointPath.interpolate(start, corner, 50),
-            JointPath.interpolate(corner, end, 50),
-        ]
-        chain = JointPath(
-            positions=np.vstack([legs[0].positions, legs[1].positions[1:]])
-        )
-        frac = 0.5
-        separate_duration = sum(
-            TrajectoryBuilder(leg, ProfileType.TOPPRA, accel_frac=frac).build().duration
-            for leg in legs
-        )
-        trajectory = TrajectoryBuilder(
-            chain, ProfileType.TOPPRA, accel_frac=frac
-        ).build()
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "TRAPEZOID", "QUINTIC"])
+    def test_blended_chain_is_no_slower_than_stops_and_respects_acceleration(
+        self, profile
+    ):
+        start = [90.0, -80.0, 190.0, 0.0, 30.0, 180.0]
+        corner = [110.0, -80.0, 190.0, 0.0, 30.0, 180.0]
+        end = [110.0, -65.0, 190.0, 0.0, 30.0, 180.0]
+        stopped_rows = 0
+        for radius in (0.0, 5.0, 20.0, 50.0):
+            client = DryRunRobotClient(initial_joints_deg=start)
+            client.select_profile(profile)
+            client.move_j(corner, speed=0.5, accel=0.5, r=radius)
+            client.move_j(end, speed=0.5, accel=0.5)
+            rows = _played_rows(client)
+            if radius == 0:
+                stopped_rows = len(rows)
+            else:
+                assert len(rows) <= stopped_rows, (
+                    profile,
+                    radius,
+                    len(rows),
+                    stopped_rows,
+                )
+            _assert_played_acceleration(rows, 0.5)
+            np.testing.assert_allclose(
+                np.degrees(rows[[0, -1]]), [start, end], atol=0.01
+            )
 
-        assert trajectory.duration <= separate_duration
-        rows = np.pad(trajectory.positions_rad, ((1, 1), (0, 0)), mode="edge")
-        acceleration = np.diff(rows, n=2, axis=0) / INTERVAL_S**2
-        assert np.all(np.abs(acceleration) <= frac * LIMITS.joint.hard.acceleration)
-        np.testing.assert_array_equal(trajectory.positions_rad[[0, -1]], [start, end])
+        client = DryRunRobotClient(
+            initial_joints_deg=list(PAROL6_ROBOT.joint.standby_deg)
+        )
+        client.select_profile(profile)
+        pose = client.pose()
+        client.move_l(
+            [pose[0] + 40, pose[1], pose[2] + 40, *pose[3:]], speed=0.5, accel=0.5
+        )
+        _assert_played_acceleration(_played_rows(client), 0.5)
 
-    @pytest.mark.parametrize(
-        "profile",
-        [
-            ProfileType.TOPPRA,
-            ProfileType.LINEAR,
-            ProfileType.QUINTIC,
-            ProfileType.TRAPEZOID,
-        ],
-    )
-    def test_a_path_that_bends_is_played_within_the_acceleration_limit(self, profile):
-        """Played one row per tick, a bend between rows is a change of joint
-        velocity within a tick, however smoothly the profile times the path
-        coordinate: the corner where a blended chain turns from J1 to J2,
-        and the J4 step a cartesian move from standby leaves after turning
-        the wrist off its singularity. Each is slowed until no joint
-        accelerates past the fraction of its limit the move asks for."""
-        start = np.array([0.0, -1.57, 3.14, 0.0, 0.5, 0.0])
-        corner = start + [0.3, 0, 0, 0, 0, 0]
-        chain = JointPath(
-            positions=np.vstack(
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "TRAPEZOID", "QUINTIC"])
+    def test_process_move_holds_a_feasible_tool_speed(self, profile):
+        for wrist_tilt in (0.0, 0.4):
+            start = np.array(PAROL6_ROBOT.joint.standby_deg, dtype=float)
+            start[4] += np.degrees(wrist_tilt)
+            client = DryRunRobotClient(initial_joints_deg=start.tolist())
+            client.select_profile(profile)
+            pose = client.pose()
+            client.move_p(
                 [
-                    JointPath.interpolate(start, corner, 50).positions,
-                    JointPath.interpolate(
-                        corner, corner + [0, 0.3, 0, 0, 0, 0], 50
-                    ).positions[1:],
+                    [pose[0] + 50, pose[1], *pose[2:]],
+                    [pose[0] + 50, pose[1] + 50, *pose[2:]],
                 ]
             )
-        )
-        standby = np.deg2rad(PAROL6_ROBOT.joint.standby_deg)
-        here = np.asarray(PAROL6_ROBOT.robot.fkine(standby)).copy()
-        there = here.copy()
-        there[:3, 3] += [0.04, 0.0, 0.04]
-        poses = np.empty((PATH_SAMPLES, 4, 4))
-        LineSegment(here, there).sample_into(poses, 0.0, 1.0, 0)
-        line = JointPath.from_poses(poses, standby)
-        frac = 0.5
-        cartesian = {
-            "cart_vel_limit": LIMITS.cart.hard.velocity.linear * frac,
-            "cart_acc_limit": LIMITS.cart.hard.acceleration.linear * frac,
-            "path_knots": line.knots,
-        }
-
-        for name, path, extra in [
-            ("blended corner", chain, {}),
-            ("MoveL from standby", line, cartesian),
-        ]:
-            rows = (
-                TrajectoryBuilder(
-                    joint_path=path,
-                    profile=profile,
-                    velocity_frac=frac,
-                    accel_frac=frac,
-                    dt=INTERVAL_S,
-                    **extra,
-                )
-                .build()
-                .positions_rad
-            )
-            rows = np.pad(rows, ((1, 1), (0, 0)), mode="edge")
-            accel = np.diff(rows, n=2, axis=0) / INTERVAL_S**2
-            ratio = float(
-                np.max(np.abs(accel) / (LIMITS.joint.hard.acceleration * frac))
-            )
-            assert ratio <= 1.0, (
-                f"{profile.name}, {name}: a joint at {ratio:.2f}x the "
-                "acceleration asked for"
-            )
+            rows = _played_rows(client)
+            _assert_played_acceleration(rows, 0.5)
+            tcp = np.array([PAROL6_ROBOT.robot.fkine(q)[:3, 3] for q in rows])
+            distance = np.linalg.norm(np.diff(tcp, axis=0), axis=1)
+            progress = np.cumsum(distance)
+            # A wrist reconfiguration contributes time but no tool travel.
+            cruise = distance[
+                (progress > 0.2 * progress[-1]) & (progress < 0.8 * progress[-1])
+            ]
+            assert cruise.min() / cruise.max() >= 0.9, (profile, wrist_tilt)
+            moving = np.flatnonzero(distance > 1e-6)
+            assert (moving[-1] - moving[0] + 1) * INTERVAL_S < 3.0
+            if wrist_tilt:
+                middle = distance[int(0.2 * len(distance)) : int(0.8 * len(distance))]
+                assert middle.min() / middle.max() >= 0.9
 
 
 class TestTrajectory:
