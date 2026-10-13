@@ -18,18 +18,21 @@ import threading
 import time
 from dataclasses import dataclass
 from importlib.resources import files as pkg_files
+from operator import attrgetter
 from pathlib import Path
 from typing import Any, Literal
 
 import msgspec
 import numpy as np
 from numpy.typing import NDArray
+from pinokin import CollisionChecker
 from pinokin import Robot as PinokinRobot
 from pinokin import se3_from_rpy, so3_rpy
 from collections.abc import Callable
 from waldoctl import (
     CartesianKinodynamicLimits,
     ChannelDescriptor,
+    Clearance,
     DryRunClient,
     ElectricGripperTool,
     HomePosition,
@@ -526,6 +529,12 @@ class Parol6IKResult:
 # ===========================================================================
 
 
+_NearestPoints = tuple[
+    str, str, float, tuple[float, float, float], tuple[float, float, float]
+]
+_clearance_distance = attrgetter("distance")
+
+
 class Robot(_RobotABC):
     """Unified PAROL6 robot - inherits from waldoctl.Robot ABC.
 
@@ -584,6 +593,7 @@ class Robot(_RobotABC):
         self._T_buf = np.asfortranarray(np.zeros((4, 4), dtype=np.float64))
         self._rpy_buf = np.zeros(3, dtype=np.float64)
         self._T_target_buf = np.zeros((4, 4), dtype=np.float64)
+        self._clearance_best: list[_NearestPoints | None] = []
 
     # -- Identity -----------------------------------------------------------
 
@@ -871,6 +881,60 @@ class Robot(_RobotABC):
             return float("inf")
         self._load_q_buf(q_rad)
         return c.min_distance(self._q_buf)
+
+    def clearances(self, q_rad: NDArray[np.float64]) -> list[Clearance]:
+        """Nearest arm/tool witnesses per keep-out, in world metres, closest first."""
+        c: CollisionChecker | None = self._collision_checker
+        if c is None:
+            return []
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        names = PAROL6_ROBOT._clearance_obstacle_names
+        if not names:
+            return []
+        indices = PAROL6_ROBOT._clearance_obstacle_indices
+        reports = PAROL6_ROBOT._clearance_display_names
+        if len(self._clearance_best) != len(names):
+            self._clearance_best = [None] * len(names)
+        best = self._clearance_best
+        self._load_q_buf(q_rad)
+        pairs: list[_NearestPoints] = c.nearest_points(self._q_buf, names)
+        for pair in pairs:
+            first, second = pair[0], pair[1]
+            index = indices.get(first)
+            if index is not None:
+                if second in indices:
+                    continue
+            else:
+                index = indices.get(second)
+                if index is None:
+                    continue
+            previous = best[index]
+            if previous is None or pair[2] < previous[2]:
+                best[index] = pair
+
+        result: list[Clearance] = []
+        for index, obstacle in enumerate(names):
+            nearest = best[index]
+            best[index] = None
+            if nearest is None:
+                continue
+            first, second, distance, first_point, second_point = nearest
+            if first == obstacle:
+                part, part_point, obstacle_point = second, second_point, first_point
+            else:
+                part, part_point, obstacle_point = first, first_point, second_point
+            result.append(
+                Clearance(
+                    reports.get(part, part),
+                    obstacle,
+                    distance,
+                    part_point,
+                    obstacle_point,
+                )
+            )
+        result.sort(key=_clearance_distance)
+        return result
 
     def apply_shapes(self, shapes) -> None:
         """Apply keep-out shapes to this process's checker (preview/editing viz).

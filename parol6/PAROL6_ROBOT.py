@@ -112,6 +112,7 @@ def _init_collision_checker(
         if srdf_path and os.path.exists(srdf_path):
             c.load_srdf(srdf_path)
         collision = c
+        _refresh_clearance_geometry()
         logger.info(
             "Collision checker loaded: %d pairs, %d geometry objects",
             c.num_collision_pairs,
@@ -146,6 +147,31 @@ _program_shapes: list = []
 # Installation-layer shapes; every program inherits these, set_shapes can't touch.
 _installation_shapes: list = []
 _installation_geom_names: list[str] = []
+
+_clearance_obstacle_names: list[str] = []
+_clearance_obstacle_indices: dict[str, int] = {}
+_clearance_display_names: dict[str, str] = {}
+
+
+def _refresh_clearance_geometry() -> None:
+    """Cache query metadata at scene edits, outside repeated pose queries."""
+    _clearance_obstacle_names.clear()
+    _clearance_obstacle_indices.clear()
+    _clearance_display_names.clear()
+    if collision is None:
+        return
+    _clearance_display_names.update(collision.geometry_link_names)
+    for prefix, shapes in (
+        ("shape:", _program_shapes),
+        ("install:", _installation_shapes),
+    ):
+        for shape in shapes:
+            if not shape.collision or shape.attachment is not None:
+                continue
+            name = prefix + shape.name
+            if collision.has_geometry(name):
+                _clearance_obstacle_indices[name] = len(_clearance_obstacle_names)
+                _clearance_obstacle_names.append(name)
 
 
 def _refresh_collision_tool_geometry(
@@ -212,9 +238,11 @@ def _refresh_collision_tool_geometry(
             for name in _active_tool_geom_names:
                 collision.remove_geometry_by_name(name)
             _active_tool_geom_names.clear()
+            _refresh_clearance_geometry()
             raise
 
     _active_tool_geom_key = key
+    _refresh_clearance_geometry()
 
 
 def apply_tool(
@@ -335,6 +363,7 @@ def apply_shapes(shapes: "Iterable[Any]") -> None:
         _replace_program_geometry(previous)
         raise
     _program_shapes = shapes
+    _refresh_clearance_geometry()
 
 
 def _replace_program_geometry(shapes: list) -> None:
@@ -399,6 +428,7 @@ def apply_installation_shapes(shapes: "Iterable[Any]") -> None:
             name, s.kind, s.params(), _pose_to_matrix(s.pose), margin=s.margin
         )
         _installation_geom_names.append(name)
+    _refresh_clearance_geometry()
 
 
 def installation_shapes() -> "list[Any]":
