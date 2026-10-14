@@ -528,7 +528,8 @@ def build_spline_path(
     Position is a natural cubic spline per axis over chord-length knots:
     uniform knots overshoot between unevenly spaced waypoints, and a
     natural end cannot swing wide of the first and last segments as
-    not-a-knot can. Orientation slerps between the waypoints' rotations.
+    not-a-knot can. Orientation slerps along each segment's geodesic with
+    smoothstep easing, giving zero angular velocity at every waypoint.
 
     Both run on one schedule, the distance along the path on the combined
     metric sqrt(t² + (w·θ)²), sampled at ``PATH_STEP_MM``: a waypoint that
@@ -583,7 +584,12 @@ def build_spline_path(
 
     out = np.zeros((len(u), 4, 4), dtype=np.float64)
     out[:, 3, 3] = 1.0
-    out[:, :3, :3] = Slerp(knots, rotations)(u).as_matrix()
+    segment = np.clip(np.searchsorted(knots, u, side="right") - 1, 0, len(knots) - 2)
+    span = knots[segment + 1] - knots[segment]
+    progress = (u - knots[segment]) / span
+    # Zero endpoint rates avoid angular-velocity corners without leaving the geodesics.
+    eased = progress**2 * (3.0 - 2.0 * progress)
+    out[:, :3, :3] = Slerp(knots, rotations)(knots[segment] + eased * span).as_matrix()
     if position is None:
         out[:, :3, 3] = points[0] / 1000.0
     else:
