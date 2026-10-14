@@ -192,6 +192,7 @@ class StatusCache:
         self._p99_period_s: float = 0.0
         self._overruns: int = 0
         self._enabled: bool = True
+        self._motion_profile: str | None = None
         self._homing_step: int = 0
         self._joints_homed: list[int] = [0] * 6
 
@@ -570,6 +571,7 @@ class StatusCache:
         enabled_changed = self._enabled != state.enabled
         if enabled_changed:
             self._enabled = state.enabled
+        self._motion_profile = state.motion_profile
 
         for i in range(6):
             bits = (1 if state.Temperature_error_in[i] else 0) | (
@@ -642,6 +644,7 @@ class StatusCache:
             accepted_index=self._accepted_index,
             homed=self._homed,
             enabled=self._enabled,
+            motion_profile=self._motion_profile,
             homing_step=self._homing_step,
             joints_homed=self._joints_homed,
             p99_period_s=self._p99_period_s,
