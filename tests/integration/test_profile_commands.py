@@ -52,7 +52,9 @@ class TestProfileCommands:
                     async for status in observer.stream_status():
                         if status.motion_profile == name:
                             return status
-                raise AssertionError("Status stream closed before reporting the profile")
+                raise AssertionError(
+                    "Status stream closed before reporting the profile"
+                )
 
             assert await writer.select_profile("QUINTIC") > 0
             selected = await reported_profile("QUINTIC")
