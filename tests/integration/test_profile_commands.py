@@ -4,11 +4,15 @@ Integration tests for motion profile commands.
 Tests SETPROFILE/GETPROFILE through the client API with a running server.
 """
 
+import asyncio
 import threading
 import time
 
 import numpy as np
 import pytest
+
+from parol6 import AsyncRobotClient
+from parol6.protocol.wire import StatusBuffer
 
 
 @pytest.mark.integration
@@ -35,6 +39,29 @@ class TestProfileCommands:
 
         assert client.select_profile("Quintic") > 0
         assert client.profile() == "QUINTIC"
+
+    @pytest.mark.asyncio
+    async def test_status_tracks_profile_selection_and_reset(self, server_proc, ports):
+        async with (
+            AsyncRobotClient(host=ports.server_ip, port=ports.server_port) as writer,
+            AsyncRobotClient(host=ports.server_ip, port=ports.server_port) as observer,
+        ):
+
+            async def reported_profile(name: str) -> StatusBuffer:
+                async with asyncio.timeout(5.0):
+                    async for status in observer.stream_status():
+                        if status.motion_profile == name:
+                            return status
+                raise AssertionError(
+                    "Status stream closed before reporting the profile"
+                )
+
+            assert await writer.select_profile("QUINTIC") > 0
+            selected = await reported_profile("QUINTIC")
+            assert await writer.reset_state() > 0
+            reset = await reported_profile("TOPPRA")
+            assert selected.motion_profile == "QUINTIC"
+            assert reset.motion_profile == "TOPPRA"
 
 
 @pytest.mark.integration

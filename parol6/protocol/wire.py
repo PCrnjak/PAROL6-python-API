@@ -15,7 +15,7 @@ client can tell an outdated peer from a silent one.
 Wire format uses msgpack arrays with integer type codes:
 - OK:       [MsgType.OK, req_id, index?]
 - ERROR:    [MsgType.ERROR, req_id, message]
-- STATUS:   [MsgType.STATUS, proto_version, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health, drive_faults]
+- STATUS:   [MsgType.STATUS, proto_version, pose, angles, speeds, io, action_current, action_state, joint_en, cart_en_wrf, cart_en_trf, executing_index, completed_index, last_checkpoint, error, queued_segments, queued_duration, action_params, tool_status, tcp_speed, simulator_active, collision_active, collision_pairs, scene_epoch, accepted_index, homed, enabled, homing_step, joints_homed, loop_health, drive_faults, session_id, seq, mono_time_ns, motion_profile]
 - RESPONSE: [MsgType.RESPONSE, req_id, [query_type, ...fields]]
 - COMMAND:  [CmdType.XXX, ...params]
 """
@@ -1692,6 +1692,10 @@ def pack_response(result: Response, req_id: int) -> bytes:
 
 _NO_JOINTS_HOMED: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
 
+# Append-only so existing profile IDs remain stable, without importing the planner.
+_MOTION_PROFILES = ("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR")
+_MOTION_PROFILE_IDS = {name: index for index, name in enumerate(_MOTION_PROFILES)}
+
 
 def pack_status(
     pose: np.ndarray,
@@ -1727,6 +1731,7 @@ def pack_status(
     session_id: int = 0,
     seq: int = 0,
     mono_time_ns: int = 0,
+    motion_profile: str | None = None,
 ) -> bytes:
     """Pack a status broadcast message.
 
@@ -1781,6 +1786,7 @@ def pack_status(
             session_id,
             seq,
             mono_time_ns,
+            _MOTION_PROFILE_IDS[motion_profile] if motion_profile is not None else None,
         ),
         option=ormsgpack.OPT_SERIALIZE_NUMPY,
     )
@@ -1834,6 +1840,7 @@ class StatusBuffer:
     # Whether the controller accepts motion (False while disabled, e.g. the
     # e-stop latch). True from producers that predate the field.
     enabled: bool = True
+    motion_profile: str | None = None
     # Remaining waldoctl StatusBuffer Protocol members. parol6 has no torque
     # sensing, fieldbus, or warning source, so these hold their empty values.
     torques: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
@@ -1920,6 +1927,7 @@ class StatusBuffer:
             accepted_index=self.accepted_index,
             homed=self.homed,
             enabled=self.enabled,
+            motion_profile=self.motion_profile,
             torques=self.torques.copy(),
             torques_ext=self.torques_ext.copy(),
             warnings=list(self.warnings),
@@ -1973,7 +1981,8 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
                      tool_status_tuple, tcp_speed, simulator_active,
                      collision_active, collision_pairs, scene_epoch,
                      accepted_index, homed, enabled, homing_step, joints_homed,
-                     loop_health, drive_faults, session_id, seq, mono_time_ns]
+                     loop_health, drive_faults, session_id, seq, mono_time_ns,
+                     motion_profile]
 
     Args:
         data: Raw msgpack bytes
@@ -2068,6 +2077,12 @@ def decode_status_bin_into(data: bytes, buf: StatusBuffer) -> bool:
         buf.accepted_index = int(msg[24]) if len(msg) > 24 else -1
         buf.homed = bool(msg[25]) if len(msg) > 25 else True
         buf.enabled = bool(msg[26]) if len(msg) > 26 else True
+        profile_id = msg[34] if len(msg) > 34 else None
+        buf.motion_profile = (
+            _MOTION_PROFILES[profile_id]
+            if type(profile_id) is int and 0 <= profile_id < len(_MOTION_PROFILES)
+            else None
+        )
         if len(msg) > 28:
             _apply_homing_progress(buf, int(msg[27]), msg[28])
         if len(msg) > 29:
