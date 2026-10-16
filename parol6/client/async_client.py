@@ -242,6 +242,8 @@ def _create_unicast_socket(port: int, host: str) -> socket.socket:
 if TYPE_CHECKING:
     from typing import Protocol
 
+    from waldoctl import Robot as WaldoRobot
+
     from parol6.robot import Robot
 
     class _StatusNotifier(Protocol):
@@ -320,7 +322,13 @@ class AsyncRobotClient(_RobotClientABC):
         return self._robot
 
     @robot.setter
-    def robot(self, value: "Robot | None") -> None:
+    def robot(self, value: "WaldoRobot | None") -> None:
+        # The interface takes any backend's robot; this client drives only
+        # its own.
+        if value is not None:
+            from parol6.robot import Robot
+
+            assert isinstance(value, Robot)
         self._robot = value
 
     def __init__(
@@ -1381,8 +1389,8 @@ class AsyncRobotClient(_RobotClientABC):
             rbt.select_profile("TOPPRA")
 
         Args:
-            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
-                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'SEPTIC', 'TRAPEZOID', 'LINEAR')
+                Note: RUCKIG and SEPTIC are point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
             1 once the profile is selected, 0 when no reply arrives.

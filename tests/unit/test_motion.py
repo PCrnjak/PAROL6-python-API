@@ -179,6 +179,7 @@ class TestTrajectoryBuilder:
         [
             ProfileType.LINEAR,
             ProfileType.QUINTIC,
+            ProfileType.SEPTIC,
             ProfileType.TRAPEZOID,
             ProfileType.TOPPRA,
             ProfileType.RUCKIG,
@@ -203,9 +204,8 @@ class TestTrajectoryBuilder:
         for i in range(len(traj.steps)):
             steps_to_rad(traj.steps[i], trajectory_rad[i])
 
-        # Compute velocities via finite difference
-        dt = traj.duration / (len(traj) - 1)
-        velocities_rad = np.diff(trajectory_rad, axis=0) / dt
+        # Rows are one control tick apart
+        velocities_rad = np.diff(trajectory_rad, axis=0) / INTERVAL_S
 
         # Check against velocity limits (with small tolerance for numerical error)
         v_max_rad = LIMITS.joint.hard.velocity
@@ -215,6 +215,47 @@ class TestTrajectoryBuilder:
             f"Profile {profile.name}: velocity exceeded limits by "
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
+
+    def test_septic_holds_its_limits_and_starts_and_stops_without_a_jerk_step(
+        self,
+    ):
+        """SEPTIC stays inside the velocity, acceleration and jerk limits, and
+        its jerk ramps in and out where QUINTIC's steps straight to its peak.
+        The move is short enough that the jerk limit is what sets its
+        duration."""
+        start = np.array([0.0, -1.57, 3.14, 0.0, 0.0, 0.0])
+        path = JointPath.interpolate(start, start + [0, 0.05, 0, 0, 0, 0], 50)
+
+        def j2_derivatives(profile):
+            q = TrajectoryBuilder(
+                joint_path=path, profile=profile, dt=INTERVAL_S
+            ).build()
+            # At rest before and after, so the differences see both ends.
+            q = np.pad(q.positions_rad[:, 1], 2, mode="edge")
+            return [np.diff(q, n=k) / INTERVAL_S**k for k in (1, 2, 3)]
+
+        hard = LIMITS.joint.hard
+        v, a, j = j2_derivatives(ProfileType.SEPTIC)
+        for name, x, limit in [
+            ("velocity", v, hard.velocity[1]),
+            ("acceleration", a, hard.acceleration[1]),
+            ("jerk", j, hard.jerk[1]),
+        ]:
+            ratio = float(np.max(np.abs(x)) / limit)
+            assert ratio <= 1.0, f"SEPTIC {name} at {ratio:.3f}x its limit"
+
+        # Jerk on the first and last samples against its peak: the septic's
+        # ramps from zero, the quintic's steps straight to its peak.
+        for profile, ramps in [
+            (ProfileType.SEPTIC, True),
+            (ProfileType.QUINTIC, False),
+        ]:
+            j = j2_derivatives(profile)[2]
+            edge = max(np.max(np.abs(j[:2])), np.max(np.abs(j[-2:])))
+            assert (edge < 0.5 * np.max(np.abs(j))) == ramps, (
+                f"{profile.name} jerk at its ends is {edge:.3f} "
+                f"against a peak of {np.max(np.abs(j)):.3f}"
+            )
 
 
 class TestTrajectory:

@@ -751,7 +751,9 @@ class DryRunRobotClient:
                     idx,
                     np.empty((0, 6)),
                     error=make_error(
-                        ErrorCode.SYS_PROFILE_INVALID, detail=params.profile
+                        ErrorCode.SYS_PROFILE_INVALID,
+                        detail=params.profile,
+                        allowed=", ".join(VALID_PROFILES),
                     ),
                 )
                 return idx

@@ -19,6 +19,7 @@ from parol6.commands.base import (
     SystemCommand,
 )
 from parol6.config import save_com_port
+from parol6.motion.trajectory import ProfileType
 from parol6.protocol.wire import (
     CmdType,
     ConnectHardwareCmd,
@@ -167,7 +168,7 @@ class SimulatorCommand(SystemCommand[SimulatorCmd]):
         return ExecutionStatusCode.COMPLETED
 
 
-VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
+VALID_PROFILES = tuple(ProfileType.__members__)
 
 
 @register_command(CmdType.SELECT_PROFILE)
@@ -181,11 +182,12 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
         TOPPRA    - Time-optimal path parameterization (default)
         RUCKIG    - Time-optimal jerk-limited (point-to-point only, joint moves only)
         QUINTIC   - C² smooth polynomial trajectories
+        SEPTIC    - C³ smooth polynomial, jerk-limited (point-to-point only, joint moves only)
         TRAPEZOID - Linear segments with parabolic blends
         LINEAR    - Direct interpolation (no smoothing)
 
-    Note: RUCKIG is point-to-point and cannot follow Cartesian paths.
-    Cartesian moves will use TOPPRA when RUCKIG is set.
+    Note: RUCKIG and SEPTIC are point-to-point and cannot follow Cartesian
+    paths. Cartesian moves will use TOPPRA when either is set.
     """
 
     PARAMS_TYPE = SelectProfileCmd
@@ -198,7 +200,9 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
         if profile not in VALID_PROFILES:
             err = ValueError(f"Invalid profile '{self.p.profile}'")
             err.robot_error = make_error(  # type: ignore[attr-defined, ty:unresolved-attribute]
-                ErrorCode.SYS_PROFILE_INVALID, detail=self.p.profile
+                ErrorCode.SYS_PROFILE_INVALID,
+                detail=self.p.profile,
+                allowed=", ".join(VALID_PROFILES),
             )
             raise err
 
