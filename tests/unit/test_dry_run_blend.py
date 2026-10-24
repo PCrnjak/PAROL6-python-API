@@ -55,18 +55,45 @@ class TestDryRunBlend:
         record = client.plan()
         assert record.rows == 0 and record.blocks == ()
 
-    def test_blended_chain_is_longer_than_one_move(self, client):
+    def test_a_chain_along_one_line_takes_as_long_as_the_one_move(self, client):
+        # W1 and W2 lie on the joint-space line from the start to W3.
         single = DryRunRobotClient()
         single.move_j(angles=W3, speed=0.3, r=0)
         client.move_j(angles=W1, speed=0.3, r=10)
         client.move_j(angles=W2, speed=0.3, r=10)
         client.move_j(angles=W3, speed=0.3, r=0)
-        assert client.plan().duration_s > single.plan().duration_s
+        chain, one = client.plan(), single.plan()
+        for plan in (chain, one):
+            assert plan.rows > 0
+            assert all(block.error is None for block in plan.blocks)
+        assert abs(chain.duration_s - one.duration_s) <= one.row_dt_s
 
     def test_state_updated_after_blend(self, client):
         client.move_j(angles=W1, speed=0.5, r=10)
         client.move_j(angles=W2, speed=0.5, r=0)
         np.testing.assert_allclose(client.angles(), W2, atol=0.5)
+
+    def test_turning_process_move_takes_comparable_time_to_a_line_chain(self):
+        start = [-50.0, 250.0, 200.0, 90.0, 0.0, 90.0]
+        corner = [50.0, 250.0, 200.0, 90.0, 0.0, 180.0]
+        end = [50.0, 250.0, 300.0, 90.0, 0.0, 180.0]
+        positioned = DryRunRobotClient()
+        positioned.move_j(pose=start, speed=0.5)
+        assert all(block.error is None for block in positioned.plan().blocks)
+        initial = positioned.angles()
+
+        process = DryRunRobotClient(initial_joints_deg=initial)
+        lines = DryRunRobotClient(initial_joints_deg=initial)
+        for robot in (process, lines):
+            robot.select_profile("TOPPRA")
+        process.move_p([corner, end], speed=0.25)
+        lines.move_l(corner, speed=0.25, r=5.0)
+        lines.move_l(end, speed=0.25)
+        process_plan, line_plan = process.plan(), lines.plan()
+        for plan in (process_plan, line_plan):
+            assert all(block.error is None for block in plan.blocks)
+        # A continuous turn must not force the entire process path to crawl.
+        assert process_plan.duration_s <= 2.0 * line_plan.duration_s
 
     def test_pause_holds_the_program_until_resume(self):
         slow = DryRunRobotClient(initial_joints_deg=W0)
