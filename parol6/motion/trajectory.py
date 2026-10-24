@@ -20,15 +20,14 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
-from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
+from scipy.interpolate import PPoly, make_interp_spline
+from ruckig import InputParameter, Result, Ruckig, Trajectory as RuckigTrajectory  # type: ignore[unresolved-import, ty:unresolved-import]
 
-from scipy.interpolate import PPoly
-
-import toppra as ta
 import toppra.algorithm as algo
 import toppra.constraint as constraint
-from toppra.interpolator import SplineInterpolator
+from toppra.parametrizer import ParametrizeConstAccel
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
@@ -36,7 +35,7 @@ from parol6.motion.geometry import _rotation_angle, cartesian_path_knots
 from parol6.utils.error_catalog import make_error
 from parol6.utils.error_codes import ErrorCode
 from parol6.utils.errors import IKError, TrajectoryPlanningError
-from parol6.utils.joint_limits import TRAVEL_MAX_RAD, TRAVEL_MIN_RAD
+from parol6.utils.joint_limits import HALF_STEP_RAD, TRAVEL_MAX_RAD, TRAVEL_MIN_RAD
 
 
 from pinokin import Damping, IKSolver, se3_interp
@@ -136,31 +135,192 @@ def _tick_intervals(duration: float, dt: float) -> int:
     return max(1, math.ceil(duration / dt - _TICK_ROUNDING))
 
 
-class _LinearPath:
-    """Piecewise linear path wrapper for TOPPRA compatibility.
+# Relative slack on a segment rate: below it a rate is taken as settled.
+_RATE_TOLERANCE = 1e-9
 
-    Wraps a scipy PPoly (degree-1) to satisfy the toppra path interface:
-    __call__(s, order), .dof, .path_interval.  Linear segments prevent
-    overshoot between waypoints — critical near wrist singularities where
-    cubic spline bulge amplifies orientation error.
+
+def _slowed(rows: NDArray[np.float64], count: int) -> NDArray[np.float64]:
+    """Retiming of rest-to-rest rows with continuous velocity and acceleration."""
+    spline = make_interp_spline(
+        np.linspace(0.0, 1.0, len(rows)), rows, k=3, bc_type="clamped"
+    )
+    slowed = spline(np.linspace(0.0, 1.0, count))
+    slowed[[0, -1]] = rows[[0, -1]]
+    return slowed
+
+
+def _distinct(values: NDArray[np.float64]) -> NDArray[np.bool_]:
+    # Seidel treats intervals below 1e-10 as singular.
+    return np.concatenate(([True], np.diff(values) > 1e-9))
+
+
+def _resample(
+    rows: NDArray[np.float64], knots: NDArray[np.float64], at: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    indices = np.clip(np.searchsorted(knots, at, side="right") - 1, 0, len(knots) - 2)
+    fraction = ((at - knots[indices]) / (knots[indices + 1] - knots[indices]))[:, None]
+    return rows[indices] + fraction * (rows[indices + 1] - rows[indices])
+
+
+@njit(cache=True)
+def _segment_rates(
+    deltas: NDArray[np.float64],
+    v_max: NDArray[np.float64],
+    dv_max: NDArray[np.float64],
+    rate_max: float,
+) -> NDArray[np.float64]:
+    """The fastest rate (one over its time) each segment between rows can
+    be run at: no faster than ``rate_max``, every joint under ``v_max``,
+    and every joint's velocity changing by at most ``dv_max`` from one
+    segment to the next, from rest into the first and into rest out of the
+    last.
+
+    A joint that its two neighbouring segments move in opposite directions
+    turns at the row between them, and each side takes half the change.
+    Every other bound caps a segment's rate by its own limits or by a
+    rising function of a neighbour's rate, so lowering the rates until no
+    bound is broken reaches the fastest timing that breaks none: a forward
+    pass for a joint speeding up into a segment, a backward pass for one
+    slowing into the next, repeated while either still lowers a rate.
     """
+    padded = np.zeros((len(deltas) + 2, deltas.shape[1]))
+    padded[1:-1] = deltas
+    deltas = padded
+    n, dof = deltas.shape
+    rates = np.full(n, rate_max)
+    for i in range(n):
+        for j in range(dof):
+            d = abs(deltas[i, j])
+            if d > 0.0:
+                rates[i] = min(rates[i], v_max[j] / d)
+    for i in range(n - 1):
+        for j in range(dof):
+            a = deltas[i, j]
+            b = deltas[i + 1, j]
+            if a * b < 0.0:
+                rates[i] = min(rates[i], 0.5 * dv_max[j] / abs(a))
+                rates[i + 1] = min(rates[i + 1], 0.5 * dv_max[j] / abs(b))
+            elif a == 0.0 and b != 0.0:
+                rates[i + 1] = min(rates[i + 1], dv_max[j] / abs(b))
+            elif b == 0.0 and a != 0.0:
+                rates[i] = min(rates[i], dv_max[j] / abs(a))
+    lowered = True
+    while lowered:
+        lowered = False
+        for i in range(n - 1):
+            for j in range(dof):
+                a = deltas[i, j]
+                b = deltas[i + 1, j]
+                if a * b > 0.0:
+                    cap = (abs(a) * rates[i] + dv_max[j]) / abs(b)
+                    if cap < rates[i + 1] * (1.0 - _RATE_TOLERANCE):
+                        rates[i + 1] = cap
+                        lowered = True
+        for i in range(n - 2, -1, -1):
+            for j in range(dof):
+                a = deltas[i, j]
+                b = deltas[i + 1, j]
+                if a * b > 0.0:
+                    cap = (abs(b) * rates[i + 1] + dv_max[j]) / abs(a)
+                    if cap < rates[i] * (1.0 - _RATE_TOLERANCE):
+                        rates[i] = cap
+                        lowered = True
+    return rates[1:-1]
 
-    __slots__ = ("_pp", "dof", "path_interval")
 
-    def __init__(self, ppoly: PPoly, dof: int) -> None:
-        self._pp = ppoly
-        self.dof = dof
-        self.path_interval = [float(ppoly.x[0]), float(ppoly.x[-1])]
+class _BlendedPath:
+    """C1 parabolic blends bounded by chord sag and sharp-corner deviation."""
 
-    def __call__(self, s_in: float | NDArray, order: int = 0) -> NDArray[np.float64]:
-        scalar = np.isscalar(s_in)
-        s = np.atleast_1d(np.asarray(s_in, dtype=float))
-        if order <= 1:
-            result = self._pp(s, order)
-        else:
-            # Second+ derivative of a piecewise-linear path is zero
-            result = np.zeros((len(s), self.dof))
-        return result[0] if scalar and result.ndim > 1 else result
+    def __init__(
+        self,
+        knots: NDArray[np.float64],
+        positions: NDArray[np.float64],
+        a_max: NDArray[np.float64],
+        dt: float,
+    ) -> None:
+        self.dof = positions.shape[1]
+        self.path_interval = (float(knots[0]), float(knots[-1]))
+        intervals = np.diff(knots)
+        self.slopes = np.diff(positions, axis=0) / intervals[:, None]
+        delta = np.diff(self.slopes, axis=0)
+        magnitude = np.max(np.abs(delta), axis=1)
+        corners = np.flatnonzero(magnitude > 1e-9)
+        span = 0.5 * (intervals[:-1] + intervals[1:])
+        curvature = np.abs(delta) / span[:, None]
+        neighbours = (
+            np.maximum(
+                np.pad(curvature[:-1], ((1, 0), (0, 0))),
+                np.pad(curvature[1:], ((0, 1), (0, 0))),
+            )
+            if len(delta)
+            else curvature
+        )
+        width = np.minimum(intervals[:-1], intervals[1:])
+        # A two-sided curvature bound permits chord sag, not isolated sharp turns.
+        sag = 2.0 * neighbours * width[:, None] ** 2 / 8.0
+        deviation = np.maximum(HALF_STEP_RAD, a_max * dt**2 / 4.0) + sag
+        with np.errstate(divide="ignore"):
+            allowed_width = np.min(
+                4.0 * deviation[corners] / np.abs(delta[corners]), axis=1
+            )
+        half_width = np.minimum(
+            0.5 * width[corners],
+            allowed_width,
+        )
+        starts = knots[corners + 1] - half_width
+        ends = knots[corners + 1] + half_width
+        unblended = np.delete(knots, corners + 1)
+        breaks = np.unique(np.concatenate([unblended, starts, ends]))
+        at = breaks[:-1]
+        segments = np.clip(
+            np.searchsorted(knots, at, side="right") - 1, 0, len(self.slopes) - 1
+        )
+        coefficients = np.zeros((3, len(at), self.dof))
+        coefficients[1] = self.slopes[segments]
+        coefficients[2] = (
+            positions[segments]
+            + self.slopes[segments] * (at - knots[segments])[:, None]
+        )
+        if len(corners):
+            blends = np.maximum(np.searchsorted(starts, at, side="right") - 1, 0)
+            inside = (at >= starts[blends]) & (at < ends[blends])
+            selected = blends[inside]
+            curvature = delta[corners[selected]] / (2.0 * half_width[selected, None])
+            offset = (at[inside] - starts[selected])[:, None]
+            slope = self.slopes[corners[selected]]
+            position = (
+                positions[corners[selected] + 1] - slope * half_width[selected, None]
+            )
+            coefficients[0, inside] = 0.5 * curvature
+            coefficients[1, inside] = slope + offset * curvature
+            coefficients[2, inside] = position + offset * (
+                slope + 0.5 * offset * curvature
+            )
+        self._pp = PPoly(coefficients, breaks)
+        self._blend_ends = ends
+
+    @property
+    def breaks(self) -> NDArray[np.float64]:
+        return self._pp.x
+
+    def __call__(self, s: float | NDArray, order: int = 0) -> NDArray[np.float64]:
+        if order == 2:
+            # TOPP-RA must constrain the last stage inside each bend.
+            s = np.where(np.isin(s, self._blend_ends), np.nextafter(s, -np.inf), s)
+        return self._pp(s, order)
+
+
+class _PathSpeedConstraint(constraint.LinearConstraint):
+    """A scalar path-speed ceiling expressed directly as a bound on squared speed."""
+
+    def __init__(self, caps: float | NDArray[np.float64]) -> None:
+        super().__init__()
+        self.caps = caps
+
+    def compute_constraint_params(self, path: _BlendedPath, gridpoints: NDArray):
+        bounds = np.zeros((len(gridpoints), 2))
+        bounds[:, 1] = np.square(self.caps)
+        return None, None, None, None, None, None, bounds
 
 
 class ProfileType(Enum):
@@ -652,8 +812,8 @@ class TrajectoryBuilder:
     """
     Converts JointPath to executable Trajectory.
 
-    Uses TOPP-RA to compute maximum allowable path speed, then applies
-    the selected motion profile (clamped to TOPP-RA limits).
+    Along-path profiles use TOPP-RA to time a blended path within the
+    selected profile's speed envelope and the joint limits.
 
     All limits come from PAROL6_ROBOT config - no hardcoded fallbacks.
     """
@@ -681,16 +841,17 @@ class TrajectoryBuilder:
             velocity_frac: Scale joint velocity limits (0.0-1.0), default 1.0
             accel_frac: Scale joint acceleration limits (0.0-1.0), default 1.0
             jerk_frac: Scale jerk limits (0.0-1.0), default 1.0
-            duration: Override duration (stretches profile if longer than TOPP-RA min)
+            duration: Requested time between endpoint rows, rounded up to control
+                ticks; longer moves are smoothly retimed, subject to joint limits.
             dt: Control loop time step
             cart_vel_limit: Cartesian linear velocity limit in m/s (for Cartesian commands)
             cart_acc_limit: Cartesian linear acceleration limit in m/s² (for Cartesian commands)
             path_knots: Path-parameter value of each joint waypoint, strictly
                 increasing from 0 to 1 — cumulative tool distance for a
                 cartesian path, so that a constant ``ds/dt`` is a constant
-                tool speed. ``None`` spaces the waypoints evenly.
+                tool speed. ``None`` uses normalized cumulative joint-space distance.
             constant_tool_speed: Hold the whole path to one ``ds/dt``, the
-                fastest the steepest stretch and the cartesian ceiling allow,
+                fastest joint velocity, bend acceleration and the tool ceiling allow,
                 rather than running each stretch as fast as it can (what a
                 process move promises).
         """
@@ -729,21 +890,46 @@ class TrajectoryBuilder:
         self._alim = np.column_stack([-self.a_max, self.a_max])
 
     def build(self) -> Trajectory:
+        """Time the fastest selected profile, enforce played joint limits across
+        the complete move, then smoothly retime to a longer requested duration.
         """
-        Generate time-parameterized trajectory.
+        trajectory = self._build()
+        if trajectory.duration == 0.0:
+            return trajectory
+        rows = self._enforce_segment_limits(trajectory.positions_rad)
+        fastest = (len(rows) - 1) * self.dt
+        if self.duration:
+            requested_intervals = _tick_intervals(self.duration, self.dt)
+            if requested_intervals < len(rows) - 1:
+                logger.warning(
+                    "Extending duration from %.3fs to %.3fs to respect the joint limits",
+                    self.duration,
+                    fastest,
+                )
+            elif requested_intervals > len(rows) - 1:
+                rows = self._enforce_segment_limits(
+                    _slowed(rows, requested_intervals + 1)
+                )
+        elif len(rows) > len(trajectory):
+            duration = (len(trajectory) - 1) * self.dt
+            level = logging.WARNING if fastest > 1.1 * duration else logging.DEBUG
+            logger.log(
+                level,
+                "Extending duration from %.3fs to %.3fs (%.1f%% increase) to respect velocity/acceleration limits",
+                duration,
+                fastest,
+                (fastest / duration - 1) * 100,
+            )
+        return self._trajectory(rows)
 
-        Uses TOPP-RA to compute time-optimal trajectory, then samples it directly
-        at the control rate. No interpolation of the original joint path is needed
-        since TOPP-RA's trajectory already provides smooth, continuous positions.
+    def _build(self) -> Trajectory:
+        """The trajectory as the selected profile times it.
 
         RUCKIG and SEPTIC run point to point, from the first row to the
         last; a path that is not a straight run between them is timed by
         TOPP-RA instead. QUINTIC and TRAPEZOID run each joint on its own
         profile from end to end on a straight run, and the path coordinate
         along any other path.
-
-        Returns:
-            Trajectory ready for execution, its rows one control tick apart
         """
         positions = self.joint_path.positions
         # A path that goes nowhere is done where it stands: there is no
@@ -760,17 +946,6 @@ class TrajectoryBuilder:
 
         if self.joint_path.prefix > 0:
             return self._build_with_prefix()
-
-        if self.path_knots is not None and self.profile in (
-            ProfileType.LINEAR,
-            ProfileType.QUINTIC,
-            ProfileType.TRAPEZOID,
-        ):
-            # These profiles time a path coordinate spaced by row; spaced
-            # by the tool's own distance instead, their cruise is one tool
-            # speed, as TOPPRA holds it through the knots.
-            self.joint_path = self._resampled_by_knots(self.path_knots)
-            self.path_knots = None
 
         along_path = self._is_cartesian_path() or not self._is_point_to_point()
         if self.profile == ProfileType.RUCKIG and not along_path:
@@ -811,18 +986,25 @@ class TrajectoryBuilder:
             positions_rad=trajectory_rad,
         )
 
-    def _resampled_by_knots(self, knots: NDArray[np.float64]) -> JointPath:
-        """The joint path resampled at even steps of the path parameter the
-        knots give each row (the tool's normalized distance), as many rows
-        as it had. Repeated knots keep their first row."""
+    def _blended_path(self) -> _BlendedPath:
         positions = self.joint_path.positions
-        knots = np.asarray(knots, dtype=np.float64)
-        keep = np.concatenate(([True], np.diff(knots) > 1e-12))
-        at = np.linspace(0.0, 1.0, len(positions))
-        resampled = np.empty_like(positions)
-        for j in range(positions.shape[1]):
-            resampled[:, j] = np.interp(at, knots[keep], positions[keep, j])
-        return JointPath(positions=resampled)
+        if self.path_knots is not None:
+            knots = np.asarray(self.path_knots, dtype=np.float64)
+        else:
+            # Bezier sampling density must not create artificial speed changes.
+            knots = np.concatenate(
+                ([0.0], np.cumsum(np.linalg.norm(np.diff(positions, axis=0), axis=1)))
+            )
+            knots /= knots[-1]
+        keep = _distinct(knots)
+        if np.count_nonzero(keep) < 2:
+            raise TrajectoryPlanningError(
+                make_error(
+                    ErrorCode.TRAJ_NO_STEPS,
+                    detail="the path covers no distance to time",
+                )
+            )
+        return _BlendedPath(knots[keep], positions[keep], self.a_max, self.dt)
 
     @staticmethod
     def _within_a_step(positions: NDArray[np.float64]) -> bool:
@@ -862,27 +1044,19 @@ class TrajectoryBuilder:
             accel_frac=self.accel_frac,
             jerk_frac=self.jerk_frac,
             dt=self.dt,
-        ).build()
-        # A requested duration is the whole move's: the path gets what the
-        # turn's motion leaves of it, and runs as fast as it can when the
-        # turn left none, as any request shorter than the move can be does.
-        path_duration = None
-        if self.duration:
-            remaining = self.duration - (len(turn) - 1) * self.dt
-            path_duration = remaining if remaining > 0 else None
+        )._build()
         path = TrajectoryBuilder(
             joint_path=JointPath(positions=self.joint_path.positions[p:]),
             profile=self.profile,
             velocity_frac=self.velocity_frac,
             accel_frac=self.accel_frac,
             jerk_frac=self.jerk_frac,
-            duration=path_duration,
             dt=self.dt,
             cart_vel_limit=self.cart_vel_limit,
             cart_acc_limit=self.cart_acc_limit,
             path_knots=self.path_knots,
             constant_tool_speed=self.constant_tool_speed,
-        ).build()
+        )._build()
         return self._trajectory(
             np.concatenate([turn.positions_rad, path.positions_rad[1:]])
         )
@@ -891,39 +1065,21 @@ class TrajectoryBuilder:
         """
         Build trajectory using TOPP-RA's time-optimal path parameterization.
 
-        Uses piecewise linear interpolation through waypoints (no overshoot)
-        and computes time-optimal velocity profile respecting joint limits
-        and optional Cartesian velocity limits.
+        Bounded corner blends expose curvature to the timing solver while
+        preserving the waypoint parameter and Cartesian velocity limits.
         """
+        return self._time_path(self._blended_path())
+
+    def _time_path(
+        self,
+        path: _BlendedPath,
+        profile_speed: Callable[[NDArray], NDArray] | None = None,
+        unaccelerated_ends: bool = False,
+    ) -> Trajectory:
+        """Time the blended path within its speed envelope, optionally easing the
+        clock into and out of rest with zero endpoint acceleration."""
         positions = self.joint_path.positions
-        if self.path_knots is not None:
-            # Waypoints that cover no distance would give a zero-width
-            # segment; the path keeps the first of any such run.
-            keep = np.concatenate(([True], np.diff(self.path_knots) > 1e-12))
-            positions = positions[keep]
-            ss_waypoints = np.asarray(self.path_knots, dtype=np.float64)[keep]
-            if len(positions) < 2:
-                raise TrajectoryPlanningError(
-                    make_error(
-                        ErrorCode.TRAJ_NO_STEPS,
-                        detail="the path covers no tool distance to time",
-                    )
-                )
-        else:
-            ss_waypoints = np.linspace(0.0, 1.0, len(positions))
-        n_points = len(positions)
-
-        # Piecewise linear PPoly — prevents cubic spline overshoot that
-        # amplifies orientation error near wrist singularities
-        n_seg = n_points - 1
-        dof = positions.shape[1]
-        c = np.zeros((2, n_seg, dof))
-        for i in range(n_seg):
-            dx = ss_waypoints[i + 1] - ss_waypoints[i]
-            c[0, i, :] = (positions[i + 1] - positions[i]) / dx
-            c[1, i, :] = positions[i]
-        path = _LinearPath(PPoly(c, ss_waypoints), dof)
-
+        gridpoints = self._gridpoints(path)
         joint_vel_constraint = constraint.JointVelocityConstraint(self._vlim)
         joint_acc_constraint = constraint.JointAccelerationConstraint(self._alim)
         constraints: list[constraint.Constraint] = [
@@ -931,59 +1087,55 @@ class TrajectoryBuilder:
             joint_acc_constraint,
         ]
 
-        if self.cart_vel_limit is not None and self.cart_vel_limit > 0:
-            cart_constraint = self._build_cart_vel_constraint(path, ss_waypoints)
-            if cart_constraint is not None:
-                constraints.append(cart_constraint)
+        if self._is_cartesian_path():
+            constraints.append(self._build_cart_vel_constraint(path, gridpoints))
         if self.constant_tool_speed:
-            constraints.append(self._build_path_speed_cap(path, positions, c[0]))
+            constraints.append(self._build_path_speed_cap(path))
+        if profile_speed is not None:
+            constraints.append(_PathSpeedConstraint(profile_speed(gridpoints)))
 
         try:
-            # Use evenly-spaced gridpoints - TOPPRA docs recommend "at least a few times
-            # the number of waypoints". Auto-selection can cluster points near
-            # discontinuities, causing TOPPRAsd to produce incorrect durations.
-            n_gridpoints = n_points * 3
-            gridpoints = np.linspace(0.0, 1.0, n_gridpoints)
+            instance = algo.TOPPRA(
+                constraints,
+                path,
+                gridpoints=gridpoints,
+                parametrizer="ParametrizeConstAccel",
+            )
+            jnt_traj = instance.compute_trajectory()
 
-            if self.duration is not None and self.duration > 0:
-                instance = algo.TOPPRAsd(constraints, path, gridpoints=gridpoints)
-                instance.set_desired_duration(self.duration)
-                jnt_traj = instance.compute_trajectory()
-                if jnt_traj is not None:
-                    duration = self.duration
-                    logger.debug(
-                        "TrajectoryBuilder: TOPPRAsd target_duration=%.3f, path_len=%d",
-                        duration,
-                        n_points,
-                    )
-                else:
-                    # Fall back to time-optimal if TOPPRAsd fails
-                    logger.warning("TOPPRAsd failed, trying time-optimal TOPPRA")
-                    instance = algo.TOPPRA(constraints, path, gridpoints=gridpoints)
-                    jnt_traj = instance.compute_trajectory()
-            else:
-                instance = algo.TOPPRA(constraints, path, gridpoints=gridpoints)
-                jnt_traj = instance.compute_trajectory()
-
-            if not isinstance(jnt_traj, SplineInterpolator):
+            if jnt_traj is None:
                 raise RuntimeError("TOPP-RA failed to compute trajectory")
 
+            assert isinstance(jnt_traj, ParametrizeConstAccel)
             duration = float(jnt_traj.duration)
+            if not np.isfinite(duration) or duration <= 0:
+                raise RuntimeError("TOPP-RA returned an invalid duration")
 
             logger.debug(
                 "TrajectoryBuilder: TOPP-RA duration=%.3f, path_len=%d",
                 duration,
-                n_points,
+                len(positions),
             )
 
-            # One row per tick, the solved trajectory slowed onto a whole
-            # number of ticks and ending exactly at its endpoint.
-            intervals = _tick_intervals(duration, self.dt)
-            times = np.arange(intervals) * (duration / intervals)
+            ramp = min(10.0 * self.dt, duration / 4.0) if unaccelerated_ends else 0.0
+            intervals = _tick_intervals(duration + ramp, self.dt)
+            times = np.arange(intervals) * ((duration + ramp) / intervals)
+            if ramp:
+                # A C2 clock ramp removes endpoint acceleration without slowing cruise.
+                distance = np.minimum(times, duration + ramp - times)
+                u = np.clip(distance / ramp, 0.0, 1.0)
+                eased = ramp * (u**3 - 0.5 * u**4)
+                times = np.where(
+                    times < ramp,
+                    eased,
+                    np.where(times > duration, duration - eased, times - ramp / 2.0),
+                )
             trajectory_rad = np.empty((intervals + 1, 6), dtype=np.float64)
             trajectory_rad[:-1] = jnt_traj(times)
-            trajectory_rad[-1] = jnt_traj(duration)
-            duration = intervals * self.dt
+            trajectory_rad[-1] = positions[-1]
+            if not np.all(np.isfinite(trajectory_rad)):
+                raise RuntimeError("TOPP-RA returned non-finite joint positions")
+            duration = len(trajectory_rad) * self.dt
 
             logger.debug(
                 "TrajectoryBuilder: output_samples=%d, duration=%.3f",
@@ -1001,49 +1153,35 @@ class TrajectoryBuilder:
             ) from e
 
     def _build_simple_trajectory(self) -> Trajectory:
-        """
-        Build the LINEAR profile: constant velocity along the path with ramps
-        at the acceleration limit at either end.
-
-        The path coordinate runs a trapezoid whose cruise is the fastest the
-        steepest joint allows and whose ramps are at that joint's
-        acceleration limit, so the profile never steps its velocity. The
-        limits come from the path's own length, segment by segment, so a
-        wrist flip or a reconfiguration mid-path costs the time it takes
-        rather than being averaged away by the endpoint delta. On a
-        cartesian path the cruise also keeps the tool under its ceiling.
-        """
+        """A trapezoidal path-speed envelope, slowed ahead of bends as needed."""
+        path = self._blended_path()
         vmax_s, amax_s, _ = self._compute_s_profile_limits()
-        vmax_s = min(vmax_s, self._cruise_cap())
-        if not np.isfinite(vmax_s) or not np.isfinite(amax_s):
-            vmax_s, amax_s = 1.0, 1.0
+        vmax_s = min(vmax_s, self._cruise_cap(path))
+        if not self._is_cartesian_path() and self._is_point_to_point():
+            duration = _trapezoid_duration(1.0, vmax_s, amax_s)
+            intervals = _tick_intervals(duration, self.dt)
+            profile_s = _trapezoid_samples(
+                np.linspace(0.0, duration, intervals + 1), 0.0, 1.0, vmax_s, amax_s
+            )
+            return self._trajectory(path(profile_s))
 
-        profile_duration = _trapezoid_duration(1.0, vmax_s, amax_s)
-        duration = max(profile_duration, self.duration or 0.0, self.dt * 2)
-        intervals = _tick_intervals(duration, self.dt)
-        duration = intervals * self.dt
-        times = np.arange(intervals + 1) * self.dt
-        profile_s = _trapezoid_samples(
-            times * (profile_duration / duration), 0.0, 1.0, vmax_s, amax_s
-        )
-        trajectory_rad = self.joint_path.sample_many(profile_s)
+        def speed(s: NDArray) -> NDArray:
+            return np.sqrt(np.minimum(vmax_s**2, 2.0 * amax_s * np.minimum(s, 1.0 - s)))
 
-        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
-
-        return self._trajectory(trajectory_rad)
+        return self._time_path(path, speed)
 
     def _is_cartesian_path(self) -> bool:
         """Check if this is a Cartesian path (has Cartesian velocity limits set)."""
         return self.cart_vel_limit is not None and self.cart_vel_limit > 0
 
-    def _cruise_cap(self) -> float:
+    def _cruise_cap(self, path: _BlendedPath) -> float:
         """The ``ds/dt`` ceiling on a path timed through its path coordinate:
-        on a process move, one tool speed the steepest stretch and the tool
-        ceiling allow; on any other cartesian path, the tool ceiling alone,
+        on a process move, one speed bounded by joint velocity, bend acceleration
+        and the tool ceiling; on any other cartesian path, the tool ceiling alone,
         the joints slowing only where they must; none off one."""
         if self.constant_tool_speed:
-            return self._row_speed_cap()
-        return self._tool_speed_cap()
+            return self._path_speed_cap(path)
+        return self._tool_speed_limit(path)
 
     def _compute_s_profile_limits(self) -> tuple[float, float, float]:
         """
@@ -1089,11 +1227,17 @@ class TrajectoryBuilder:
         self, trajectory_rad: NDArray[np.float64]
     ) -> NDArray[np.float64]:
         """
-        Enforce velocity limits by locally stretching segments that exceed limits.
+        Trim residual velocity and acceleration excess in the final played
+        rows, including the seam after a wrist-turn prefix. Continuous
+        timing can miss extrema between gridpoints and across that seam.
 
-        Walks through each segment and checks if joint velocities exceed limits.
-        Where they do, stretches that segment's time. This handles singularities
-        and wrist flips by slowing only where necessary, not globally.
+        Each segment between rows is given the shortest time, never less
+        than a tick, that keeps every joint under its velocity limit and
+        its velocity change from one segment to the next within a tick of
+        its acceleration limit (:func:`_segment_rates`). The rows are then
+        resampled a tick apart along that timing; a stretch of segments
+        all at least a tick long, sampled a tick apart, changes velocity
+        no faster than its segments do.
 
         Args:
             trajectory_rad: Joint positions in radians, shape (N, 6), one
@@ -1108,76 +1252,19 @@ class TrajectoryBuilder:
         if n_points < 2:
             return trajectory_rad
 
-        initial_dt = self.dt
-        duration = (n_points - 1) * initial_dt
-
-        deltas = np.diff(trajectory_rad, axis=0)  # (N-1, 6)
-
-        # Minimum time per segment to respect velocity limits:
-        # max(|delta[j]| / v_max[j]) over joints
-        min_segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
-        segment_times = np.maximum(min_segment_times, initial_dt)
-
-        # Approximate acceleration check: is the velocity change between
-        # adjacent segments feasible at the times they take once slowed for
-        # velocity? Measured at the original spacing instead, a segment
-        # slowed for velocity counts its excess twice.
-        if n_points > 2:
-            velocities = deltas / segment_times[:, np.newaxis]
-            spans = 0.5 * (segment_times[:-1] + segment_times[1:])
-            accel = np.diff(velocities, axis=0) / spans[:, np.newaxis]  # (N-2, 6)
-            accel_times = np.zeros(n_points - 1)
-            for i in range(len(accel)):
-                max_accel_ratio = np.max(np.abs(accel[i]) / self.a_max)
-                if max_accel_ratio > 1.0:
-                    # Spread the extra time across adjacent segments
-                    stretch = np.sqrt(max_accel_ratio)
-                    accel_times[i] = max(accel_times[i], min_segment_times[i] * stretch)
-                    accel_times[i + 1] = max(
-                        accel_times[i + 1], min_segment_times[i + 1] * stretch
-                    )
-            segment_times = np.maximum(segment_times, accel_times)
-
-        new_duration = float(np.sum(segment_times))
-        if new_duration <= duration * 1.001:  # No significant change
+        deltas = np.diff(trajectory_rad, axis=0)
+        rates = _segment_rates(deltas, self.v_max, self.a_max * self.dt, 1.0 / self.dt)
+        if rates.min() * self.dt >= 1.0 - _RATE_TOLERANCE:
             return trajectory_rad
 
-        logger.warning(
-            "Extending duration from %.3fs to %.3fs (%.1f%% increase) to respect velocity/acceleration limits",
-            duration,
-            new_duration,
-            (new_duration / duration - 1) * 100,
-        )
-
-        # Resample at control rate with the new per-segment timing
         cumulative_times = np.zeros(n_points)
-        cumulative_times[1:] = np.cumsum(segment_times)
+        cumulative_times[1:] = np.cumsum(1.0 / rates)
+        new_duration = float(cumulative_times[-1])
 
         intervals = _tick_intervals(new_duration, self.dt)
         output_times = np.arange(intervals + 1) * (new_duration / intervals)
 
-        new_trajectory = np.empty((intervals + 1, 6), dtype=np.float64)
-        for j in range(6):
-            new_trajectory[:, j] = np.interp(
-                output_times, cumulative_times, trajectory_rad[:, j]
-            )
-
-        return new_trajectory
-
-    def _requested_or(self, fastest: float) -> float:
-        """The requested duration, stretched to ``fastest`` when shorter:
-        a duration no joint can keep is not kept by overrunning its
-        limits."""
-        if not self.duration:
-            return fastest
-        if self.duration < fastest:
-            logger.warning(
-                "Extending duration from %.3fs to %.3fs to respect the joint limits",
-                self.duration,
-                fastest,
-            )
-            return fastest
-        return self.duration
+        return _resample(trajectory_rad, cumulative_times, output_times)
 
     def _compute_joint_duration_trapezoid(self) -> float:
         """
@@ -1242,50 +1329,21 @@ class TrajectoryBuilder:
         time_per_joint = np.maximum(np.maximum(time_vel, time_acc), time_jerk)
         return max(float(np.max(time_per_joint)), self.dt * 2)
 
-    def _compute_duration_along_rows(self) -> float:
-        """
-        Compute duration for a path followed row by row, from per-segment
-        joint requirements.
-
-        This properly handles singularities and wrist flips by analyzing
-        the maximum joint movement required in each path segment, not just
-        the total start-to-end displacement.
-
-        Returns the sum of minimum segment times, ensuring the path can be
-        traversed without violating joint velocity limits at any point.
-        """
-        positions = self.joint_path.positions
-        if len(positions) < 2:
-            return self.dt * 2
-
-        # Per-segment time from the max joint movement within each segment;
-        # summing these handles singularities/wrist flips that total
-        # start-to-end displacement would miss.
-        deltas = np.diff(positions, axis=0)  # (N-1, 6)
-        segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
-
-        segment_times = np.maximum(segment_times, self.dt)
-
-        return max(float(np.sum(segment_times)), self.dt * 2)
-
     def _build_polynomial_trajectory_joint(
         self,
         samples: Callable[
             [NDArray[np.float64], float, float, float], NDArray[np.float64]
         ],
-        fastest: float,
+        duration: float,
     ) -> Trajectory:
         """
         Build per-joint polynomial trajectory.
 
         Each joint independently follows the polynomial ``samples``,
-        synchronized to finish at the same time: over ``fastest``, the
-        shortest duration the joint limits allow, or a longer one asked for.
+        synchronized to finish together after ``duration``.
         """
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
-
-        duration = self._requested_or(fastest)
 
         intervals = _tick_intervals(duration, self.dt)
         duration = intervals * self.dt
@@ -1300,36 +1358,25 @@ class TrajectoryBuilder:
 
             trajectory_rad[:, j] = samples(times, start_pos[j], end_pos[j], duration)
 
-        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
-
         return self._trajectory(trajectory_rad)
 
     def _build_quintic_trajectory_along_path(self) -> Trajectory:
-        """
-        Build a quintic trajectory of the path coordinate.
-
-        The path is followed row by row along a quintic profile of s, with
-        local slowdown where velocity limits would be exceeded. On a
-        cartesian path the profile's peak keeps the tool under its ceiling.
-        """
-        if self.duration:
-            duration = self.duration
-        else:
-            # Use per-segment analysis to handle singularities and wrist flips
-            duration = self._compute_duration_along_rows()
-        duration = max(duration, _QUINTIC_PEAK_VEL / self._cruise_cap())
-
-        intervals = _tick_intervals(duration, self.dt)
-        duration = intervals * self.dt
-        times = np.arange(intervals + 1) * self.dt
-
-        profile_s = _quintic_samples(times, 0.0, 1.0, duration)
-
-        trajectory_rad = self.joint_path.sample_many(profile_s)
-
-        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
-
-        return self._trajectory(trajectory_rad)
+        """Quintic speed envelope with unaccelerated ends, or steady process cruise."""
+        if self.constant_tool_speed:
+            return self._build_simple_trajectory()
+        path = self._blended_path()
+        vmax_s, amax_s, _ = self._compute_s_profile_limits()
+        duration = max(
+            _QUINTIC_PEAK_VEL / min(vmax_s, self._cruise_cap(path)),
+            np.sqrt(_QUINTIC_PEAK_ACC / amax_s),
+            self.dt * 2,
+        )
+        times = np.linspace(0.0, 1.0, 1001)
+        profile_s = _quintic_samples(times, 0.0, 1.0, 1.0)
+        profile_v = 30.0 * times**2 * (1.0 - times) ** 2 / duration
+        return self._time_path(
+            path, lambda s: np.interp(s, profile_s, profile_v), unaccelerated_ends=True
+        )
 
     def _build_trapezoid_trajectory_joint(self) -> Trajectory:
         """
@@ -1341,7 +1388,7 @@ class TrajectoryBuilder:
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
 
-        duration = self._requested_or(self._compute_joint_duration_trapezoid())
+        duration = self._compute_joint_duration_trapezoid()
 
         intervals = _tick_intervals(duration, self.dt)
         duration = intervals * self.dt
@@ -1367,170 +1414,82 @@ class TrajectoryBuilder:
                 self.a_max[j],
             )
 
-        trajectory_rad = self._enforce_segment_limits(trajectory_rad)
-
         return self._trajectory(trajectory_rad)
 
+    def _gridpoints(self, path: _BlendedPath) -> NDArray[np.float64]:
+        breaks = path.breaks
+        widths = np.diff(breaks)
+        midpoints = 0.5 * (breaks[:-1] + breaks[1:])
+        curvature = np.max(np.abs(path(midpoints, 2)), axis=1)
+        divisions = np.maximum(1, np.ceil(widths / 0.05)).astype(int)
+        divisions = np.maximum(
+            divisions, np.ceil(np.sqrt(0.5 * curvature * widths**2 / 1e-4)).astype(int)
+        )
+        divisions = np.maximum(divisions, np.where(curvature > 1e-9, 2, 1))
+        points = np.concatenate(
+            [
+                np.linspace(left, right, int(count) + 1)
+                for left, right, count in zip(breaks[:-1], breaks[1:], divisions)
+            ]
+        )
+        curved = curvature > 1e-9
+        # Narrow bends must not constrain an entire adjacent straight interval.
+        outside = np.concatenate(
+            [
+                breaks[:-1][curved] - widths[curved] / 2,
+                breaks[1:][curved] + widths[curved] / 2,
+            ]
+        )
+        points = np.unique(
+            np.concatenate([points, np.clip(outside, *path.path_interval)])
+        )
+        midpoints = 0.5 * (points[:-1] + points[1:])
+        straight = np.max(np.abs(path(midpoints, 2)), axis=1) < 1e-9
+        points = np.sort(np.concatenate([points, midpoints[straight]]))
+        points = points[_distinct(points)]
+        points[[0, -1]] = path.path_interval
+        return points
+
     def _build_cart_vel_constraint(
-        self, path: ta.SplineInterpolator | _LinearPath, ss_waypoints: NDArray
-    ) -> constraint.JointVelocityConstraintVarying | None:
-        """
-        Build Cartesian velocity constraint for TOPP-RA using path-tangent method.
+        self, path: _BlendedPath, gridpoints: NDArray[np.float64]
+    ) -> _PathSpeedConstraint:
+        assert self.cart_vel_limit is not None
+        positions = path(gridpoints)
+        slopes = path(gridpoints, 1)
+        speeds = self._tool_speeds(positions, slopes)
+        with np.errstate(divide="ignore"):
+            caps = self.cart_vel_limit / speeds
+        return _PathSpeedConstraint(caps)
 
-        Uses the path tangent (dq/ds) to compute accurate Cartesian velocity limits.
-        At each path point s:
-        - cart_vel = J_lin @ q_dot = J_lin @ (dq/ds * s_dot)
-        - ||cart_vel|| = ||J_lin @ dq/ds|| * |s_dot|
-        - For ||cart_vel|| <= v_max: |s_dot| <= v_max / ||J_lin @ dq/ds||
+    def _build_path_speed_cap(self, path: _BlendedPath) -> _PathSpeedConstraint:
+        return _PathSpeedConstraint(self._path_speed_cap(path))
 
-        This is more accurate than the column-norm method as it considers the
-        actual direction of motion along the path.
-
-        Args:
-            path: The spline path through joint space
-            ss_waypoints: Path parameter values at each waypoint
-
-        Returns:
-            JointVelocityConstraintVarying with path-dependent limits, or None if error
-        """
-        if self.cart_vel_limit is None or self.cart_vel_limit <= 0:
-            return None
-
-        try:
-            robot = PAROL6_ROBOT.robot
-
-            # cart_vel_limit is already in m/s (SI units)
-            v_max_m_s = self.cart_vel_limit
-            # Scaled joint limits respect the user's velocity_frac
-            v_max_joint = self.v_max
-
-            # Pre-allocate; vlim_func is called once per gridpoint
-            vlim_buffer = np.empty((6, 2), dtype=np.float64)
-            _jac_buf = np.zeros((6, 6), dtype=np.float64, order="F")
-
-            def vlim_func(s: float) -> NDArray:
-                """Compute velocity limits at path position s using path tangent."""
-                q = path(s)
-                dq_ds = path(s, 1)  # Path tangent (first derivative)
-
-                # Linear (translational) part of the Jacobian is the first 3 rows
-                robot.jacob0_into(q, _jac_buf)
-                J_lin = _jac_buf[:3, :]
-
-                cart_vel_per_sdot = np.linalg.norm(J_lin @ dq_ds)
-
-                if cart_vel_per_sdot < 1e-6:
-                    # Near-zero path tangent (at waypoint or singular), use joint limits
-                    vlim_buffer[:, 0] = -v_max_joint
-                    vlim_buffer[:, 1] = v_max_joint
-                    return vlim_buffer.copy()
-
-                max_sdot = v_max_m_s / cart_vel_per_sdot
-
-                # The Cartesian constraint limits s_dot, not individual joint velocities.
-                # We scale ALL joint velocity limits uniformly by the ratio of
-                # (Cartesian-limited s_dot) / (fastest achievable s_dot from joint limits).
-                #
-                # This ensures the path velocity respects the Cartesian limit while
-                # keeping joints at their relative proportions.
-                abs_dq_ds = np.abs(dq_ds)
-
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    s_dot_per_joint = np.where(
-                        abs_dq_ds > 1e-9,
-                        v_max_joint / abs_dq_ds,
-                        np.inf,
-                    )
-
-                # The binding joint limit determines max achievable s_dot
-                s_dot_from_joints = float(np.min(s_dot_per_joint))
-
-                if max_sdot < s_dot_from_joints and s_dot_from_joints > 0:
-                    # Cartesian constraint is the tighter one; scale all limits down
-                    scale = max_sdot / s_dot_from_joints
-                    q_dot_max = v_max_joint * scale
-                else:
-                    q_dot_max = v_max_joint
-
-                vlim_buffer[:, 0] = -q_dot_max
-                vlim_buffer[:, 1] = q_dot_max
-
-                return vlim_buffer.copy()
-
-            return constraint.JointVelocityConstraintVarying(vlim_func)
-
-        except Exception as e:
-            logger.warning("Failed to build Cartesian velocity constraint: %s", e)
-            return None
-
-    def _build_path_speed_cap(
-        self,
-        path: _LinearPath,
-        positions: NDArray[np.float64],
-        slopes: NDArray[np.float64],
-    ) -> constraint.Constraint:
-        """:meth:`_path_speed_cap` as a TOPP-RA constraint. Holding every
-        stretch to it is what a constant tool speed costs; on a process
-        move that is the point rather than the price."""
-        cap = self._path_speed_cap(positions, slopes)
-        vlim_buffer = np.empty((6, 2), dtype=np.float64)
-
-        def vlim_func(s: float) -> NDArray:
-            dq_ds = np.abs(path(s, 1))
-            q_dot_max = np.maximum(dq_ds * cap, 1e-6)
-            vlim_buffer[:, 0] = -q_dot_max
-            vlim_buffer[:, 1] = q_dot_max
-            return vlim_buffer.copy()
-
-        return constraint.JointVelocityConstraintVarying(vlim_func)
-
-    def _row_slopes(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """The rows each segment starts at, and each segment's ``dq/ds``,
-        for a path whose rows are evenly spaced in its parameter, as the
-        profiles that time ``s`` directly take it."""
-        positions = self.joint_path.positions
-        return positions[:-1], np.diff(positions, axis=0) * (len(positions) - 1)
-
-    def _row_speed_cap(self) -> float:
-        """:meth:`_path_speed_cap` over the rows (:meth:`_row_slopes`)."""
-        return self._path_speed_cap(*self._row_slopes())
-
-    def _tool_speed_cap(self) -> float:
-        """:meth:`_tool_speed_limit` over the rows (:meth:`_row_slopes`)."""
-        return self._tool_speed_limit(*self._row_slopes())
-
-    def _tool_speed_limit(
+    def _tool_speeds(
         self, positions: NDArray[np.float64], slopes: NDArray[np.float64]
-    ) -> float:
-        """The fastest ``ds/dt`` that keeps the tool under the cartesian
-        ceiling wherever it moves fastest per unit of path; unbounded off
-        a cartesian path, or on one where the tool only turns.
-        ``positions`` are the rows the path runs through, one per segment
-        start in ``slopes``."""
+    ) -> NDArray[np.float64]:
+        robot = PAROL6_ROBOT.robot
+        jac = np.zeros((6, 6), dtype=np.float64, order="F")
+        speeds = np.empty(len(slopes))
+        for i in range(len(slopes)):
+            robot.jacob0_into(positions[i], jac)
+            speeds[i] = np.linalg.norm(jac[:3, :] @ slopes[i])
+        return speeds
+
+    def _tool_speed_limit(self, path: _BlendedPath) -> float:
         if not self._is_cartesian_path():
             return np.inf
         assert self.cart_vel_limit is not None
-        robot = PAROL6_ROBOT.robot
-        jac = np.zeros((6, 6), dtype=np.float64, order="F")
-        fastest = 0.0
-        for i in range(len(slopes)):
-            robot.jacob0_into(positions[i], jac)
-            fastest = max(fastest, float(np.linalg.norm(jac[:3, :] @ slopes[i])))
+        fastest = float(
+            np.max(self._tool_speeds(path(path.breaks), path(path.breaks, 1)))
+        )
         return self.cart_vel_limit / fastest if fastest > 1e-9 else np.inf
 
-    def _path_speed_cap(
-        self, positions: NDArray[np.float64], slopes: NDArray[np.float64]
-    ) -> float:
-        """One ``ds/dt`` ceiling for the whole path: the fastest constant the
-        steepest stretch allows under the joint limits, and under the
-        cartesian ceiling (:meth:`_tool_speed_limit`). ``positions`` are
-        the rows the path runs through, one per segment start in
-        ``slopes``."""
+    def _path_speed_cap(self, path: _BlendedPath) -> float:
+        """One feasible cruise speed under joint velocity, bend acceleration and tool limits."""
         with np.errstate(divide="ignore", invalid="ignore"):
-            per_joint = np.where(
-                np.abs(slopes) > 1e-9, self.v_max / np.abs(slopes), np.inf
-            )
-        cap = min(float(np.min(per_joint)), self._tool_speed_limit(positions, slopes))
+            velocity = np.min(self.v_max / np.abs(path.slopes))
+            bend = np.sqrt(np.min(self.a_max / np.abs(path(path.breaks, 2))))
+        cap = min(float(velocity), float(bend), self._tool_speed_limit(path))
         if not np.isfinite(cap) or cap <= 0.0:
             raise TrajectoryPlanningError(
                 make_error(
@@ -1550,7 +1509,7 @@ class TrajectoryBuilder:
         n_dofs = 6
         gen = Ruckig(n_dofs, self.dt)
         inp = InputParameter(n_dofs)
-        out = OutputParameter(n_dofs)
+        solution = RuckigTrajectory(n_dofs)
 
         start_pos = self.joint_path.positions[0]
         end_pos = self.joint_path.positions[-1]
@@ -1565,45 +1524,16 @@ class TrajectoryBuilder:
         inp.max_velocity = self.v_max.tolist()
         inp.max_acceleration = self.a_max.tolist()
         inp.max_jerk = self.j_max.tolist()
+        if self.duration is not None:
+            inp.minimum_duration = self.duration
 
-        # Pre-size the buffer from an estimated duration; the loop below
-        # grows it if Ruckig runs longer than expected.
-        est_duration = self._estimate_simple_duration()
-        max_iters = int(est_duration / self.dt) + 500  # generous margin
-        trajectory_rad = np.empty((max_iters, n_dofs), dtype=np.float64)
+        result = gen.calculate(inp, solution)
+        if result not in (Result.Working, Result.Finished):
+            raise RuntimeError(f"Ruckig failed to compute trajectory: {result}")
 
-        # Row 0 is the start, played on the first tick like every profile's:
-        # Ruckig's first output is already a tick along.
-        trajectory_rad[0] = start_pos
-        count = 1
-        result = Result.Working
-
-        while result == Result.Working:
-            result = gen.update(inp, out)
-            if count >= len(trajectory_rad):
-                new_buf = np.empty((len(trajectory_rad) * 2, n_dofs), dtype=np.float64)
-                new_buf[:count] = trajectory_rad[:count]
-                trajectory_rad = new_buf
-            trajectory_rad[count] = out.new_position
-            count += 1
-            out.pass_to_input(inp)
-
-        if result == Result.Error:
-            raise RuntimeError("Ruckig failed to compute trajectory")
-
-        return self._trajectory(trajectory_rad[:count])
-
-    def _estimate_simple_duration(self) -> float:
-        """Estimate minimum duration based on joint velocity limits.
-
-        With adaptive time distribution, each segment gets time proportional
-        to its joint movement, so total duration is sum of per-segment times.
-        """
-        positions = self.joint_path.positions
-        if len(positions) < 2:
-            return self.dt * 2
-
-        deltas = np.diff(positions, axis=0)  # (N-1, 6)
-        segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
-
-        return max(float(np.sum(segment_times)), self.dt * 2)
+        # Sampling the continuous solution avoids an extra update at a tick boundary.
+        intervals = _tick_intervals(solution.duration, self.dt)
+        times = np.linspace(0.0, solution.duration, intervals + 1)
+        trajectory_rad = np.array([solution.at_time(t)[0] for t in times])
+        trajectory_rad[[0, -1]] = [start_pos, end_pos]
+        return self._trajectory(trajectory_rad)

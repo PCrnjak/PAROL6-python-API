@@ -317,6 +317,7 @@ class ArcSegment:
 
 def _cubic_blend_into(
     entry_pose: NDArray[np.float64],
+    corner_pose: NDArray[np.float64],
     exit_pose: NDArray[np.float64],
     p1: NDArray[np.float64],
     p2: NDArray[np.float64],
@@ -326,7 +327,8 @@ def _cubic_blend_into(
     """Write a cubic Bézier blend zone into a pre-allocated buffer.
 
     Position follows the cubic through the control points
-    (entry, p1, p2, exit); orientation is the geodesic from entry to exit.
+    (entry, p1, p2, exit); orientation follows the spherical quadratic
+    through (entry, corner, exit), matching the adjoining legs' rates.
     """
     E = entry_pose[:3, 3]
     X = exit_pose[:3, 3]
@@ -334,7 +336,21 @@ def _cubic_blend_into(
     n_total = out.shape[0] + skip
     t = np.linspace(0.0, 1.0, n_total)[skip:]
 
-    batch_se3_interp(entry_pose, exit_pose, t, out)
+    entry, corner, exit_ = Rotation.from_matrix(
+        np.stack([pose[:3, :3] for pose in (entry_pose, corner_pose, exit_pose)])
+    )
+    # Matching the position's 2r tangents avoids angular-rate jumps at the joins.
+    entering = entry * Rotation.from_rotvec(
+        np.outer(t, (entry.inv() * corner).as_rotvec())
+    )
+    leaving = corner * Rotation.from_rotvec(
+        np.outer(t, (corner.inv() * exit_).as_rotvec())
+    )
+    out[:, :3, :3] = (
+        entering
+        * Rotation.from_rotvec(t[:, None] * (entering.inv() * leaving).as_rotvec())
+    ).as_matrix()
+    out[:, 3, :] = [0.0, 0.0, 0.0, 1.0]
 
     omt = 1.0 - t
     out[:, :3, 3] = (
@@ -466,7 +482,9 @@ def build_blended_path(
                 segments[seg_idx + 1].sample(t_out, exit_buf)
                 counts.append(
                     _intervals(
-                        2.0 * clamped[seg_idx], _rotation_angle(entry_buf, exit_buf)
+                        2.0 * clamped[seg_idx],
+                        _rotation_angle(entry_buf, seg.end)
+                        + _rotation_angle(seg.end, exit_buf),
                     )
                 )
     if samples_per_segment is None:
@@ -488,7 +506,13 @@ def build_blended_path(
             p1 = entry_buf[:3, 3] + handle_m * seg.tangent(t_a)
             p2 = exit_buf[:3, 3] - handle_m * nxt.tangent(t_b)
             _cubic_blend_into(
-                entry_buf, exit_buf, p1, p2, out[row : row + n_write], skip=skip
+                entry_buf,
+                seg.end,
+                exit_buf,
+                p1,
+                p2,
+                out[row : row + n_write],
+                skip=skip,
             )
         row += n_write
 
@@ -504,7 +528,8 @@ def build_spline_path(
     Position is a natural cubic spline per axis over chord-length knots:
     uniform knots overshoot between unevenly spaced waypoints, and a
     natural end cannot swing wide of the first and last segments as
-    not-a-knot can. Orientation slerps between the waypoints' rotations.
+    not-a-knot can. Orientation slerps along each segment's geodesic with
+    smoothstep easing, giving zero angular velocity at every waypoint.
 
     Both run on one schedule, the distance along the path on the combined
     metric sqrt(t² + (w·θ)²), sampled at ``PATH_STEP_MM``: a waypoint that
@@ -559,7 +584,12 @@ def build_spline_path(
 
     out = np.zeros((len(u), 4, 4), dtype=np.float64)
     out[:, 3, 3] = 1.0
-    out[:, :3, :3] = Slerp(knots, rotations)(u).as_matrix()
+    segment = np.clip(np.searchsorted(knots, u, side="right") - 1, 0, len(knots) - 2)
+    span = knots[segment + 1] - knots[segment]
+    progress = (u - knots[segment]) / span
+    # Zero endpoint rates avoid angular-velocity corners without leaving the geodesics.
+    eased = progress**2 * (3.0 - 2.0 * progress)
+    out[:, :3, :3] = Slerp(knots, rotations)(knots[segment] + eased * span).as_matrix()
     if position is None:
         out[:, :3, 3] = points[0] / 1000.0
     else:
