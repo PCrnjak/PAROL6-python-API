@@ -26,7 +26,7 @@ class UDPTransport:
     """
 
     def __init__(
-        self, ip: str = "127.0.0.1", port: int = 5001, buffer_size: int = 1024
+        self, ip: str = "127.0.0.1", port: int = 5001, buffer_size: int = 65535
     ):
         """
         Initialize the UDP transport.
@@ -34,7 +34,9 @@ class UDPTransport:
         Args:
             ip: IP address to bind to
             port: Port number to listen on
-            buffer_size: Size of the receive buffer in bytes
+            buffer_size: Size of the receive buffer in bytes. A datagram
+                longer than this is truncated, so the default holds the
+                largest UDP datagram (a SET_SHAPES of a whole workcell).
         """
         self.ip = ip
         self.port = port

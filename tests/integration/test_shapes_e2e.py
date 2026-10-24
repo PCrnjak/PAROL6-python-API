@@ -229,6 +229,19 @@ def test_set_shapes_ack_readback_rejection_and_timeout(
         dead = RobotClient(host=ports.server_ip, port=free_udp_port(), timeout=0.3)
         assert dead.set_shapes([box]) == 0
         assert dead.shapes() is None
+
+        # A whole workcell is one datagram several KiB long; it is applied,
+        # not truncated into a decode error.
+        cell = [
+            Box(
+                name=f"bin{i}", x=0.05, y=0.05, z=0.05, pose=(0.9, 0.06 * i, 0, 0, 0, 0)
+            )
+            for i in range(40)
+        ]
+        assert client.set_shapes(cell) == 1
+        world = client.shapes()
+        assert world is not None
+        assert world.program == tuple(cell)
     finally:
         assert client.set_shapes([]) == 1
         world = client.shapes()

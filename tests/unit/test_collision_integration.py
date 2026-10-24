@@ -55,6 +55,71 @@ def test_robot_collision_methods_clear_at_home():
     assert r.check_trajectory(q_path) == -1
 
 
+def test_robot_clearances_report_nearest_world_points_per_keepout(monkeypatch):
+    from waldoctl import Box
+
+    r = Robot()
+    q = np.zeros(6)
+    previous_program = PAROL6_ROBOT.program_shapes()
+    previous_installation = PAROL6_ROBOT.installation_shapes()
+    try:
+        r.apply_shapes([])
+        PAROL6_ROBOT.apply_installation_shapes([])
+        assert r.clearances(q) == []
+        gap = min(0.001, r.min_distance(q) / 2)
+        base = trimesh.load_mesh(
+            str(Path(PAROL6_ROBOT._mesh_dir) / "meshes" / "base_link_simplified.stl")
+        )
+        floor_top = float(base.bounds[0, 2]) - gap
+        PAROL6_ROBOT.apply_installation_shapes(
+            [
+                Box(
+                    name="floor",
+                    x=2,
+                    y=2,
+                    z=0.1,
+                    pose=(0, 0, floor_top - 0.05, 0, 0, 0),
+                )
+            ]
+        )
+        r.apply_shapes(
+            [
+                Box(
+                    name="floor",
+                    x=2,
+                    y=2,
+                    z=0.1,
+                    pose=(0, 0, floor_top - 1.05, 0, 0, 0),
+                ),
+                Box(name="marker", x=2, y=2, z=2, collision=False),
+            ]
+        )
+        clearances = r.clearances(q)
+        assert [c.obstacle for c in clearances] == ["install:floor", "shape:floor"]
+        nearest = clearances[0]
+        assert nearest.part == "base_link"
+        assert nearest.distance == pytest.approx(gap, abs=1e-7)
+        assert nearest.distance == pytest.approx(r.min_distance(q), abs=1e-7)
+        assert nearest.part_point[2] > nearest.obstacle_point[2]
+        assert nearest.obstacle_point[2] == pytest.approx(floor_top, abs=1e-7)
+        for clearance in clearances:
+            assert np.linalg.norm(
+                np.subtract(clearance.part_point, clearance.obstacle_point)
+            ) == pytest.approx(abs(clearance.distance), abs=1e-7)
+        assert clearances[1].distance == pytest.approx(gap + 1, abs=1e-7)
+
+        r.apply_shapes([])
+        assert [c.obstacle for c in r.clearances(q)] == ["install:floor"]
+        with monkeypatch.context() as patch:
+            patch.setattr(PAROL6_ROBOT, "collision", None)
+            assert r.clearances(q) == []
+        PAROL6_ROBOT.apply_installation_shapes([])
+        assert r.clearances(q) == []
+    finally:
+        PAROL6_ROBOT.apply_installation_shapes(previous_installation)
+        r.apply_shapes(previous_program)
+
+
 def test_guard_joint_path_clear_returns_none():
     positions = np.zeros((10, 6))
     # No exception means no collision detected.
