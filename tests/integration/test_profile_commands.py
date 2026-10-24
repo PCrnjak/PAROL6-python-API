@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from parol6 import AsyncRobotClient
+from parol6.motion.trajectory import ProfileType
 from parol6.protocol.wire import StatusBuffer
 
 
@@ -56,11 +57,14 @@ class TestProfileCommands:
                     "Status stream closed before reporting the profile"
                 )
 
-            assert await writer.select_profile("QUINTIC") > 0
-            selected = await reported_profile("QUINTIC")
+            for profile in ProfileType:
+                if profile is ProfileType.TOPPRA:
+                    continue
+                assert await writer.select_profile(profile.name) > 0
+                selected = await reported_profile(profile.name)
+                assert selected.motion_profile == profile.name
             assert await writer.reset_state() > 0
             reset = await reported_profile("TOPPRA")
-            assert selected.motion_profile == "QUINTIC"
             assert reset.motion_profile == "TOPPRA"
 
 

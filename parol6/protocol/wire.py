@@ -1693,7 +1693,7 @@ def pack_response(result: Response, req_id: int) -> bytes:
 _NO_JOINTS_HOMED: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
 
 # Append-only so existing profile IDs remain stable, without importing the planner.
-_MOTION_PROFILES = ("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR")
+_MOTION_PROFILES = ("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR", "SEPTIC")
 _MOTION_PROFILE_IDS = {name: index for index, name in enumerate(_MOTION_PROFILES)}
 
 
