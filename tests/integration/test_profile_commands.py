@@ -4,11 +4,16 @@ Integration tests for motion profile commands.
 Tests SETPROFILE/GETPROFILE through the client API with a running server.
 """
 
+import asyncio
 import threading
 import time
 
 import numpy as np
 import pytest
+
+from parol6 import AsyncRobotClient
+from parol6.motion.trajectory import ProfileType
+from parol6.protocol.wire import StatusBuffer
 
 
 @pytest.mark.integration
@@ -24,7 +29,7 @@ class TestProfileCommands:
 
     def test_select_and_get_profile_roundtrip(self, client, server_proc):
         """Test setting a profile and getting it back."""
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             assert client.select_profile(p) > 0
             assert client.profile() == p
 
@@ -35,6 +40,32 @@ class TestProfileCommands:
 
         assert client.select_profile("Quintic") > 0
         assert client.profile() == "QUINTIC"
+
+    @pytest.mark.asyncio
+    async def test_status_tracks_profile_selection_and_reset(self, server_proc, ports):
+        async with (
+            AsyncRobotClient(host=ports.server_ip, port=ports.server_port) as writer,
+            AsyncRobotClient(host=ports.server_ip, port=ports.server_port) as observer,
+        ):
+
+            async def reported_profile(name: str) -> StatusBuffer:
+                async with asyncio.timeout(5.0):
+                    async for status in observer.stream_status():
+                        if status.motion_profile == name:
+                            return status
+                raise AssertionError(
+                    "Status stream closed before reporting the profile"
+                )
+
+            for profile in ProfileType:
+                if profile is ProfileType.TOPPRA:
+                    continue
+                assert await writer.select_profile(profile.name) > 0
+                selected = await reported_profile(profile.name)
+                assert selected.motion_profile == profile.name
+            assert await writer.reset_state() > 0
+            reset = await reported_profile("TOPPRA")
+            assert reset.motion_profile == "TOPPRA"
 
 
 @pytest.mark.integration
@@ -48,11 +79,9 @@ class TestProfileMotionBehavior:
         target_angles = [10, -50, 190, 5, 10, 15]
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Teleport to the standby pose: each profile starts from the same
-            # spot without paying for five planned home moves (home() on a
-            # referenced robot is a real planned move now, not a firmware
-            # re-home — slow CI runners blew the per-test timeout on it).
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+            # Teleport, don't drive: a planned home move per profile blows the
+            # per-test timeout on slow runners.
             assert client.teleport(standby) == 1
 
             # Set profile and execute move
@@ -95,9 +124,9 @@ class TestProfileMotionBehavior:
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
 
         # All profiles should work for Cartesian moves
-        # RUCKIG falls back to TOPPRA automatically
-        for p in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
-            # Teleport, don't drive: five planned home moves blow the
+        # RUCKIG and SEPTIC fall back to TOPPRA automatically
+        for p in ["LINEAR", "QUINTIC", "SEPTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+            # Teleport, don't drive: a planned home move per profile blows the
             # per-test timeout on slow runners.
             assert client.teleport(standby) == 1
 
@@ -163,6 +192,33 @@ class TestProfileMotionBehavior:
         assert abs(planned[-1] - quintic) < 0.02, (
             f"previewed {quintic:.2f} s under QUINTIC, the controller planned "
             f"{planned[-1]:.2f} s"
+        )
+
+    def test_a_septic_cartesian_move_is_timed_along_its_path(self):
+        """SEPTIC times a straight joint run only. From standby the wrist
+        sits at its singularity, and a cartesian move leaves it in the
+        path's first row: a few degrees of J4 and J6 the tool never sees.
+        Timed as one polynomial from that row's slope, the whole move would run at
+        the turn's pace, a few centimetres taking ten times what TOPPRA
+        takes."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+
+        def previewed(profile: str) -> float:
+            preview = DryRunRobotClient(initial_joints_deg=standby)
+            assert preview.select_profile(profile) == 1
+            index = preview.move_l([40.0, 0.0, 40.0, 0.0, 0.0, 0.0], rel=True)
+            record = preview.plan()
+            assert record.blocks[index].error is None
+            return record.blocks[index].rows * record.row_dt_s
+
+        septic, toppra = previewed("SEPTIC"), previewed("TOPPRA")
+        # The wrist's turn ahead of the path is a joint move, run as SEPTIC.
+        assert septic < 1.5 * toppra, (
+            f"SEPTIC planned {septic:.2f} s for a move TOPPRA runs in {toppra:.2f} s"
         )
 
     @pytest.mark.parametrize("profile", ["LINEAR", "QUINTIC", "TRAPEZOID"])

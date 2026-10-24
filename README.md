@@ -197,7 +197,7 @@ flowchart TB
 - **MotionPlanner** (`parol6.server.motion_planner`): Separate subprocess for trajectory computation (TOPPRA, IK chains) — keeps the 100 Hz loop free. Only planned moves (MoveJ, MoveL, MoveC, MoveS, MoveP) go through the planner; streaming commands (JogJ, ServoJ, etc.) execute directly in the main loop
 - **SegmentPlayer** (`parol6.server.segment_player`): Consumes computed trajectory segments in the control loop — indexes one waypoint per tick with zero allocation
 - **StreamingExecutor** (`parol6.motion.streaming_executors`): Joint-space and Cartesian Ruckig-based executors for real-time jog/servo commands
-- **Motion pipeline** (`parol6.motion`): Offline trajectory generation (TOPPRA, Ruckig, Quintic, Trapezoid, Linear) and online streaming executors
+- **Motion pipeline** (`parol6.motion`): Offline trajectory generation (TOPPRA, Ruckig, Quintic, Septic, Trapezoid, Linear) and online streaming executors
 - **Transports** (`parol6.server.transports`): `SerialTransport` (hardware, 3 Mbaud), `MockSerialTransport` (simulator via shared memory IPC)
 - **StatusCache** (`parol6.server.status_cache`): Change-detection cache with async IK worker for cartesian/joint enablement computation
 
@@ -293,10 +293,11 @@ client.set_profile("TOPPRA")  # Default: time-optimal path-following
 | **TOPPRA** | Time-optimal path-following (default) |
 | **RUCKIG** | Jerk-limited point-to-point motion (joint moves only) |
 | **QUINTIC** | C² smooth polynomial trajectories |
+| **SEPTIC** | C³ smooth polynomial, jerk-limited: jerk also starts and ends at zero (joint moves only) |
 | **TRAPEZOID** | Linear segments with parabolic blends |
 | **LINEAR** | Direct interpolation (no smoothing) |
 
-Note: RUCKIG is point-to-point only and cannot follow Cartesian paths. When RUCKIG is set, Cartesian moves automatically use TOPPRA instead.
+Note: RUCKIG and SEPTIC are point-to-point only and cannot follow Cartesian paths. When either is set, Cartesian moves automatically use TOPPRA instead.
 
 ### Speed and acceleration
 
