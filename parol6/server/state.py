@@ -177,7 +177,7 @@ class ControllerState:
 
     # Motion profile for all moves, a ProfileType name.
     # RUCKIG and SEPTIC are point-to-point only; Cartesian moves fall back to TOPPRA
-    motion_profile: str = "TOPPRA"
+    motion_profile: str = "RUCKIG"
 
     # Streaming executors for online motion (jogging/streaming)
     streaming_executor: StreamingExecutor = field(
@@ -465,7 +465,7 @@ class ControllerState:
         self.execution_paused = False
         self.execution_speed = 1.0
         self.soft_error = False
-        self.motion_profile = "TOPPRA"
+        self.motion_profile = "RUCKIG"
 
         # Tool back to none
         self._current_tool = "NONE"

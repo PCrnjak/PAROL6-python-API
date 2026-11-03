@@ -179,15 +179,16 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
     Format: [CmdType.SELECT_PROFILE, profile_type]
 
     Profile Types:
-        TOPPRA    - Time-optimal path parameterization (default)
-        RUCKIG    - Time-optimal jerk-limited (point-to-point only, joint moves only)
+        RUCKIG    - Time-optimal jerk-limited (default; point-to-point only, joint moves only)
+        TOPPRA    - Time-optimal path parameterization
         QUINTIC   - C² smooth polynomial trajectories
         SEPTIC    - C³ smooth polynomial, jerk-limited (point-to-point only, joint moves only)
         TRAPEZOID - Linear segments with parabolic blends
         LINEAR    - Direct interpolation (no smoothing)
 
     Note: RUCKIG and SEPTIC are point-to-point and cannot follow Cartesian
-    paths. Cartesian moves will use TOPPRA when either is set.
+    paths. Cartesian moves will use TOPPRA when either is set, as does a
+    timed move under RUCKIG.
     """
 
     PARAMS_TYPE = SelectProfileCmd

@@ -326,8 +326,8 @@ class _PathSpeedConstraint(constraint.LinearConstraint):
 class ProfileType(Enum):
     """Available trajectory profile types for motion planning."""
 
-    TOPPRA = "toppra"  # Time-optimal path following (default)
-    RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
+    RUCKIG = "ruckig"  # Point-to-point jerk-limited (default; no Cartesian paths)
+    TOPPRA = "toppra"  # Time-optimal path following
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
     SEPTIC = "septic"  # Point-to-point septic polynomial (C³ smooth, jerk-limited)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
@@ -867,6 +867,10 @@ class TrajectoryBuilder:
             cart_vel_limit is not None or cart_acc_limit is not None
         ):
             logger.warning("RUCKIG cannot follow Cartesian paths, using TOPPRA")
+            self.profile = ProfileType.TOPPRA
+        # A timed move is a path stretched to a clock, which is TOPPRA's
+        # parameterization.
+        if self.profile == ProfileType.RUCKIG and duration:
             self.profile = ProfileType.TOPPRA
 
         self.velocity_frac = velocity_frac
@@ -1524,8 +1528,6 @@ class TrajectoryBuilder:
         inp.max_velocity = self.v_max.tolist()
         inp.max_acceleration = self.a_max.tolist()
         inp.max_jerk = self.j_max.tolist()
-        if self.duration is not None:
-            inp.minimum_duration = self.duration
 
         result = gen.calculate(inp, solution)
         if result not in (Result.Working, Result.Finished):

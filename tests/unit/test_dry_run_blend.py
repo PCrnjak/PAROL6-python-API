@@ -56,8 +56,11 @@ class TestDryRunBlend:
         assert record.rows == 0 and record.blocks == ()
 
     def test_a_chain_along_one_line_takes_as_long_as_the_one_move(self, client):
-        # W1 and W2 lie on the joint-space line from the start to W3.
+        # W1 and W2 lie on the joint-space line from the start to W3. A
+        # blended chain is timed along its path, so the one move is too.
         single = DryRunRobotClient()
+        for robot in (single, client):
+            assert robot.select_profile("TOPPRA") == 1
         single.move_j(angles=W3, speed=0.3, r=0)
         client.move_j(angles=W1, speed=0.3, r=10)
         client.move_j(angles=W2, speed=0.3, r=10)

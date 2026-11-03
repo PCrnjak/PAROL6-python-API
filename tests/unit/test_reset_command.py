@@ -28,7 +28,7 @@ class TestResetCommandExecution:
         state.soft_error = True
         state.execution_paused = True
         state.execution_speed = 0.4
-        state.motion_profile = "RUCKIG"
+        state.motion_profile = "TOPPRA"
         state._current_tool = "GRIPPER"
 
         cmd = ResetStateCommand(ResetStateCmd())
@@ -51,7 +51,7 @@ class TestResetCommandExecution:
         assert state.error is None
         assert not state.execution_paused
         assert state.execution_speed == 1.0
-        assert state.motion_profile == "TOPPRA"
+        assert state.motion_profile == "RUCKIG"
         assert state._current_tool == "NONE"
 
     def test_reset_preserves_connection_state(self):

@@ -21,11 +21,11 @@ class TestProfileCommands:
     """Test motion profile get/set commands."""
 
     def test_profile_returns_default(self, client, server_proc):
-        """Test GETPROFILE returns default profile (TOPPRA) after reset."""
+        """Test GETPROFILE returns default profile (RUCKIG) after reset."""
         client.reset_state()
         result = client.profile()
         assert result is not None
-        assert result == "TOPPRA"
+        assert result == "RUCKIG"
 
     def test_select_and_get_profile_roundtrip(self, client, server_proc):
         """Test setting a profile and getting it back."""
@@ -58,14 +58,14 @@ class TestProfileCommands:
                 )
 
             for profile in ProfileType:
-                if profile is ProfileType.TOPPRA:
+                if profile is ProfileType.RUCKIG:
                     continue
                 assert await writer.select_profile(profile.name) > 0
                 selected = await reported_profile(profile.name)
                 assert selected.motion_profile == profile.name
             assert await writer.reset_state() > 0
-            reset = await reported_profile("TOPPRA")
-            assert reset.motion_profile == "TOPPRA"
+            reset = await reported_profile("RUCKIG")
+            assert reset.motion_profile == "RUCKIG"
 
 
 @pytest.mark.integration
@@ -193,6 +193,39 @@ class TestProfileMotionBehavior:
             f"previewed {quintic:.2f} s under QUINTIC, the controller planned "
             f"{planned[-1]:.2f} s"
         )
+
+    def test_the_startup_profile_is_jerk_limited_and_a_timed_move_is_toppra_timed(
+        self,
+    ):
+        """A move_j under the startup profile is RUCKIG's jerk-limited shape,
+        and a timed one under RUCKIG is TOPPRA's: asked for less than the
+        optimum, it takes TOPPRA's acceleration-bound minimum."""
+        from parol6.client.dry_run_client import DryRunRobotClient
+
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+
+        standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
+        target = [40.0, -60.0, 200.0, 30.0, 20.0, 150.0]
+
+        def previewed(profile: str | None, duration: float = 0.0) -> int:
+            preview = DryRunRobotClient(initial_joints_deg=standby)
+            if profile is not None:
+                assert preview.select_profile(profile) == 1
+            if duration:
+                index = preview.move_j(target, duration=duration, accel=1.0)
+            else:
+                index = preview.move_j(target, speed=1.0, accel=1.0)
+            record = preview.plan()
+            assert record.blocks[index].error is None
+            return record.blocks[index].rows
+
+        ruckig, toppra = previewed("RUCKIG"), previewed("TOPPRA")
+        assert ruckig > toppra, "the move does not tell RUCKIG from TOPPRA"
+        assert previewed(None) == ruckig, (
+            f"the startup profile ran {previewed(None)} rows, RUCKIG {ruckig}"
+        )
+        assert previewed("RUCKIG", 0.1) == previewed("TOPPRA", 0.1) == toppra
+        assert previewed(None, 0.1) == toppra
 
     def test_a_septic_cartesian_move_is_timed_along_its_path(self):
         """SEPTIC times a straight joint run only. From standby the wrist
