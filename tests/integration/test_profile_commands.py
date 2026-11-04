@@ -199,15 +199,20 @@ class TestProfileMotionBehavior:
     ):
         """A move_j under the startup profile is RUCKIG's jerk-limited shape,
         and a timed one under RUCKIG is TOPPRA's: asked for less than the
-        optimum, it takes TOPPRA's acceleration-bound minimum."""
+        optimum, it takes TOPPRA's minimum. TOPPRA's timing is smoothed to
+        the jerk limits: its own acceleration is bang-bang, a step a torque
+        feedforward turns into a torque step."""
         from parol6.client.dry_run_client import DryRunRobotClient
+        from parol6.config import LIMITS
 
         import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
         standby = [float(v) for v in PAROL6_ROBOT.joint.standby_deg]
         target = [40.0, -60.0, 200.0, 30.0, 20.0, 150.0]
+        dt = 0.0
 
-        def previewed(profile: str | None, duration: float = 0.0) -> int:
+        def previewed(profile: str | None, duration: float = 0.0) -> np.ndarray:
+            nonlocal dt
             preview = DryRunRobotClient(initial_joints_deg=standby)
             if profile is not None:
                 assert preview.select_profile(profile) == 1
@@ -216,16 +221,28 @@ class TestProfileMotionBehavior:
             else:
                 index = preview.move_j(target, speed=1.0, accel=1.0)
             record = preview.plan()
-            assert record.blocks[index].error is None
-            return record.blocks[index].rows
+            block = record.blocks[index]
+            assert block.error is None
+            dt = record.row_dt_s
+            rows = record.joints_rad[block.start_row : block.start_row + block.rows]
+            return np.asarray(rows, dtype=np.float64)
 
         ruckig, toppra = previewed("RUCKIG"), previewed("TOPPRA")
-        assert ruckig > toppra, "the move does not tell RUCKIG from TOPPRA"
-        assert previewed(None) == ruckig, (
-            f"the startup profile ran {previewed(None)} rows, RUCKIG {ruckig}"
+        assert len(ruckig) != len(toppra), "the move does not tell RUCKIG from TOPPRA"
+        assert len(previewed(None)) == len(ruckig), (
+            f"the startup profile ran {len(previewed(None))} rows, RUCKIG {len(ruckig)}"
         )
-        assert previewed("RUCKIG", 0.1) == previewed("TOPPRA", 0.1) == toppra
-        assert previewed(None, 0.1) == toppra
+        assert len(previewed("RUCKIG", 0.1)) == len(previewed("TOPPRA", 0.1))
+        assert len(previewed(None, 0.1)) == len(toppra)
+
+        # From rest to rest, the third difference of the rows is their jerk
+        # averaged over three rows.
+        rest = np.vstack([toppra[:1]] * 3 + [toppra] + [toppra[-1:]] * 3)
+        jerk = np.abs(np.diff(rest, 3, axis=0)).max(axis=0) / dt**3
+        limit = LIMITS.joint.hard.jerk
+        assert np.all(jerk <= 1.05 * limit), (
+            f"TOPPRA commanded {np.round(jerk / limit, 2)} of the jerk limits"
+        )
 
     def test_a_septic_cartesian_move_is_timed_along_its_path(self):
         """SEPTIC times a straight joint run only. From standby the wrist
