@@ -191,7 +191,7 @@ class PlannerState:
     # snapshot) and predicts a queued HOME; a pessimistic default would refuse
     # dry runs that were seeded from an already-homed robot.
     Homed_in: np.ndarray = field(default_factory=lambda: np.ones(8, dtype=np.uint8))
-    motion_profile: str = "TOPPRA"
+    motion_profile: str = "RUCKIG"
     current_tool: str = "NONE"
     current_tool_variant: str = ""
     tcp_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0)

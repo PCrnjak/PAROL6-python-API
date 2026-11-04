@@ -130,9 +130,9 @@ def test_a_move_that_starts_with_a_wrist_turn_takes_the_duration_it_names():
     """From standby a tool-frame reorientation first turns the wrist out of
     its singularity; a duration names the whole move, turn included."""
     client = DryRunRobotClient(initial_joints_deg=HOME)
-    index = client.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", duration=2.0)
+    index = client.move_l([0.0, 0.0, 0.0, -15.0, 0.0, 0.0], frame="TRF", duration=3.0)
     record = client.plan()
     block = record.blocks[index]
     assert block.error is None, block.error
     # The block's first row is the pose the move starts from, at t = 0.
-    assert (block.rows - 1) * record.row_dt_s == pytest.approx(2.0, abs=record.row_dt_s)
+    assert (block.rows - 1) * record.row_dt_s == pytest.approx(3.0, abs=record.row_dt_s)

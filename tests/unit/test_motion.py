@@ -447,7 +447,8 @@ class TestDryRunTimingRegressions:
         tcp = np.array([PAROL6_ROBOT.robot.fkine(q)[:3, 3] for q in rows]) * 1000
         speeds = np.linalg.norm(np.diff(tcp, axis=0), axis=1) / INTERVAL_S
         middle = speeds[len(speeds) // 5 : 4 * len(speeds) // 5]
-        assert middle.min() > 40.0
+        # Jerk-limited, the bend costs speed, but nowhere near a stop.
+        assert middle.min() > 30.0
         assert np.linalg.norm(tcp - np.array(corner[:3]), axis=1).min() < 1.0
         np.testing.assert_allclose(tcp[-1], end[:3], atol=0.1)
 

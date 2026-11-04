@@ -139,6 +139,141 @@ def _tick_intervals(duration: float, dt: float) -> int:
 _RATE_TOLERANCE = 1e-9
 
 
+def _max_path_speed(
+    path: _BlendedPath,
+    s: NDArray[np.float64],
+    v_max: NDArray[np.float64],
+    a_max: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """The maximum-velocity curve at path positions ``s``: every joint under
+    its velocity limit, and some path acceleration keeping every joint's
+    ``q'·u + q''·sd²`` inside its acceleration limit. Each joint confines
+    ``u`` to an interval that shrinks as ``sd²`` grows; they share a point
+    while every pair overlaps, and a pair stops overlapping past
+    ``(a_j·|q'_k| + a_k·|q'_j|) / |q''_j·q'_k − q''_k·q'_j|``. A joint the
+    path does not move is bounded by its curvature alone."""
+    signed, d2 = path(s, 1), path(s, 2)
+    d1 = np.abs(signed)
+    tiny = 1e-12
+    moving = d1 > tiny
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sd = np.where(moving, v_max / d1, np.inf).min(axis=1)
+        x = np.where(~moving & (np.abs(d2) > tiny), a_max / np.abs(d2), np.inf).min(
+            axis=1
+        )
+        j, k = np.triu_indices(len(v_max), 1)
+        den = np.abs(d2[:, j] * signed[:, k] - d2[:, k] * signed[:, j])
+        num = a_max[j] * d1[:, k] + a_max[k] * d1[:, j]
+        pairs = np.where(den > tiny, num / den, np.inf).min(axis=1)
+    return np.minimum(sd, np.sqrt(np.minimum(x, pairs)))
+
+
+def _window_min(
+    values: NDArray[np.float64], times: NDArray[np.float64], reach: float
+) -> NDArray[np.float64]:
+    """At each point, the lowest of ``values`` within ``reach`` of its time
+    either way."""
+    near = np.abs(times[:, None] - times[None, :]) <= reach
+    return np.where(near, values[None, :], np.inf).min(axis=1)
+
+
+class _PathClock:
+    """TOPP-RA's path timing as constant-acceleration segments between its
+    grid points, built from the solved grid speeds the way toppra's
+    ParametrizeConstAccel builds them."""
+
+    def __init__(self, gridpoints: NDArray, speeds: NDArray) -> None:
+        self.s = np.asarray(gridpoints, dtype=np.float64)
+        self.v = np.maximum(np.asarray(speeds, dtype=np.float64), 0.0)
+        ds = np.diff(self.s)
+        self.u = 0.5 * np.diff(self.v**2) / ds
+        self.t = np.concatenate(
+            ([0.0], np.cumsum(2.0 * ds / (self.v[:-1] + self.v[1:])))
+        )
+        d = np.diff(self.t)
+        self._area = np.concatenate(
+            (
+                [0.0],
+                np.cumsum(
+                    self.s[:-1] * d + 0.5 * self.v[:-1] * d**2 + self.u * d**3 / 6.0
+                ),
+            )
+        )
+
+    def _at(self, t: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        """Segment index, time into it, and whether ``t`` is before the
+        start or after the end."""
+        end = self.t[-1]
+        k = np.clip(np.searchsorted(self.t, t, side="right") - 1, 0, len(self.u) - 1)
+        return k, np.clip(t, 0.0, end) - self.t[k], (t <= 0.0) | (t >= end)
+
+    def _position_speed(self, t: NDArray) -> tuple[NDArray, NDArray]:
+        """The path position and speed at ``t``, at rest outside the
+        profile."""
+        k, d, outside = self._at(t)
+        s = self.s[k] + self.v[k] * d + 0.5 * self.u[k] * d**2
+        s = np.where(t <= 0.0, self.s[0], np.where(t >= self.t[-1], self.s[-1], s))
+        return s, np.where(outside, 0.0, self.v[k] + self.u[k] * d)
+
+    def _position_integral(self, t: NDArray) -> NDArray:
+        """The path position integrated from 0 to ``t``, held at rest
+        before the start and after the end."""
+        end = self.t[-1]
+        k, d, _ = self._at(t)
+        inside = (
+            self._area[k]
+            + self.s[k] * d
+            + 0.5 * self.v[k] * d**2
+            + self.u[k] * d**3 / 6.0
+        )
+        after = self._area[-1] + self.s[-1] * (t - end)
+        return np.where(t <= 0.0, self.s[0] * t, np.where(t >= end, after, inside))
+
+    def averaged(
+        self, times: NDArray, window: float
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """The path position averaged over the trailing ``window``, with its
+        speed and acceleration: the differences of the position and speed
+        across the window over its width, so each step in TOPP-RA's path
+        acceleration becomes a ramp that wide. Only the timing along the
+        path changes, never the path."""
+        integral = self._position_integral
+        s = (integral(times) - integral(times - window)) / window
+        s_now, v_now = self._position_speed(times)
+        s_then, v_then = self._position_speed(times - window)
+        return (
+            np.clip(s, self.s[0], self.s[-1]),
+            (s_now - s_then) / window,
+            (v_now - v_then) / window,
+        )
+
+    def window_span(self, times: NDArray, window: float) -> tuple[NDArray, NDArray]:
+        """The stretch of path the average at ``times`` draws on."""
+        return self._position_speed(times - window)[0], self._position_speed(times)[0]
+
+
+class _ScaledJointAcceleration(constraint.LinearConstraint):
+    """Joint acceleration limits scaled per gridpoint."""
+
+    def __init__(self, limit: NDArray, scale: NDArray) -> None:
+        super().__init__()
+        self.limit = np.asarray(limit, dtype=np.float64)
+        self.scale = np.asarray(scale, dtype=np.float64)
+        self.dof = len(self.limit)
+        self.identical = False
+        self.set_discretization_type(constraint.DiscretizationType.Interpolation)
+
+    def compute_constraint_params(self, path: _BlendedPath, gridpoints: NDArray):
+        ps, pss = path(gridpoints, 1), path(gridpoints, 2)
+        eye = np.eye(self.dof)
+        F = np.tile(np.vstack((eye, -eye)), (len(gridpoints), 1, 1))
+        bound = self.scale[:, None] * self.limit[None, :]
+        g = np.hstack((bound, bound))
+        return constraint.canlinear_colloc_to_interpolate(
+            ps, pss, np.zeros_like(ps), F, g, None, None, gridpoints
+        )
+
+
 def _slowed(rows: NDArray[np.float64], count: int) -> NDArray[np.float64]:
     """Retiming of rest-to-rest rows with continuous velocity and acceleration."""
     spline = make_interp_spline(
@@ -326,8 +461,8 @@ class _PathSpeedConstraint(constraint.LinearConstraint):
 class ProfileType(Enum):
     """Available trajectory profile types for motion planning."""
 
-    TOPPRA = "toppra"  # Time-optimal path following (default)
-    RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
+    RUCKIG = "ruckig"  # Point-to-point jerk-limited (default; no Cartesian paths)
+    TOPPRA = "toppra"  # Time-optimal path following
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
     SEPTIC = "septic"  # Point-to-point septic polynomial (C³ smooth, jerk-limited)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
@@ -868,6 +1003,10 @@ class TrajectoryBuilder:
         ):
             logger.warning("RUCKIG cannot follow Cartesian paths, using TOPPRA")
             self.profile = ProfileType.TOPPRA
+        # A timed move is a path stretched to a clock, which is TOPPRA's
+        # parameterization.
+        if self.profile == ProfileType.RUCKIG and duration:
+            self.profile = ProfileType.TOPPRA
 
         self.velocity_frac = velocity_frac
         self.accel_frac = accel_frac
@@ -1063,21 +1202,25 @@ class TrajectoryBuilder:
 
     def _build_toppra_trajectory(self) -> Trajectory:
         """
-        Build trajectory using TOPP-RA's time-optimal path parameterization.
+        Build trajectory using TOPP-RA's time-optimal path parameterization,
+        its timing smoothed to the jerk limits.
 
         Bounded corner blends expose curvature to the timing solver while
         preserving the waypoint parameter and Cartesian velocity limits.
         """
-        return self._time_path(self._blended_path())
+        return self._time_path(self._blended_path(), smoothed=True)
 
     def _time_path(
         self,
         path: _BlendedPath,
         profile_speed: Callable[[NDArray], NDArray] | None = None,
         unaccelerated_ends: bool = False,
+        smoothed: bool = False,
     ) -> Trajectory:
         """Time the blended path within its speed envelope, optionally easing the
-        clock into and out of rest with zero endpoint acceleration."""
+        clock into and out of rest with zero endpoint acceleration, or
+        averaging the path position over a window that ramps every step in
+        TOPP-RA's acceleration within the jerk limits."""
         positions = self.joint_path.positions
         gridpoints = self._gridpoints(path)
         joint_vel_constraint = constraint.JointVelocityConstraint(self._vlim)
@@ -1094,7 +1237,9 @@ class TrajectoryBuilder:
         if profile_speed is not None:
             constraints.append(_PathSpeedConstraint(profile_speed(gridpoints)))
 
-        try:
+        def solve(
+            constraints: list[constraint.Constraint],
+        ) -> tuple[algo.TOPPRA, ParametrizeConstAccel, float]:
             instance = algo.TOPPRA(
                 constraints,
                 path,
@@ -1102,24 +1247,63 @@ class TrajectoryBuilder:
                 parametrizer="ParametrizeConstAccel",
             )
             jnt_traj = instance.compute_trajectory()
-
             if jnt_traj is None:
                 raise RuntimeError("TOPP-RA failed to compute trajectory")
-
             assert isinstance(jnt_traj, ParametrizeConstAccel)
             duration = float(jnt_traj.duration)
             if not np.isfinite(duration) or duration <= 0:
                 raise RuntimeError("TOPP-RA returned an invalid duration")
+            return instance, jnt_traj, duration
 
+        try:
+            instance, jnt_traj, duration = solve(constraints)
             logger.debug(
                 "TrajectoryBuilder: TOPP-RA duration=%.3f, path_len=%d",
                 duration,
                 len(positions),
             )
 
+            window = self._smoothing_window(jnt_traj, duration) if smoothed else 0.0
+            if window:
+                # Averaged, a narrow dip TOPP-RA takes through a bend would be
+                # carried at the window's mean speed. The average lands where
+                # the path stood half a window earlier, drawing on the speeds
+                # half a window either side, so capping the path speed at the
+                # lowest limit within half a window of each point widens the
+                # dip instead; the maximum-velocity curve leaves out the
+                # rest-to-rest ramps, slow for the boundary, not the path.
+                data = instance.problem_data
+                first = _PathClock(data.gridpoints, data.sd_vec)
+                limit = _max_path_speed(path, data.gridpoints, self.v_max, self.a_max)
+                cap = _PathSpeedConstraint(_window_min(limit, first.t, 0.5 * window))
+                others = [c for c in constraints if c is not joint_acc_constraint]
+                scale = np.ones(len(data.gridpoints))
+                # Averaged over the window, the path acceleration TOPP-RA
+                # held at each point is spent where the joints answer it
+                # differently, and along a path whose joint ratios change
+                # quickly (near a wrist singularity, through a blend) that
+                # can pass a limit TOPP-RA held. Each round lowers the
+                # limits on the stretch the average drew from by its
+                # excess; the segment pass after planning takes what is left.
+                for round_ in range(4):
+                    instance, jnt_traj, duration = solve(
+                        [*others, _ScaledJointAcceleration(self.a_max, scale), cap]
+                    )
+                    window = self._smoothing_window(jnt_traj, duration)
+                    if round_ == 3:
+                        break
+                    data = instance.problem_data
+                    factor = self._acceleration_excess(
+                        _PathClock(data.gridpoints, data.sd_vec), path, duration, window
+                    )
+                    if factor is None:
+                        break
+                    scale = scale / factor
+
             ramp = min(10.0 * self.dt, duration / 4.0) if unaccelerated_ends else 0.0
-            intervals = _tick_intervals(duration + ramp, self.dt)
-            times = np.arange(intervals) * ((duration + ramp) / intervals)
+            span = duration + ramp + window
+            intervals = _tick_intervals(span, self.dt)
+            times = np.arange(intervals) * (span / intervals)
             if ramp:
                 # A C2 clock ramp removes endpoint acceleration without slowing cruise.
                 distance = np.minimum(times, duration + ramp - times)
@@ -1131,7 +1315,12 @@ class TrajectoryBuilder:
                     np.where(times > duration, duration - eased, times - ramp / 2.0),
                 )
             trajectory_rad = np.empty((intervals + 1, 6), dtype=np.float64)
-            trajectory_rad[:-1] = jnt_traj(times)
+            if window:
+                data = instance.problem_data
+                clock = _PathClock(data.gridpoints, data.sd_vec)
+                trajectory_rad[:-1] = path(clock.averaged(times, window)[0])
+            else:
+                trajectory_rad[:-1] = jnt_traj(times)
             trajectory_rad[-1] = positions[-1]
             if not np.all(np.isfinite(trajectory_rad)):
                 raise RuntimeError("TOPP-RA returned non-finite joint positions")
@@ -1151,6 +1340,54 @@ class TrajectoryBuilder:
             raise TrajectoryPlanningError(
                 make_error(ErrorCode.TRAJ_NO_STEPS, detail=f"TOPPRA failed: {e}")
             ) from e
+
+    def _smoothing_window(
+        self, jnt_traj: ParametrizeConstAccel, duration: float
+    ) -> float:
+        """The shortest window the path position can be averaged over with
+        every joint's jerk inside its limit. Averaged over ``W``, a joint's
+        acceleration changes at ``(qdd(t) - qdd(t - W)) / W``, so ``W`` must
+        cover the largest change in ``qdd`` across any span that wide. A
+        move that cruises between its acceleration steps needs one step's
+        change, a bang-bang one that reverses within the window both; the
+        widths that fit are not one interval, so they are scanned from the
+        shortest up."""
+        samples = 2000
+        h = duration / samples
+        qdd = jnt_traj(np.linspace(0.0, duration, samples + 1), order=2)
+        swing = np.maximum(qdd.max(axis=0), 0.0) - np.minimum(qdd.min(axis=0), 0.0)
+        longest = float(
+            np.divide(
+                swing, self.j_max, out=np.zeros_like(swing), where=self.j_max > 0
+            ).max()
+        )
+        if longest <= 0.0:
+            return 0.0
+        for m in range(1, math.ceil(longest / h) + 1):
+            rest = np.zeros((m, qdd.shape[1]))
+            padded = np.vstack((rest, qdd, rest))
+            change = np.abs(padded[m:] - padded[:-m]).max(axis=0)
+            if np.all(change <= self.j_max * m * h):
+                return m * h
+        return longest
+
+    def _acceleration_excess(
+        self, clock: _PathClock, path: _BlendedPath, duration: float, window: float
+    ) -> NDArray | None:
+        """By how much each gridpoint's acceleration limits must come down
+        for the average over ``window`` to stay inside them: the worst
+        excess of any sample whose average draws on it. ``None`` when no
+        sample is over."""
+        times = np.linspace(0.0, duration + window, 2001)
+        s, v, u = clock.averaged(times, window)
+        qdd = path(s, 2) * v[:, None] ** 2 + path(s, 1) * u[:, None]
+        ratio = (np.abs(qdd) / self.a_max).max(axis=1)
+        over = ratio > 1.0 + 1e-6
+        if not over.any():
+            return None
+        lo, hi = clock.window_span(times[over], window)
+        drawn = (clock.s[None, :] >= lo[:, None]) & (clock.s[None, :] <= hi[:, None])
+        return np.where(drawn, ratio[over][:, None], 1.0).max(axis=0)
 
     def _build_simple_trajectory(self) -> Trajectory:
         """A trapezoidal path-speed envelope, slowed ahead of bends as needed."""
@@ -1524,8 +1761,6 @@ class TrajectoryBuilder:
         inp.max_velocity = self.v_max.tolist()
         inp.max_acceleration = self.a_max.tolist()
         inp.max_jerk = self.j_max.tolist()
-        if self.duration is not None:
-            inp.minimum_duration = self.duration
 
         result = gen.calculate(inp, solution)
         if result not in (Result.Working, Result.Finished):

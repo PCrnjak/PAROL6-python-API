@@ -283,21 +283,21 @@ Performance-critical functions (unit conversions, serial frame packing, IK check
 Set the motion profile for all moves:
 
 ```python
-client.set_profile("TOPPRA")  # Default: time-optimal path-following
+client.set_profile("RUCKIG")  # Default: jerk-limited point-to-point
 ```
 
 **Available profiles** (`SETPROFILE`):
 
 | Profile | Description |
 |---------|-------------|
-| **TOPPRA** | Time-optimal path-following (default) |
-| **RUCKIG** | Jerk-limited point-to-point motion (joint moves only) |
+| **RUCKIG** | Jerk-limited point-to-point motion (default; joint moves only) |
+| **TOPPRA** | Time-optimal path-following |
 | **QUINTIC** | C² smooth polynomial trajectories |
 | **SEPTIC** | C³ smooth polynomial, jerk-limited: jerk also starts and ends at zero (joint moves only) |
 | **TRAPEZOID** | Linear segments with parabolic blends |
 | **LINEAR** | Direct interpolation (no smoothing) |
 
-Note: RUCKIG and SEPTIC are point-to-point only and cannot follow Cartesian paths. When either is set, Cartesian moves automatically use TOPPRA instead.
+Note: RUCKIG and SEPTIC are point-to-point only and cannot follow Cartesian paths. When either is set, Cartesian moves automatically use TOPPRA instead, and so does a move given a `duration` under RUCKIG.
 
 ### Speed and acceleration
 
