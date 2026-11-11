@@ -23,7 +23,7 @@ import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 from scipy.interpolate import PPoly, make_interp_spline
-from ruckig import InputParameter, Result, Ruckig, Trajectory as RuckigTrajectory  # type: ignore[unresolved-import, ty:unresolved-import]
+from ruckig import InputParameter, Result, Ruckig, Trajectory as RuckigTrajectory  # type: ignore[unresolved-import, ty:import-not-found]
 
 import toppra.algorithm as algo
 import toppra.constraint as constraint

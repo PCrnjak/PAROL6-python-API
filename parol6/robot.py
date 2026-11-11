@@ -1047,8 +1047,8 @@ class Robot(_RobotABC):
         bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
-            bound_spec._get_status = client._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:missing-attribute]
+            bound_spec._get_status = client._tool_status  # type: ignore[attr-defined, ty:missing-attribute]
             bound[spec.key] = bound_spec
         client._bound_tools = bound
         return client
@@ -1066,8 +1066,8 @@ class Robot(_RobotABC):
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
-            bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:missing-attribute]
+            bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:missing-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
         bound: dict[str, SyncTool] = {}

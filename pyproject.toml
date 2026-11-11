@@ -126,7 +126,7 @@ invalid-type-form = "ignore"
 [[tool.ty.overrides]]
 include = ["parol6/PAROL6_ROBOT.py"]
 [tool.ty.overrides.rules]
-unresolved-import = "ignore"
+import-not-found = "ignore"
 
 [tool.setuptools]
 include-package-data = true

@@ -199,7 +199,7 @@ class SelectProfileCommand(SystemCommand[SelectProfileCmd]):
         profile = self.p.profile.upper()
         if profile not in VALID_PROFILES:
             err = ValueError(f"Invalid profile '{self.p.profile}'")
-            err.robot_error = make_error(  # type: ignore[attr-defined, ty:unresolved-attribute]
+            err.robot_error = make_error(  # type: ignore[attr-defined, ty:missing-attribute]
                 ErrorCode.SYS_PROFILE_INVALID,
                 detail=self.p.profile,
                 allowed=", ".join(VALID_PROFILES),
