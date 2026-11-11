@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
-from pinokin import se3_from_rpy, se3_from_trans
+from pinokin import se3_from_rpy
 from waldoctl import (
     CameraSpec,
     LinearMotion,
@@ -554,8 +554,8 @@ def _make_tcp_transform(
 
     Pure translation — tool frame orientation matches the flange.
     """
-    out = np.zeros((4, 4), dtype=np.float64)
-    se3_from_trans(x, y, z, out)
+    out = np.eye(4, dtype=np.float64)
+    out[:3, 3] = (x, y, z)
     return out
 
 
