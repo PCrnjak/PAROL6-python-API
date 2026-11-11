@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from importlib.resources import files as pkg_files
 from operator import attrgetter
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import msgspec
 import numpy as np
@@ -52,10 +52,8 @@ from waldoctl import (
 )
 
 from parol6.client.async_client import AsyncRobotClient
-from parol6.client.dry_run_client import DryRunRobotClient
 from parol6.client.sync_client import RobotClient as SyncRobotClient
 from parol6.config import HOME_ANGLES_DEG, LIMITS
-from parol6.motion.trajectory import ProfileType
 from parol6.protocol.wire import PingCmd, ResponseMsg, decode_message, encode_command
 from parol6.tools import (
     ElectricGripperConfig,
@@ -454,7 +452,9 @@ def _decompose_transform(
     """Extract (origin_m, rpy_rad) from a 4x4 homogeneous transform."""
     origin = (float(T[0, 3]), float(T[1, 3]), float(T[2, 3]))
     rpy_buf = np.zeros(3, dtype=np.float64)
-    so3_rpy(T[:3, :3], rpy_buf)
+    # Plain, not jitted: every RobotClient() decomposes its tools' transforms,
+    # and a first jitted call would set numba up in a program that needs none.
+    cast(Any, so3_rpy).py_func(T[:3, :3], rpy_buf)
     rpy = (float(rpy_buf[0]), float(rpy_buf[1]), float(rpy_buf[2]))
     return origin, rpy
 
@@ -571,7 +571,7 @@ class Robot(_RobotABC):
         register_plugin_tools()
         self._urdf_path = _resolve_urdf_path()
         self._mesh_dir = _resolve_mesh_dir()
-        self._motion_profiles = tuple(p.value.upper() for p in ProfileType)
+        self._motion_profiles: tuple[str, ...] | None = None
 
         cj = LIMITS.cart.jog
         self._cartesian_limits = CartesianKinodynamicLimits(
@@ -665,6 +665,12 @@ class Robot(_RobotABC):
 
     @property
     def motion_profiles(self) -> tuple[str, ...]:
+        if self._motion_profiles is None:
+            # The planner's modules are a client's heaviest import, and only a
+            # caller that plans needs them.
+            from parol6.motion.trajectory import ProfileType
+
+            self._motion_profiles = tuple(p.value.upper() for p in ProfileType)
         return self._motion_profiles
 
     @property
@@ -1041,8 +1047,8 @@ class Robot(_RobotABC):
         bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
-            bound_spec._get_status = client._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._execute = client.tool_action  # type: ignore[attr-defined, ty:missing-attribute]
+            bound_spec._get_status = client._tool_status  # type: ignore[attr-defined, ty:missing-attribute]
             bound[spec.key] = bound_spec
         client._bound_tools = bound
         return client
@@ -1060,8 +1066,8 @@ class Robot(_RobotABC):
         async_bound: dict[str, ToolSpec] = {}
         for spec in self.tools.available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
-            bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._execute = client._inner.tool_action  # type: ignore[attr-defined, ty:missing-attribute]
+            bound_spec._get_status = client._inner._tool_status  # type: ignore[attr-defined, ty:missing-attribute]
             async_bound[spec.key] = bound_spec
         client._inner._bound_tools = async_bound
         bound: dict[str, SyncTool] = {}
@@ -1073,6 +1079,9 @@ class Robot(_RobotABC):
     def create_dry_run_client(self, **kwargs: Any) -> DryRunClient | None:
         initial_joints_deg: list[float] | None = kwargs.get("initial_joints_deg")
         initial_homed: bool = bool(kwargs.get("initial_homed", True))
+        # Here, not at module level: it brings the planner.
+        from parol6.client.dry_run_client import DryRunRobotClient
+
         return DryRunRobotClient(
             initial_joints_deg=initial_joints_deg,
             initial_homed=initial_homed,

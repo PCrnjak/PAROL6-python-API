@@ -11,12 +11,12 @@ Key components:
 """
 
 from importlib.metadata import version as _pkg_version
+from typing import TYPE_CHECKING
 
 from . import PAROL6_ROBOT
 
 __version__: str = _pkg_version("parol6")
 from .client.async_client import AsyncRobotClient, StatusSnapshot
-from .client.dry_run_client import DryRunRobotClient
 from .client.sync_client import RobotClient
 from .protocol.wire import (
     CurrentActionResultStruct,
@@ -63,3 +63,18 @@ __all__ = [
     "make_error",
     "MotionError",
 ]
+
+
+if TYPE_CHECKING:
+    from .client.dry_run_client import DryRunRobotClient
+
+
+def __getattr__(name: str):
+    """The dry-run client on first use: it brings the planner, which a robot
+    program does not need."""
+    if name == "DryRunRobotClient":
+        from .client.dry_run_client import DryRunRobotClient
+
+        globals()[name] = DryRunRobotClient
+        return DryRunRobotClient
+    raise AttributeError(f"module 'parol6' has no attribute {name!r}")

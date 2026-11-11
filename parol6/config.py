@@ -9,7 +9,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Any, Union, cast
 
 import numpy as np
 from numba import njit
@@ -45,8 +45,8 @@ if not hasattr(logging.Logger, "trace"):
         if self.isEnabledFor(TRACE):
             self._log(TRACE, msg, args, **kwargs)
 
-    logging.Logger.trace = _trace  # type: ignore[attr-defined, ty:unresolved-attribute]
-    logging.TRACE = TRACE  # type: ignore[attr-defined, ty:unresolved-attribute]
+    logging.Logger.trace = _trace  # type: ignore[attr-defined, ty:missing-attribute]
+    logging.TRACE = TRACE  # type: ignore[attr-defined, ty:missing-attribute]
 
 TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes", "on")
 
@@ -496,14 +496,25 @@ def _build_kinodynamic(
     v_steps_arr = np.asarray(v_steps, dtype=np.int32)
     a_steps_arr = np.asarray(a_steps, dtype=np.int32)
     j_steps_arr = np.asarray(j_steps, dtype=np.int32)
+    # The plain functions: a jitted call at import would set numba up in every
+    # process that imports the package, a robot program's included.
     v_rad = np.array(
-        [float(speed_steps_to_rad_scalar(v_steps_arr[i], i)) for i in range(6)]
+        [
+            float(cast(Any, speed_steps_to_rad_scalar).py_func(v_steps_arr[i], i))
+            for i in range(6)
+        ]
     )
     a_rad = np.array(
-        [float(speed_steps_to_rad_scalar(a_steps_arr[i], i)) for i in range(6)]
+        [
+            float(cast(Any, speed_steps_to_rad_scalar).py_func(a_steps_arr[i], i))
+            for i in range(6)
+        ]
     )
     j_rad = np.array(
-        [float(speed_steps_to_rad_scalar(j_steps_arr[i], i)) for i in range(6)]
+        [
+            float(cast(Any, speed_steps_to_rad_scalar).py_func(j_steps_arr[i], i))
+            for i in range(6)
+        ]
     )
     return Kinodynamic(
         velocity=v_rad,
@@ -520,10 +531,11 @@ def _build_joint_position(limits_deg: NDArray) -> JointPosition:
     limits_rad = np.deg2rad(limits_deg)
     # Allocate once for module init (not hot path)
     tmp = np.zeros(6, dtype=np.int32)
+    # Plain, not jitted: see _build_kinodynamic.
     limits_steps = np.column_stack(
         [
-            deg_to_steps(limits_deg[:, 0], tmp).copy(),
-            deg_to_steps(limits_deg[:, 1], tmp).copy(),
+            cast(Any, deg_to_steps).py_func(limits_deg[:, 0], tmp).copy(),
+            cast(Any, deg_to_steps).py_func(limits_deg[:, 1], tmp).copy(),
         ]
     )
     return JointPosition(deg=limits_deg.copy(), rad=limits_rad, steps=limits_steps)

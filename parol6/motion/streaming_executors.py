@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
-from ruckig import (  # type: ignore[unresolved-import, ty:unresolved-import]
+from ruckig import (  # type: ignore[unresolved-import, ty:import-not-found]
     ControlInterface,
     InputParameter,
     OutputParameter,

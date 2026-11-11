@@ -405,8 +405,8 @@ class AsyncRobotClient(_RobotClientABC):
         bound: dict[str, ToolSpec] = {}
         for spec in _build_tools().available:
             bound_spec = copy.copy(spec)
-            bound_spec._execute = self.tool_action  # type: ignore[attr-defined, ty:unresolved-attribute]
-            bound_spec._get_status = self._tool_status  # type: ignore[attr-defined, ty:unresolved-attribute]
+            bound_spec._execute = self.tool_action  # type: ignore[attr-defined, ty:missing-attribute]
+            bound_spec._get_status = self._tool_status  # type: ignore[attr-defined, ty:missing-attribute]
             bound[spec.key] = bound_spec
         self._bound_tools = bound
 
